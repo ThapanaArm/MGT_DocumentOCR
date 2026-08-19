@@ -3,3 +3,8 @@ uploads/
 __pycache__/
 *.pyc
 .claude/
+bin/
+obj/
+node_modules/
+dist/
+*.user

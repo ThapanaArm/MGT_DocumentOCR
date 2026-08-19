@@ -1,0 +1,6 @@
+@MgtOcr.Api_HostAddress = http://localhost:5005
+
+GET {{MgtOcr.Api_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

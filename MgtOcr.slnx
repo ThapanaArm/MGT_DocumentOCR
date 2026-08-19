@@ -1,0 +1,13 @@
+<Solution>
+  <Folder Name="/backend/" />
+  <Folder Name="/backend/src/">
+    <Project Path="backend/src/MgtOcr.Api/MgtOcr.Api.csproj" />
+    <Project Path="backend/src/MgtOcr.Core/MgtOcr.Core.csproj" />
+    <Project Path="backend/src/MgtOcr.Data/MgtOcr.Data.csproj" />
+    <Project Path="backend/src/MgtOcr.Ocr/MgtOcr.Ocr.csproj" />
+  </Folder>
+  <Folder Name="/backend/tests/">
+    <Project Path="backend/tests/MgtOcr.Core.Tests/MgtOcr.Core.Tests.csproj" />
+    <Project Path="backend/tests/MgtOcr.Ocr.Tests/MgtOcr.Ocr.Tests.csproj" />
+  </Folder>
+</Solution>
