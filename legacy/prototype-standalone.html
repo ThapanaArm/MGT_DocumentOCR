@@ -1,0 +1,1068 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OCR to SAP S/4HANA — AP &amp; Sales Order</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Anuphan:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  /* =====================================================================
+     Design tokens — อ้างอิงระบบดีไซน์ของ bitkub.com (bk-global tokens)
+     ฟอนต์จริงของ Bitkub คือ "Graphik TH" (ลิขสิทธิ์เชิงพาณิชย์)
+     ถ้าเครื่องมีติดตั้งไว้จะถูกใช้ก่อน มิฉะนั้น fallback เป็น Anuphan (ทรงใกล้เคียง)
+     ===================================================================== */
+  :root{
+    /* palette */
+    --bk-black:#0c0e0c; --bk-white:#ffffff;
+    --g100:#f1f3f2; --g200:#e4e7e5; --g300:#d6dbd8; --g500:#bbc4be;
+    --g700:#a0aca4; --g1100:#6b7b70; --g1200:#5f6d64; --g1600:#2f3732; --g1700:#242925; --g1800:#181b19;
+    --gr100:#e5fff2; --gr300:#b3ffd9; --gr1200:#00cc66; --gr1300:#00b359; --gr1400:#00994d; --gr1600:#006633;
+    --rd100:#fde8e7; --rd300:#f9b9b8; --rd800:#f04542; --rd1200:#bd120f;
+    --yl100:#fef8e6; --yl1000:#f9b806; --yl1200:#c79305;
+    --bl100:#e6f5fe; --bl1100:#0690e0;
+
+    /* semantic */
+    --bg:var(--g100); --card:var(--bk-white); --nav-bg:var(--bk-white);
+    --line:var(--g200); --line-soft:var(--g100);
+    --text:var(--bk-black); --muted:var(--g1100); --text-3:var(--g700);
+    --brand:var(--gr1400); --brand-h:#007a3d; --brand-soft:var(--gr100); --brand-line:var(--gr300);
+    --blue:var(--gr1400); --blue-d:#007a3d;                     /* legacy alias */
+    --green:var(--gr1400); --green-bg:var(--gr100);
+    --red:var(--rd1200); --red-bg:var(--rd100);
+    --orange:var(--yl1200); --orange-bg:var(--yl100);
+    --info:var(--bl1100); --info-bg:var(--bl100);
+    --btn-dark:var(--bk-black); --btn-dark-h:#1f241f;
+    --code-bg:var(--bk-black); --code-fg:#ccffe5;
+
+    /* radius (bk-global-border-radius) */
+    --r1:2px; --r2:4px; --r3:8px; --r4:16px; --r5:20px; --r6:32px; --pill:100px;
+    --radius:16px;
+    /* shadow (bk-global-shadow) */
+    --sh1:0 4px 8px 2px #0000000a,0 -1px 8px 0 #00000005;
+    --sh3:0 8px 16px 4px #0000001a,0 -1px 4px 0 #0000001a;
+    --sh4:0 16px 32px 8px #0000001a,0 -1px 12px 0 #0000001a;
+    --shadow:var(--sh1);
+    --font:'Graphik TH','Anuphan','IBM Plex Sans Thai','Noto Sans Thai','Inter',-apple-system,'Segoe UI',Tahoma,sans-serif;
+  }
+  [data-theme="dark"]{
+    --bg:var(--bk-black); --card:var(--g1800); --nav-bg:var(--g1800);
+    --line:var(--g1600); --line-soft:var(--g1700);
+    --text:#ffffff; --muted:var(--g700); --text-3:var(--g1100);
+    --brand:var(--gr1200); --brand-h:var(--gr1300); --brand-soft:rgba(0,204,102,.12); --brand-line:rgba(0,204,102,.35);
+    --blue:var(--gr1200); --blue-d:var(--gr1300);
+    --green:var(--gr1200); --green-bg:rgba(0,204,102,.12);
+    --red:var(--rd800); --red-bg:rgba(240,69,66,.14);
+    --orange:var(--yl1000); --orange-bg:rgba(249,184,6,.14);
+    --btn-dark:var(--gr1200); --btn-dark-h:var(--gr1300);
+    --code-bg:#000; --sh1:none; --shadow:none;
+  }
+
+  *{box-sizing:border-box}
+  html{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
+  body{margin:0;font-family:var(--font);background:var(--bg);color:var(--text);
+       font-size:15px;line-height:24px;letter-spacing:.01em}
+  button{font-family:inherit;font-size:15px;cursor:pointer}
+  input,select,textarea{font-family:inherit;font-size:15px;color:inherit}
+  h1,h2,h3{letter-spacing:-.01em}
+
+  /* ---------- Layout ---------- */
+  .app{display:flex;min-height:100vh}
+  .sidebar{width:248px;background:var(--nav-bg);color:var(--text);flex-shrink:0;display:flex;flex-direction:column;
+           border-right:1px solid var(--line);position:sticky;top:0;height:100vh}
+  .brand{padding:22px 20px 16px}
+  .brand b{display:block;font-size:19px;font-weight:600;letter-spacing:-.02em;line-height:26px}
+  .brand b:before{content:'';display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--brand);margin-right:8px;vertical-align:middle}
+  .brand span{font-size:12px;color:var(--muted);letter-spacing:.02em}
+  .nav{padding:6px 12px;flex:1;overflow:auto}
+  .nav-title{font-size:11px;font-weight:600;letter-spacing:.08em;color:var(--text-3);padding:16px 12px 6px}
+  .nav a{display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:var(--pill);color:var(--g1200);
+         text-decoration:none;margin-bottom:2px;font-size:14px;font-weight:500;transition:background .15s,color .15s}
+  [data-theme="dark"] .nav a{color:var(--muted)}
+  .nav a:hover{background:var(--line-soft);color:var(--text)}
+  .nav a.active{background:var(--brand-soft);color:var(--brand);font-weight:600}
+  .nav a .ic{width:18px;text-align:center;font-size:15px}
+  .sidebar-foot{padding:14px 20px;font-size:12px;line-height:20px;color:var(--muted);border-top:1px solid var(--line)}
+
+  .main{flex:1;min-width:0;display:flex;flex-direction:column}
+  .topbar{background:var(--card);border-bottom:1px solid var(--line);padding:14px 28px;display:flex;align-items:center;gap:14px;position:sticky;top:0;z-index:20}
+  .topbar h1{font-size:22px;margin:0;font-weight:600;line-height:32px}
+  .topbar .sp{flex:1}
+  .modtag{display:inline-flex;align-items:center;gap:6px;background:var(--brand-soft);color:var(--brand);
+          padding:5px 14px;border-radius:var(--pill);font-size:13px;font-weight:600}
+  .content{padding:24px 28px 72px;max-width:1560px;width:100%}
+
+  /* ---------- Common ---------- */
+  .card{background:var(--card);border:1px solid var(--line);border-radius:var(--r4);box-shadow:var(--sh1);margin-bottom:20px;overflow:hidden}
+  .card-h{padding:16px 20px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  .card-h h2{font-size:17px;margin:0;font-weight:600;line-height:26px}
+  .card-h .sp{flex:1}
+  .card-b{padding:20px}
+  .btn{border:1px solid var(--g300);background:var(--card);color:var(--text);padding:9px 18px;border-radius:var(--pill);
+       font-weight:500;font-size:14px;line-height:22px;display:inline-flex;align-items:center;gap:8px;transition:.15s;white-space:nowrap}
+  [data-theme="dark"] .btn{border-color:var(--g1600)}
+  .btn:hover{background:var(--line-soft);border-color:var(--g500)}
+  .btn.primary{background:var(--brand);border-color:var(--brand);color:#fff;font-weight:600}
+  .btn.primary:hover{background:var(--brand-h);border-color:var(--brand-h)}
+  [data-theme="dark"] .btn.primary{color:var(--bk-black)}
+  .btn.success{background:var(--btn-dark);border-color:var(--btn-dark);color:#fff;font-weight:600}
+  .btn.success:hover{background:var(--btn-dark-h);border-color:var(--btn-dark-h)}
+  [data-theme="dark"] .btn.success{color:var(--bk-black)}
+  .btn.ghost{background:transparent;border-color:transparent}
+  .btn.ghost:hover{background:var(--line-soft)}
+  .btn.sm{padding:6px 14px;font-size:13px;line-height:20px}
+  .btn:disabled{opacity:.4;cursor:not-allowed}
+  .btn:disabled:hover{background:var(--card);border-color:var(--g300)}
+  .muted{color:var(--muted)}
+  .hint{font-size:13px;line-height:20px;color:var(--muted)}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+
+  .badge{display:inline-flex;align-items:center;gap:5px;padding:4px 11px;border-radius:var(--pill);font-size:12px;
+         line-height:18px;font-weight:600;white-space:nowrap}
+  .b-ok{background:var(--green-bg);color:var(--green)}
+  .b-fail{background:var(--red-bg);color:var(--red)}
+  .b-warn{background:var(--orange-bg);color:var(--orange)}
+  .b-idle{background:var(--line-soft);color:var(--muted)}
+
+  /* ---------- Steps ---------- */
+  .steps{display:flex;margin-bottom:20px;background:var(--card);border:1px solid var(--line);border-radius:var(--r4);overflow:hidden;box-shadow:var(--sh1)}
+  .step{flex:1;padding:16px 18px;display:flex;gap:12px;align-items:center;border-right:1px solid var(--line)}
+  .step:last-child{border-right:0}
+  .step .n{width:28px;height:28px;border-radius:50%;background:var(--line-soft);color:var(--muted);display:flex;
+           align-items:center;justify-content:center;font-weight:600;font-size:13px;flex-shrink:0}
+  .step .t{font-size:12px;line-height:18px;color:var(--muted)}
+  .step .t b{display:block;font-size:14px;line-height:22px;color:var(--text);font-weight:600}
+  .step.on{background:var(--brand-soft)}
+  .step.on .n{background:var(--brand);color:#fff}
+  .step.done .n{background:var(--brand-soft);color:var(--brand)}
+  [data-theme="dark"] .step.on .n{color:var(--bk-black)}
+
+  /* ---------- Module picker ---------- */
+  .modules{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:18px}
+  .mod{border:1px solid var(--line);border-radius:var(--r4);padding:24px;background:var(--card);cursor:pointer;transition:.18s}
+  .mod:hover{border-color:var(--brand);box-shadow:var(--sh3);transform:translateY(-2px)}
+  .mod.sel{border-color:var(--brand);background:var(--brand-soft);box-shadow:var(--sh1)}
+  .mod .ic{font-size:30px;line-height:1}
+  .mod h3{margin:14px 0 6px;font-size:19px;font-weight:600;letter-spacing:-.01em}
+  .mod p{margin:0;font-size:14px;color:var(--muted);line-height:22px}
+  .mod ul{margin:14px 0 0;padding-left:20px;font-size:13px;color:var(--muted);line-height:24px}
+
+  /* ---------- Upload ---------- */
+  .drop{border:1.5px dashed var(--g300);border-radius:var(--r4);padding:44px 24px;text-align:center;background:var(--line-soft);transition:.15s}
+  .drop.over{border-color:var(--brand);background:var(--brand-soft)}
+  .drop .big{font-size:38px;line-height:1}
+  .filechip{display:inline-flex;align-items:center;gap:8px;background:var(--line-soft);border:1px solid var(--line);
+            padding:5px 14px;border-radius:var(--pill);font-size:13px;color:var(--muted)}
+  .bar{height:6px;background:var(--g200);border-radius:var(--pill);overflow:hidden;margin-top:14px}
+  [data-theme="dark"] .bar{background:var(--g1600)}
+  .bar > i{display:block;height:100%;background:var(--brand);width:0;transition:width .25s;border-radius:var(--pill)}
+
+  /* ---------- Fields ---------- */
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px 18px}
+  .f label{display:block;font-size:12px;line-height:18px;color:var(--muted);margin-bottom:6px;font-weight:500}
+  .f input,.f select,.f textarea{width:100%;padding:10px 13px;border:1px solid var(--g300);border-radius:var(--r3);
+        background:var(--card);font-size:14px;line-height:22px;transition:.15s}
+  [data-theme="dark"] .f input,[data-theme="dark"] .f select{border-color:var(--g1600)}
+  .f input:focus,.f select:focus{outline:none;border-color:var(--brand);box-shadow:0 0 0 3px rgba(0,204,102,.18)}
+  .f input[readonly]{background:var(--line-soft);color:var(--muted)}
+  .f .sub{font-size:12px;margin-top:7px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .f.err input,.f.err select{border-color:var(--red);background:var(--red-bg)}
+  .f.ok input,.f.ok select{border-color:var(--brand-line)}
+
+  /* ---------- Table ---------- */
+  .tw{overflow-x:auto;border:1px solid var(--line);border-radius:var(--r4)}
+  table{width:100%;border-collapse:collapse;font-size:14px;min-width:780px}
+  th{background:var(--line-soft);text-align:left;padding:11px 14px;font-size:12px;line-height:18px;color:var(--muted);
+     font-weight:600;letter-spacing:.02em;border-bottom:1px solid var(--line);white-space:nowrap}
+  td{padding:9px 14px;border-bottom:1px solid var(--line-soft);vertical-align:middle;line-height:22px}
+  tr:last-child td{border-bottom:0}
+  tbody tr:hover{background:var(--line-soft)}
+  td input,td select{width:100%;padding:6px 9px;border:1px solid transparent;border-radius:var(--r2);background:transparent;font-size:14px}
+  td input:hover,td select:hover{border-color:var(--g300);background:var(--card)}
+  td input:focus,td select:focus{border-color:var(--brand);background:var(--card);outline:none;box-shadow:0 0 0 3px rgba(0,204,102,.15)}
+  td.num input{text-align:right;font-variant-numeric:tabular-nums}
+  .cell-fail select,.cell-fail input{border-color:var(--red);background:var(--red-bg)}
+  .totrow td{background:var(--line-soft);font-weight:600;font-variant-numeric:tabular-nums}
+
+  /* ---------- Result panel ---------- */
+  .result{border-radius:var(--r4);padding:18px 20px;margin-bottom:20px;border:1px solid}
+  .result.ok{background:var(--green-bg);border-color:var(--brand-line);color:var(--gr1600)}
+  .result.bad{background:var(--red-bg);border-color:var(--rd300);color:var(--rd1200)}
+  [data-theme="dark"] .result.ok{color:var(--gr1200)}
+  [data-theme="dark"] .result.bad{color:var(--rd800)}
+  .result h3{margin:0 0 8px;font-size:17px;font-weight:600;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .result ul{margin:10px 0 0;padding-left:22px;line-height:26px;font-size:14px}
+  .result code{background:rgba(12,14,12,.08);padding:2px 7px;border-radius:var(--r2);font-size:13px}
+  [data-theme="dark"] .result code{background:rgba(255,255,255,.12)}
+  .result .hint{color:inherit;opacity:.75}
+
+  pre.json{background:var(--code-bg);color:var(--code-fg);padding:18px;border-radius:var(--r3);overflow:auto;
+           font-family:'SF Mono',Consolas,monospace;font-size:12.5px;line-height:1.7;max-height:440px;margin:0}
+  .tabs{display:flex;gap:6px;border-bottom:1px solid var(--line);padding:0 20px;flex-wrap:wrap}
+  .tabs button{background:none;border:0;border-bottom:2px solid transparent;padding:13px 6px;margin-right:10px;
+               color:var(--muted);font-weight:500;font-size:14px}
+  .tabs button:hover{color:var(--text)}
+  .tabs button.on{color:var(--brand);border-bottom-color:var(--brand);font-weight:600}
+
+  /* ---------- Modal ---------- */
+  .ov{position:fixed;inset:0;background:rgba(12,14,12,.6);backdrop-filter:blur(4px);display:none;align-items:center;
+      justify-content:center;z-index:100;padding:24px}
+  .ov.on{display:flex}
+  .modal{background:var(--card);border-radius:var(--r5);width:min(640px,100%);max-height:88vh;overflow:auto;box-shadow:var(--sh4)}
+  .modal .card-h{position:sticky;top:0;background:var(--card);z-index:1}
+  .toast{position:fixed;right:24px;bottom:24px;background:var(--bk-black);color:#fff;padding:14px 20px;border-radius:var(--r3);
+         box-shadow:var(--sh4);z-index:200;display:none;font-size:14px;line-height:22px;max-width:400px;border:1px solid var(--g1600)}
+  .toast.on{display:block;animation:pop .25s}
+  @keyframes pop{from{transform:translateY(10px);opacity:0}}
+  .sec-title{font-size:12px;font-weight:600;color:var(--muted);letter-spacing:.06em;margin:0 0 14px;
+             padding-bottom:8px;border-bottom:1px solid var(--line)}
+  .empty{padding:48px;text-align:center;color:var(--muted)}
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-thumb{background:var(--g300);border-radius:var(--pill);border:2px solid var(--bg)}
+  [data-theme="dark"] ::-webkit-scrollbar-thumb{background:var(--g1600)}
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- ============ SIDEBAR ============ -->
+  <aside class="sidebar">
+    <div class="brand">
+      <b>OCR &rarr; SAP S/4HANA</b>
+      <span>Document Intake Automation</span>
+    </div>
+    <nav class="nav" id="nav">
+      <div class="nav-title">PROCESS</div>
+      <a href="#" data-page="home" class="active"><span class="ic">&#9635;</span> เลือกโมดูล</a>
+      <a href="#" data-page="work"><span class="ic">&#9781;</span> นำเข้าเอกสาร / OCR</a>
+      <div class="nav-title">MASTER DATA</div>
+      <a href="#" data-page="master"><span class="ic">&#9873;</span> Master Mapping</a>
+      <div class="nav-title">LOG</div>
+      <a href="#" data-page="log"><span class="ic">&#9783;</span> ประวัติส่ง SAP</a>
+    </nav>
+    <div class="sidebar-foot">
+      Connection: <span id="connState" style="color:var(--brand);font-weight:600">● S4H-PRD (mock)</span><br>
+      User: it-digital@megachem
+    </div>
+  </aside>
+
+  <!-- ============ MAIN ============ -->
+  <div class="main">
+    <div class="topbar">
+      <h1 id="pageTitle">เลือกโมดูล</h1>
+      <span class="modtag" id="modTag" style="display:none"></span>
+      <div class="sp"></div>
+      <button class="btn sm ghost" id="themeBtn" onclick="toggleTheme()" title="สลับโหมดสว่าง/มืด">&#9789;</button>
+      <button class="btn sm" onclick="resetDoc()">&#8635; เริ่มเอกสารใหม่</button>
+    </div>
+    <div class="content" id="content"></div>
+  </div>
+</div>
+
+<div class="ov" id="ov"><div class="modal" id="modal"></div></div>
+<div class="toast" id="toast"></div>
+
+<script>
+/* =======================================================================
+   1) MASTER DATA  (เก็บใน localStorage — จริงให้ replicate จาก SAP)
+   ======================================================================= */
+const SEED = {
+  customers: [
+    {code:'0010001', name:'บริษัท สยาม เคมิคอล อินดัสทรี จำกัด', nameEn:'Siam Chemical Industry Co., Ltd.', taxId:'0105533012345', branch:'00000', salesOrg:'1000', distChannel:'10', division:'00', currency:'THB', paymentTerms:'N030'},
+    {code:'0010002', name:'บริษัท ไทย โพลีเมอร์ กรุ๊ป จำกัด (มหาชน)', nameEn:'Thai Polymer Group PCL.', taxId:'0107536000123', branch:'00000', salesOrg:'1000', distChannel:'10', division:'00', currency:'THB', paymentTerms:'N060'},
+    {code:'0010003', name:'บริษัท เอเชีย โคทติ้ง แอนด์ พลาสติก จำกัด', nameEn:'Asia Coating & Plastic Co., Ltd.', taxId:'0125548009876', branch:'00000', salesOrg:'1000', distChannel:'10', division:'00', currency:'THB', paymentTerms:'N030'}
+  ],
+  shipTos: [
+    {customerCode:'0010001', code:'0010001-01', name:'คลังสินค้า บางปู', address:'นิคมอุตสาหกรรมบางปู ซ.7 ต.แพรกษา อ.เมือง สมุทรปราการ 10280'},
+    {customerCode:'0010001', code:'0010001-02', name:'โรงงาน ระยอง', address:'นิคมอุตสาหกรรมมาบตาพุด ต.มาบตาพุด อ.เมือง ระยอง 21150'},
+    {customerCode:'0010002', code:'0010002-01', name:'โรงงานอยุธยา (โรจนะ)', address:'สวนอุตสาหกรรมโรจนะ ต.คานหาม อ.อุทัย พระนครศรีอยุธยา 13210'},
+    {customerCode:'0010003', code:'0010003-01', name:'สำนักงานใหญ่ / คลังบางนา', address:'กม.19 ถ.บางนา-ตราด ต.บางโฉลง อ.บางพลี สมุทรปราการ 10540'}
+  ],
+  materials: [
+    {code:'FG-100021', desc:'Titanium Dioxide R-902 (25 KG/BAG)', uom:'KG',  plant:'1000', matGroup:'PIG01'},
+    {code:'FG-100045', desc:'Calcium Carbonate CC-800 (25 KG/BAG)', uom:'KG', plant:'1000', matGroup:'FIL01'},
+    {code:'FG-100078', desc:'Epoxy Resin EP-828 (200 KG/DRUM)', uom:'KG',  plant:'1000', matGroup:'RES01'},
+    {code:'RM-200011', desc:'Methyl Ethyl Ketone (MEK) 99.5%', uom:'L',   plant:'1000', matGroup:'SOL01'},
+    {code:'RM-200034', desc:'Toluene Industrial Grade', uom:'L',          plant:'1000', matGroup:'SOL01'},
+    {code:'RM-200099', desc:'Polypropylene Homopolymer PP-1100N', uom:'KG',plant:'1000', matGroup:'PLA01'},
+    {code:'SV-900001', desc:'ค่าขนส่งสินค้า / Freight Charge', uom:'AU',   plant:'1000', matGroup:'SRV01'}
+  ],
+  custMaterials: [ /* รหัส/ชื่อสินค้า ฝั่งลูกค้า -> Material ภายใน */
+    {customerCode:'0010001', extCode:'SCI-TIO2-902', extDesc:'TIO2 R902 ถุง 25 กก.', materialCode:'FG-100021'},
+    {customerCode:'0010001', extCode:'SCI-CACO3-800', extDesc:'แคลเซียมคาร์บอเนต CC800', materialCode:'FG-100045'},
+    {customerCode:'0010002', extCode:'TPG-PP1100', extDesc:'PP HOMO 1100N', materialCode:'RM-200099'},
+    {customerCode:'0010002', extCode:'TPG-MEK', extDesc:'MEK 99.5%', materialCode:'RM-200011'},
+    {customerCode:'0010003', extCode:'ACP-EP828', extDesc:'อีพ็อกซี่เรซิน EP-828', materialCode:'FG-100078'}
+  ],
+  vendors: [
+    {code:'V-500012', name:'บริษัท ยูนิเวอร์แซล เคมีคอล ซัพพลาย จำกัด', taxId:'0105546007788', branch:'00000', currency:'THB', paymentTerms:'N030', reconAcct:'2110100', wht:'-'},
+    {code:'V-500034', name:'บริษัท เอ็น.ซี. โลจิสติกส์ เซอร์วิส จำกัด', taxId:'0115551002233', branch:'00000', currency:'THB', paymentTerms:'N015', reconAcct:'2110100', wht:'53 (3%)'},
+    {code:'V-500051', name:'บริษัท พีทีจี เพโทรเคมิคอล จำกัด (มหาชน)', taxId:'0107545000456', branch:'00001', currency:'THB', paymentTerms:'N045', reconAcct:'2110100', wht:'-'}
+  ],
+  vendorMaterials: [ /* รหัส/ชื่อสินค้า ฝั่ง Vendor -> Material ภายใน */
+    {vendorCode:'V-500012', extCode:'UC-TL-100', extDesc:'TOLUENE INDUSTRIAL', materialCode:'RM-200034'},
+    {vendorCode:'V-500012', extCode:'UC-MEK-995', extDesc:'MEK 99.5 PCT', materialCode:'RM-200011'},
+    {vendorCode:'V-500034', extCode:'NC-FREIGHT', extDesc:'ค่าขนส่ง', materialCode:'SV-900001'},
+    {vendorCode:'V-500051', extCode:'PTG-PP-1100N', extDesc:'PP HOMOPOLYMER 1100N', materialCode:'RM-200099'}
+  ]
+};
+
+const MASTER_DEF = {
+  customers:{label:'ลูกค้า (Customer)', mod:'SO', key:'code', cols:[
+    {k:'code',l:'รหัสลูกค้า'},{k:'name',l:'ชื่อ (TH)'},{k:'nameEn',l:'ชื่อ (EN)'},
+    {k:'taxId',l:'เลขทะเบียน / ผู้เสียภาษี'},{k:'branch',l:'สาขา'},
+    {k:'salesOrg',l:'Sales Org'},{k:'distChannel',l:'Distr.Ch'},{k:'division',l:'Div'},
+    {k:'currency',l:'สกุลเงิน'},{k:'paymentTerms',l:'Payment Terms'}]},
+  shipTos:{label:'สถานที่ส่งของ (Ship-to)', mod:'SO', key:'code', cols:[
+    {k:'customerCode',l:'รหัสลูกค้า'},{k:'code',l:'รหัส Ship-to'},{k:'name',l:'ชื่อสถานที่'},{k:'address',l:'ที่อยู่'}]},
+  custMaterials:{label:'สินค้าฝั่งลูกค้า (Customer Material)', mod:'SO', key:'extCode', cols:[
+    {k:'customerCode',l:'รหัสลูกค้า'},{k:'extCode',l:'รหัสสินค้าของลูกค้า'},{k:'extDesc',l:'ชื่อสินค้าของลูกค้า'},{k:'materialCode',l:'Material (SAP)'}]},
+  vendors:{label:'ผู้ขาย (Vendor / Supplier)', mod:'AP', key:'code', cols:[
+    {k:'code',l:'รหัสผู้ขาย'},{k:'name',l:'ชื่อผู้ขาย'},{k:'taxId',l:'เลขทะเบียน / ผู้เสียภาษี'},
+    {k:'branch',l:'สาขา'},{k:'currency',l:'สกุลเงิน'},{k:'paymentTerms',l:'Payment Terms'},
+    {k:'reconAcct',l:'Recon. Account'},{k:'wht',l:'ภาษีหัก ณ ที่จ่าย'}]},
+  vendorMaterials:{label:'สินค้าฝั่งผู้ขาย (Vendor Material)', mod:'AP', key:'extCode', cols:[
+    {k:'vendorCode',l:'รหัสผู้ขาย'},{k:'extCode',l:'รหัสสินค้าของผู้ขาย'},{k:'extDesc',l:'ชื่อสินค้าของผู้ขาย'},{k:'materialCode',l:'Material (SAP)'}]},
+  materials:{label:'สินค้า/บริการ (Material)', mod:'ALL', key:'code', cols:[
+    {k:'code',l:'รหัส Material'},{k:'desc',l:'รายละเอียด'},{k:'uom',l:'หน่วย'},{k:'plant',l:'Plant'},{k:'matGroup',l:'Material Group'}]}
+};
+
+/* =======================================================================
+   2) STATE
+   ======================================================================= */
+const LSK = 'ocr_sap_master_v1', LSL = 'ocr_sap_log_v1';
+let MD  = load(LSK, SEED);
+let LOG = load(LSS(), []);
+function LSS(){return LSL}
+function load(k,d){ try{const v=localStorage.getItem(k); return v?JSON.parse(v):JSON.parse(JSON.stringify(d));}catch(e){return JSON.parse(JSON.stringify(d))} }
+function saveMD(){ localStorage.setItem(LSK, JSON.stringify(MD)); }
+function saveLog(){ localStorage.setItem(LSL, JSON.stringify(LOG)); }
+
+const S = {
+  page:'home',
+  module:null,          // 'AP' | 'SO'
+  file:null,
+  doc:null,             // {header:{}, lines:[]}
+  map:null,             // ผลการ mapping
+  posted:false,
+  masterTab:'customers',
+  workTab:'doc'
+};
+
+/* =======================================================================
+   3) MOCK OCR SAMPLES  (จุดต่อ OCR จริงอยู่ที่ฟังก์ชัน runOCR)
+   ======================================================================= */
+const SAMPLES = {
+  SO:[
+    {name:'PO-SCI-6801234.pdf', label:'ใบสั่งซื้อลูกค้า — ข้อมูลครบ', confidence:0.97,
+     header:{docType:'PURCHASE ORDER', poNo:'PO-6801234', poDate:'2026-08-10', customerName:'บริษัท สยาม เคมิคอล อินดัสทรี จำกัด', customerTaxId:'0105533012345',
+             shipToName:'คลังสินค้า บางปู', shipToAddress:'นิคมอุตสาหกรรมบางปู ซ.7 ต.แพรกษา อ.เมือง สมุทรปราการ 10280',
+             deliveryDate:'2026-08-25', currency:'THB', paymentTerms:'เครดิต 30 วัน', incoterms:'DDP', totalAmount:'385000.00', remark:'ส่งของช่วงเช้า 08:00-11:00'},
+     lines:[{extCode:'SCI-TIO2-902', desc:'TIO2 R902 ถุง 25 กก.', qty:'5000', uom:'KG', price:'62.00', amount:'310000.00'},
+            {extCode:'SCI-CACO3-800', desc:'แคลเซียมคาร์บอเนต CC800', qty:'2500', uom:'KG', price:'30.00', amount:'75000.00'}]},
+    {name:'PO-TPG-2026-0842.pdf', label:'ใบสั่งซื้อลูกค้า — สินค้าไม่พบใน Master', confidence:0.91,
+     header:{docType:'PURCHASE ORDER', poNo:'TPG-2026-0842', poDate:'2026-08-12', customerName:'THAI POLYMER GROUP PCL.', customerTaxId:'0107536000123',
+             shipToName:'โรงงานอยุธยา (โรจนะ)', shipToAddress:'สวนอุตสาหกรรมโรจนะ ต.คานหาม อ.อุทัย พระนครศรีอยุธยา 13210',
+             deliveryDate:'2026-08-28', currency:'THB', paymentTerms:'เครดิต 60 วัน', incoterms:'DDP', totalAmount:'640000.00', remark:''},
+     lines:[{extCode:'TPG-PP1100', desc:'PP HOMO 1100N', qty:'10000', uom:'KG', price:'52.00', amount:'520000.00'},
+            {extCode:'TPG-XY-500', desc:'XYLENE INDUSTRIAL GRADE', qty:'3000', uom:'L', price:'40.00', amount:'120000.00'}]},
+    {name:'PO-UNKNOWN-9931.jpg', label:'ใบสั่งซื้อ — ลูกค้าใหม่ (ไม่พบใน Master)', confidence:0.86,
+     header:{docType:'PURCHASE ORDER', poNo:'PO-9931', poDate:'2026-08-13', customerName:'บริษัท นิว เวิลด์ เทรดดิ้ง จำกัด', customerTaxId:'0105566001111',
+             shipToName:'คลังสินค้าลาดกระบัง', shipToAddress:'ถ.ฉลองกรุง แขวงลำปลาทิว เขตลาดกระบัง กรุงเทพฯ 10520',
+             deliveryDate:'2026-08-30', currency:'THB', paymentTerms:'เงินสด', incoterms:'EXW', totalAmount:'124000.00', remark:''},
+     lines:[{extCode:'NW-EP828', desc:'อีพ็อกซี่เรซิน EP-828', qty:'2000', uom:'KG', price:'62.00', amount:'124000.00'}]}
+  ],
+  AP:[
+    {name:'INV-UC-25080456.pdf', label:'ใบแจ้งหนี้/ใบกำกับภาษี — ข้อมูลครบ', confidence:0.96,
+     header:{docType:'ใบกำกับภาษี/ใบส่งของ', invoiceNo:'UC-25080456', invoiceDate:'2026-08-08', postingDate:'2026-08-08',
+             vendorName:'บริษัท ยูนิเวอร์แซล เคมีคอล ซัพพลาย จำกัด', vendorTaxId:'0105546007788', branch:'สำนักงานใหญ่',
+             poRef:'4500012345', currency:'THB', paymentTerms:'เครดิต 30 วัน',
+             subTotal:'268000.00', vatRate:'7', vatAmount:'18760.00', whtAmount:'0.00', totalAmount:'286760.00'},
+     lines:[{extCode:'UC-TL-100', desc:'TOLUENE INDUSTRIAL', qty:'4000', uom:'L', price:'42.00', amount:'168000.00'},
+            {extCode:'UC-MEK-995', desc:'MEK 99.5 PCT', qty:'2000', uom:'L', price:'50.00', amount:'100000.00'}]},
+    {name:'INV-NC-LOG-6808.pdf', label:'ใบแจ้งหนี้ค่าขนส่ง — มี WHT', confidence:0.93,
+     header:{docType:'ใบแจ้งหนี้', invoiceNo:'NC-LOG-6808', invoiceDate:'2026-08-11', postingDate:'2026-08-11',
+             vendorName:'บริษัท เอ็น.ซี. โลจิสติกส์ เซอร์วิส จำกัด', vendorTaxId:'0115551002233', branch:'สำนักงานใหญ่',
+             poRef:'', currency:'THB', paymentTerms:'เครดิต 15 วัน',
+             subTotal:'85000.00', vatRate:'7', vatAmount:'5950.00', whtAmount:'2550.00', totalAmount:'88400.00'},
+     lines:[{extCode:'NC-FREIGHT', desc:'ค่าขนส่ง เดือน ก.ค. 2569', qty:'1', uom:'AU', price:'85000.00', amount:'85000.00'}]},
+    {name:'INV-SCAN-77120.jpg', label:'ใบแจ้งหนี้สแกน — ผู้ขายไม่พบ + สินค้าไม่พบ', confidence:0.78,
+     header:{docType:'ใบกำกับภาษี', invoiceNo:'77120', invoiceDate:'2026-08-12', postingDate:'2026-08-12',
+             vendorName:'หจก. รุ่งเรือง เคมีภัณฑ์', vendorTaxId:'0103552009999', branch:'สำนักงานใหญ่',
+             poRef:'', currency:'THB', paymentTerms:'เงินสด',
+             subTotal:'52000.00', vatRate:'7', vatAmount:'3640.00', whtAmount:'0.00', totalAmount:'55640.00'},
+     lines:[{extCode:'RR-ACET', desc:'ACETONE 99%', qty:'1300', uom:'L', price:'40.00', amount:'52000.00'}]}
+  ]
+};
+
+/* =======================================================================
+   4) UTIL
+   ======================================================================= */
+const $ = s => document.querySelector(s);
+const esc = s => String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const num = v => { const n = parseFloat(String(v==null?'':v).replace(/[, ]/g,'')); return isNaN(n)?0:n; };
+const fmt = n => num(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+const digits = s => String(s||'').replace(/\D/g,'');
+
+function norm(s){
+  return String(s||'').toLowerCase()
+    .replace(/บริษัท|จำกัด|มหาชน|หจก\.|ห้างหุ้นส่วนจำกัด|co\.,?\s*ltd\.?|company|limited|public|pcl\.?|corp\.?|inc\.?/g,'')
+    .replace(/[^a-z0-9ก-๙]/g,'');
+}
+/* Dice coefficient บน bigram — ใช้เทียบชื่อแบบยืดหยุ่น */
+function sim(a,b){
+  a=norm(a); b=norm(b);
+  if(!a||!b) return 0;
+  if(a===b) return 1;
+  if(a.includes(b)||b.includes(a)) return .92;
+  const bg = s => { const o=[]; for(let i=0;i<s.length-1;i++) o.push(s.slice(i,i+2)); return o; };
+  const A=bg(a), B=bg(b); if(!A.length||!B.length) return 0;
+  const pool=B.slice(); let hit=0;
+  A.forEach(x=>{ const i=pool.indexOf(x); if(i>-1){hit++;pool.splice(i,1);} });
+  return 2*hit/(A.length+B.length);
+}
+const TH_AUTO = .82,        // เกณฑ์จับคู่อัตโนมัติของ "ชื่อคู่ค้า"
+      TH_MAT_SCOPE = .85,   // เกณฑ์จับคู่ชื่อสินค้าภายใต้คู่ค้ารายเดียวกัน
+      TH_MAT_MASTER = .93,  // เกณฑ์จับคู่กับ Material master โดยตรง (เข้มกว่า กันจับผิดตัว)
+      TH_SUGGEST = .45;
+
+/* ธีมสว่าง/มืด — ใช้ชุดสี light & dark ตามระบบดีไซน์ของ Bitkub */
+function applyTheme(t){
+  document.documentElement.setAttribute('data-theme', t);
+  const b=document.getElementById('themeBtn'); if(b) b.innerHTML = t==='dark'?'&#9788;':'&#9789;';
+  try{ localStorage.setItem('ocr_sap_theme', t); }catch(e){}
+}
+function toggleTheme(){ applyTheme(document.documentElement.getAttribute('data-theme')==='dark'?'light':'dark'); }
+(function(){ let t='light'; try{ t=localStorage.getItem('ocr_sap_theme')||'light'; }catch(e){} applyTheme(t); })();
+
+function toast(msg,ms){ const t=$('#toast'); t.innerHTML=msg; t.classList.add('on'); clearTimeout(t._t); t._t=setTimeout(()=>t.classList.remove('on'), ms||2600); }
+function openModal(html){ $('#modal').innerHTML=html; $('#ov').classList.add('on'); }
+function closeModal(){ $('#ov').classList.remove('on'); }
+$('#ov').addEventListener('click', e=>{ if(e.target.id==='ov') closeModal(); });
+
+/* =======================================================================
+   5) MAPPING ENGINE
+   ======================================================================= */
+function R(status, code, text, method, cands){ return {status, code:code||'', text:text||'', method:method||'', cands:cands||[]}; }
+
+function matchPartner(list, taxId, name){
+  const t = digits(taxId);
+  if(t.length>=10){
+    const hit = list.find(x=>digits(x.taxId)===t);
+    if(hit) return {hit, method:'เลขทะเบียนนิติบุคคล (Tax ID)', score:1};
+  }
+  let best=null, bs=0;
+  list.forEach(x=>{
+    const sc = Math.max(sim(name,x.name), sim(name,x.nameEn||''));
+    if(sc>bs){bs=sc;best=x;}
+  });
+  if(best && bs>=TH_AUTO) return {hit:best, method:'ชื่อ ('+Math.round(bs*100)+'%)', score:bs};
+  const cands = list.map(x=>({o:x, s:Math.max(sim(name,x.name), sim(name,x.nameEn||''))}))
+                    .filter(c=>c.s>=TH_SUGGEST).sort((a,b)=>b.s-a.s).slice(0,3).map(c=>c.o);
+  return {hit:null, method:'', score:bs, cands};
+}
+
+function matchMaterial(partnerCode, extCode, extDesc, mapList, keyField){
+  const scope = mapList.filter(m=>m[keyField]===partnerCode);
+  const ec = String(extCode||'').trim().toUpperCase();
+  if(ec){
+    const hit = scope.find(m=>String(m.extCode).trim().toUpperCase()===ec);
+    if(hit) return {code:hit.materialCode, method:'รหัสสินค้าของคู่ค้า', score:1};
+  }
+  let best=null, bs=0;
+  scope.forEach(m=>{ const sc=sim(extDesc,m.extDesc); if(sc>bs){bs=sc;best=m;} });
+  if(best && bs>=TH_MAT_SCOPE) return {code:best.materialCode, method:'ชื่อสินค้าของคู่ค้า ('+Math.round(bs*100)+'%)', score:bs};
+  // fallback: เทียบกับ description ของ Material master
+  let b2=null, s2=0;
+  MD.materials.forEach(m=>{ const sc=Math.max(sim(extDesc,m.desc), sim(extCode,m.code)); if(sc>s2){s2=sc;b2=m;} });
+  if(b2 && s2>=TH_MAT_MASTER) return {code:b2.code, method:'Material master ('+Math.round(s2*100)+'%)', score:s2};
+  const cands=[];
+  scope.filter(m=>sim(extDesc,m.extDesc)>=TH_SUGGEST).forEach(m=>cands.push(m.materialCode));
+  MD.materials.filter(m=>sim(extDesc,m.desc)>=TH_SUGGEST).forEach(m=>{ if(!cands.includes(m.code)) cands.push(m.code); });
+  return {code:'', method:'', score:Math.max(bs,s2), cands:cands.slice(0,3)};
+}
+
+function runMapping(){
+  const d=S.doc, h=d.header, m={header:{}, lines:[], errors:[], warns:[]};
+  const manual = (S.map && S.map.manual) ? S.map.manual : {header:{}, lines:{}};
+  m.manual = manual;
+
+  if(S.module==='SO'){
+    /* --- Customer --- */
+    let custCode = manual.header.customer || '';
+    if(custCode){
+      const c = MD.customers.find(x=>x.code===custCode);
+      m.header.customer = R('manual', c.code, c.name, 'เลือกด้วยตนเอง');
+    }else{
+      const r = matchPartner(MD.customers, h.customerTaxId, h.customerName);
+      m.header.customer = r.hit ? R('ok', r.hit.code, r.hit.name, r.method)
+        : R('fail','','', '', r.cands);
+      if(!r.hit) m.errors.push({field:'Customer', msg:'ไม่พบลูกค้าที่ตรงกับเลขทะเบียน <code>'+esc(h.customerTaxId||'-')+'</code> หรือชื่อ &quot;'+esc(h.customerName||'-')+'&quot;', fix:'สร้าง/แก้ไขที่ Master Mapping &rarr; ลูกค้า (Customer)'});
+    }
+    const custCodeFinal = m.header.customer.code;
+
+    /* --- Ship-to --- */
+    let stCode = manual.header.shipTo || '';
+    if(stCode){
+      const s = MD.shipTos.find(x=>x.code===stCode);
+      m.header.shipTo = R('manual', s.code, s.name, 'เลือกด้วยตนเอง');
+    }else if(!custCodeFinal){
+      m.header.shipTo = R('fail','','','',[]);
+      m.errors.push({field:'Ship-to', msg:'ยังระบุ Ship-to ไม่ได้ เนื่องจากยังไม่ทราบลูกค้า', fix:'ระบุลูกค้าให้ถูกต้องก่อน'});
+    }else{
+      const scope = MD.shipTos.filter(x=>x.customerCode===custCodeFinal);
+      let best=null,bs=0;
+      scope.forEach(x=>{ const sc=Math.max(sim(h.shipToName,x.name), sim(h.shipToAddress,x.address)); if(sc>bs){bs=sc;best=x;} });
+      if(best && bs>=.7){ m.header.shipTo = R('ok', best.code, best.name, 'ชื่อ/ที่อยู่ ('+Math.round(bs*100)+'%)'); }
+      else{
+        m.header.shipTo = R('fail','','','', scope.map(x=>x.code).slice(0,3));
+        m.errors.push({field:'Ship-to', msg:'ไม่พบสถานที่ส่งของ &quot;'+esc(h.shipToName||'-')+'&quot; ของลูกค้ารายนี้', fix:'เพิ่มที่ Master Mapping &rarr; Ship-to'});
+      }
+    }
+
+    /* --- Material lines --- */
+    d.lines.forEach((ln,i)=>{
+      const mv = manual.lines[i];
+      if(mv){ m.lines.push(R('manual', mv, matDesc(mv), 'เลือกด้วยตนเอง')); return; }
+      if(!custCodeFinal){
+        m.lines.push(R('fail','','','',[]));
+        if(i===0) m.errors.push({field:'Material (ทุกบรรทัด)', msg:'ยังจับคู่สินค้าไม่ได้ เนื่องจากยังระบุลูกค้าไม่สำเร็จ', fix:'ระบุลูกค้าให้ถูกต้องก่อน แล้วกด Mapping อีกครั้ง'});
+        return;
+      }
+      const r = matchMaterial(custCodeFinal, ln.extCode, ln.desc, MD.custMaterials, 'customerCode');
+      if(r.code) m.lines.push(R('ok', r.code, matDesc(r.code), r.method));
+      else{
+        m.lines.push(R('fail','','','', r.cands));
+        m.errors.push({field:'Material บรรทัดที่ '+(i+1), msg:'ไม่พบสินค้า <code>'+esc(ln.extCode||'-')+'</code> / &quot;'+esc(ln.desc||'-')+'&quot; ในรายการสินค้าของลูกค้า', fix:'เพิ่มที่ Master Mapping &rarr; สินค้าฝั่งลูกค้า'});
+      }
+    });
+  }else{
+    /* ================= AP ================= */
+    let vc = manual.header.vendor || '';
+    if(vc){
+      const v = MD.vendors.find(x=>x.code===vc);
+      m.header.vendor = R('manual', v.code, v.name, 'เลือกด้วยตนเอง');
+    }else{
+      const r = matchPartner(MD.vendors, h.vendorTaxId, h.vendorName);
+      m.header.vendor = r.hit ? R('ok', r.hit.code, r.hit.name, r.method) : R('fail','','','', r.cands);
+      if(!r.hit) m.errors.push({field:'Vendor / Supplier', msg:'ไม่พบผู้ขายที่ตรงกับเลขทะเบียน <code>'+esc(h.vendorTaxId||'-')+'</code> หรือชื่อ &quot;'+esc(h.vendorName||'-')+'&quot;', fix:'สร้าง/แก้ไขที่ Master Mapping &rarr; ผู้ขาย (Vendor)'});
+    }
+    const vCode = m.header.vendor.code;
+
+    d.lines.forEach((ln,i)=>{
+      const mv = manual.lines[i];
+      if(mv){ m.lines.push(R('manual', mv, matDesc(mv), 'เลือกด้วยตนเอง')); return; }
+      if(!vCode){
+        m.lines.push(R('fail','','','',[]));
+        if(i===0) m.errors.push({field:'Material (ทุกบรรทัด)', msg:'ยังจับคู่สินค้าไม่ได้ เนื่องจากยังระบุผู้ขายไม่สำเร็จ', fix:'ระบุผู้ขายให้ถูกต้องก่อน แล้วกด Mapping อีกครั้ง'});
+        return;
+      }
+      const r = matchMaterial(vCode, ln.extCode, ln.desc, MD.vendorMaterials, 'vendorCode');
+      if(r.code) m.lines.push(R('ok', r.code, matDesc(r.code), r.method));
+      else{
+        m.lines.push(R('fail','','','', r.cands));
+        m.errors.push({field:'Material บรรทัดที่ '+(i+1), msg:'ไม่พบสินค้า <code>'+esc(ln.extCode||'-')+'</code> / &quot;'+esc(ln.desc||'-')+'&quot; ในรายการสินค้าของผู้ขาย', fix:'เพิ่มที่ Master Mapping &rarr; สินค้าฝั่งผู้ขาย'});
+      }
+    });
+
+    /* ตรวจภาษี */
+    const calcVat = Math.round(num(h.subTotal)*num(h.vatRate)/100*100)/100;
+    if(Math.abs(calcVat-num(h.vatAmount))>1)
+      m.warns.push('VAT ที่อ่านได้ '+fmt(h.vatAmount)+' ไม่ตรงกับที่คำนวณ '+fmt(calcVat)+' (ฐาน '+fmt(h.subTotal)+' × '+num(h.vatRate)+'%)');
+  }
+
+  /* ตรวจจำนวน/ราคา และยอดรวม */
+  d.lines.forEach((ln,i)=>{
+    if(num(ln.qty)<=0) m.errors.push({field:'จำนวน บรรทัดที่ '+(i+1), msg:'จำนวนต้องมากกว่า 0', fix:'แก้ไขค่าในตาราง Detail'});
+    if(num(ln.price)<=0) m.warns.push('บรรทัดที่ '+(i+1)+' ราคาต่อหน่วยเป็น 0');
+  });
+  const sum = d.lines.reduce((a,l)=>a+num(l.amount),0);
+  const base = S.module==='AP' ? num(d.header.subTotal) : num(d.header.totalAmount);
+  if(Math.abs(sum-base)>1) m.warns.push('ผลรวมรายการ '+fmt(sum)+' ไม่ตรงกับยอดในหัวเอกสาร '+fmt(base));
+
+  m.pass = m.errors.length===0;
+  S.map = m;
+  return m;
+}
+function matDesc(code){ const m=MD.materials.find(x=>x.code===code); return m?m.desc:code; }
+
+/* =======================================================================
+   6) SAP PAYLOAD
+   ======================================================================= */
+function buildPayload(){
+  const h=S.doc.header, m=S.map;
+  if(S.module==='SO'){
+    const cust = MD.customers.find(c=>c.code===m.header.customer.code)||{};
+    return {
+      _target:'API_SALES_ORDER_SRV / A_SalesOrder (POST)',
+      SalesOrderType:'OR', SalesOrganization:cust.salesOrg||'1000',
+      DistributionChannel:cust.distChannel||'10', OrganizationDivision:cust.division||'00',
+      SoldToParty:m.header.customer.code, PurchaseOrderByCustomer:h.poNo,
+      CustomerPurchaseOrderDate:h.poDate, RequestedDeliveryDate:h.deliveryDate,
+      TransactionCurrency:h.currency||'THB', CustomerPaymentTerms:cust.paymentTerms||'',
+      IncotermsClassification:h.incoterms||'',
+      to_Partner:[{PartnerFunction:'SH', Customer:m.header.shipTo.code}],
+      to_Item:S.doc.lines.map((l,i)=>({
+        SalesOrderItem:String((i+1)*10), Material:m.lines[i].code,
+        RequestedQuantity:num(l.qty).toFixed(3), RequestedQuantityUnit:l.uom,
+        NetAmount:num(l.amount).toFixed(2),
+        MaterialByCustomer:l.extCode
+      })),
+      _ocr:{sourceFile:S.file, confidence:S.doc.confidence, scannedBy:'it-digital@megachem.co.th'}
+    };
+  }
+  const v = MD.vendors.find(x=>x.code===m.header.vendor.code)||{};
+  return {
+    _target:'API_SUPPLIERINVOICE_PROCESS_SRV / A_SupplierInvoice (POST)',
+    CompanyCode:'1000', DocumentDate:h.invoiceDate, PostingDate:h.postingDate,
+    InvoicingParty:m.header.vendor.code, SupplierInvoiceIDByInvcgParty:h.invoiceNo,
+    DocumentCurrency:h.currency||'THB', InvoiceGrossAmount:num(h.totalAmount).toFixed(2),
+    PaymentTerms:v.paymentTerms||'', TaxIsCalculatedAutomatically:false,
+    to_SuplrInvcItemPurOrdRef:S.doc.lines.map((l,i)=>({
+      SupplierInvoiceItem:String(i+1), PurchaseOrder:h.poRef||'', PurchaseOrderItem:h.poRef?String((i+1)*10):'',
+      Material:m.lines[i].code, Plant:'1000',
+      QuantityInPurchaseOrderUnit:num(l.qty).toFixed(3), PurchaseOrderQuantityUnit:l.uom,
+      SupplierInvoiceItemAmount:num(l.amount).toFixed(2), TaxCode:'V7'
+    })),
+    to_SuplrInvcTax:[{TaxCode:'V7', TaxBaseAmount:num(h.subTotal).toFixed(2), TaxAmount:num(h.vatAmount).toFixed(2)}],
+    _wht:num(h.whtAmount)>0?{WithholdingTaxType:v.wht||'53', WithholdingTaxAmount:num(h.whtAmount).toFixed(2)}:null,
+    _ocr:{sourceFile:S.file, confidence:S.doc.confidence, scannedBy:'it-digital@megachem.co.th'}
+  };
+}
+
+/* =======================================================================
+   7) ROUTER / RENDER
+   ======================================================================= */
+document.querySelectorAll('#nav a').forEach(a=>{
+  a.onclick = e=>{ e.preventDefault(); go(a.dataset.page); };
+});
+function go(p){
+  if(p==='work' && !S.module){ toast('กรุณาเลือกโมดูลก่อน (AP หรือ Sales Order)'); p='home'; }
+  S.page=p;
+  document.querySelectorAll('#nav a').forEach(a=>a.classList.toggle('active', a.dataset.page===p));
+  $('#pageTitle').textContent = {home:'เลือกโมดูล', work:'นำเข้าเอกสาร / OCR', master:'Master Mapping', log:'ประวัติส่ง SAP'}[p];
+  render();
+}
+function render(){
+  const t = $('#modTag');
+  if(S.module){ t.style.display='inline-flex'; t.innerHTML = (S.module==='AP'?'&#9632; Module: AP — ตั้งหนี้เจ้าหนี้':'&#9632; Module: SO — Sales Order'); }
+  else t.style.display='none';
+  ({home:renderHome, work:renderWork, master:renderMaster, log:renderLog})[S.page]();
+}
+
+/* ---------- Steps ---------- */
+function stepsHtml(cur){
+  const st=[['1','เลือกโมดูล','AP หรือ Sales Order'],['2','นำเข้า &amp; อ่านเอกสาร','OCR → Header / Detail'],
+            ['3','Mapping ข้อมูล','ตรวจกับ Master Data'],['4','ส่งเข้า SAP','สร้างเอกสารใน S/4HANA']];
+  return '<div class="steps">'+st.map((s,i)=>{
+    const n=i+1, cls = n<cur?'done':(n===cur?'on':'');
+    return '<div class="step '+cls+'"><div class="n">'+(n<cur?'&#10003;':n)+'</div><div class="t"><b>'+s[1]+'</b><span class="muted">'+s[2]+'</span></div></div>';
+  }).join('')+'</div>';
+}
+
+/* ---------- PAGE: HOME ---------- */
+function renderHome(){
+  $('#content').innerHTML = stepsHtml(1)+`
+  <div class="card"><div class="card-h"><h2>ขั้นตอนที่ 1 — เลือกโมดูลที่ต้องการทำรายการ</h2></div>
+  <div class="card-b">
+    <div class="modules">
+      <div class="mod ${S.module==='AP'?'sel':''}" onclick="pick('AP')">
+        <div class="ic">&#128179;</div><h3>1. ตั้งหนี้ AP</h3>
+        <p>อ่านใบแจ้งหนี้ / ใบกำกับภาษีจากผู้ขาย แล้วสร้าง Supplier Invoice ใน SAP</p>
+        <ul><li>Mapping: Vendor จากเลขทะเบียนนิติบุคคล</li><li>Mapping: Material จากรหัส/ชื่อสินค้าของผู้ขาย</li><li>ตรวจ VAT / WHT / อ้างอิง PO</li></ul>
+      </div>
+      <div class="mod ${S.module==='SO'?'sel':''}" onclick="pick('SO')">
+        <div class="ic">&#128230;</div><h3>2. Sales Order</h3>
+        <p>อ่านใบสั่งซื้อจากลูกค้า แล้วสร้าง Sales Order ใน SAP</p>
+        <ul><li>Mapping: Customer จากเลขทะเบียนนิติบุคคล หรือชื่อ</li><li>Mapping: Ship-to จากชื่อ/ที่อยู่จัดส่ง</li><li>Mapping: Material จากรหัส/ชื่อสินค้าของลูกค้า</li></ul>
+      </div>
+      <div class="mod" onclick="go('master')">
+        <div class="ic">&#9881;</div><h3>3. Master Mapping</h3>
+        <p>จัดการข้อมูลหลักที่ใช้เทียบของแต่ละ Process</p>
+        <ul><li>ลูกค้า / Ship-to / สินค้าฝั่งลูกค้า</li><li>ผู้ขาย / สินค้าฝั่งผู้ขาย</li><li>Material master (SAP)</li></ul>
+      </div>
+    </div>
+    <div class="row" style="margin-top:18px">
+      <button class="btn primary" onclick="go('work')" ${S.module?'':'disabled'}>ถัดไป — นำเข้าเอกสาร &rarr;</button>
+      <span class="hint">${S.module?'เลือกแล้ว: '+(S.module==='AP'?'ตั้งหนี้ AP':'Sales Order'):'กรุณาเลือกโมดูล'}</span>
+    </div>
+  </div></div>`;
+}
+function pick(m){ if(S.module!==m){ S.module=m; S.doc=null; S.map=null; S.file=null; S.posted=false; } render(); }
+
+/* ---------- PAGE: WORK ---------- */
+function renderWork(){
+  const step = S.posted?4:(S.map?3:(S.doc?3:2));
+  let h = stepsHtml(S.posted?4:(S.doc?3:2));
+  h += S.doc ? docHtml() : uploadHtml();
+  $('#content').innerHTML = h;
+  if(!S.doc) bindDrop();
+}
+
+function uploadHtml(){
+  const list = SAMPLES[S.module].map((s,i)=>
+    `<tr><td><b>${esc(s.name)}</b></td><td>${esc(s.label)}</td><td>${Math.round(s.confidence*100)}%</td>
+     <td style="text-align:right"><button class="btn sm primary" onclick="runOCR(${i})">อ่านเอกสาร</button></td></tr>`).join('');
+  return `
+  <div class="card"><div class="card-h"><h2>ขั้นตอนที่ 2 — นำเข้าเอกสาร</h2><div class="sp"></div>
+    <span class="hint">รองรับ PDF / JPG / PNG / TIFF (สูงสุด 20 MB)</span></div>
+  <div class="card-b">
+    <div class="drop" id="drop">
+      <div class="big">&#128228;</div>
+      <div style="margin:10px 0 4px;font-weight:600">ลากไฟล์มาวางที่นี่ หรือ</div>
+      <input type="file" id="fileIn" accept=".pdf,.jpg,.jpeg,.png,.tif,.tiff" hidden>
+      <button class="btn primary" onclick="document.getElementById('fileIn').click()">เลือกไฟล์เอกสาร</button>
+      <div class="hint" style="margin-top:10px">โมดูลปัจจุบัน: <b>${S.module==='AP'?'ตั้งหนี้ AP (ใบแจ้งหนี้ผู้ขาย)':'Sales Order (ใบสั่งซื้อลูกค้า)'}</b></div>
+      <div id="prog" style="display:none;max-width:420px;margin:16px auto 0">
+        <div id="progText" class="hint"></div><div class="bar"><i id="progBar"></i></div>
+      </div>
+    </div>
+    <p class="hint" style="margin:16px 0 8px">หรือเลือกเอกสารตัวอย่างเพื่อทดสอบ (ชุดข้อมูลจำลองผลลัพธ์ OCR):</p>
+    <div class="tw"><table style="min-width:600px">
+      <thead><tr><th>ไฟล์</th><th>ลักษณะเอกสาร</th><th>ความมั่นใจ OCR</th><th></th></tr></thead>
+      <tbody>${list}</tbody></table></div>
+  </div></div>`;
+}
+
+function bindDrop(){
+  const d=$('#drop'), f=$('#fileIn');
+  if(!d) return;
+  ['dragenter','dragover'].forEach(e=>d.addEventListener(e,ev=>{ev.preventDefault();d.classList.add('over')}));
+  ['dragleave','drop'].forEach(e=>d.addEventListener(e,ev=>{ev.preventDefault();d.classList.remove('over')}));
+  d.addEventListener('drop',ev=>{ const file=ev.dataTransfer.files[0]; if(file) runOCR(null,file.name); });
+  f.addEventListener('change',()=>{ if(f.files[0]) runOCR(null,f.files[0].name); });
+}
+
+/* ---- จุดต่อ OCR จริง: แทน setTimeout ด้วย fetch('/api/ocr') แล้ว map ผลลัพธ์เป็น {header, lines} ---- */
+function runOCR(idx, fileName){
+  const pool = SAMPLES[S.module];
+  const s = pool[idx!=null?idx:Math.floor(Math.random()*pool.length)];
+  const p=$('#prog'), b=$('#progBar'), t=$('#progText');
+  const stages=['กำลังอัปโหลดไฟล์…','ปรับภาพ / ตัดขอบ / แก้ความเอียง…','กำลังอ่านตัวอักษร (OCR Engine)…','แยกโครงสร้าง Header / Detail…','เสร็จสิ้น'];
+  if(p){ p.style.display='block'; }
+  let i=0;
+  const tick=()=>{
+    if(t) t.textContent=stages[i];
+    if(b) b.style.width=((i+1)/stages.length*100)+'%';
+    if(++i<stages.length) setTimeout(tick, 320);
+    else setTimeout(()=>{
+      S.file = fileName || s.name;
+      S.doc = JSON.parse(JSON.stringify({header:s.header, lines:s.lines, confidence:s.confidence}));
+      S.map=null; S.posted=false;
+      render();
+      toast('อ่านเอกสารสำเร็จ — ความมั่นใจ '+Math.round(s.confidence*100)+'% | พบ '+s.lines.length+' รายการ');
+    }, 300);
+  };
+  tick();
+}
+
+/* ---------- Document view ---------- */
+const SO_H = [
+  ['docType','ประเภทเอกสาร',1],['poNo','เลขที่ใบสั่งซื้อลูกค้า'],['poDate','วันที่เอกสาร','date'],
+  ['customerName','ชื่อลูกค้า'],['customerTaxId','เลขทะเบียนนิติบุคคล'],
+  ['shipToName','สถานที่ส่งของ'],['shipToAddress','ที่อยู่จัดส่ง'],
+  ['deliveryDate','วันที่ต้องการรับสินค้า','date'],['currency','สกุลเงิน'],['paymentTerms','เงื่อนไขชำระเงิน'],
+  ['incoterms','Incoterms'],['totalAmount','ยอดรวมทั้งสิ้น'],['remark','หมายเหตุ']
+];
+const AP_H = [
+  ['docType','ประเภทเอกสาร'],['invoiceNo','เลขที่ใบแจ้งหนี้'],['invoiceDate','วันที่ใบแจ้งหนี้','date'],
+  ['postingDate','วันที่ผ่านรายการ','date'],['vendorName','ชื่อผู้ขาย'],['vendorTaxId','เลขทะเบียนนิติบุคคล'],
+  ['branch','สาขา'],['poRef','อ้างอิง PO'],['currency','สกุลเงิน'],['paymentTerms','เงื่อนไขชำระเงิน'],
+  ['subTotal','มูลค่าก่อนภาษี'],['vatRate','อัตราภาษี (%)'],['vatAmount','ภาษีมูลค่าเพิ่ม'],
+  ['whtAmount','ภาษีหัก ณ ที่จ่าย'],['totalAmount','ยอดรวมสุทธิ']
+];
+
+function docHtml(){
+  const h=S.doc.header, mp=S.map;
+  const def = S.module==='SO'?SO_H:AP_H;
+  const fields = def.map(f=>{
+    const v = h[f[0]]==null?'':h[f[0]];
+    return `<div class="f"><label>${f[1]}</label>
+      <input type="text" value="${esc(v)}" oninput="S.doc.header['${f[0]}']=this.value;S.map=null;renderWork()"></div>`;
+  }).join('');
+
+  /* --- mapping panel ของ header --- */
+  let mapHead='';
+  if(mp){
+    const items = S.module==='SO'
+      ? [['customer','ลูกค้า (Sold-to)','customers'],['shipTo','สถานที่ส่งของ (Ship-to)','shipTos']]
+      : [['vendor','ผู้ขาย (Vendor)','vendors']];
+    mapHead = '<div class="grid" style="margin-top:4px">'+items.map(it=>{
+      const r = mp.header[it[0]]; if(!r) return '';
+      const opts = optionsFor(it[2]);
+      const cls = r.status==='fail'?'err':'ok';
+      const badge = r.status==='fail'
+        ? '<span class="badge b-fail">&#10007; ไม่พบข้อมูล</span>'
+        : (r.status==='manual'?'<span class="badge b-warn">&#9998; เลือกเอง</span>':'<span class="badge b-ok">&#10003; Mapping สำเร็จ</span>');
+      return `<div class="f ${cls}"><label>${it[1]} &rarr; SAP</label>
+        <select onchange="setManualHeader('${it[0]}',this.value)">
+          <option value="">-- ไม่พบ / กรุณาเลือก --</option>${opts.map(o=>`<option value="${esc(o.v)}" ${o.v===r.code?'selected':''}>${esc(o.t)}</option>`).join('')}
+        </select>
+        <div class="sub">${badge}<span class="muted">${esc(r.method||'')}</span></div></div>`;
+    }).join('')+'</div>';
+  }
+
+  /* --- Detail table --- */
+  const rows = S.doc.lines.map((l,i)=>{
+    const r = mp?mp.lines[i]:null;
+    const cell = !mp ? '<span class="badge b-idle">รอ Mapping</span>' :
+      `<select onchange="setManualLine(${i},this.value)">
+         <option value="">-- ไม่พบ / กรุณาเลือก --</option>
+         ${MD.materials.map(m=>`<option value="${esc(m.code)}" ${r.code===m.code?'selected':''}>${esc(m.code)} — ${esc(m.desc)}</option>`).join('')}
+       </select>`;
+    const st = !mp?'' : (r.status==='fail'
+      ? '<span class="badge b-fail">&#10007; ไม่พบ</span>'
+      : (r.status==='manual'?'<span class="badge b-warn">&#9998; เลือกเอง</span>':'<span class="badge b-ok">&#10003; '+esc(r.method)+'</span>'));
+    return `<tr>
+      <td style="text-align:center">${(i+1)*10}</td>
+      <td><input value="${esc(l.extCode)}" oninput="editLine(${i},'extCode',this.value)"></td>
+      <td><input value="${esc(l.desc)}" oninput="editLine(${i},'desc',this.value)"></td>
+      <td class="num"><input value="${esc(l.qty)}" oninput="editLine(${i},'qty',this.value)"></td>
+      <td><input value="${esc(l.uom)}" oninput="editLine(${i},'uom',this.value)" style="width:60px"></td>
+      <td class="num"><input value="${esc(l.price)}" oninput="editLine(${i},'price',this.value)"></td>
+      <td class="num"><input value="${esc(l.amount)}" oninput="editLine(${i},'amount',this.value)"></td>
+      <td class="${mp&&mp.lines[i].status==='fail'?'cell-fail':''}" style="min-width:260px">${cell}</td>
+      <td style="white-space:nowrap">${st}
+        ${mp&&mp.lines[i].status==='manual'&&mp.lines[i].code?`<button class="btn sm" style="margin-left:4px" onclick="learn(${i})" title="บันทึกลง Master Mapping">&#43; Master</button>`:''}
+      </td>
+      <td><button class="btn sm ghost" onclick="delLine(${i})" title="ลบบรรทัด">&#10005;</button></td></tr>`;
+  }).join('');
+  const sum = S.doc.lines.reduce((a,l)=>a+num(l.amount),0);
+
+  /* --- ผลการ mapping --- */
+  let panel='';
+  if(mp){
+    if(mp.pass){
+      panel = `<div class="result ok"><h3><span class="badge b-ok">&#10003; ผ่าน</span> Mapping ข้อมูลครบถ้วน — พร้อมส่งเข้า SAP</h3>
+        <div class="hint">ตรวจสอบครบ ${1+(S.module==='SO'?1:0)+S.doc.lines.length} จุด: ${S.module==='SO'?'Customer, Ship-to':'Vendor'} และ Material ${S.doc.lines.length} รายการ</div>
+        ${mp.warns.length?'<ul>'+mp.warns.map(w=>'<li>&#9888; '+w+'</li>').join('')+'</ul>':''}</div>`;
+    }else{
+      panel = `<div class="result bad"><h3><span class="badge b-fail">&#10007; ไม่ผ่าน</span> ไม่พบข้อมูล ${mp.errors.length} จุด</h3>
+        <ul>${mp.errors.map(e=>`<li><b>${esc(e.field)}:</b> ${e.msg}<br><span class="hint">&#8627; วิธีแก้: ${e.fix}</span></li>`).join('')}</ul>
+        ${mp.warns.length?'<div style="margin-top:10px"><b>คำเตือน</b><ul>'+mp.warns.map(w=>'<li>&#9888; '+w+'</li>').join('')+'</ul></div>':''}
+        <div class="row" style="margin-top:12px"><button class="btn" onclick="go('master')">&#9881; ไปหน้า Master Mapping</button>
+        <span class="hint">หรือเลือกค่าที่ถูกต้องจาก dropdown ด้านล่าง แล้วกด Mapping อีกครั้ง</span></div></div>`;
+    }
+  }
+
+  let posted='';
+  if(S.posted){
+    posted = `<div class="result ok"><h3>&#10003; ส่งเข้า SAP S/4HANA สำเร็จ</h3>
+      <div>เอกสาร SAP: <code>${esc(S.postedDoc)}</code> &nbsp;|&nbsp; ${S.module==='SO'?'Sales Order':'Supplier Invoice'} &nbsp;|&nbsp; ${esc(S.postedAt)}</div></div>`;
+  }
+
+  return `
+  ${panel}${posted}
+  <div class="card">
+    <div class="card-h"><h2>เอกสารที่อ่านได้</h2>
+      <span class="badge ${S.doc.confidence>=.9?'b-ok':'b-warn'}">OCR ${Math.round(S.doc.confidence*100)}%</span>
+      <span class="filechip">&#128196; ${esc(S.file)}</span>
+      <div class="sp"></div>
+      <button class="btn sm" onclick="S.doc=null;S.map=null;S.posted=false;renderWork()">เปลี่ยนเอกสาร</button>
+    </div>
+    <div class="card-b">
+      <p class="sec-title">HEADER — ข้อมูลส่วนหัว</p>
+      <div class="grid">${fields}</div>
+      ${mp?'<p class="sec-title" style="margin-top:20px">HEADER MAPPING &rarr; SAP</p>'+mapHead:''}
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-h"><h2>DETAIL — รายการสินค้า (${S.doc.lines.length} บรรทัด)</h2><div class="sp"></div>
+      <button class="btn sm" onclick="addLine()">&#43; เพิ่มบรรทัด</button></div>
+    <div class="card-b">
+      <div class="tw"><table>
+        <thead><tr><th style="width:50px">Item</th><th style="width:150px">รหัสสินค้า (คู่ค้า)</th><th>ชื่อสินค้าตามเอกสาร</th>
+          <th style="width:90px">จำนวน</th><th style="width:70px">หน่วย</th><th style="width:100px">ราคา/หน่วย</th><th style="width:110px">จำนวนเงิน</th>
+          <th>Material (SAP)</th><th>สถานะ</th><th style="width:40px"></th></tr></thead>
+        <tbody>${rows||'<tr><td colspan="10" class="empty">ไม่มีรายการ</td></tr>'}</tbody>
+        <tfoot><tr class="totrow"><td colspan="6" style="text-align:right">รวม</td><td style="text-align:right">${fmt(sum)}</td><td colspan="3"></td></tr></tfoot>
+      </table></div>
+    </div>
+  </div>
+
+  <div class="card"><div class="card-b row">
+    <button class="btn primary" onclick="doMapping()">&#128269; ขั้นตอนที่ 3 — Mapping ข้อมูล</button>
+    <button class="btn success" onclick="postSAP()" ${(mp&&mp.pass&&!S.posted)?'':'disabled'}>&#9099; ขั้นตอนที่ 4 — ส่งเข้า SAP S/4HANA</button>
+    <button class="btn" onclick="showPayload()" ${mp&&mp.pass?'':'disabled'}>&#123;&#125; ดู Payload ที่จะส่ง</button>
+    <div class="sp" style="flex:1"></div>
+    <span class="hint">${S.posted?'เอกสารนี้ส่งเข้า SAP แล้ว':(mp?(mp.pass?'พร้อมส่งเข้า SAP':'แก้ไขข้อมูลที่ไม่ผ่านก่อนส่ง'):'กด Mapping เพื่อตรวจสอบกับ Master Data')}</span>
+  </div></div>`;
+}
+
+function optionsFor(kind){
+  if(kind==='customers') return MD.customers.map(c=>({v:c.code,t:c.code+' — '+c.name}));
+  if(kind==='vendors')   return MD.vendors.map(c=>({v:c.code,t:c.code+' — '+c.name}));
+  if(kind==='shipTos'){
+    const cc = S.map && S.map.header.customer ? S.map.header.customer.code : '';
+    return MD.shipTos.filter(s=>!cc||s.customerCode===cc).map(s=>({v:s.code,t:s.code+' — '+s.name}));
+  }
+  return [];
+}
+function editLine(i,k,v){ S.doc.lines[i][k]=v; if(k==='qty'||k==='price') S.doc.lines[i].amount=(num(S.doc.lines[i].qty)*num(S.doc.lines[i].price)).toFixed(2); S.map=null; renderWork(); }
+function addLine(){ S.doc.lines.push({extCode:'',desc:'',qty:'0',uom:'EA',price:'0',amount:'0.00'}); S.map=null; renderWork(); }
+function delLine(i){ S.doc.lines.splice(i,1); S.map=null; renderWork(); }
+
+function doMapping(){
+  if(!S.doc) return;
+  const m = runMapping();
+  renderWork();
+  toast(m.pass ? '&#10003; Mapping ผ่าน — ข้อมูลครบถ้วน พร้อมส่งเข้า SAP'
+               : '&#10007; Mapping ไม่ผ่าน — ไม่พบข้อมูล '+m.errors.length+' จุด');
+  window.scrollTo({top:0,behavior:'smooth'});
+}
+function setManualHeader(k,v){
+  if(!S.map) return;
+  S.map.manual.header[k]=v;
+  if(k==='customer') S.map.manual.header.shipTo='';
+  runMapping(); renderWork();
+}
+function setManualLine(i,v){ if(!S.map) return; S.map.manual.lines[i]=v; runMapping(); renderWork(); }
+
+function learn(i){
+  const ln=S.doc.lines[i], code=S.map.lines[i].code;
+  if(S.module==='SO'){
+    MD.custMaterials.push({customerCode:S.map.header.customer.code, extCode:ln.extCode, extDesc:ln.desc, materialCode:code});
+  }else{
+    MD.vendorMaterials.push({vendorCode:S.map.header.vendor.code, extCode:ln.extCode, extDesc:ln.desc, materialCode:code});
+  }
+  saveMD(); runMapping(); renderWork();
+  toast('บันทึกลง Master Mapping แล้ว — ครั้งถัดไประบบจะจับคู่อัตโนมัติ');
+}
+
+function showPayload(){
+  const p = buildPayload();
+  openModal(`<div class="card-h"><h2>Payload ที่จะส่งเข้า SAP</h2><div class="sp"></div>
+    <button class="btn sm" onclick="closeModal()">&#10005;</button></div>
+    <div class="card-b"><p class="hint">Endpoint: <code>${esc(p._target)}</code></p>
+    <pre class="json">${esc(JSON.stringify(p,null,2))}</pre></div>`);
+}
+
+function postSAP(){
+  const p = buildPayload();
+  openModal(`<div class="card-h"><h2>ยืนยันการส่งเข้า SAP S/4HANA</h2></div><div class="card-b">
+    <p>ระบบจะสร้างเอกสาร <b>${S.module==='SO'?'Sales Order':'Supplier Invoice (ตั้งหนี้ AP)'}</b> ในระบบ SAP</p>
+    <div class="tw"><table style="min-width:auto"><tbody>
+      ${S.module==='SO'
+        ? `<tr><th>Sold-to</th><td>${esc(S.map.header.customer.code)} — ${esc(S.map.header.customer.text)}</td></tr>
+           <tr><th>Ship-to</th><td>${esc(S.map.header.shipTo.code)} — ${esc(S.map.header.shipTo.text)}</td></tr>
+           <tr><th>PO ลูกค้า</th><td>${esc(S.doc.header.poNo)}</td></tr>`
+        : `<tr><th>Vendor</th><td>${esc(S.map.header.vendor.code)} — ${esc(S.map.header.vendor.text)}</td></tr>
+           <tr><th>เลขที่ใบแจ้งหนี้</th><td>${esc(S.doc.header.invoiceNo)}</td></tr>`}
+      <tr><th>จำนวนรายการ</th><td>${S.doc.lines.length} บรรทัด</td></tr>
+      <tr><th>ยอดรวม</th><td><b>${fmt(S.doc.header.totalAmount)} ${esc(S.doc.header.currency||'THB')}</b></td></tr>
+    </tbody></table></div>
+    <div class="row" style="margin-top:16px"><button class="btn success" onclick="confirmPost()">ยืนยันส่งเข้า SAP</button>
+    <button class="btn" onclick="closeModal()">ยกเลิก</button></div></div>`);
+}
+function confirmPost(){
+  const no = (S.module==='SO'?'00':'51') + String(Math.floor(Math.random()*900000)+100000);
+  S.posted=true; S.postedDoc=no; S.postedAt=new Date().toLocaleString('th-TH');
+  LOG.unshift({at:S.postedAt, module:S.module, sapDoc:no, file:S.file,
+    partner:S.module==='SO'?S.map.header.customer.text:S.map.header.vendor.text,
+    ref:S.module==='SO'?S.doc.header.poNo:S.doc.header.invoiceNo,
+    amount:fmt(S.doc.header.totalAmount), lines:S.doc.lines.length});
+  saveLog(); closeModal(); renderWork();
+  toast('&#10003; สร้างเอกสารใน SAP สำเร็จ — เลขที่ '+no);
+  window.scrollTo({top:0,behavior:'smooth'});
+}
+function resetDoc(){ S.doc=null; S.map=null; S.file=null; S.posted=false; go(S.module?'work':'home'); }
+
+/* ---------- PAGE: MASTER ---------- */
+function renderMaster(){
+  const keys = Object.keys(MASTER_DEF);
+  const tabs = keys.map(k=>{
+    const d=MASTER_DEF[k];
+    const tag = d.mod==='ALL'?'':' <span class="badge b-idle">'+d.mod+'</span>';
+    return `<button class="${S.masterTab===k?'on':''}" onclick="S.masterTab='${k}';renderMaster()">${d.label}${tag} <span class="muted">(${MD[k].length})</span></button>`;
+  }).join('');
+  const def = MASTER_DEF[S.masterTab], rows = MD[S.masterTab];
+  const body = rows.map((r,i)=>'<tr>'+def.cols.map(c=>`<td>${esc(r[c.k])}</td>`).join('')+
+    `<td style="white-space:nowrap"><button class="btn sm" onclick="editRow(${i})">แก้ไข</button>
+     <button class="btn sm ghost" onclick="delRow(${i})">ลบ</button></td></tr>`).join('');
+
+  $('#content').innerHTML = `
+  <div class="card"><div class="card-h"><h2>Master Mapping — ข้อมูลหลักที่ใช้จับคู่แต่ละ Process</h2><div class="sp"></div>
+    <button class="btn sm" onclick="exportMD()">&#8681; Export JSON</button>
+    <button class="btn sm" onclick="importMD()">&#8679; Import JSON</button>
+    <button class="btn sm" onclick="if(confirm('คืนค่าข้อมูลตัวอย่างทั้งหมด?')){MD=JSON.parse(JSON.stringify(SEED));saveMD();renderMaster();}">คืนค่าเริ่มต้น</button></div>
+    <div class="tabs">${tabs}</div>
+    <div class="card-b">
+      <div class="row" style="margin-bottom:12px">
+        <button class="btn primary sm" onclick="editRow(-1)">&#43; เพิ่มข้อมูล</button>
+        <span class="hint">${mapNote(S.masterTab)}</span>
+      </div>
+      <div class="tw"><table>
+        <thead><tr>${def.cols.map(c=>`<th>${esc(c.l)}</th>`).join('')}<th style="width:120px"></th></tr></thead>
+        <tbody>${body||`<tr><td colspan="${def.cols.length+1}" class="empty">ยังไม่มีข้อมูล</td></tr>`}</tbody>
+      </table></div>
+    </div></div>`;
+}
+function mapNote(k){
+  return {
+    customers:'ใช้จับคู่ Sold-to: ตรวจจาก <b>เลขทะเบียนนิติบุคคล</b> ก่อน ถ้าไม่พบจึงเทียบ <b>ชื่อ</b> (ความคล้าย &ge; 82%)',
+    shipTos:'ใช้จับคู่ Ship-to จาก <b>ชื่อสถานที่/ที่อยู่</b> ภายใต้ลูกค้าเดียวกัน',
+    custMaterials:'ใช้แปลง <b>รหัส/ชื่อสินค้าของลูกค้า</b> เป็น Material ของ SAP',
+    vendors:'ใช้จับคู่ Vendor: ตรวจจาก <b>เลขทะเบียนนิติบุคคล</b> ก่อน ถ้าไม่พบจึงเทียบ <b>ชื่อ</b>',
+    vendorMaterials:'ใช้แปลง <b>รหัส/ชื่อสินค้าของผู้ขาย</b> เป็น Material ของ SAP',
+    materials:'ข้อมูล Material ของ SAP (ควร replicate จาก S/4HANA)'
+  }[k]||'';
+}
+function editRow(i){
+  const def=MASTER_DEF[S.masterTab], r = i<0?{}:MD[S.masterTab][i];
+  const fields = def.cols.map(c=>{
+    if(c.k==='materialCode')
+      return `<div class="f"><label>${esc(c.l)}</label><select id="fld_${c.k}">
+        ${MD.materials.map(m=>`<option value="${esc(m.code)}" ${r[c.k]===m.code?'selected':''}>${esc(m.code)} — ${esc(m.desc)}</option>`).join('')}</select></div>`;
+    if(c.k==='customerCode')
+      return `<div class="f"><label>${esc(c.l)}</label><select id="fld_${c.k}">
+        ${MD.customers.map(m=>`<option value="${esc(m.code)}" ${r[c.k]===m.code?'selected':''}>${esc(m.code)} — ${esc(m.name)}</option>`).join('')}</select></div>`;
+    if(c.k==='vendorCode')
+      return `<div class="f"><label>${esc(c.l)}</label><select id="fld_${c.k}">
+        ${MD.vendors.map(m=>`<option value="${esc(m.code)}" ${r[c.k]===m.code?'selected':''}>${esc(m.code)} — ${esc(m.name)}</option>`).join('')}</select></div>`;
+    return `<div class="f"><label>${esc(c.l)}</label><input id="fld_${c.k}" value="${esc(r[c.k]||'')}"></div>`;
+  }).join('');
+  openModal(`<div class="card-h"><h2>${i<0?'เพิ่ม':'แก้ไข'} — ${def.label}</h2><div class="sp"></div>
+    <button class="btn sm" onclick="closeModal()">&#10005;</button></div>
+    <div class="card-b"><div class="grid">${fields}</div>
+    <div class="row" style="margin-top:16px"><button class="btn primary" onclick="saveRow(${i})">บันทึก</button>
+    <button class="btn" onclick="closeModal()">ยกเลิก</button></div></div>`);
+}
+function saveRow(i){
+  const def=MASTER_DEF[S.masterTab], o={};
+  def.cols.forEach(c=>{ o[c.k]=document.getElementById('fld_'+c.k).value.trim(); });
+  if(!o[def.key]){ toast('กรุณากรอก '+def.cols.find(c=>c.k===def.key).l); return; }
+  if(i<0) MD[S.masterTab].push(o); else MD[S.masterTab][i]=o;
+  saveMD(); closeModal(); renderMaster(); toast('บันทึกข้อมูลหลักเรียบร้อย');
+  if(S.map) runMapping();
+}
+function delRow(i){ if(!confirm('ลบข้อมูลนี้?')) return; MD[S.masterTab].splice(i,1); saveMD(); renderMaster(); }
+function exportMD(){
+  const b=new Blob([JSON.stringify(MD,null,2)],{type:'application/json'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(b); a.download='master_mapping.json'; a.click();
+}
+function importMD(){
+  const inp=document.createElement('input'); inp.type='file'; inp.accept='.json';
+  inp.onchange=()=>{ const f=inp.files[0]; if(!f) return; const rd=new FileReader();
+    rd.onload=()=>{ try{ const o=JSON.parse(rd.result); Object.keys(MASTER_DEF).forEach(k=>{ if(Array.isArray(o[k])) MD[k]=o[k]; }); saveMD(); renderMaster(); toast('นำเข้าข้อมูลหลักสำเร็จ'); }catch(e){ toast('ไฟล์ไม่ถูกต้อง'); } };
+    rd.readAsText(f); };
+  inp.click();
+}
+
+/* ---------- PAGE: LOG ---------- */
+function renderLog(){
+  const rows = LOG.map(l=>`<tr><td>${esc(l.at)}</td><td><span class="badge ${l.module==='AP'?'b-warn':'b-ok'}">${esc(l.module)}</span></td>
+    <td><b>${esc(l.sapDoc)}</b></td><td>${esc(l.ref)}</td><td>${esc(l.partner)}</td>
+    <td style="text-align:right">${esc(l.amount)}</td><td style="text-align:center">${l.lines}</td><td>${esc(l.file)}</td></tr>`).join('');
+  $('#content').innerHTML=`<div class="card"><div class="card-h"><h2>ประวัติเอกสารที่ส่งเข้า SAP</h2><div class="sp"></div>
+    <button class="btn sm" onclick="if(confirm('ล้างประวัติทั้งหมด?')){LOG=[];saveLog();renderLog();}">ล้างประวัติ</button></div>
+    <div class="card-b"><div class="tw"><table>
+      <thead><tr><th>เวลา</th><th>Module</th><th>เลขที่เอกสาร SAP</th><th>เอกสารอ้างอิง</th><th>คู่ค้า</th><th style="text-align:right">ยอดรวม</th><th>รายการ</th><th>ไฟล์ต้นทาง</th></tr></thead>
+      <tbody>${rows||'<tr><td colspan="8" class="empty">ยังไม่มีเอกสารที่ส่งเข้า SAP</td></tr>'}</tbody>
+    </table></div></div></div>`;
+}
+
+render();
+</script>
+</body>
+</html>

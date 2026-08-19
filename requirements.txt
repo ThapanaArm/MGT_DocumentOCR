@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+python-multipart
+python-dotenv
+pyodbc
+pdfplumber
+pypdf
+# OCR สำหรับเอกสารสแกน/รูปภาพ (ต้องติดตั้งโปรแกรม Tesseract-OCR ด้วย — ดู README หัวข้อ 4)
+pytesseract
+pillow
+pymupdf

@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MGT Document OCR → SAP S/4HANA</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Anuphan:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css?v=12">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <img src="/assets/logo.png" alt="MGT" class="brand-logo">
+      <b>MGT Document OCR</b>
+      <span>Document Intake → SAP S/4HANA</span>
+    </div>
+    <nav class="nav" id="nav">
+      <a href="#" data-page="home" class="active"><span class="ic">&#9635;</span> ภาพรวม</a>
+      <div class="nav-title">AP INVOICE</div>
+      <a href="#" data-page="work" data-mod="AP"><span class="ic">&#9781;</span> นำเข้าเอกสาร / OCR</a>
+      <a href="#" data-page="inbox" data-mod="AP"><span class="ic">&#9776;</span> ทะเบียนเอกสาร</a>
+      <div class="nav-title">SALES ORDER</div>
+      <a href="#" data-page="work" data-mod="SO"><span class="ic">&#9781;</span> นำเข้าเอกสาร / OCR</a>
+      <a href="#" data-page="inbox" data-mod="SO"><span class="ic">&#9776;</span> ทะเบียนเอกสาร</a>
+      <div class="nav-title">MASTER DATA</div>
+      <a href="#" data-page="master"><span class="ic">&#9873;</span> Master Mapping</a>
+      <div class="nav-title">LOG</div>
+      <a href="#" data-page="log"><span class="ic">&#9783;</span> ประวัติส่ง SAP</a>
+    </nav>
+    <div class="sidebar-foot" id="foot">กำลังเชื่อมต่อฐานข้อมูล…</div>
+  </aside>
+
+  <div class="main">
+    <div class="topbar">
+      <h1 id="pageTitle">เลือกโมดูล</h1>
+      <span class="modtag" id="modTag" style="display:none"></span>
+      <div class="sp"></div>
+      <button class="btn sm ghost" id="themeBtn" onclick="toggleTheme()" title="สลับโหมดสว่าง/มืด">&#9789;</button>
+      <button class="btn sm" onclick="resetDoc()">&#8635; เริ่มเอกสารใหม่</button>
+    </div>
+    <div class="content" id="content"><div class="empty">กำลังโหลด…</div></div>
+  </div>
+</div>
+
+<div class="ov" id="ov"><div class="modal" id="modal"></div></div>
+<div class="toast" id="toast"></div>
+<script src="/app.js?v=12"></script>
+</body>
+</html>
