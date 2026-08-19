@@ -1,4 +1,5 @@
 using DotNetEnv;
+using MgtOcr.Api.Json;
 using MgtOcr.Core.Config;
 using MgtOcr.Data;
 
@@ -58,6 +59,7 @@ Directory.CreateDirectory(appConfig.UploadDir);
 builder.Services.AddSingleton(appConfig);
 builder.Services.AddSingleton<DbConnectionFactory>();
 builder.Services.AddSingleton<Db>();
+builder.Services.AddSingleton<MasterRepository>();
 
 builder.Services.AddControllers().AddJsonOptions(o =>
 {
@@ -65,6 +67,8 @@ builder.Services.AddControllers().AddJsonOptions(o =>
     // PascalCase SQL columns as dynamic objects, which bypass this policy entirely since Dapper's
     // dynamic rows serialize using their original property names regardless of naming policy.
     o.JsonSerializerOptions.PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase;
+    o.JsonSerializerOptions.Converters.Add(new PythonDateTimeConverter());
+    o.JsonSerializerOptions.Converters.Add(new PythonDecimalConverter());
 });
 builder.Services.AddOpenApi();
 
