@@ -8,3 +8,5 @@ obj/
 node_modules/
 dist/
 *.user
+server.log
+server_err.log

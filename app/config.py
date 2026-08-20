@@ -32,6 +32,8 @@ ANTHROPIC_API_KEY = _get("ANTHROPIC_API_KEY")
 ANTHROPIC_MODEL   = _get("ANTHROPIC_MODEL", "claude-sonnet-5")
 TYPHOON_API_KEY   = _get("TYPHOON_API_KEY")
 TYPHOON_MODEL     = _get("TYPHOON_MODEL", "typhoon-ocr")
+GEMINI_API_KEY    = _get("GEMINI_API_KEY")
+GEMINI_MODEL      = _get("GEMINI_MODEL", "gemini-3.6-flash")
 
 SAP_BASE_URL      = _get("SAP_BASE_URL")
 SAP_USER          = _get("SAP_USER")

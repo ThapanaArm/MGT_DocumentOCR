@@ -4,6 +4,7 @@ FastAPI backend + static frontend
 """
 from __future__ import annotations
 
+import base64
 import json
 import re
 import shutil
@@ -21,6 +22,14 @@ from . import config, db, ocr_engine, sap
 from .mapping import num, run_mapping
 
 app = FastAPI(title="MGT Document OCR → SAP S/4HANA", version="1.0.0")
+
+# ประเภทเอกสาร AP Invoice — ผู้ใช้เลือกเองในหน้าเอกสาร ไม่ได้เดาจาก OCR (เก็บไว้แสดง/กรองเท่านั้น ยังไม่ผูกกับ SAP)
+AP_DOC_CATEGORIES = [
+    {"id": "TRADE", "label": "Trade"},
+    {"id": "NONTRADE_PO_SERVICE", "label": "Non-Trade มี PO (Service)"},
+    {"id": "NONTRADE_PO_ITEM", "label": "Non-Trade มี PO (Item)"},
+    {"id": "NONTRADE_NOPO", "label": "Non-Trade ไม่มี PO"},
+]
 
 # ======================================================================
 # helpers
@@ -112,15 +121,18 @@ def denorm(module: str, h: dict) -> dict:
             "WhtAmount": num(h.get("whtAmount")), "TotalAmount": num(h.get("totalAmount"))}
 
 
-def create_document(module: str, ext: dict, file_name: str, stored: str, size: int, user: str) -> int:
+def create_document(module: str, ext: dict, file_name: str, stored: str, size: int, user: str,
+                    ap_doc_category: str = "") -> int:
     h, d = ext["header"], denorm(module, ext["header"])
     doc_id = db.insert_returning_id("""
-        INSERT ocr.Document(Module,FileName,StoredPath,FileSize,OcrProvider,OcrConfidence,Status,
+        INSERT ocr.Document(Module,FileName,StoredPath,FileSize,OcrProvider,OcrConfidence,OcrConfidenceNote,
+              OcrTokensIn,OcrTokensOut,ApDocCategory,Status,
               DocNo,DocDate,PostingDate,PartnerName,PartnerTaxId,Currency,SubTotal,VatRate,VatAmount,
               WhtAmount,TotalAmount,HeaderJson,RawText,CreatedBy)
-        VALUES(?,?,?,?,?,?, 'NEW', ?,?,?,?,?,?,?,?,?,?,?,?,?,?);
+        VALUES(?,?,?,?,?,?,?,?,?,?, 'NEW', ?,?,?,?,?,?,?,?,?,?,?,?,?,?);
         SELECT SCOPE_IDENTITY();""",
-        (module, file_name, stored, size, ext.get("provider"), ext.get("confidence"),
+        (module, file_name, stored, size, ext.get("provider"), ext.get("confidence"), ext.get("confidenceNote"),
+         ext.get("tokensIn"), ext.get("tokensOut"), ap_doc_category or None,
          d["DocNo"], d["DocDate"], d["PostingDate"], d["PartnerName"], d["PartnerTaxId"], d["Currency"],
          d["SubTotal"], d["VatRate"], d["VatAmount"], d["WhtAmount"], d["TotalAmount"],
          json.dumps(h, ensure_ascii=False), (ext.get("rawText") or "")[:20000], user))
@@ -134,12 +146,13 @@ def save_lines(doc_id: int, lines: list[dict]) -> None:
         cur.execute("DELETE FROM ocr.DocumentLine WHERE DocId=?", doc_id)
         for i, l in enumerate(lines):
             cur.execute("""INSERT ocr.DocumentLine(DocId,ItemNo,ExtCode,ExtDesc,Qty,Uom,UnitPrice,Amount,
-                              MaterialCode,MapStatus,MapMethod,SapQty,SapUom,UomFactor)
-                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                              MaterialCode,MapStatus,MapMethod,SapQty,SapUom,UomFactor,ExtraJson)
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                         doc_id, (i + 1) * 10, l.get("extCode"), l.get("desc"), num(l.get("qty")),
                         l.get("uom"), num(l.get("price")), num(l.get("amount")),
                         l.get("materialCode") or None, l.get("mapStatus"), l.get("mapMethod"),
-                        l.get("sapQty"), l.get("sapUom"), l.get("uomFactor"))
+                        l.get("sapQty"), l.get("sapUom"), l.get("uomFactor"),
+                        json.dumps(l.get("extra") or {}, ensure_ascii=False) if l.get("extra") else None)
 
 
 def get_document(doc_id: int) -> dict:
@@ -150,7 +163,10 @@ def get_document(doc_id: int) -> dict:
     lines = rows(db.query("SELECT * FROM ocr.DocumentLine WHERE DocId=? ORDER BY ItemNo", (doc_id,)))
     return {
         "docId": d["DocId"], "module": d["Module"], "fileName": d["FileName"], "status": d["Status"],
-        "provider": d["OcrProvider"], "confidence": d["OcrConfidence"], "createdAt": d["CreatedAt"],
+        "provider": d["OcrProvider"], "confidence": d["OcrConfidence"],
+        "confidenceNote": d.get("OcrConfidenceNote") or "",
+        "tokensIn": d.get("OcrTokensIn"), "tokensOut": d.get("OcrTokensOut"),
+        "apDocCategory": d.get("ApDocCategory") or "", "createdAt": d["CreatedAt"],
         "sapDocNo": d["SapDocNo"], "postedAt": d["PostedAt"], "mapStatus": d["MapStatus"],
         "partnerCode": d["PartnerCode"], "shipToCode": d["ShipToCode"],
         "header": json.loads(d["HeaderJson"] or "{}"),
@@ -158,8 +174,39 @@ def get_document(doc_id: int) -> dict:
                    "qty": l["Qty"], "uom": l["Uom"] or "", "price": l["UnitPrice"], "amount": l["Amount"],
                    "materialCode": l["MaterialCode"] or "", "mapStatus": l["MapStatus"] or "",
                    "mapMethod": l["MapMethod"] or "", "sapQty": l.get("SapQty"),
-                   "sapUom": l.get("SapUom") or "", "uomFactor": l.get("UomFactor")} for l in lines],
+                   "sapUom": l.get("SapUom") or "", "uomFactor": l.get("UomFactor"),
+                   "extra": json.loads(l.get("ExtraJson") or "{}")} for l in lines],
     }
+
+
+# ---------------------------------------------------------------- แชทสั่งแก้ไขข้อมูล (AI)
+CHAT_DIR = config.UPLOAD_DIR / "chat"
+CHAT_DIR.mkdir(exist_ok=True)
+
+
+def save_chat_message(doc_id: int, role: str, text: str, image_bytes: bytes | None,
+                      image_ext: str, user: str) -> int:
+    """บันทึกข้อความแชทถาวรลง DB — ภาพเก็บเป็นไฟล์บนดิสก์ (เหมือนไฟล์เอกสารต้นฉบับ) ไม่เก็บ base64 ใน DB
+    เพื่อไม่ให้ตารางบวมเกินจำเป็น"""
+    image_path = None
+    if image_bytes:
+        d = CHAT_DIR / str(doc_id)
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}{image_ext}"
+        p.write_bytes(image_bytes)
+        image_path = str(p)
+    return db.insert_returning_id(
+        """INSERT ocr.DocumentChat(DocId,Role,MessageText,ImagePath,CreatedBy) VALUES(?,?,?,?,?);
+           SELECT SCOPE_IDENTITY();""",
+        (doc_id, role, text, image_path, user))
+
+
+def get_chat_history(doc_id: int) -> list[dict]:
+    """ประวัติแชทของเอกสารนี้ เรียงเก่า->ใหม่ — ใช้ทั้งแสดงผลหน้าเว็บ และเป็นบริบทส่งให้ Claude ตอบต่อเนื่อง"""
+    r = rows(db.query("SELECT ChatId, Role, MessageText, ImagePath, CreatedAt FROM ocr.DocumentChat "
+                      "WHERE DocId=? ORDER BY ChatId", (doc_id,)))
+    return [{"chatId": x["ChatId"], "role": x["Role"], "text": x["MessageText"] or "",
+            "hasImage": bool(x["ImagePath"]), "createdAt": x["CreatedAt"]} for x in r]
 
 
 def update_header(doc_id: int, module: str, header: dict) -> None:
@@ -260,10 +307,13 @@ def create_from_sample(body: dict = Body(...)):
     module = (body.get("module") or "").upper()
     if module not in ("AP", "SO"):
         raise HTTPException(400, "module ต้องเป็น AP หรือ SO")
+    ap_cat = (body.get("apDocCategory") or "").strip().upper()
+    if ap_cat and ap_cat not in {c["id"] for c in AP_DOC_CATEGORIES}:
+        raise HTTPException(400, "ประเภทเอกสารไม่ถูกต้อง")
     idx = int(body.get("index") or 0)
     ext = ocr_engine.demo_doc(module, idx)
     doc_id = create_document(module, ext, ext.get("sampleName", "sample.pdf"), "", 0,
-                             body.get("user") or "system")
+                             body.get("user") or "system", ap_cat)
     return get_document(doc_id)
 
 
@@ -274,10 +324,13 @@ def ocr_providers():
 
 @app.post("/api/documents/upload")
 def upload(module: str = Form(...), user: str = Form("system"), ocr: str = Form("auto"),
-          file: UploadFile = File(...)):
+          apDocCategory: str = Form(""), file: UploadFile = File(...)):
     module = module.upper()
     if module not in ("AP", "SO"):
         raise HTTPException(400, "module ต้องเป็น AP หรือ SO")
+    ap_cat = (apDocCategory or "").strip().upper()
+    if ap_cat and ap_cat not in {c["id"] for c in AP_DOC_CATEGORIES}:
+        raise HTTPException(400, "ประเภทเอกสารไม่ถูกต้อง")
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     fname = safe_name(file.filename or "document")
     stored = config.UPLOAD_DIR / f"{stamp}_{fname}"
@@ -285,21 +338,29 @@ def upload(module: str = Form(...), user: str = Form("system"), ocr: str = Form(
         shutil.copyfileobj(file.file, f)
     size = stored.stat().st_size
     ext = ocr_engine.extract(stored, module, ocr)
-    doc_id = create_document(module, ext, fname, str(stored), size, user)
+    doc_id = create_document(module, ext, fname, str(stored), size, user, ap_cat)
     out = get_document(doc_id)
     out["ocrNote"] = ext.get("_note") or ""
     return out
 
 
+@app.get("/api/ap-doc-categories")
+def ap_doc_categories():
+    return AP_DOC_CATEGORIES
+
+
 @app.get("/api/documents")
-def list_documents(module: str = "", status: str = "", limit: int = 100):
+def list_documents(module: str = "", status: str = "", apDocCategory: str = "", limit: int = 100):
     w, p = [], []
     if module:
         w.append("Module=?"); p.append(module.upper())
     if status:
         w.append("Status=?"); p.append(status.upper())
+    if apDocCategory:
+        w.append("ApDocCategory=?"); p.append(apDocCategory.upper())
     sql = ("SELECT TOP (?) DocId,Module,FileName,Status,DocNo,DocDate,PartnerName,PartnerCode,"
-           "TotalAmount,Currency,SapDocNo,PostedAt,CreatedAt,OcrProvider,OcrConfidence "
+           "TotalAmount,Currency,SapDocNo,PostedAt,CreatedAt,OcrProvider,OcrConfidence,OcrConfidenceNote,"
+           "OcrTokensIn,OcrTokensOut,ApDocCategory "
            "FROM ocr.Document")
     if w:
         sql += " WHERE " + " AND ".join(w)
@@ -325,6 +386,16 @@ def save_document(doc_id: int, body: dict = Body(...)):
     return get_document(doc_id)
 
 
+@app.post("/api/documents/{doc_id}/category")
+def set_doc_category(doc_id: int, body: dict = Body(...)):
+    """ตั้งค่าประเภทเอกสาร AP Invoice (Trade/Non-Trade) — ผู้ใช้เลือกเอง ไม่เกี่ยวกับ OCR/Mapping"""
+    cat = (body.get("apDocCategory") or "").strip().upper()
+    if cat and cat not in {c["id"] for c in AP_DOC_CATEGORIES}:
+        raise HTTPException(400, "ประเภทเอกสารไม่ถูกต้อง")
+    db.execute("UPDATE ocr.Document SET ApDocCategory=? WHERE DocId=?", (cat or None, doc_id))
+    return get_document(doc_id)
+
+
 @app.delete("/api/documents/{doc_id}")
 def delete_document(doc_id: int):
     db.execute("DELETE FROM ocr.Document WHERE DocId=?", (doc_id,))
@@ -345,13 +416,15 @@ def reocr_document(doc_id: int, body: dict = Body(default={})):
 
     ext = ocr_engine.extract(Path(d["StoredPath"]), d["Module"], body.get("ocr") or "auto")
     dn = denorm(d["Module"], ext["header"])
-    db.execute("""UPDATE ocr.Document SET OcrProvider=?, OcrConfidence=?, HeaderJson=?, RawText=?,
+    db.execute("""UPDATE ocr.Document SET OcrProvider=?, OcrConfidence=?, OcrConfidenceNote=?,
+                    OcrTokensIn=?, OcrTokensOut=?, HeaderJson=?, RawText=?,
                     DocNo=?, DocDate=?, PostingDate=?, PartnerName=?, PartnerTaxId=?, Currency=?,
                     SubTotal=?, VatRate=?, VatAmount=?, WhtAmount=?, TotalAmount=?,
                     Status='NEW', MapStatus=NULL, MapMessage=NULL, PartnerCode=NULL, ShipToCode=NULL,
                     SapPartnerCode=NULL, SapShipToCode=NULL, UpdatedAt=SYSDATETIME()
                   WHERE DocId=?""",
-               (ext.get("provider"), ext.get("confidence"),
+               (ext.get("provider"), ext.get("confidence"), ext.get("confidenceNote"),
+                ext.get("tokensIn"), ext.get("tokensOut"),
                 json.dumps(ext["header"], ensure_ascii=False), (ext.get("rawText") or "")[:20000],
                 dn["DocNo"], dn["DocDate"], dn["PostingDate"], dn["PartnerName"], dn["PartnerTaxId"],
                 dn["Currency"], dn["SubTotal"], dn["VatRate"], dn["VatAmount"], dn["WhtAmount"],
@@ -360,6 +433,65 @@ def reocr_document(doc_id: int, body: dict = Body(default={})):
     out = get_document(doc_id)
     out["ocrNote"] = ext.get("_note") or ("อ่านเอกสารใหม่เรียบร้อย (%s)" % ext.get("provider"))
     return out
+
+
+@app.get("/api/documents/{doc_id}/chat")
+def read_chat_history(doc_id: int):
+    return get_chat_history(doc_id)
+
+
+@app.get("/api/documents/{doc_id}/chat/{chat_id}/image")
+def chat_image(doc_id: int, chat_id: int):
+    r = db.query_one("SELECT ImagePath FROM ocr.DocumentChat WHERE DocId=? AND ChatId=?", (doc_id, chat_id))
+    if not r or not r["ImagePath"] or not Path(r["ImagePath"]).exists():
+        raise HTTPException(404, "ไม่พบภาพ")
+    return FileResponse(r["ImagePath"])
+
+
+@app.post("/api/documents/{doc_id}/chat-fix")
+def chat_fix_document(doc_id: int, body: dict = Body(...)):
+    """เมนู "แชทสั่งแก้" — ผู้ใช้พิมพ์บอกจุดที่ OCR อ่านผิดด้วยภาษาธรรมดา หรือถามคำถามเกี่ยวกับเอกสารก็ได้
+    (แนบภาพประกอบได้ เช่น capture จุดที่ผิดจาก Review Document) ให้ Claude แก้เฉพาะจุดนั้นในเอกสารนี้
+    บันทึกบทสนทนาถาวรลง ocr.DocumentChat เพื่อดูย้อนหลังได้ และส่งกลับไปเป็นบริบทให้ตอบต่อเนื่องได้
+    (ไม่บันทึกลง Master Data ถาวร ต่างจาก /learn — ต้องตั้งค่า ANTHROPIC_API_KEY ใน .env ก่อนใช้งานได้)"""
+    message = (body.get("message") or "").strip()
+    image_data_url = (body.get("image") or "").strip()
+    user = body.get("user") or "system"
+    if not message and not image_data_url:
+        raise HTTPException(400, "กรุณาพิมพ์ข้อความหรือแนบภาพ")
+    doc = get_document(doc_id)
+    if doc["status"] == "POSTED":
+        raise HTTPException(400, "เอกสารถูกส่งเข้า SAP แล้ว แก้ไขไม่ได้")
+
+    image_b64, image_media_type, image_bytes, image_ext = None, "image/png", None, ".png"
+    if image_data_url:
+        m = re.match(r"^data:(image/([a-zA-Z0-9.+-]+));base64,(.+)$", image_data_url, re.S)
+        if not m:
+            raise HTTPException(400, "รูปแบบภาพไม่ถูกต้อง")
+        image_media_type, subtype, image_b64 = m.group(1), m.group(2), m.group(3)
+        image_ext = "." + (subtype if re.fullmatch(r"[a-zA-Z0-9]+", subtype) else "png")
+        try:
+            image_bytes = base64.b64decode(image_b64)
+        except Exception:
+            raise HTTPException(400, "ถอดรหัสภาพไม่สำเร็จ")
+
+    history = get_chat_history(doc_id)                    # ก่อนบันทึกข้อความใหม่ — ใช้เป็นบริบทของเทิร์นนี้
+    save_chat_message(doc_id, "user", message, image_bytes, image_ext, user)
+
+    prompt_message = message or "ดูภาพที่แนบมา แล้วแก้ไขข้อมูลในเอกสารให้ถูกต้องตามสิ่งที่เห็นในภาพ"
+    result = ocr_engine.chat_fix_document(doc["module"], doc["header"], doc["lines"], history, prompt_message,
+                                          image_b64, image_media_type)
+    if not result:
+        raise HTTPException(400, "เชื่อมต่อ Claude ไม่สำเร็จ หรือยังไม่ได้ตั้งค่า ANTHROPIC_API_KEY ใน .env")
+
+    save_chat_message(doc_id, "assistant", result["reply"], None, ".png", "AI")
+
+    update_header(doc_id, doc["module"], result["header"])
+    save_lines(doc_id, result["lines"])
+    db.execute("UPDATE ocr.Document SET Status=CASE WHEN Status='POSTED' THEN Status ELSE 'NEW' END,"
+               " MapStatus=NULL, MapMessage=NULL WHERE DocId=?", (doc_id,))
+    out = get_document(doc_id)
+    return {"reply": result["reply"], "document": out}
 
 
 @app.get("/api/documents/{doc_id}/rawtext")

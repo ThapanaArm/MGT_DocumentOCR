@@ -5,7 +5,8 @@
 const S = {
   page: 'home', module: null, doc: null, map: null, manual: { header: {}, lines: {} },
   masters: null, masterGroup: 'vendor', masterTab: 'vendors', busy: false, inbox: [], logs: [], health: null,
-  user: 'it-digital@megachem.co.th', ocrProviders: null, ocrProvider: 'auto'
+  user: 'it-digital@megachem.co.th', ocrProviders: null, ocrProvider: 'auto', chatHistory: [], chatImage: null,
+  apDocCategories: null, inboxApDocCategory: '', uploadApDocCategory: ''
 };
 
 async function ocrProviders() {
@@ -18,6 +19,19 @@ function ocrProviderSelect(id, selected) {
     ${list.map(p => `<option value="${esc(p.id)}" ${p.id === selected ? 'selected' : ''} ${p.ready ? '' : 'class="hint"'}
         title="${esc(p.desc)}">${esc(p.label)}${p.ready ? '' : ' (ยังไม่ได้ตั้งค่า)'}</option>`).join('')}
   </select>`;
+}
+
+async function apDocCategories() {
+  if (!S.apDocCategories) S.apDocCategories = await API.get('/api/ap-doc-categories');
+  return S.apDocCategories;
+}
+function apDocCategoryLabel(id) {
+  return (S.apDocCategories || []).find(c => c.id === id)?.label || id || '';
+}
+async function setDocCategory(v) {
+  await guard(async () => {
+    S.doc = await API.post(`/api/documents/${S.doc.docId}/category`, { apDocCategory: v });
+  });
 }
 
 /* ---------------------------------------------------------------- utils */
@@ -65,7 +79,7 @@ function toast(msg, ms) {
   const t = $('#toast'); t.innerHTML = msg; t.classList.add('on');
   clearTimeout(t._t); t._t = setTimeout(() => t.classList.remove('on'), ms || 3000);
 }
-function openModal(html) { $('#modal').innerHTML = html; $('#ov').classList.add('on'); }
+function openModal(html, size) { $('#modal').innerHTML = html; $('#modal').className = 'modal' + (size ? ' ' + size : ''); $('#ov').classList.add('on'); }
 function closeModal() { $('#ov').classList.remove('on'); }
 document.getElementById('ov').addEventListener('click', e => { if (e.target.id === 'ov') closeModal(); });
 
@@ -98,9 +112,10 @@ const API = {
   upload: (u, fd) => api('POST', u, fd, true)
 };
 async function guard(fn) {
+  document.body.classList.add('busy');
   try { S.busy = true; return await fn(); }
   catch (e) { toast('&#9888; ' + esc(e.message)); throw e; }
-  finally { S.busy = false; }
+  finally { S.busy = false; document.body.classList.remove('busy'); }
 }
 
 /* ---------------------------------------------------------------- master defs */
@@ -190,13 +205,46 @@ const AP_H = [['docType', 'ประเภทเอกสาร'], ['invoiceNo',
 ['branch', 'สาขา'], ['poRef', 'อ้างอิง PO'], ['currency', 'สกุลเงิน'], ['paymentTerms', 'เงื่อนไขชำระเงิน'],
 ['subTotal', 'มูลค่าก่อนภาษี'], ['vatRate', 'อัตราภาษี (%)'], ['vatAmount', 'ภาษีมูลค่าเพิ่ม'],
 ['whtAmount', 'ภาษีหัก ณ ที่จ่าย'], ['totalAmount', 'ยอดรวมสุทธิ']];
+// ฟิลด์เพิ่มเติมสำหรับเอกสารประเภท Trade (MIRO) เท่านั้น — ผู้ใช้กรอกเอง (ไม่ได้เดาจาก OCR)
+const AP_TRADE_H = [['taxCode', 'Tax Code (รหัสภาษีซื้อ)'], ['calculateTax', 'Calculate Tax'],
+['baselineDate', 'Baseline Date'], ['paymentMethod', 'Payment Method'], ['assignmentText', 'Assignment/Text']];
+// ฟิลด์เพิ่มเติมสำหรับเอกสารประเภท Non-Trade ไม่มี PO เท่านั้น — ผู้ใช้กรอกเอง (ไม่ได้เดาจาก OCR)
+// (Vendor/Invoice Date/Posting Date/Reference/Amount/Currency/Payment Terms/Withholding Tax ใช้ฟิลด์เดิมใน
+// HEADER อยู่แล้ว ไม่ต้องเพิ่มซ้ำ — taxCode/calculateTax/baselineDate/paymentMethod ใช้ key ร่วมกับ Trade)
+const AP_NONTRADE_NOPO_H = [['companyCode', 'Company Code'], ['taxCode', 'Tax Code'],
+['calculateTax', 'Calculate Tax'], ['baselineDate', 'Baseline Date'], ['paymentMethod', 'Payment Method'],
+['assignmentText', 'Assignment'], ['headerText', 'Header Text']];
+// ฟิลด์ระดับรายการสำหรับเอกสารประเภท Non-Trade มี PO (Service/Item) เท่านั้น — แยกกรอกทีละรายการใน DETAIL
+// (Short Text/Material, Quantity, Net Price ใช้ desc/qty/price ที่มีอยู่แล้ว ไม่ต้องเพิ่มซ้ำ)
+const PO_LINE_EXTRA_FIELDS = [
+  ['accountAssignment', 'Account Assignment Category', 'select', [['', '— เลือก —'], ['K', 'K — Cost Center'], ['A', 'A — Asset'], ['P', 'P — Project']]],
+  ['itemCategory', 'Item Category', 'select', [['', '— เลือก —'], ['STANDARD', 'Standard'], ['SERVICE', 'Service']]],
+  ['plant', 'Plant', 'text'],
+  ['glAccount', 'G/L Account', 'text'],
+  ['costCenter', 'Cost Center', 'text'],
+  ['internalOrder', 'Internal Order', 'text'],
+  ['wbsElement', 'WBS Element', 'text'],
+  ['assetNumber', 'Asset Number', 'text'],
+  ['taxCode', 'Tax Code', 'text'],
+  ['deliveryDate', 'Delivery Date', 'text'],
+  ['grIndicator', 'GR Indicator', 'select', [['', '— เลือก —'], ['YES', 'ใช่ — ต้องรับของ/บริการ'], ['NO', 'ไม่ใช่']]],
+  ['irIndicator', 'IR Indicator', 'select', [['', '— เลือก —'], ['YES', 'ใช่ — รับ Invoice ได้'], ['NO', 'ไม่ใช่']]],
+  ['grBasedIv', 'GR-Based IV', 'select', [['', '— เลือก —'], ['YES', 'ใช่ — ต้องอ้างอิงรายการที่รับแล้ว'], ['NO', 'ไม่ใช่']]],
+];
+// เลือก Account Assignment ให้ตรงวัตถุประสงค์ — ใช้ไฮไลต์ฟิลด์ที่ควรกรอกใน showLineExtra() ให้ผู้ใช้ไม่ต้องจำเอง
+const AA_GUIDE = {
+  '': { hint: 'ของเข้า Stock ปกติไม่ใช้ Account Assignment (เว้นว่างไว้ได้ เว้นแต่ Configuration บริษัทกำหนดไว้)', field: '' },
+  K: { hint: 'ค่าใช้จ่ายของแผนก → กรอก Cost Center (หรือ Internal Order เพิ่มถ้าเป็นค่าใช้จ่ายเฉพาะกิจกรรม)', field: 'costCenter' },
+  A: { hint: 'ซื้อทรัพย์สินถาวร → กรอก Asset Number', field: 'assetNumber' },
+  P: { hint: 'ค่าใช้จ่ายโครงการ → กรอก WBS Element', field: 'wbsElement' },
+};
 
 /* ---------------------------------------------------------------- router */
 // เมนูซ้ายแยก Process ของแต่ละโมดูล (AP Invoice / Sales Order) ไว้คนละกลุ่มชัดเจน — ลิงก์แต่ละอันมี
 // data-mod กำกับอยู่แล้วว่าเป็นของโมดูลไหน กดแล้วสลับ S.module ให้อัตโนมัติ ไม่ต้องมีหน้า "เลือกโมดูล" คั่นกลาง
 document.querySelectorAll('#nav a').forEach(a => { a.onclick = e => { e.preventDefault(); go(a.dataset.page, a.dataset.mod); }; });
 function go(p, mod) {
-  if (mod) S.module = mod;
+  if (mod) { S.module = mod; S.uploadApDocCategory = ''; }
   S.page = p;
   document.querySelectorAll('#nav a').forEach(a =>
     a.classList.toggle('active', a.dataset.page === p && (!a.dataset.mod || a.dataset.mod === S.module)));
@@ -262,23 +310,35 @@ async function renderWork() {
 
 async function uploadHtml() {
   let list = '';
+  const needCategory = S.module === 'AP' && !S.uploadApDocCategory;
   try {
     const s = await API.get('/api/samples/' + S.module);
     list = s.map(x => `<tr><td><b>${esc(x.name)}</b></td><td>${esc(x.label)}</td><td>${Math.round(x.confidence * 100)}%</td>
-      <td style="text-align:right"><button class="btn sm primary" onclick="useSample(${x.index})">อ่านเอกสาร</button></td></tr>`).join('');
+      <td style="text-align:right"><button class="btn sm primary" ${needCategory ? 'disabled' : ''} onclick="useSample(${x.index})">อ่านเอกสาร</button></td></tr>`).join('');
   } catch (e) { }
   const providers = await ocrProviders();
   const active = providers.find(p => p.id === S.ocrProvider) || providers[0];
+  if (S.module === 'AP') await apDocCategories();
+  const categoryBlock = S.module === 'AP' ? `
+    <div class="row" style="margin-bottom:16px">
+      <label class="hint" style="font-weight:600">&#128203; ประเภทเอกสาร</label>
+      <select id="uploadApDocCategory" onchange="S.uploadApDocCategory=this.value;renderWork()">
+        <option value="">— เลือกประเภทเอกสาร —</option>
+        ${(S.apDocCategories || []).map(c => `<option value="${esc(c.id)}" ${c.id === S.uploadApDocCategory ? 'selected' : ''}>${esc(c.label)}</option>`).join('')}
+      </select>
+    </div>
+    ${needCategory ? '<p class="hint" style="margin:-8px 0 16px">&#9888; กรุณาเลือกประเภทเอกสารก่อน จึงจะเลือกวิธีอ่านเอกสาร/นำเข้าไฟล์ได้</p>' : ''}` : '';
   return `
   <div class="card"><div class="card-h"><h2>ขั้นตอนที่ 1 — นำเข้าเอกสาร</h2><div class="sp"></div>
     <span class="hint">รองรับ PDF / JPG / PNG / TIFF</span></div>
   <div class="card-b">
-    <div class="row" style="margin-bottom:16px">
+    ${categoryBlock}
+    <div class="row" style="margin-bottom:16px;${needCategory ? 'opacity:.45;pointer-events:none' : ''}">
       <label class="hint" style="font-weight:600">&#129504; วิธีอ่านเอกสาร (OCR Engine)</label>
       ${ocrProviderSelect('ocrEngine', S.ocrProvider)}
     </div>
     <p class="hint" style="margin:-8px 0 16px" id="ocrEngineDesc">${esc(active ? active.desc : '')}</p>
-    <div class="drop" id="drop">
+    <div class="drop" id="drop" style="${needCategory ? 'opacity:.45;pointer-events:none' : ''}">
       <div class="big">&#128228;</div>
       <div style="margin:12px 0 4px;font-weight:600">ลากไฟล์มาวางที่นี่ หรือ</div>
       <input type="file" id="fileIn" accept=".pdf,.jpg,.jpeg,.png,.tif,.tiff" hidden>
@@ -315,14 +375,17 @@ function progress(on, text, pct) {
 }
 
 async function uploadFile(file) {
+  if (S.module === 'AP' && !S.uploadApDocCategory) { toast('&#9888; กรุณาเลือกประเภทเอกสารก่อน'); return; }
   const fd = new FormData();
   fd.append('module', S.module); fd.append('user', S.user); fd.append('ocr', S.ocrProvider); fd.append('file', file);
+  fd.append('apDocCategory', S.uploadApDocCategory || '');
   progress(true, 'กำลังอัปโหลด ' + file.name + ' …', 35);
   await guard(async () => {
     progress(true, 'กำลังอ่านเอกสาร (' + S.ocrProvider + ') …', 70);
     const doc = await API.upload('/api/documents/upload', fd);
     progress(true, 'เสร็จสิ้น', 100);
-    S.doc = doc; S.map = null; S.manual = { header: {}, lines: {} };
+    S.doc = doc; S.map = null; S.manual = { header: {}, lines: {} }; S.chatImage = null;
+    await loadChatHistory(doc.docId);
     render();
     toast(doc.ocrNote ? '&#9888; ' + esc(doc.ocrNote)
       : '&#10003; อ่านเอกสารสำเร็จ (' + doc.provider + ') — พบ ' + doc.lines.length + ' รายการ', 5000);
@@ -330,19 +393,24 @@ async function uploadFile(file) {
 }
 
 async function useSample(i) {
+  if (S.module === 'AP' && !S.uploadApDocCategory) { toast('&#9888; กรุณาเลือกประเภทเอกสารก่อน'); return; }
   await guard(async () => {
-    const doc = await API.post('/api/documents/sample', { module: S.module, index: i, user: S.user });
-    S.doc = doc; S.map = null; S.manual = { header: {}, lines: {} };
+    const doc = await API.post('/api/documents/sample', { module: S.module, index: i, user: S.user, apDocCategory: S.uploadApDocCategory });
+    S.doc = doc; S.map = null; S.manual = { header: {}, lines: {} }; S.chatImage = null;
+    await loadChatHistory(doc.docId);
     render(); toast('&#10003; สร้างเอกสารในระบบแล้ว (DocId ' + doc.docId + ')');
   });
 }
 
-async function reOcr() {
+async function reOcr(btn) {
   const sel = $('#docOcrEngine');
   const engine = sel ? sel.value : 'auto';
+  const label = btn ? btn.innerHTML : '';
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="hg" style="display:inline-block">&#8987;</span> กำลังอ่านเอกสาร…'; }
   await guard(async () => {
     const doc = await API.post('/api/documents/' + S.doc.docId + '/reocr', { ocr: engine });
-    S.doc = doc; S.map = null; S.manual = { header: {}, lines: {} };
+    S.doc = doc; S.map = null; S.manual = { header: {}, lines: {} }; S.chatImage = null;
+    // ไม่ล้างประวัติแชท — อ่านเอกสารใหม่ไม่ได้ลบ doc_id จึงยังอยู่บันทึกไว้ที่ server เหมือนเดิม
     await renderWork();
     const failed = doc.ocrNote && doc.provider === 'demo';
     openModal(`<div class="card-h"><h2>${failed ? '&#9888; อ่านเอกสารไม่สำเร็จ' : '&#10003; อ่านเอกสารใหม่เสร็จแล้ว'}</h2>
@@ -351,12 +419,14 @@ async function reOcr() {
         ${failed
           ? `<p class="hint">${esc(doc.ocrNote)}</p>`
           : `<p>Engine: <b>${esc(doc.provider || '')}</b> &nbsp;·&nbsp; ความมั่นใจ: <b>${Math.round((doc.confidence || 0) * 100)}%</b></p>
-             <p>พบรายการ Item Detail: <b>${doc.lines.length}</b> รายการ</p>`}
+             <p>พบรายการ Item Detail: <b>${doc.lines.length}</b> รายการ</p>
+             ${doc.tokensIn != null ? `<p>Token ที่ใช้: <b>${num(doc.tokensIn).toLocaleString('en-US')}</b> input / <b>${num(doc.tokensOut).toLocaleString('en-US')}</b> output</p>` : ''}
+             ${doc.confidenceNote ? `<p class="hint">&#9888; ${esc(doc.confidenceNote)}</p>` : ''}`}
         <div class="row" style="margin-top:16px;justify-content:flex-end">
           <button class="btn primary" onclick="closeModal()">ตกลง</button>
         </div>
       </div>`);
-  });
+  }).catch(() => { if (btn) { btn.disabled = false; btn.innerHTML = label; } });
 }
 
 async function showRaw() {
@@ -369,10 +439,27 @@ async function showRaw() {
   });
 }
 
+function reviewDocument() {
+  const d = S.doc;
+  const fileUrl = `/api/documents/${d.docId}/file`;
+  const ext = (d.fileName || '').split('.').pop().toLowerCase();
+  const isImg = ['jpg', 'jpeg', 'png', 'tif', 'tiff', 'bmp', 'webp'].includes(ext);
+  const viewer = d.provider === 'demo'
+    ? '<p class="hint">เอกสารนี้สร้างจากชุดตัวอย่าง (demo) ไม่มีไฟล์ต้นฉบับให้เปิดดู</p>'
+    : isImg
+      ? `<img src="${esc(fileUrl)}" style="max-width:100%;border-radius:var(--r3);border:1px solid var(--line)">`
+      : `<iframe src="${esc(fileUrl)}" style="width:100%;height:78vh;border:1px solid var(--line);border-radius:var(--r3)"></iframe>`;
+  openModal(`<div class="card-h"><h2>&#128065; Review Document — ${esc(d.fileName)}</h2><div class="sp"></div>
+      ${d.provider !== 'demo' ? `<a class="btn sm ghost" href="${esc(fileUrl)}" target="_blank" rel="noopener">เปิดแท็บใหม่</a>` : ''}
+      <button class="btn sm" onclick="closeModal()">&#10005;</button></div>
+    <div class="card-b"><p class="hint">เปรียบเทียบไฟล์ต้นฉบับกับข้อมูลที่อ่านได้ในหน้า HEADER/DETAIL</p>${viewer}</div>`, 'wide');
+}
+
 async function openDoc(id) {
   await guard(async () => {
     const doc = await API.get('/api/documents/' + id);
-    S.doc = doc; S.module = doc.module; S.map = null; S.manual = { header: {}, lines: {} };
+    S.doc = doc; S.module = doc.module; S.map = null; S.manual = { header: {}, lines: {} }; S.chatImage = null;
+    await loadChatHistory(doc.docId);
     if (doc.mapStatus) await runMap(true);
     go('work');
   });
@@ -382,16 +469,21 @@ async function openDoc(id) {
 async function docHtml() {
   const d = S.doc, h = d.header, mp = S.map, md = await masters();
   const providers = await ocrProviders();
+  if (d.module === 'AP') await apDocCategories();
   const def = d.module === 'SO' ? SO_H : AP_H;
   const posted = d.status === 'POSTED';
 
-  const fields = def.map(f => `<div class="f"><label>${f[1]}</label>
+  const headerFieldGrid = list => list.map(f => `<div class="f"><label>${f[1]}</label>
       <input type="text" value="${esc(h[f[0]] == null ? '' : h[f[0]])}" ${posted ? 'readonly' : ''}
              oninput="editHeader('${f[0]}',this.value)"></div>`).join('');
+  const fields = headerFieldGrid(def);
+  const tradeFields = (d.module === 'AP' && d.apDocCategory === 'TRADE') ? headerFieldGrid(AP_TRADE_H) : '';
+  const nonTradeNoPoFields = (d.module === 'AP' && d.apDocCategory === 'NONTRADE_NOPO') ? headerFieldGrid(AP_NONTRADE_NOPO_H) : '';
 
   const mapCards = mp ? mappingCards(d, mp, md, posted) : '';
 
   const matOpts = md.materials.map(m => ({ v: m.MaterialCode, t: m.MaterialCode + ' — ' + m.Description }));
+  const showPoExtra = d.module === 'AP' && (d.apDocCategory === 'NONTRADE_PO_SERVICE' || d.apDocCategory === 'NONTRADE_PO_ITEM');
   const rows = d.lines.map((l, i) => {
     const r = mp ? mp.lines[i] : null;
     const cell = !mp ? '<span class="badge b-idle">รอ Mapping</span>'
@@ -415,6 +507,8 @@ async function docHtml() {
       <td style="white-space:nowrap">${st}
         ${mp && mp.lines[i].status === 'manual' && mp.lines[i].code && !posted
         ? `<button class="btn sm" style="margin-left:4px" onclick="learn(${i})">&#43; Master</button>` : ''}</td>
+      ${showPoExtra ? `<td style="white-space:nowrap"><button class="btn sm ${lineExtraCount(l) ? '' : 'ghost'}" onclick="showLineExtra(${i})">
+          &#128203; PO ${lineExtraCount(l) ? `(${lineExtraCount(l)}/${PO_LINE_EXTRA_FIELDS.length})` : ''}</button></td>` : ''}
       <td>${posted ? '' : `<button class="btn sm ghost" onclick="delLine(${i})">&#10005;</button>`}</td></tr>`;
   }).join('');
   const sum = d.lines.reduce((a, l) => a + num(l.amount), 0);
@@ -437,15 +531,25 @@ async function docHtml() {
   return `${panel}${postedBox}
   <div class="card">
     <div class="card-h"><h2>เอกสาร #${d.docId}</h2>
-      <span class="badge ${d.confidence >= 0.9 ? 'b-ok' : 'b-warn'}">OCR ${Math.round((d.confidence || 0) * 100)}% · ${esc(d.provider || '')}</span>
+      <span class="badge ${d.confidence >= 0.9 ? 'b-ok' : 'b-warn'}" ${d.confidenceNote ? `title="${esc(d.confidenceNote)}"` : ''}>OCR ${Math.round((d.confidence || 0) * 100)}% · ${esc(d.provider || '')}</span>
+      ${d.tokensIn != null ? `<span class="badge" title="Token ที่ใช้อ่านเอกสารนี้">&#9889; ${num(d.tokensIn).toLocaleString('en-US')} in / ${num(d.tokensOut).toLocaleString('en-US')} out</span>` : ''}
       <span class="filechip">&#128196; ${esc(d.fileName)}</span>${statusBadge(d.status)}
       <div class="sp"></div>
-      ${!posted ? ocrProviderSelect('docOcrEngine', { ocr: 'tesseract', text: 'text', azure: 'azure', claude: 'claude', claude_text: 'claude_text', typhoon: 'typhoon' }[d.provider] || 'auto') : ''}
-      <button class="btn sm primary" onclick="reOcr()" ${posted ? 'disabled' : ''}
+      ${!posted ? ocrProviderSelect('docOcrEngine', { ocr: 'tesseract', text: 'text', azure: 'azure', claude: 'claude', claude_text: 'claude_text', typhoon: 'typhoon', gemini: 'gemini' }[d.provider] || 'auto') : ''}
+      <button class="btn sm primary" onclick="reOcr(this)" ${posted ? 'disabled' : ''}
         title="อ่านไฟล์ต้นฉบับใหม่ด้วย engine ที่เลือก">&#8635; อ่านเอกสารใหม่</button>
       <button class="btn sm ghost" onclick="showRaw()">&#128196; ข้อความที่อ่านได้</button>
-      <button class="btn sm ghost" onclick="S.doc=null;S.map=null;renderWork()">เปลี่ยนเอกสาร</button></div>
+      <button class="btn sm ghost" onclick="reviewDocument()" title="เปิดดูไฟล์ต้นฉบับ เทียบกับข้อมูลที่อ่านได้">&#128065; Review Document</button>
+      <button class="btn sm ghost" onclick="S.doc=null;S.map=null;S.chatHistory=[];S.chatImage=null;renderWork()">เปลี่ยนเอกสาร</button></div>
     <div class="card-b">
+      ${d.module === 'AP' ? `<div class="f" style="max-width:320px;margin-bottom:14px">
+          <label>ประเภทเอกสาร</label>
+          <select ${posted ? 'disabled' : ''} onchange="setDocCategory(this.value)">
+            <option value="">— เลือกประเภทเอกสาร —</option>
+            ${(S.apDocCategories || []).map(c => `<option value="${esc(c.id)}" ${c.id === d.apDocCategory ? 'selected' : ''}>${esc(c.label)}</option>`).join('')}
+          </select></div>` : ''}
+      ${d.confidenceNote ? `<div class="hint" style="margin:-6px 0 14px;padding:8px 12px;background:var(--line-soft);border-radius:var(--r2)">
+          &#9888; เหตุผลที่ความแม่นยำไม่ถึง 100%: ${esc(d.confidenceNote)}</div>` : ''}
       <p class="sec-title">HEADER — ข้อมูลส่วนหัว</p>
       <div class="grid">${fields}</div>
     </div>
@@ -458,12 +562,25 @@ async function docHtml() {
     <div class="card-b"><div class="tw"><table>
       <thead><tr><th style="width:54px">Item</th><th style="width:150px">รหัสสินค้า (คู่ค้า)</th><th style="min-width:260px">ชื่อสินค้าตามเอกสาร</th>
         <th style="width:92px">จำนวน</th><th style="width:74px">หน่วย</th><th style="width:104px">ราคา/หน่วย</th>
-        <th style="width:116px">จำนวนเงิน</th><th style="min-width:270px">Material (SAP)</th><th style="min-width:170px">หน่วย &rarr; SAP</th><th>สถานะ</th><th style="width:44px"></th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="11" class="empty">ไม่มีรายการ</td></tr>'}</tbody>
+        <th style="width:116px">จำนวนเงิน</th><th style="min-width:270px">Material (SAP)</th><th style="min-width:170px">หน่วย &rarr; SAP</th><th>สถานะ</th>
+        ${showPoExtra ? '<th style="width:120px">PO Detail</th>' : ''}<th style="width:44px"></th></tr></thead>
+      <tbody>${rows || `<tr><td colspan="${showPoExtra ? 12 : 11}" class="empty">ไม่มีรายการ</td></tr>`}</tbody>
       <tfoot><tr class="totrow"><td colspan="6" style="text-align:right">รวม</td>
-        <td style="text-align:right">${fmt(sum)}</td><td colspan="4"></td></tr></tfoot>
+        <td style="text-align:right">${fmt(sum)}</td><td colspan="${showPoExtra ? 5 : 4}"></td></tr></tfoot>
     </table></div></div>
   </div>
+
+  ${tradeFields ? `<div class="card">
+    <div class="card-h"><h2>ข้อมูลสำหรับ Trade (MIRO)</h2></div>
+    <div class="card-b"><div class="grid">${tradeFields}</div></div>
+  </div>` : ''}
+
+  ${nonTradeNoPoFields ? `<div class="card">
+    <div class="card-h"><h2>ข้อมูลสำหรับ Non-Trade ไม่มี PO</h2></div>
+    <div class="card-b"><div class="grid">${nonTradeNoPoFields}</div></div>
+  </div>` : ''}
+
+  ${!posted ? chatFixCard() : ''}
 
   <div class="card"><div class="card-b row">
     <button class="btn primary" onclick="runMap()" ${posted ? 'disabled' : ''}>&#128269; ขั้นตอนที่ 2 — Mapping ข้อมูล</button>
@@ -472,6 +589,96 @@ async function docHtml() {
     <div style="flex:1"></div>
     <span class="hint">${posted ? 'เอกสารนี้ส่งเข้า SAP แล้ว' : (mp ? (mp.pass ? 'พร้อมส่งเข้า SAP' : 'แก้ไขข้อมูลที่ไม่ผ่านก่อนส่ง') : 'กด Mapping เพื่อตรวจสอบกับ Master Data')}</span>
   </div></div>`;
+}
+
+/* ---------- แชทสั่งแก้ไขข้อมูล (AI) — แก้เฉพาะเอกสารนี้ ไม่บันทึกลง Master Data ---------- */
+/* ประวัติเก็บถาวรที่ server (ocr.DocumentChat) — โหลดใหม่ทุกครั้งที่เปิดเอกสาร และหลังส่งข้อความสำเร็จ
+   เพื่อให้ chatId/รูปภาพเป็นค่าจริงจาก server เสมอ (ไม่ใช่แค่ state ชั่วคราวในเบราว์เซอร์) */
+async function loadChatHistory(docId) {
+  try { S.chatHistory = await API.get(`/api/documents/${docId}/chat`); }
+  catch (e) { S.chatHistory = []; }
+}
+
+function chatFixCard() {
+  const ready = (S.ocrProviders || []).find(p => p.id === 'claude')?.ready;
+  const msgs = S.chatHistory.map(m => {
+    // m.image = data URL ชั่วคราว (ข้อความที่เพิ่งส่ง ยังไม่ได้ค่า chatId จาก server)
+    // m.hasImage + m.chatId = ภาพที่บันทึกถาวรแล้ว โหลดผ่าน URL แทนการฝัง data URL ซ้ำ
+    const imgSrc = m.image || (m.hasImage && m.chatId ? `/api/documents/${S.doc.docId}/chat/${m.chatId}/image` : '');
+    return `
+    <div class="chat-msg ${m.role}">
+      <b>${m.role === 'user' ? 'คุณ' : 'AI'}</b>
+      ${imgSrc ? `<img src="${esc(imgSrc)}" class="chat-img">` : ''}
+      ${m.text ? `<div>${esc(m.text)}</div>` : ''}
+    </div>`;
+  }).join('') ||
+    '<p class="hint">พิมพ์หรือแนบภาพ (capture จุดที่ผิดจาก Review Document ก็ได้) บอกจุดที่ OCR อ่านผิดด้วยภาษาธรรมดา เช่น "ชื่อผู้ขายที่ถูกคือ บริษัท เอบีซี จำกัด ไม่ใช่ เอ็กซ์วายแซด" หรือถามคำถามเกี่ยวกับเอกสารนี้ก็ได้ — AI จะแก้เฉพาะเอกสารนี้ให้ ไม่กระทบเอกสารอื่น</p>';
+  return `<div class="card">
+    <div class="card-h"><h2>&#129302; แชทสั่งแก้ไขข้อมูล (AI)</h2><div class="sp"></div>
+      ${!ready ? '<span class="hint">ต้องตั้งค่า ANTHROPIC_API_KEY ก่อนใช้งาน</span>' : ''}</div>
+    <div class="card-b">
+      <div class="chat-history" id="chatHistory">${msgs}</div>
+      ${S.chatImage ? `<div class="chat-attach-preview">
+          <img src="${esc(S.chatImage)}"><span class="hint">แนบภาพแล้ว</span>
+          <button class="btn sm ghost" onclick="S.chatImage=null;renderWork()">&#10005; เอาภาพออก</button>
+        </div>` : ''}
+      <div class="row" style="margin-top:10px">
+        <input id="chatFileIn" type="file" accept="image/*" hidden onchange="onChatFileChosen(event)">
+        <button class="btn sm ghost" onclick="$('#chatFileIn').click()" title="แนบภาพ (capture จุดที่ผิด)" ${ready ? '' : 'disabled'}>&#128206;</button>
+        <input id="chatInput" type="text" placeholder="เช่น ยอดรวมที่ถูกคือ 25,680 บาท (หรือวางภาพด้วย Ctrl+V)" style="flex:1"
+          onkeydown="if(event.key==='Enter')sendChatFix()" onpaste="onChatPaste(event)" ${ready ? '' : 'disabled'}>
+        <button class="btn primary" onclick="sendChatFix()" ${ready ? '' : 'disabled'}>&#10148; ส่ง</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function readImageFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+async function onChatFileChosen(e) {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+  S.chatImage = await readImageFile(file);
+  await renderWork();
+  $('#chatInput')?.focus();
+}
+
+async function onChatPaste(e) {
+  const item = [...(e.clipboardData?.items || [])].find(i => i.type.startsWith('image/'));
+  if (!item) return;
+  e.preventDefault();
+  S.chatImage = await readImageFile(item.getAsFile());
+  await renderWork();
+  $('#chatInput')?.focus();
+}
+
+async function sendChatFix() {
+  const input = $('#chatInput');
+  const message = (input?.value || '').trim();
+  const image = S.chatImage;
+  if (!message && !image) return;
+  S.chatHistory.push({ role: 'user', text: message, image });    // แสดงทันทีก่อนรอ server (optimistic)
+  if (input) input.value = '';
+  S.chatImage = null;
+  await renderWork();
+  const hist = $('#chatHistory'); if (hist) hist.scrollTop = hist.scrollHeight;
+
+  await guard(async () => {
+    const r = await API.post(`/api/documents/${S.doc.docId}/chat-fix`, { message, image, user: S.user });
+    S.doc = r.document; S.map = null;
+  }).catch(() => { /* ข้อความผู้ใช้ถูกบันทึกที่ server แล้วแม้ Claude ตอบไม่สำเร็จ — โหลดประวัติจริงด้านล่างอยู่ดี */ })
+    .finally(async () => {
+      await loadChatHistory(S.doc.docId);   // แทนที่ state ชั่วคราวด้วยประวัติจริงจาก server (chatId/รูปภาพถาวร)
+      await renderWork();
+      const h2 = $('#chatHistory'); if (h2) h2.scrollTop = h2.scrollHeight;
+    });
 }
 
 /* ---------- การ์ดเทียบข้อมูล: เอกสาร (OCR) ↔ SAP ---------- */
@@ -646,6 +853,42 @@ function editLine(i, k, v) {
   if (k === 'qty' || k === 'price') S.doc.lines[i].amount = (num(S.doc.lines[i].qty) * num(S.doc.lines[i].price)).toFixed(2);
   S.map = null; markDirty();
 }
+
+/* ---------- ข้อมูล PO ระดับรายการ (Non-Trade มี PO) — ผู้ใช้กรอกเอง ไม่ได้เดาจาก OCR ---------- */
+function lineExtraCount(l) {
+  const ex = l.extra || {};
+  return PO_LINE_EXTRA_FIELDS.filter(f => (ex[f[0]] || '') !== '').length;
+}
+function editLineExtra(i, k, v) {
+  const l = S.doc.lines[i];
+  l.extra = { ...(l.extra || {}), [k]: v };
+  markDirty();
+}
+function showLineExtra(i) {
+  const l = S.doc.lines[i];
+  const ex = l.extra || {};
+  const aaGuide = AA_GUIDE[ex.accountAssignment || ''] || AA_GUIDE[''];
+  const fields = PO_LINE_EXTRA_FIELDS.map(([k, label, type, opts]) => {
+    const isRelevant = k === aaGuide.field;
+    const wrapStyle = isRelevant ? 'border:1.5px solid var(--brand);border-radius:var(--r3);padding:8px' : '';
+    return `<div class="f" style="${wrapStyle}"><label>${esc(label)}${isRelevant ? ' <span style="color:var(--brand)">&#9733; แนะนำให้กรอก</span>' : ''}</label>
+      ${type === 'select'
+        ? `<select ${k === 'accountAssignment' ? `onchange="editLineExtra(${i},'${k}',this.value);showLineExtra(${i})"` : `onchange="editLineExtra(${i},'${k}',this.value)"`}>
+             ${opts.map(([v, t]) => `<option value="${esc(v)}" ${v === (ex[k] || '') ? 'selected' : ''}>${esc(t)}</option>`).join('')}
+           </select>`
+        : `<input type="text" value="${esc(ex[k] || '')}" oninput="editLineExtra(${i},'${k}',this.value)">`}
+    </div>`;
+  }).join('');
+  openModal(`<div class="card-h"><h2>&#128203; ข้อมูล PO เพิ่มเติม — รายการ ${l.itemNo} (${esc(l.desc || '')})</h2>
+      <div class="sp"></div><button class="btn sm" onclick="closeModal();renderWork()">&#10005;</button></div>
+    <div class="card-b">
+      <p class="hint" style="margin:-4px 0 16px;padding:8px 12px;background:var(--line-soft);border-radius:var(--r2)">&#128161; ${esc(aaGuide.hint)}</p>
+      <div class="grid">${fields}</div>
+      <div class="row" style="margin-top:16px;justify-content:flex-end">
+        <button class="btn primary" onclick="closeModal();renderWork()">เสร็จสิ้น</button>
+      </div>
+    </div>`, 'wide');
+}
 function addLine() {
   S.doc.lines.push({ itemNo: (S.doc.lines.length + 1) * 10, extCode: '', desc: '', qty: 0, uom: 'EA', price: 0, amount: 0, materialCode: '' });
   S.map = null; renderWork();
@@ -722,30 +965,39 @@ async function confirmPost(btn) {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   } catch (e) { toast('&#9888; ' + esc(e.message)); btn.disabled = false; btn.textContent = 'ยืนยันส่งเข้า SAP'; }
 }
-function resetDoc() { S.doc = null; S.map = null; S.manual = { header: {}, lines: {} }; go(S.module ? 'work' : 'home'); }
+function resetDoc() { S.doc = null; S.map = null; S.manual = { header: {}, lines: {} }; S.chatHistory = []; S.chatImage = null; S.uploadApDocCategory = ''; go(S.module ? 'work' : 'home'); }
 
 /* ---------------------------------------------------------------- INBOX */
 async function renderInbox() {
   $('#content').innerHTML = '<div class="card"><div class="card-b"><div class="empty">กำลังโหลด…</div></div></div>';
+  if (S.module === 'AP') await apDocCategories(); else S.inboxApDocCategory = '';
   // ทะเบียนเอกสารแยกตามโมดูลที่เข้าจากเมนูซ้าย (AP INVOICE / SALES ORDER) — กรองด้วย S.module
   // ถ้าเข้าจากปุ่ม "ดูทั้งหมด" บนหน้าภาพรวม (S.module ว่าง) จะแสดงทุกโมดูลรวมกัน
-  const list = await API.get('/api/documents?limit=200' + (S.module ? '&module=' + S.module : ''));
+  const catQs = (S.module === 'AP' && S.inboxApDocCategory) ? '&apDocCategory=' + S.inboxApDocCategory : '';
+  const list = await API.get('/api/documents?limit=200' + (S.module ? '&module=' + S.module : '') + catQs);
   const title = S.module ? `ทะเบียนเอกสาร — ${S.module === 'AP' ? 'AP Invoice' : 'Sales Order'} (${list.length})`
     : `ทะเบียนเอกสารทั้งหมด (${list.length})`;
+  const catFilter = S.module === 'AP' ? `<select onchange="S.inboxApDocCategory=this.value;renderInbox()" style="margin-right:8px">
+      <option value="">ทุกประเภทเอกสาร</option>
+      ${(S.apDocCategories || []).map(c => `<option value="${esc(c.id)}" ${c.id === S.inboxApDocCategory ? 'selected' : ''}>${esc(c.label)}</option>`).join('')}
+    </select>` : '';
   $('#content').innerHTML = `
   <div class="card"><div class="card-h"><h2>${title}</h2><div class="sp"></div>
-    <button class="btn sm" onclick="renderInbox()">&#8635; รีเฟรช</button></div>
+    ${catFilter}<button class="btn sm" onclick="renderInbox()">&#8635; รีเฟรช</button></div>
   <div class="card-b"><div class="tw"><table>
     <thead><tr><th>#</th><th>Module</th><th>ไฟล์</th><th>เลขที่เอกสาร</th><th>วันที่</th><th>คู่ค้า</th>
-      <th style="text-align:right">ยอดรวม</th><th>สถานะ</th><th>SAP Doc</th><th>สร้างเมื่อ</th><th></th></tr></thead>
+      <th style="text-align:right">ยอดรวม</th>${S.module === 'AP' ? '<th>ประเภทเอกสาร</th>' : ''}<th>สถานะ</th><th>SAP Doc</th><th>สร้างเมื่อ</th><th></th></tr></thead>
     <tbody>${list.map(r => `<tr>
       <td>${r.DocId}</td><td><span class="badge ${r.Module === 'AP' ? 'b-warn' : 'b-ok'}">${r.Module}</span></td>
       <td>${esc(r.FileName || '')}</td><td>${esc(r.DocNo || '')}</td><td>${esc(r.DocDate || '')}</td>
       <td>${esc(r.PartnerName || '')}</td><td style="text-align:right">${fmt(r.TotalAmount)}</td>
-      <td>${statusBadge(r.Status)}</td><td>${esc(r.SapDocNo || '')}</td><td class="hint">${dt(r.CreatedAt)}</td>
+      ${S.module === 'AP' ? `<td>${r.ApDocCategory ? esc(apDocCategoryLabel(r.ApDocCategory)) : '<span class="hint">—</span>'}</td>` : ''}
+      <td ${r.OcrConfidenceNote || r.OcrTokensIn != null ? `title="${esc([r.OcrConfidenceNote, r.OcrTokensIn != null ? `Token: ${r.OcrTokensIn} in / ${r.OcrTokensOut} out` : ''].filter(Boolean).join(' — '))}"` : ''}>${statusBadge(r.Status)}
+        ${r.OcrConfidence != null ? `<span class="hint">${Math.round(r.OcrConfidence * 100)}%</span>` : ''}</td>
+      <td>${esc(r.SapDocNo || '')}</td><td class="hint">${dt(r.CreatedAt)}</td>
       <td style="white-space:nowrap"><button class="btn sm" onclick="openDoc(${r.DocId})">เปิด</button>
         ${r.Status === 'POSTED' ? '' : `<button class="btn sm ghost" onclick="delDoc(${r.DocId})">&#10005;</button>`}</td></tr>`).join('')
-      || '<tr><td colspan="11" class="empty">ยังไม่มีเอกสารในระบบ</td></tr>'}
+      || `<tr><td colspan="${S.module === 'AP' ? 12 : 11}" class="empty">ยังไม่มีเอกสารในระบบ</td></tr>`}
     </tbody></table></div></div></div>`;
 }
 async function delDoc(id) {

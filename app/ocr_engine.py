@@ -878,7 +878,9 @@ def claude_vision_extract(path: Path, module: str) -> dict | None:
             lines.append({"extCode": str(ln.get("extCode") or ""), "desc": str(ln.get("desc") or ""),
                           "qty": _f(ln.get("qty")), "uom": str(ln.get("uom") or "EA") or "EA",
                           "price": _f(ln.get("price")), "amount": _f(ln.get("amount"))})
-        return {"header": h, "lines": lines, "confidence": 0.88, "provider": "claude", "rawText": raw[:20000]}
+        usage = resp.get("usage") or {}
+        return {"header": h, "lines": lines, "confidence": 0.88, "provider": "claude", "rawText": raw[:20000],
+                "tokensIn": usage.get("input_tokens"), "tokensOut": usage.get("output_tokens")}
     except Exception:
         return None
 
@@ -918,7 +920,162 @@ def claude_text_extract(path: Path, module: str, text: str) -> dict | None:
             lines.append({"extCode": str(ln.get("extCode") or ""), "desc": str(ln.get("desc") or ""),
                           "qty": _f(ln.get("qty")), "uom": str(ln.get("uom") or "EA") or "EA",
                           "price": _f(ln.get("price")), "amount": _f(ln.get("amount"))})
-        return {"header": h, "lines": lines, "confidence": 0.82, "provider": "claude_text", "rawText": text[:20000]}
+        usage = resp.get("usage") or {}
+        return {"header": h, "lines": lines, "confidence": 0.82, "provider": "claude_text", "rawText": text[:20000],
+                "tokensIn": usage.get("input_tokens"), "tokensOut": usage.get("output_tokens")}
+    except Exception:
+        return None
+
+
+def gemini_vision_extract(path: Path, module: str) -> dict | None:
+    """อ่านเอกสารด้วย Google Gemini Vision — ส่งภาพหน้าเอกสารเข้าไปพร้อม prompt เดียวกับ Claude Vision
+    (ใช้ generationConfig.responseMimeType=application/json ให้ Gemini คืน JSON ล้วน ๆ โดยตรง)"""
+    if not config.GEMINI_API_KEY:
+        return None
+    try:
+        import base64
+        import json as _json
+        import urllib.request
+
+        imgs: list[bytes] = []
+        if path.suffix.lower() == ".pdf":
+            import fitz
+            with fitz.open(str(path)) as doc:
+                for page in doc[:3]:                    # จำกัด 3 หน้าแรก
+                    pix = page.get_pixmap(dpi=200)
+                    imgs.append(pix.tobytes("png"))
+        else:
+            imgs.append(path.read_bytes())
+        if not imgs:
+            return None
+
+        parts = [{"text": _claude_prompt(module)}]
+        for b in imgs:
+            parts.append({"inline_data": {"mime_type": "image/png", "data": base64.b64encode(b).decode()}})
+
+        body = {"contents": [{"parts": parts}],
+                "generationConfig": {"responseMimeType": "application/json", "maxOutputTokens": 3000}}
+        url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+               f"{config.GEMINI_MODEL}:generateContent?key={config.GEMINI_API_KEY}")
+        req = urllib.request.Request(
+            url, data=_json.dumps(body).encode("utf-8"),
+            method="POST", headers={"content-type": "application/json"})
+        with urllib.request.urlopen(req, timeout=90) as r:
+            resp = _json.loads(r.read().decode("utf-8"))
+        raw = "".join(p.get("text", "") for c in resp.get("candidates", [])
+                     for p in (c.get("content") or {}).get("parts", []))
+        m = re.search(r"\{.*\}", raw, re.S)
+        if not m:
+            return None
+        parsed = _json.loads(m.group(0))
+
+        h = _blank_header(module)
+        for k, v in (parsed.get("header") or {}).items():
+            if k in h:
+                h[k] = v
+        lines = []
+        for ln in (parsed.get("lines") or [])[:60]:
+            lines.append({"extCode": str(ln.get("extCode") or ""), "desc": str(ln.get("desc") or ""),
+                          "qty": _f(ln.get("qty")), "uom": str(ln.get("uom") or "EA") or "EA",
+                          "price": _f(ln.get("price")), "amount": _f(ln.get("amount"))})
+        usage = resp.get("usageMetadata") or {}
+        return {"header": h, "lines": lines, "confidence": 0.88, "provider": "gemini", "rawText": raw[:20000],
+                "tokensIn": usage.get("promptTokenCount"), "tokensOut": usage.get("candidatesTokenCount")}
+    except Exception:
+        return None
+
+
+def chat_fix_document(module: str, header: dict, lines: list[dict], history: list[dict], message: str,
+                      image_b64: str | None = None, image_media_type: str = "image/png") -> dict | None:
+    """เมนู "แชทสั่งแก้" — ผู้ใช้พิมพ์บอกจุดที่ผิดด้วยภาษาธรรมดา (เช่น "ชื่อผู้ขายที่ถูกคือ ABC จำกัด ไม่ใช่ XYZ")
+    พร้อมแนบภาพประกอบได้ (เช่น capture หน้าจอจุดที่อ่านผิดจาก Review Document) ให้ Claude ดูภาพนั้นด้วย
+    แล้วให้ Claude แก้เฉพาะจุดที่ระบุในข้อมูล header/lines ปัจจุบัน ไม่แตะข้อมูลอื่น — ใช้กับเอกสารนี้เท่านั้น
+    (ไม่ auto-learn ไปเอกสารอื่น ต่างจาก /learn ที่บันทึกลง Master Data ถาวร)
+
+    history: บทสนทนาก่อนหน้า [{"role": "user"|"assistant", "text": str}, ...] เรียงเก่า->ใหม่ — ส่งเข้าไปเป็น
+    บริบทให้ Claude ตอบแบบถามตอบต่อเนื่องได้ (เช่น ถามคำถามต่อจากที่คุยไว้ก่อนหน้า) ไม่ใช่แค่คำสั่งเดี่ยว ๆ ทีละครั้ง
+    ไม่ใส่ภาพของเทิร์นก่อนหน้ากลับเข้าไปซ้ำ (คุมขนาด prompt/ค่าใช้จ่าย) เพราะผลของการแก้ไขที่ยืนยันแล้วอยู่ใน
+    header/lines ปัจจุบันที่ส่งให้ทุกครั้งอยู่แล้ว
+
+    คืนค่า {reply, header, lines} หรือ None ถ้าเรียก API ไม่สำเร็จ"""
+    if not config.ANTHROPIC_API_KEY:
+        return None
+    try:
+        import json as _json
+        import urllib.request
+
+        system_prompt = (
+            "คุณคือผู้ช่วยแก้ไขข้อมูลเอกสาร (ใบกำกับภาษี/ใบแจ้งหนี้/ใบสั่งซื้อ) ที่อ่านมาจาก OCR ในระบบ OCR-to-SAP\n"
+            "ด้านล่างนี้คือข้อมูล header และ lines ปัจจุบันของเอกสารนี้ในรูปแบบ JSON (เป็นค่าล่าสุด "
+            "รวมการแก้ไขจากบทสนทนาก่อนหน้าแล้ว):\n\n"
+            f"header:\n{_json.dumps(header, ensure_ascii=False)}\n\n"
+            f"lines:\n{_json.dumps(lines, ensure_ascii=False)}\n\n"
+            "กติกา:\n"
+            "- ผู้ใช้อาจพิมพ์คำสั่งแก้ไข หรือถามคำถามเกี่ยวกับเอกสารนี้ก็ได้ (ถามตอบต่อเนื่องได้ตามบทสนทนาก่อนหน้า)\n"
+            "- ถ้าเป็นคำสั่งแก้ไข ให้แก้เฉพาะจุดที่ผู้ใช้ระบุเท่านั้น ห้ามเปลี่ยนค่าอื่นที่ไม่เกี่ยวข้องแม้จะดูแปลกตา\n"
+            "- ถ้ามีภาพแนบมาในข้อความล่าสุด ให้ใช้ภาพเป็นหลักฐานยืนยันค่าที่ถูกต้อง (เช่น อ่านตัวเลข/ชื่อจากภาพโดยตรง) "
+            "ประกอบกับคำอธิบายของผู้ใช้\n"
+            "- โครงสร้างและชื่อ field ของ header/lines ต้องเหมือนเดิมทุกประการ ห้ามเพิ่ม/ลบ field ห้ามเพิ่ม/ลบรายการใน lines "
+            "เว้นแต่ผู้ใช้ขอให้เพิ่ม/ลบรายการโดยตรง\n"
+            "- ถ้าเป็นคำถาม (ไม่ใช่คำสั่งแก้ไข) ให้ตอบคำถามใน reply แล้วคืน header/lines เดิมโดยไม่แก้ไขอะไร\n"
+            "- ตัวเลขต้องเป็นตัวเลขล้วน ไม่มีคอมมา\n"
+            "- ตอบกลับเป็น JSON ล้วน ๆ เท่านั้นทุกครั้ง ไม่ว่าข้อความก่อนหน้าในบทสนทนาจะเป็นรูปแบบใด "
+            "ตามโครงสร้างนี้ ห้ามมีข้อความอื่นนอก JSON:\n"
+            '{"reply": "ข้อความสั้น ๆ ยืนยันว่าแก้อะไรไป หรือคำตอบคำถาม (ภาษาไทย)", '
+            '"header": { ...header ที่แก้ไขแล้ว (หรือเดิมถ้าไม่ได้แก้)... }, '
+            '"lines": [ ...lines ที่แก้ไขแล้ว (หรือเดิมถ้าไม่ได้แก้)... ]}'
+        )
+
+        messages = []
+        for h in (history or [])[-12:]:                  # จำกัดความยาวบทสนทนาย้อนหลัง กันบวม token
+            role = "assistant" if h.get("role") == "assistant" else "user"
+            text = str(h.get("text") or "").strip()
+            suffix = " [แนบภาพประกอบ]" if h.get("hasImage") and role == "user" else ""
+            if text or suffix:
+                messages.append({"role": role, "content": text + suffix})
+
+        cur_content: list | str
+        if image_b64:
+            cur_content = [{"type": "image", "source": {"type": "base64", "media_type": image_media_type, "data": image_b64}},
+                           {"type": "text", "text": message}]
+        else:
+            cur_content = message
+        messages.append({"role": "user", "content": cur_content})
+
+        body = {"model": config.ANTHROPIC_MODEL, "max_tokens": 3000,
+                "system": system_prompt, "messages": messages}
+        req = urllib.request.Request(
+            "https://api.anthropic.com/v1/messages", data=_json.dumps(body).encode("utf-8"),
+            method="POST", headers={"x-api-key": config.ANTHROPIC_API_KEY,
+                                    "anthropic-version": "2023-06-01", "content-type": "application/json"})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            resp = _json.loads(r.read().decode("utf-8"))
+        raw = "".join(b.get("text", "") for b in resp.get("content", []) if b.get("type") == "text")
+        m = re.search(r"\{.*\}", raw, re.S)
+        parsed = None
+        if m:
+            try:
+                parsed = _json.loads(m.group(0))
+            except ValueError:
+                parsed = None
+        if parsed is None:
+            # บางครั้งโมเดลตอบคำถามเป็นข้อความล้วนไม่ห่อ JSON (โดยเฉพาะเทิร์นถามตอบต่อเนื่อง) —
+            # ถือเป็นคำตอบคำถามธรรมดา ไม่แก้ไข header/lines แทนที่จะถือว่าล้มเหลวทั้งเทิร์น
+            reply_text = raw.strip()
+            if not reply_text:
+                return None
+            return {"reply": reply_text, "header": dict(header), "lines": [dict(ln) for ln in lines]}
+
+        h = _blank_header(module)
+        for k, v in (parsed.get("header") or {}).items():
+            if k in h:
+                h[k] = v
+        out_lines = []
+        for ln in (parsed.get("lines") or [])[:60]:
+            out_lines.append({"extCode": str(ln.get("extCode") or ""), "desc": str(ln.get("desc") or ""),
+                              "qty": _f(ln.get("qty")), "uom": str(ln.get("uom") or "EA") or "EA",
+                              "price": _f(ln.get("price")), "amount": _f(ln.get("amount"))})
+        return {"reply": str(parsed.get("reply") or "แก้ไขเรียบร้อยแล้ว"), "header": h, "lines": out_lines}
     except Exception:
         return None
 
@@ -932,7 +1089,11 @@ def _blank_header(module: str) -> dict:
                 "totalAmount": 0, "remark": ""}
     return {"docType": "ใบกำกับภาษี/ใบแจ้งหนี้", "invoiceNo": "", "invoiceDate": "", "postingDate": "",
             "vendorName": "", "vendorTaxId": "", "branch": "", "poRef": "", "currency": "THB",
-            "paymentTerms": "", "subTotal": 0, "vatRate": 7, "vatAmount": 0, "whtAmount": 0, "totalAmount": 0}
+            "paymentTerms": "", "subTotal": 0, "vatRate": 7, "vatAmount": 0, "whtAmount": 0, "totalAmount": 0,
+            # ฟิลด์สำหรับเอกสารประเภท Trade (MIRO) — ผู้ใช้กรอกเอง ไม่ได้เดาจาก OCR
+            "taxCode": "", "calculateTax": "", "baselineDate": "", "paymentMethod": "", "assignmentText": "",
+            # ฟิลด์เพิ่มสำหรับเอกสารประเภท Non-Trade ไม่มี PO — ผู้ใช้กรอกเอง ไม่ได้เดาจาก OCR
+            "companyCode": "", "headerText": ""}
 
 
 def _po_number_date(text: str) -> tuple[str, str]:
@@ -1189,6 +1350,9 @@ OCR_PROVIDERS = [
     {"id": "claude", "label": "Claude Vision (AI)",
      "desc": "แม่นที่สุดสำหรับเอกสารยุ่งเหยิง/ตารางซับซ้อน เข้าใจบริบทได้ — ต้องตั้งค่า ANTHROPIC_API_KEY ใน .env (มีค่าใช้จ่ายต่อครั้ง)",
      "ready": bool(config.ANTHROPIC_API_KEY)},
+    {"id": "gemini", "label": "Gemini Vision (AI)",
+     "desc": "โมเดล Vision ของ Google อ่านภาพเอกสารโดยตรง เข้าใจบริบทได้ — ต้องตั้งค่า GEMINI_API_KEY ใน .env (มีค่าใช้จ่ายต่อครั้ง)",
+     "ready": bool(config.GEMINI_API_KEY)},
     {"id": "demo", "label": "ข้อมูลตัวอย่าง (ทดสอบ)",
      "desc": "ไม่อ่านไฟล์จริง ใช้สำหรับทดสอบขั้นตอน Mapping/ส่ง SAP เท่านั้น", "ready": True},
 ]
@@ -1201,7 +1365,53 @@ def _demo_fallback(path: Path, module: str, note: str) -> dict:
     return d
 
 
+# ฟิลด์สำคัญต่อโมดูล ใช้สร้างเหตุผลอธิบายว่าทำไมความแม่นยำไม่ถึง 100% — ไม่รวมทุกฟิลด์ เพราะบางฟิลด์
+# (เช่น remark, incoterms) ว่างได้ตามปกติโดยไม่ถือว่าอ่านไม่ครบ
+_AP_IMPORTANT = {"invoiceNo": "เลขที่ใบกำกับภาษี/ใบแจ้งหนี้", "invoiceDate": "วันที่เอกสาร",
+                 "vendorName": "ชื่อผู้ขาย", "vendorTaxId": "เลขทะเบียนผู้เสียภาษีของผู้ขาย",
+                 "totalAmount": "ยอดรวมทั้งสิ้น"}
+_SO_IMPORTANT = {"poNo": "เลขที่ใบสั่งซื้อ", "poDate": "วันที่เอกสาร", "customerName": "ชื่อลูกค้า",
+                 "customerTaxId": "เลขทะเบียนผู้เสียภาษีของลูกค้า", "totalAmount": "ยอดรวมทั้งสิ้น"}
+_PROVIDER_CAVEAT = {
+    "ocr": "อ่านด้วย Tesseract OCR จากไฟล์สแกน ซึ่งแม่นยำต่ำกว่าอ่านข้อความจากไฟล์ต้นฉบับโดยตรง",
+    "typhoon": "อ่านด้วย Typhoon OCR จากภาพเอกสาร อาจมีข้อผิดพลาดจากคุณภาพภาพ/ลายมือ",
+    "azure": "อ่านด้วย Azure Document Intelligence จากภาพเอกสาร",
+    "claude": "อ่านด้วย Claude Vision จากภาพเอกสาร อาจตีความคลาดเคลื่อนได้ในบางจุด",
+    "claude_text": "ใช้ OCR อ่านข้อความก่อนแล้วให้ Claude จัดโครงสร้าง ความแม่นยำขึ้นกับคุณภาพข้อความจาก OCR รอบแรก",
+    "gemini": "อ่านด้วย Gemini Vision จากภาพเอกสาร อาจตีความคลาดเคลื่อนได้ในบางจุด",
+}
+
+
+def _confidence_note(module: str, header: dict, lines: list[dict], provider: str) -> str:
+    """สร้างคำอธิบายว่าทำไมความแม่นยำ OCR ไม่ถึง 100% — ใช้เก็บลง Document.OcrConfidenceNote
+    เพื่อให้ผู้ใช้เห็นเหตุผลตรง ๆ แทนที่จะเห็นแค่ตัวเลข % เฉย ๆ"""
+    important = _AP_IMPORTANT if module == "AP" else _SO_IMPORTANT
+    missing = [label for key, label in important.items()
+              if str(header.get(key) or "").strip() in ("", "0", "0.0")]
+    reasons = []
+    if missing:
+        reasons.append("ไม่พบข้อมูล: " + ", ".join(missing))
+    if not lines:
+        reasons.append("ไม่พบรายการสินค้า/บริการ (Item Detail)")
+    caveat = _PROVIDER_CAVEAT.get(provider)
+    if caveat:
+        reasons.append(caveat)
+    return " / ".join(reasons)
+
+
 def extract(path: Path, module: str, provider_override: str | None = None) -> dict:
+    """ห่อ _extract_dispatch() อีกชั้น เพื่อเติม confidenceNote (เหตุผลว่าทำไมความแม่นยำไม่ถึง 100%)
+    ให้ผลลัพธ์ทุก provider อย่างสม่ำเสมอ โดยไม่ต้องแก้ทุก return ใน _extract_dispatch()"""
+    out = _extract_dispatch(path, module, provider_override)
+    if out.get("provider") == "demo":
+        out["confidenceNote"] = out.get("_note") or "ใช้ข้อมูลตัวอย่าง (demo) ไม่ได้อ่านจากไฟล์จริง"
+    else:
+        out["confidenceNote"] = _confidence_note(module, out.get("header") or {}, out.get("lines") or [],
+                                                  out.get("provider") or "")
+    return out
+
+
+def _extract_dispatch(path: Path, module: str, provider_override: str | None = None) -> dict:
     """provider_override: ค่าจากตัวเลือก engine ที่ผู้ใช้กดในหน้าเว็บ (ถ้าระบุ จะ 'บังคับ' ใช้ตัวนั้น
     ไม่ fallback ไปตัวอื่นเงียบ ๆ) — ปล่อยว่างหรือ 'auto' จะใช้สายข้อความ→OCR ในเครื่องตามปกติ
     (ไม่เรียก Azure/Claude อัตโนมัติ เพราะมีค่าใช้จ่าย ต้องเลือกเองเท่านั้น)"""
@@ -1220,6 +1430,12 @@ def extract(path: Path, module: str, provider_override: str | None = None) -> di
             return out
         return _demo_fallback(path, module,
                               "เชื่อมต่อ Claude Vision ไม่สำเร็จ หรือยังไม่ได้ตั้งค่า ANTHROPIC_API_KEY ใน .env")
+    if provider == "gemini":
+        out = gemini_vision_extract(path, module)
+        if out:
+            return out
+        return _demo_fallback(path, module,
+                              "เชื่อมต่อ Gemini Vision ไม่สำเร็จ หรือยังไม่ได้ตั้งค่า GEMINI_API_KEY ใน .env")
     if provider == "claude_text":
         pre_text = pdf_text(path) if ext == ".pdf" else ""
         if not pre_text.strip() and (ext in IMAGE_EXT or ext == ".pdf"):
