@@ -25,6 +25,12 @@ public class AppConfig
     public string AnthropicModel { get; init; } = "claude-sonnet-5";
     public string TyphoonApiKey { get; init; } = "";
     public string TyphoonModel { get; init; } = "typhoon-ocr";
+    // New in the .NET port (no Python equivalent) — same raw-HTTP, no-SDK pattern as the
+    // existing Claude/Azure/Typhoon clients.
+    public string GeminiApiKey { get; init; } = "";
+    public string GeminiModel { get; init; } = "gemini-2.5-flash";
+    public string OpenAiApiKey { get; init; } = "";
+    public string OpenAiModel { get; init; } = "gpt-4o";
 
     public string SapBaseUrl { get; init; } = "";
     public string SapUser { get; init; } = "";

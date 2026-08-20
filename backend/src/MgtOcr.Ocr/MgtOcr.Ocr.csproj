@@ -13,6 +13,11 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <!-- Tesseract shell-out + PDFtoImage's PDFium binding are used here as this deployment's
+         actual runtime (Windows, per this project's SQL Server/Tesseract setup) — declaring it
+         resolves the CA1416 platform-compatibility warnings on those calls truthfully rather
+         than suppressing them blindly. -->
+    <SupportedOSPlatform>windows</SupportedOSPlatform>
   </PropertyGroup>
 
 </Project>
