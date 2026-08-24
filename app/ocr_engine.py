@@ -979,8 +979,69 @@ def gemini_vision_extract(path: Path, module: str) -> dict | None:
                           "qty": _f(ln.get("qty")), "uom": str(ln.get("uom") or "EA") or "EA",
                           "price": _f(ln.get("price")), "amount": _f(ln.get("amount"))})
         usage = resp.get("usageMetadata") or {}
+        # thoughtsTokenCount = token คิด/reasoning ภายในของ Gemini — ไม่โผล่ในข้อความตอบ แต่ Google คิดเงินเป็น
+        # output token ด้วย (พบว่าบางครั้งมากกว่า candidatesTokenCount หลายเท่า) ต้องรวมด้วยไม่งั้นค่าใช้จ่ายจะต่ำกว่าจริงมาก
+        tokens_out = (usage.get("candidatesTokenCount") or 0) + (usage.get("thoughtsTokenCount") or 0)
         return {"header": h, "lines": lines, "confidence": 0.88, "provider": "gemini", "rawText": raw[:20000],
-                "tokensIn": usage.get("promptTokenCount"), "tokensOut": usage.get("candidatesTokenCount")}
+                "tokensIn": usage.get("promptTokenCount"), "tokensOut": tokens_out or None}
+    except Exception:
+        return None
+
+
+def openai_vision_extract(path: Path, module: str) -> dict | None:
+    """อ่านเอกสารด้วย OpenAI GPT-4o/GPT-5 Vision — ส่งภาพหน้าเอกสารเข้าไปพร้อม prompt เดียวกับ Claude/Gemini Vision
+    (ใช้ response_format=json_object ให้ตอบกลับเป็น JSON ล้วน ๆ โดยตรง)"""
+    if not config.OPENAI_API_KEY:
+        return None
+    try:
+        import base64
+        import json as _json
+        import urllib.request
+
+        imgs: list[bytes] = []
+        if path.suffix.lower() == ".pdf":
+            import fitz
+            with fitz.open(str(path)) as doc:
+                for page in doc[:3]:                    # จำกัด 3 หน้าแรก
+                    pix = page.get_pixmap(dpi=200)
+                    imgs.append(pix.tobytes("png"))
+        else:
+            imgs.append(path.read_bytes())
+        if not imgs:
+            return None
+
+        content = [{"type": "text", "text": _claude_prompt(module)}]
+        for b in imgs:
+            content.append({"type": "image_url",
+                            "image_url": {"url": "data:image/png;base64," + base64.b64encode(b).decode()}})
+
+        body = {"model": config.OPENAI_MODEL, "max_tokens": 3000,
+                "response_format": {"type": "json_object"},
+                "messages": [{"role": "user", "content": content}]}
+        req = urllib.request.Request(
+            "https://api.openai.com/v1/chat/completions", data=_json.dumps(body).encode("utf-8"),
+            method="POST", headers={"Authorization": "Bearer " + config.OPENAI_API_KEY,
+                                    "content-type": "application/json"})
+        with urllib.request.urlopen(req, timeout=90) as r:
+            resp = _json.loads(r.read().decode("utf-8"))
+        raw = ((resp.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+        m = re.search(r"\{.*\}", raw, re.S)
+        if not m:
+            return None
+        parsed = _json.loads(m.group(0))
+
+        h = _blank_header(module)
+        for k, v in (parsed.get("header") or {}).items():
+            if k in h:
+                h[k] = v
+        lines = []
+        for ln in (parsed.get("lines") or [])[:60]:
+            lines.append({"extCode": str(ln.get("extCode") or ""), "desc": str(ln.get("desc") or ""),
+                          "qty": _f(ln.get("qty")), "uom": str(ln.get("uom") or "EA") or "EA",
+                          "price": _f(ln.get("price")), "amount": _f(ln.get("amount"))})
+        usage = resp.get("usage") or {}
+        return {"header": h, "lines": lines, "confidence": 0.88, "provider": "openai", "rawText": raw[:20000],
+                "tokensIn": usage.get("prompt_tokens"), "tokensOut": usage.get("completion_tokens")}
     except Exception:
         return None
 
@@ -1353,6 +1414,9 @@ OCR_PROVIDERS = [
     {"id": "gemini", "label": "Gemini Vision (AI)",
      "desc": "โมเดล Vision ของ Google อ่านภาพเอกสารโดยตรง เข้าใจบริบทได้ — ต้องตั้งค่า GEMINI_API_KEY ใน .env (มีค่าใช้จ่ายต่อครั้ง)",
      "ready": bool(config.GEMINI_API_KEY)},
+    {"id": "openai", "label": "ChatGPT Vision (AI)",
+     "desc": "โมเดล GPT-4o/GPT-5 ของ OpenAI อ่านภาพเอกสารโดยตรง เข้าใจบริบทได้ — ต้องตั้งค่า OPENAI_API_KEY ใน .env (มีค่าใช้จ่ายต่อครั้ง)",
+     "ready": bool(config.OPENAI_API_KEY)},
     {"id": "demo", "label": "ข้อมูลตัวอย่าง (ทดสอบ)",
      "desc": "ไม่อ่านไฟล์จริง ใช้สำหรับทดสอบขั้นตอน Mapping/ส่ง SAP เท่านั้น", "ready": True},
 ]
@@ -1379,6 +1443,7 @@ _PROVIDER_CAVEAT = {
     "claude": "อ่านด้วย Claude Vision จากภาพเอกสาร อาจตีความคลาดเคลื่อนได้ในบางจุด",
     "claude_text": "ใช้ OCR อ่านข้อความก่อนแล้วให้ Claude จัดโครงสร้าง ความแม่นยำขึ้นกับคุณภาพข้อความจาก OCR รอบแรก",
     "gemini": "อ่านด้วย Gemini Vision จากภาพเอกสาร อาจตีความคลาดเคลื่อนได้ในบางจุด",
+    "openai": "อ่านด้วย ChatGPT Vision จากภาพเอกสาร อาจตีความคลาดเคลื่อนได้ในบางจุด",
 }
 
 
@@ -1399,15 +1464,42 @@ def _confidence_note(module: str, header: dict, lines: list[dict], provider: str
     return " / ".join(reasons)
 
 
+_TOKEN_PRICE = {                            # (ราคาต่อ 1 ล้าน input token, ราคาต่อ 1 ล้าน output token) เป็น USD
+    "claude": (config.PRICE_CLAUDE_IN, config.PRICE_CLAUDE_OUT),
+    "claude_text": (config.PRICE_CLAUDE_IN, config.PRICE_CLAUDE_OUT),
+    "gemini": (config.PRICE_GEMINI_IN, config.PRICE_GEMINI_OUT),
+    "openai": (config.PRICE_OPENAI_IN, config.PRICE_OPENAI_OUT),
+}
+
+
+def _estimate_cost(provider: str, tokens_in, tokens_out):
+    """ประมาณค่าใช้จ่าย (USD) จากจำนวน token ที่ใช้จริง x ราคาต่อ token ของ provider นั้น ๆ แยกส่วน input/output
+    คืนค่า (costIn, costOut, costTotal, currency) หรือ (None, None, None, None) ถ้า provider นี้ไม่มีค่าใช้จ่ายต่อ token
+    (Tesseract/text/demo ฯลฯ)"""
+    price = _TOKEN_PRICE.get(provider)
+    if not price or tokens_in is None or tokens_out is None:
+        return None, None, None, None
+    price_in, price_out = price
+    cost_in = round((tokens_in / 1_000_000) * price_in, 4)
+    cost_out = round((tokens_out / 1_000_000) * price_out, 4)
+    return cost_in, cost_out, round(cost_in + cost_out, 4), "USD"
+
+
 def extract(path: Path, module: str, provider_override: str | None = None) -> dict:
     """ห่อ _extract_dispatch() อีกชั้น เพื่อเติม confidenceNote (เหตุผลว่าทำไมความแม่นยำไม่ถึง 100%)
-    ให้ผลลัพธ์ทุก provider อย่างสม่ำเสมอ โดยไม่ต้องแก้ทุก return ใน _extract_dispatch()"""
+    และค่าใช้จ่ายโดยประมาณ (cost/currency) ให้ผลลัพธ์ทุก provider อย่างสม่ำเสมอ โดยไม่ต้องแก้ทุก return ใน _extract_dispatch()"""
     out = _extract_dispatch(path, module, provider_override)
     if out.get("provider") == "demo":
         out["confidenceNote"] = out.get("_note") or "ใช้ข้อมูลตัวอย่าง (demo) ไม่ได้อ่านจากไฟล์จริง"
     else:
         out["confidenceNote"] = _confidence_note(module, out.get("header") or {}, out.get("lines") or [],
                                                   out.get("provider") or "")
+    cost_in, cost_out, cost_total, currency = _estimate_cost(
+        out.get("provider") or "", out.get("tokensIn"), out.get("tokensOut"))
+    out["costIn"] = cost_in
+    out["costOut"] = cost_out
+    out["cost"] = cost_total
+    out["costCurrency"] = currency
     return out
 
 
@@ -1436,6 +1528,12 @@ def _extract_dispatch(path: Path, module: str, provider_override: str | None = N
             return out
         return _demo_fallback(path, module,
                               "เชื่อมต่อ Gemini Vision ไม่สำเร็จ หรือยังไม่ได้ตั้งค่า GEMINI_API_KEY ใน .env")
+    if provider == "openai":
+        out = openai_vision_extract(path, module)
+        if out:
+            return out
+        return _demo_fallback(path, module,
+                              "เชื่อมต่อ ChatGPT Vision ไม่สำเร็จ หรือยังไม่ได้ตั้งค่า OPENAI_API_KEY ใน .env")
     if provider == "claude_text":
         pre_text = pdf_text(path) if ext == ".pdf" else ""
         if not pre_text.strip() and (ext in IMAGE_EXT or ext == ".pdf"):

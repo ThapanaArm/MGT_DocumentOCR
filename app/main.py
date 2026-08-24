@@ -126,13 +126,14 @@ def create_document(module: str, ext: dict, file_name: str, stored: str, size: i
     h, d = ext["header"], denorm(module, ext["header"])
     doc_id = db.insert_returning_id("""
         INSERT ocr.Document(Module,FileName,StoredPath,FileSize,OcrProvider,OcrConfidence,OcrConfidenceNote,
-              OcrTokensIn,OcrTokensOut,ApDocCategory,Status,
+              OcrTokensIn,OcrTokensOut,OcrCost,OcrInputCost,OcrOutputCost,OcrCostCurrency,ApDocCategory,Status,
               DocNo,DocDate,PostingDate,PartnerName,PartnerTaxId,Currency,SubTotal,VatRate,VatAmount,
               WhtAmount,TotalAmount,HeaderJson,RawText,CreatedBy)
-        VALUES(?,?,?,?,?,?,?,?,?,?, 'NEW', ?,?,?,?,?,?,?,?,?,?,?,?,?,?);
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'NEW', ?,?,?,?,?,?,?,?,?,?,?,?,?,?);
         SELECT SCOPE_IDENTITY();""",
         (module, file_name, stored, size, ext.get("provider"), ext.get("confidence"), ext.get("confidenceNote"),
-         ext.get("tokensIn"), ext.get("tokensOut"), ap_doc_category or None,
+         ext.get("tokensIn"), ext.get("tokensOut"), ext.get("cost"), ext.get("costIn"), ext.get("costOut"),
+         ext.get("costCurrency"), ap_doc_category or None,
          d["DocNo"], d["DocDate"], d["PostingDate"], d["PartnerName"], d["PartnerTaxId"], d["Currency"],
          d["SubTotal"], d["VatRate"], d["VatAmount"], d["WhtAmount"], d["TotalAmount"],
          json.dumps(h, ensure_ascii=False), (ext.get("rawText") or "")[:20000], user))
@@ -166,6 +167,8 @@ def get_document(doc_id: int) -> dict:
         "provider": d["OcrProvider"], "confidence": d["OcrConfidence"],
         "confidenceNote": d.get("OcrConfidenceNote") or "",
         "tokensIn": d.get("OcrTokensIn"), "tokensOut": d.get("OcrTokensOut"),
+        "cost": d.get("OcrCost"), "costIn": d.get("OcrInputCost"), "costOut": d.get("OcrOutputCost"),
+        "costCurrency": d.get("OcrCostCurrency") or "",
         "apDocCategory": d.get("ApDocCategory") or "", "createdAt": d["CreatedAt"],
         "sapDocNo": d["SapDocNo"], "postedAt": d["PostedAt"], "mapStatus": d["MapStatus"],
         "partnerCode": d["PartnerCode"], "shipToCode": d["ShipToCode"],
@@ -360,7 +363,7 @@ def list_documents(module: str = "", status: str = "", apDocCategory: str = "", 
         w.append("ApDocCategory=?"); p.append(apDocCategory.upper())
     sql = ("SELECT TOP (?) DocId,Module,FileName,Status,DocNo,DocDate,PartnerName,PartnerCode,"
            "TotalAmount,Currency,SapDocNo,PostedAt,CreatedAt,OcrProvider,OcrConfidence,OcrConfidenceNote,"
-           "OcrTokensIn,OcrTokensOut,ApDocCategory "
+           "OcrTokensIn,OcrTokensOut,OcrCost,OcrInputCost,OcrOutputCost,OcrCostCurrency,ApDocCategory "
            "FROM ocr.Document")
     if w:
         sql += " WHERE " + " AND ".join(w)
@@ -417,14 +420,16 @@ def reocr_document(doc_id: int, body: dict = Body(default={})):
     ext = ocr_engine.extract(Path(d["StoredPath"]), d["Module"], body.get("ocr") or "auto")
     dn = denorm(d["Module"], ext["header"])
     db.execute("""UPDATE ocr.Document SET OcrProvider=?, OcrConfidence=?, OcrConfidenceNote=?,
-                    OcrTokensIn=?, OcrTokensOut=?, HeaderJson=?, RawText=?,
+                    OcrTokensIn=?, OcrTokensOut=?, OcrCost=?, OcrInputCost=?, OcrOutputCost=?, OcrCostCurrency=?,
+                    HeaderJson=?, RawText=?,
                     DocNo=?, DocDate=?, PostingDate=?, PartnerName=?, PartnerTaxId=?, Currency=?,
                     SubTotal=?, VatRate=?, VatAmount=?, WhtAmount=?, TotalAmount=?,
                     Status='NEW', MapStatus=NULL, MapMessage=NULL, PartnerCode=NULL, ShipToCode=NULL,
                     SapPartnerCode=NULL, SapShipToCode=NULL, UpdatedAt=SYSDATETIME()
                   WHERE DocId=?""",
                (ext.get("provider"), ext.get("confidence"), ext.get("confidenceNote"),
-                ext.get("tokensIn"), ext.get("tokensOut"),
+                ext.get("tokensIn"), ext.get("tokensOut"), ext.get("cost"), ext.get("costIn"), ext.get("costOut"),
+                ext.get("costCurrency"),
                 json.dumps(ext["header"], ensure_ascii=False), (ext.get("rawText") or "")[:20000],
                 dn["DocNo"], dn["DocDate"], dn["PostingDate"], dn["PartnerName"], dn["PartnerTaxId"],
                 dn["Currency"], dn["SubTotal"], dn["VatRate"], dn["VatAmount"], dn["WhtAmount"],

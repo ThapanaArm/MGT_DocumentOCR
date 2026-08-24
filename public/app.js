@@ -6,7 +6,7 @@ const S = {
   page: 'home', module: null, doc: null, map: null, manual: { header: {}, lines: {} },
   masters: null, masterGroup: 'vendor', masterTab: 'vendors', busy: false, inbox: [], logs: [], health: null,
   user: 'it-digital@megachem.co.th', ocrProviders: null, ocrProvider: 'auto', chatHistory: [], chatImage: null,
-  apDocCategories: null, inboxApDocCategory: '', uploadApDocCategory: ''
+  apDocCategories: null, inboxApDocCategory: '', uploadApDocCategory: '', inboxSearch: ''
 };
 
 async function ocrProviders() {
@@ -39,6 +39,7 @@ const $ = s => document.querySelector(s);
 const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const num = v => { const n = parseFloat(String(v == null ? '' : v).replace(/[, ]/g, '')); return isNaN(n) ? 0 : n; };
 const fmt = n => num(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const fmtCost = n => num(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 });
 const dt = s => s ? String(s).replace('T', ' ').slice(0, 19) : '';
 
 /* ---------------------------------------------------------------- duplicate check (client-side) */
@@ -244,7 +245,7 @@ const AA_GUIDE = {
 // data-mod กำกับอยู่แล้วว่าเป็นของโมดูลไหน กดแล้วสลับ S.module ให้อัตโนมัติ ไม่ต้องมีหน้า "เลือกโมดูล" คั่นกลาง
 document.querySelectorAll('#nav a').forEach(a => { a.onclick = e => { e.preventDefault(); go(a.dataset.page, a.dataset.mod); }; });
 function go(p, mod) {
-  if (mod) { S.module = mod; S.uploadApDocCategory = ''; }
+  if (mod) { S.module = mod; S.uploadApDocCategory = ''; S.inboxSearch = ''; S.inboxApDocCategory = ''; }
   S.page = p;
   document.querySelectorAll('#nav a').forEach(a =>
     a.classList.toggle('active', a.dataset.page === p && (!a.dataset.mod || a.dataset.mod === S.module)));
@@ -420,7 +421,8 @@ async function reOcr(btn) {
           ? `<p class="hint">${esc(doc.ocrNote)}</p>`
           : `<p>Engine: <b>${esc(doc.provider || '')}</b> &nbsp;·&nbsp; ความมั่นใจ: <b>${Math.round((doc.confidence || 0) * 100)}%</b></p>
              <p>พบรายการ Item Detail: <b>${doc.lines.length}</b> รายการ</p>
-             ${doc.tokensIn != null ? `<p>Token ที่ใช้: <b>${num(doc.tokensIn).toLocaleString('en-US')}</b> input / <b>${num(doc.tokensOut).toLocaleString('en-US')}</b> output</p>` : ''}
+             ${doc.tokensIn != null ? `<p>Token ที่ใช้: <b>${num(doc.tokensIn).toLocaleString('en-US')}</b> input / <b>${num(doc.tokensOut).toLocaleString('en-US')}</b> output
+               ${doc.cost != null ? ` &nbsp;·&nbsp; ค่าใช้จ่ายโดยประมาณ: <b>${fmtCost(doc.costIn)}</b> input + <b>${fmtCost(doc.costOut)}</b> output = <b>${fmtCost(doc.cost)} ${esc(doc.costCurrency || '')}</b>` : ''}</p>` : ''}
              ${doc.confidenceNote ? `<p class="hint">&#9888; ${esc(doc.confidenceNote)}</p>` : ''}`}
         <div class="row" style="margin-top:16px;justify-content:flex-end">
           <button class="btn primary" onclick="closeModal()">ตกลง</button>
@@ -533,9 +535,10 @@ async function docHtml() {
     <div class="card-h"><h2>เอกสาร #${d.docId}</h2>
       <span class="badge ${d.confidence >= 0.9 ? 'b-ok' : 'b-warn'}" ${d.confidenceNote ? `title="${esc(d.confidenceNote)}"` : ''}>OCR ${Math.round((d.confidence || 0) * 100)}% · ${esc(d.provider || '')}</span>
       ${d.tokensIn != null ? `<span class="badge" title="Token ที่ใช้อ่านเอกสารนี้">&#9889; ${num(d.tokensIn).toLocaleString('en-US')} in / ${num(d.tokensOut).toLocaleString('en-US')} out</span>` : ''}
+      ${d.cost != null ? `<span class="badge" title="Input: ${fmtCost(d.costIn)} ${esc(d.costCurrency || '')} · Output: ${fmtCost(d.costOut)} ${esc(d.costCurrency || '')}">&#128176; ${fmtCost(d.cost)} ${esc(d.costCurrency || '')}</span>` : ''}
       <span class="filechip">&#128196; ${esc(d.fileName)}</span>${statusBadge(d.status)}
       <div class="sp"></div>
-      ${!posted ? ocrProviderSelect('docOcrEngine', { ocr: 'tesseract', text: 'text', azure: 'azure', claude: 'claude', claude_text: 'claude_text', typhoon: 'typhoon', gemini: 'gemini' }[d.provider] || 'auto') : ''}
+      ${!posted ? ocrProviderSelect('docOcrEngine', { ocr: 'tesseract', text: 'text', azure: 'azure', claude: 'claude', claude_text: 'claude_text', typhoon: 'typhoon', gemini: 'gemini', openai: 'openai' }[d.provider] || 'auto') : ''}
       <button class="btn sm primary" onclick="reOcr(this)" ${posted ? 'disabled' : ''}
         title="อ่านไฟล์ต้นฉบับใหม่ด้วย engine ที่เลือก">&#8635; อ่านเอกสารใหม่</button>
       <button class="btn sm ghost" onclick="showRaw()">&#128196; ข้อความที่อ่านได้</button>
@@ -974,7 +977,15 @@ async function renderInbox() {
   // ทะเบียนเอกสารแยกตามโมดูลที่เข้าจากเมนูซ้าย (AP INVOICE / SALES ORDER) — กรองด้วย S.module
   // ถ้าเข้าจากปุ่ม "ดูทั้งหมด" บนหน้าภาพรวม (S.module ว่าง) จะแสดงทุกโมดูลรวมกัน
   const catQs = (S.module === 'AP' && S.inboxApDocCategory) ? '&apDocCategory=' + S.inboxApDocCategory : '';
-  const list = await API.get('/api/documents?limit=200' + (S.module ? '&module=' + S.module : '') + catQs);
+  S.inboxList = await API.get('/api/documents?limit=200' + (S.module ? '&module=' + S.module : '') + catQs);
+  renderInboxLocal();
+}
+function renderInboxLocal() {
+  const q = (S.inboxSearch || '').trim().toLowerCase();
+  const list = !q ? S.inboxList : S.inboxList.filter(r =>
+    String(r.DocNo || '').toLowerCase().includes(q) ||
+    String(r.PartnerName || '').toLowerCase().includes(q) ||
+    String(r.DocDate || '').toLowerCase().includes(q));
   const title = S.module ? `ทะเบียนเอกสาร — ${S.module === 'AP' ? 'AP Invoice' : 'Sales Order'} (${list.length})`
     : `ทะเบียนเอกสารทั้งหมด (${list.length})`;
   const catFilter = S.module === 'AP' ? `<select onchange="S.inboxApDocCategory=this.value;renderInbox()" style="margin-right:8px">
@@ -983,6 +994,8 @@ async function renderInbox() {
     </select>` : '';
   $('#content').innerHTML = `
   <div class="card"><div class="card-h"><h2>${title}</h2><div class="sp"></div>
+    <input id="inboxSearch" type="text" placeholder="ค้นหา วันที่ / คู่ค้า / เลขที่เอกสาร…" value="${esc(S.inboxSearch)}"
+           oninput="S.inboxSearch=this.value;renderInboxLocal()" style="max-width:260px;margin-right:8px">
     ${catFilter}<button class="btn sm" onclick="renderInbox()">&#8635; รีเฟรช</button></div>
   <div class="card-b"><div class="tw"><table>
     <thead><tr><th>#</th><th>Module</th><th>ไฟล์</th><th>เลขที่เอกสาร</th><th>วันที่</th><th>คู่ค้า</th>
@@ -992,13 +1005,22 @@ async function renderInbox() {
       <td>${esc(r.FileName || '')}</td><td>${esc(r.DocNo || '')}</td><td>${esc(r.DocDate || '')}</td>
       <td>${esc(r.PartnerName || '')}</td><td style="text-align:right">${fmt(r.TotalAmount)}</td>
       ${S.module === 'AP' ? `<td>${r.ApDocCategory ? esc(apDocCategoryLabel(r.ApDocCategory)) : '<span class="hint">—</span>'}</td>` : ''}
-      <td ${r.OcrConfidenceNote || r.OcrTokensIn != null ? `title="${esc([r.OcrConfidenceNote, r.OcrTokensIn != null ? `Token: ${r.OcrTokensIn} in / ${r.OcrTokensOut} out` : ''].filter(Boolean).join(' — '))}"` : ''}>${statusBadge(r.Status)}
+      <td ${r.OcrConfidenceNote || r.OcrTokensIn != null ? `title="${esc([r.OcrConfidenceNote,
+          r.OcrTokensIn != null ? `Token: ${r.OcrTokensIn} in / ${r.OcrTokensOut} out` : '',
+          r.OcrCost != null ? `ค่าใช้จ่าย: ${r.OcrInputCost} in + ${r.OcrOutputCost} out = ${r.OcrCost} ${r.OcrCostCurrency || ''}` : ''].filter(Boolean).join(' — '))}"` : ''}>${statusBadge(r.Status)}
         ${r.OcrConfidence != null ? `<span class="hint">${Math.round(r.OcrConfidence * 100)}%</span>` : ''}</td>
       <td>${esc(r.SapDocNo || '')}</td><td class="hint">${dt(r.CreatedAt)}</td>
       <td style="white-space:nowrap"><button class="btn sm" onclick="openDoc(${r.DocId})">เปิด</button>
         ${r.Status === 'POSTED' ? '' : `<button class="btn sm ghost" onclick="delDoc(${r.DocId})">&#10005;</button>`}</td></tr>`).join('')
       || `<tr><td colspan="${S.module === 'AP' ? 12 : 11}" class="empty">ยังไม่มีเอกสารในระบบ</td></tr>`}
     </tbody></table></div></div></div>`;
+  // ค้นหาแบบ re-render ทั้ง card ทุกครั้งที่พิมพ์ ทำให้ input เดิมถูกแทนที่ด้วย element ใหม่และเสีย focus —
+  // ต้องคืน focus + ตำแหน่ง cursor ให้กล่องค้นหาเองหลัง render เสร็จ
+  const si = $('#inboxSearch');
+  if (si && document.activeElement !== si) {
+    si.focus();
+    si.setSelectionRange(si.value.length, si.value.length);
+  }
 }
 async function delDoc(id) {
   if (!confirm('ลบเอกสาร #' + id + ' ?')) return;
