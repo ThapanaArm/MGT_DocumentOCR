@@ -6,7 +6,13 @@ const S = {
   page: 'home', module: null, doc: null, map: null, manual: { header: {}, lines: {} },
   masters: null, masterGroup: 'vendor', masterTab: 'vendors', busy: false, inbox: [], logs: [], health: null,
   user: 'it-digital@megachem.co.th', ocrProviders: null, ocrProvider: 'auto', chatHistory: [], chatImage: null,
-  apDocCategories: null, inboxApDocCategory: '', uploadApDocCategory: '', inboxSearch: ''
+  chatProvider: 'claude',
+  apDocCategories: null, inboxApDocCategory: '', uploadApDocCategory: '', inboxSearch: '', miroTab: 'Basic Data',
+  iiTab: 'Basic Data', usageDays: 7, dashDays: 7,
+  masterSearch: '',
+  inboxPage: 1, inboxPageSize: 50, inboxDateFrom: '', inboxDateTo: '',
+  logPage: 1, logPageSize: 50, logDateFrom: '', logDateTo: '',
+  auditLogPage: 1, auditLogPageSize: 50, auditLogDateFrom: '', auditLogDateTo: ''
 };
 
 async function ocrProviders() {
@@ -30,7 +36,7 @@ function apDocCategoryLabel(id) {
 }
 async function setDocCategory(v) {
   await guard(async () => {
-    S.doc = await API.post(`/api/documents/${S.doc.docId}/category`, { apDocCategory: v });
+    S.doc = await API.post(`/api/documents/${S.doc.docId}/category`, { apDocCategory: v, user: S.user });
   });
 }
 
@@ -40,6 +46,15 @@ const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&am
 const num = v => { const n = parseFloat(String(v == null ? '' : v).replace(/[, ]/g, '')); return isNaN(n) ? 0 : n; };
 const fmt = n => num(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const fmtCost = n => num(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+const fmtAmt = n => num(n).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 2 });   // format 0,000.##
+const moduleLabel = mod => ({ SO: 'Sales Order', II: 'Incoming Invoice', PODP: 'PO Down Payment' }[mod] || 'Supplier Invoice');
+// ชื่อย่อโมเดล/วิธีอ่านเอกสาร — ใช้แสดงในหน้า List ต่าง ๆ ว่าเอกสารนี้อ่านด้วยอะไร
+const OCR_PROVIDER_SHORT = { auto: 'อัตโนมัติ', text: 'ข้อความในไฟล์', ocr: 'Tesseract OCR', tesseract: 'Tesseract OCR',
+  typhoon: 'Typhoon', azure: 'Azure', claude_text: 'Claude (text)', claude: 'Claude', gemini: 'Gemini',
+  openai: 'ChatGPT', demo: 'ตัวอย่าง', failed: 'อ่านไม่สำเร็จ' };
+const providerBadge = id => id ? `<span class="hint">${esc(OCR_PROVIDER_SHORT[id] || id)}</span>` : '<span class="hint">—</span>';
+// หัวข้อหน้าทะเบียนเอกสาร — ปกติใช้ moduleLabel + ' List' แต่บาง module สั้นกว่านั้น (override เฉพาะจุด)
+const inboxTitle = mod => mod ? ({ II: 'Incoming' }[mod] || moduleLabel(mod)) + ' List' : 'ทะเบียนเอกสารทั้งหมด';
 const dt = s => s ? String(s).replace('T', ' ').slice(0, 19) : '';
 
 /* ---------------------------------------------------------------- duplicate check (client-side) */
@@ -91,6 +106,14 @@ function applyTheme(t) {
 }
 function toggleTheme() { applyTheme(document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark'); }
 (function () { let t = 'light'; try { t = localStorage.getItem('ocr_sap_theme') || 'light'; } catch (e) { } applyTheme(t); })();
+
+function applyNavCollapsed(on) {
+  $('#sidebar')?.classList.toggle('collapsed', on);
+  const b = $('#navToggle'); if (b) b.title = on ? 'ขยายเมนู' : 'ย่อเมนู';
+  try { localStorage.setItem('ocr_sap_nav_collapsed', on ? '1' : '0'); } catch (e) { }
+}
+function toggleNav() { applyNavCollapsed(!$('#sidebar')?.classList.contains('collapsed')); }
+(function () { let c = false; try { c = localStorage.getItem('ocr_sap_nav_collapsed') === '1'; } catch (e) { } if (c) applyNavCollapsed(true); })();
 
 /* ---------------------------------------------------------------- api */
 async function api(method, url, body, isForm) {
@@ -203,19 +226,55 @@ const SO_H = [['docType', 'ประเภทเอกสาร'], ['poNo', 'เ
 ['vatAmount', 'ภาษีมูลค่าเพิ่ม'], ['totalAmount', 'ยอดรวมทั้งสิ้น'], ['remark', 'หมายเหตุ']];
 const AP_H = [['docType', 'ประเภทเอกสาร'], ['invoiceNo', 'เลขที่ใบแจ้งหนี้'], ['invoiceDate', 'วันที่ใบแจ้งหนี้'],
 ['postingDate', 'วันที่ผ่านรายการ'], ['vendorName', 'ชื่อผู้ขาย'], ['vendorTaxId', 'เลขทะเบียนนิติบุคคล'],
-['branch', 'สาขา'], ['poRef', 'อ้างอิง PO'], ['currency', 'สกุลเงิน'], ['paymentTerms', 'เงื่อนไขชำระเงิน'],
-['subTotal', 'มูลค่าก่อนภาษี'], ['vatRate', 'อัตราภาษี (%)'], ['vatAmount', 'ภาษีมูลค่าเพิ่ม'],
+['branch', 'สาขา'], ['poRef', 'อ้างอิง PO'], ['currency', 'สกุลเงิน'], ['paymentTerms', 'เงื่อนไขชำระเงิน']];
+// Incoming Invoices (Fiori F0859) — เอกสารตั้งหนี้เจ้าหนี้ไม่มี PO อ้างอิง แยก module 'II' จาก Supplier Invoice โดยสมบูรณ์
+const II_H = [['transaction', 'Transaction'], ['invoiceNo', 'Reference'], ['invoiceDate', 'Invoice Date'],
+['postingDate', 'Posting Date'], ['vendorName', 'Supplier'], ['vendorTaxId', 'เลขทะเบียนนิติบุคคล'],
+['sapDocType', 'Document type'], ['currency', 'Currency']];
+const II_TOTALS_H = [['totalAmount', 'Amount'], ['vatAmount', 'Tax Amount'], ['whtAmount', 'Withholding Tax Amount FC']];
+const II_GROUPS = [
+  { title: 'Basic Data', fields: [['calculateTax', 'Calculate Tax'], ['taxCode', 'Tax Code'],
+    ['businessPlace', 'Business Place'], ['headerText', 'Text']] },
+  { title: 'Address and Bank Data', fields: [['language', 'Language'], ['vendorName2', 'Name2'],
+    ['vendorName3', 'Name3'], ['vendorName4', 'Name4'], ['addressStreet', 'Street'], ['addressCity', 'City'],
+    ['addressPostalCode', 'Postal Code'], ['addressCountry', 'Ctry/Reg.'], ['vendorEmail', 'E-Mail'],
+    ['bankCountry', 'Bank Ctry/Reg.'], ['bankKey', 'Bank Key'], ['bankAccountNo', 'Bank Account'],
+    ['taxNumber3', 'Tax Number 3']] },
+  { title: 'Payment', fields: [['baselineDate', 'Baseline Date'], ['paymentTerms', 'Payment Terms'],
+    ['paymentMethod', 'Payment Method'], ['paymentBlock', 'Payment Block'], ['partnerBank', 'Partner Bank'],
+    ['houseBank', 'House Bank'], ['bankAccountId', 'Account ID']] },
+  { title: 'Details', fields: [['assignmentText', 'Assignment'], ['refKey1', 'Ref. Key 1'],
+    ['refKey2', 'Ref. Key 2'], ['refKey3', 'Ref. Key 3']] },
+  { title: 'Withholding Tax', fields: [['whtCode', 'Withholding Tax Code'],
+    ['whtBaseAmount', 'Withholding Tax Base Amount FC']] },
+];
+// Purchase Order Down Payments — module แยกอีกอัน ฟิลด์เริ่มต้นแบบพื้นฐาน รอรายละเอียดฉบับเต็มจากผู้ใช้
+const PODP_H = [['docType', 'ประเภทเอกสาร'], ['invoiceNo', 'เลขที่เอกสาร'], ['invoiceDate', 'วันที่เอกสาร'],
+['postingDate', 'วันที่ผ่านรายการ'], ['vendorName', 'ผู้ขาย'], ['vendorTaxId', 'เลขทะเบียนนิติบุคคล'],
+['poRef', 'อ้างอิง PO'], ['currency', 'สกุลเงิน'], ['paymentTerms', 'เงื่อนไขชำระเงิน']];
+const PODP_TOTALS_H = [['totalAmount', 'จำนวนเงินมัดจำ']];
+// ฟิลด์ยอดเงิน — ย้ายมาแสดงเป็นการ์ดแยกด้านล่าง DETAIL (ใกล้รายการสินค้าที่รวมยอดมาจาก) พร้อม format เลข 0,000.##
+const AP_TOTALS_H = [['subTotal', 'มูลค่าก่อนภาษี'], ['vatRate', 'อัตราภาษี (%)'], ['vatAmount', 'ภาษีมูลค่าเพิ่ม'],
 ['whtAmount', 'ภาษีหัก ณ ที่จ่าย'], ['totalAmount', 'ยอดรวมสุทธิ']];
-// ฟิลด์เพิ่มเติมสำหรับเอกสารประเภท Trade (MIRO) เท่านั้น — ผู้ใช้กรอกเอง (ไม่ได้เดาจาก OCR)
-const AP_TRADE_H = [['taxCode', 'Tax Code (รหัสภาษีซื้อ)'], ['calculateTax', 'Calculate Tax'],
-['baselineDate', 'Baseline Date'], ['paymentMethod', 'Payment Method'], ['assignmentText', 'Assignment/Text']];
-// ฟิลด์เพิ่มเติมสำหรับเอกสารประเภท Non-Trade ไม่มี PO เท่านั้น — ผู้ใช้กรอกเอง (ไม่ได้เดาจาก OCR)
-// (Vendor/Invoice Date/Posting Date/Reference/Amount/Currency/Payment Terms/Withholding Tax ใช้ฟิลด์เดิมใน
-// HEADER อยู่แล้ว ไม่ต้องเพิ่มซ้ำ — taxCode/calculateTax/baselineDate/paymentMethod ใช้ key ร่วมกับ Trade)
-const AP_NONTRADE_NOPO_H = [['companyCode', 'Company Code'], ['taxCode', 'Tax Code'],
-['calculateTax', 'Calculate Tax'], ['baselineDate', 'Baseline Date'], ['paymentMethod', 'Payment Method'],
-['assignmentText', 'Assignment'], ['headerText', 'Header Text']];
-// ฟิลด์ระดับรายการสำหรับเอกสารประเภท Non-Trade มี PO (Service/Item) เท่านั้น — แยกกรอกทีละรายการใน DETAIL
+// ฟิลด์เพิ่มเติมสำหรับ Supplier Invoice / MIRO เต็มรูปแบบ — ใช้กับทุกประเภทเอกสาร AP (ผู้ใช้กรอกเอง ไม่ได้เดาจาก OCR)
+// จัดกลุ่มตามหน้าจอ MIRO จริง — Invoice Date/Reference/Posting Date/Amount/Currency/PO Reference อยู่ใน
+// HEADER หลักอยู่แล้ว (invoiceDate/invoiceNo/postingDate/totalAmount/currency/poRef/branch) ไม่ต้องเพิ่มซ้ำ
+const AP_TRADE_GROUPS = [
+  { title: 'Basic Data', fields: [['taxCode', 'Tax Code'], ['calculateTax', 'Calculate Tax'],
+    ['businessPlace', 'Business Place'], ['companyCode', 'Company Code'], ['headerText', 'Text']] },
+  { title: 'PO Reference', fields: [['refDocType', 'เอกสารอ้างอิง', 'select', [
+    ['', '— เลือก —'], ['1', '1. Goods/service item'], ['2', '2. Planned delivery costs'],
+    ['3', '3. Goods/service item + Planned delivery costs']]]] },
+  { title: 'Payment', fields: [['baselineDate', 'Baseline Date'], ['paymentMethod', 'Payment Method'],
+    ['paymentBlock', 'Payment Block'], ['partnerBank', 'Partner Bank'], ['houseBank', 'House Bank'],
+    ['bankAccountId', 'Account ID']] },
+  { title: 'Details', fields: [['assignmentText', 'Assignment'], ['unplannedDeliveryCost', 'Unplanned Delivery Costs']] },
+  { title: 'Tax', fields: [['taxDate', 'Tax Date'], ['taxReportingDate', 'Tax Reporting Date'],
+    ['taxFulfillDate', 'Tax Fulfill Date']] },
+  { title: 'Withholding Tax', fields: [['whtCode', 'Withholding Tax Code'],
+    ['whtBaseAmount', 'Withholding Tax Base Amount FC']] },
+];
+// ฟิลด์ระดับรายการ (Account Assignment/GL/Cost Center ฯลฯ) — ใช้กับทุกประเภทเอกสาร AP แยกกรอกทีละรายการใน DETAIL
 // (Short Text/Material, Quantity, Net Price ใช้ desc/qty/price ที่มีอยู่แล้ว ไม่ต้องเพิ่มซ้ำ)
 const PO_LINE_EXTRA_FIELDS = [
   ['accountAssignment', 'Account Assignment Category', 'select', [['', '— เลือก —'], ['K', 'K — Cost Center'], ['A', 'A — Asset'], ['P', 'P — Project']]],
@@ -245,19 +304,26 @@ const AA_GUIDE = {
 // data-mod กำกับอยู่แล้วว่าเป็นของโมดูลไหน กดแล้วสลับ S.module ให้อัตโนมัติ ไม่ต้องมีหน้า "เลือกโมดูล" คั่นกลาง
 document.querySelectorAll('#nav a').forEach(a => { a.onclick = e => { e.preventDefault(); go(a.dataset.page, a.dataset.mod); }; });
 function go(p, mod) {
-  if (mod) { S.module = mod; S.uploadApDocCategory = ''; S.inboxSearch = ''; S.inboxApDocCategory = ''; }
+  if (mod && mod !== S.module) {
+    // สลับโมดูลจากเมนู — ล้างเอกสารที่ค้างอยู่ (ถ้ามี) กันหน้าจอค้างแสดงเอกสารของโมดูลเก่าทับโมดูลใหม่
+    S.module = mod; S.uploadApDocCategory = ''; S.inboxSearch = ''; S.inboxApDocCategory = '';
+    S.inboxPage = 1; S.inboxDateFrom = ''; S.inboxDateTo = '';
+    S.doc = null; S.map = null; S.manual = { header: {}, lines: {} }; S.chatHistory = []; S.chatImage = null;
+  } else if (mod) {
+    S.module = mod; S.uploadApDocCategory = ''; S.inboxSearch = ''; S.inboxApDocCategory = '';
+  }
   S.page = p;
   document.querySelectorAll('#nav a').forEach(a =>
     a.classList.toggle('active', a.dataset.page === p && (!a.dataset.mod || a.dataset.mod === S.module)));
-  $('#pageTitle').textContent = { home: 'ภาพรวมเอกสารในระบบ', work: 'นำเข้าเอกสาร / OCR', inbox: 'ทะเบียนเอกสาร', master: 'Master Mapping', log: 'ประวัติส่ง SAP' }[p];
+  $('#pageTitle').textContent = { home: 'Overview', work: 'นำเข้าเอกสาร / OCR', inbox: inboxTitle(S.module), master: 'Master Mapping', log: 'ประวัติส่ง SAP', auditlog: 'Log' }[p];
   render();
 }
 function render() {
   const t = $('#modTag');
   const showMod = S.module && (S.page === 'work' || S.page === 'inbox');
-  if (showMod) { t.style.display = 'inline-flex'; t.innerHTML = S.module === 'AP' ? '&#9632; Module: AP Invoice' : '&#9632; Module: Sales Order'; }
+  if (showMod) { t.style.display = 'inline-flex'; t.innerHTML = '&#9632; Module: ' + moduleLabel(S.module); }
   else t.style.display = 'none';
-  ({ home: renderHome, work: renderWork, inbox: renderInbox, master: renderMaster, log: renderLog })[S.page]();
+  ({ home: renderHome, work: renderWork, inbox: renderInbox, master: renderMaster, log: renderLog, auditlog: renderAuditLog })[S.page]();
 }
 function stepsHtml(cur) {
   const st = [['นำเข้า &amp; อ่านเอกสาร', 'OCR → Header / Detail'],
@@ -270,38 +336,251 @@ function stepsHtml(cur) {
 
 /* ---------------------------------------------------------------- HOME */
 // หน้าภาพรวม — ไม่ต้องเลือกโมดูลก่อนอีกต่อไป Process ของแต่ละโมดูลแยกเข้าถึงตรงจากเมนูซ้าย
-// (กลุ่ม "AP INVOICE" / "SALES ORDER") หน้านี้เหลือแค่สรุปสถิติเอกสารรวมทุกโมดูล
 async function renderHome() {
   $('#content').innerHTML = '<div class="card"><div class="card-b"><div class="empty">กำลังโหลด…</div></div></div>';
   try {
-    const d = await API.get('/api/dashboard');
-    const cnt = k => d.byStatus.filter(x => x.Status === k).reduce((a, b) => a + b.Cnt, 0);
+    const days = S.dashDays || 7;
+    const d = await API.get('/api/dashboard?days=' + days);
+    const sc = d.statusCounts, tr = d.trend;
+    const pendingReview = sc.NEW || 0, mappingFailed = sc.INCOMPLETE || 0, readyToSend = sc.MAPPED || 0,
+          sentOk = sc.POSTED || 0, total = sc.total || 0;
+
+    const tiles = [
+      ['&#128196;', 'var(--info-bg)', 'var(--info)', 'เอกสารทั้งหมด', total, tr.total],
+      ['&#8987;', 'var(--orange-bg)', 'var(--orange)', 'รอตรวจสอบ', pendingReview, tr.NEW],
+      ['&#10060;', 'var(--red-bg)', 'var(--red)', 'Mapping ไม่ผ่าน', mappingFailed, tr.INCOMPLETE],
+      ['&#128228;', 'var(--info-bg)', 'var(--info)', 'พร้อมส่ง SAP', readyToSend, tr.MAPPED],
+      ['&#9989;', 'var(--green-bg)', 'var(--green)', 'ส่ง SAP สำเร็จ', sentOk, tr.POSTED],
+    ].map(([icon, bg, fg, label, val, pct]) => statTile(icon, bg, fg, label, val, pct)).join('');
+
+    const dayOpts = [7, 15, 30].map(n => `<option value="${n}" ${n === days ? 'selected' : ''}>${n} วัน</option>`).join('');
+    const daySelect = `<select onchange="S.dashDays=parseInt(this.value);renderHome()" style="width:auto">${dayOpts}</select>`;
+
+    const statusDonutSegs = [
+      { label: 'สำเร็จ', value: sentOk, color: 'var(--green)' },
+      { label: 'รอตรวจสอบ', value: pendingReview + mappingFailed, color: 'var(--orange)' },
+      { label: 'พร้อมส่ง', value: readyToSend, color: 'var(--info)' },
+    ].filter(s => s.value > 0);
+    const donutTotal = statusDonutSegs.reduce((a, s) => a + s.value, 0) || 1;
+    statusDonutSegs.forEach(s => s.pct = Math.round(s.value / donutTotal * 100));
+
+    const byModuleData = d.byModule.map(m => ({ label: moduleLabel(m.module), value: m.count }));
+
+    const tasks = [
+      ['&#128203;', 'ตรวจสอบข้อมูล OCR', 'เอกสารรอตรวจสอบ', pendingReview],
+      ['&#9881;', 'แก้ไข Master Mapping', 'รายการที่ต้องแก้ไข', mappingFailed],
+      ['&#9729;', 'ส่งข้อมูลไป SAP', 'เอกสารพร้อมส่ง', readyToSend],
+    ];
+
     $('#content').innerHTML = `
-    <div class="card"><div class="card-h"><h2>ภาพรวมเอกสารในระบบ</h2><div class="sp"></div>
+    <div class="tiles" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:16px;margin-bottom:20px">${tiles}</div>
+
+    <div style="display:grid;grid-template-columns:1.6fr 1fr;gap:20px;align-items:start" class="dash-row">
+      <div class="card" style="margin-bottom:0"><div class="card-h"><h2>ปริมาณเอกสารและความสำเร็จ OCR</h2><div class="sp"></div>${daySelect}</div>
+        <div class="card-b">
+          <div class="row" style="gap:18px;margin-bottom:8px;font-size:13px">
+            <span><span style="display:inline-block;width:14px;height:3px;background:var(--brand);vertical-align:middle;margin-right:6px"></span>เอกสาร</span>
+            <span><span style="display:inline-block;width:14px;height:0;border-top:3px dashed var(--info);vertical-align:middle;margin-right:6px"></span>OCR สำเร็จ</span>
+          </div>
+          ${lineChart2(d.ocrDaily, [{ key: 'docCount', label: 'เอกสาร', color: 'var(--brand)' },
+                                    { key: 'okCount', label: 'OCR สำเร็จ', color: 'var(--info)', dash: true }])}
+        </div></div>
+      <div class="card" style="margin-bottom:0"><div class="card-h"><h2>สถานะเอกสาร</h2></div>
+        <div class="card-b">
+          ${donutChart(statusDonutSegs, num(total).toLocaleString('en-US'), 'รวมทั้งหมด เอกสาร')}
+          <div style="margin-top:14px">${statusDonutSegs.map(s => `<div class="row" style="justify-content:space-between;margin-bottom:8px">
+              <span><span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${s.color};margin-right:8px"></span>${esc(s.label)}</span>
+              <span class="hint">${s.pct}% &middot; ${num(s.value).toLocaleString('en-US')} เอกสาร</span></div>`).join('')}</div>
+        </div></div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:20px;align-items:start;margin-top:20px" class="dash-row">
+      <div class="card" style="margin-bottom:0"><div class="card-h"><h2>เอกสารตามประเภท</h2><div class="sp"></div>${daySelect}</div>
+        <div class="card-b">${byModuleData.length ? hBarChart(byModuleData) : '<div class="empty">ยังไม่มีข้อมูล</div>'}
+          <p class="sec-title" style="margin-top:20px">ค่าใช้จ่าย OCR แต่ละ Module</p>
+          ${costByModuleTable(d.costByModule)}
+        </div></div>
+      <div class="card" style="margin-bottom:0"><div class="card-h"><h2>ประสิทธิภาพ OCR</h2></div>
+        <div class="card-b">
+          ${radialGauge(d.ocrPerf.avgConfidencePct ?? 0, 'ความแม่นยำ OCR')}
+          <div style="margin-top:16px;display:flex;flex-direction:column;gap:12px">
+            <div class="row" style="gap:10px"><span>&#9201;</span><div><div class="hint">เฉลี่ยต่อเอกสาร</div>
+              <b>${d.ocrPerf.avgDurationSec != null ? d.ocrPerf.avgDurationSec + ' วินาที' : '—'}</b></div></div>
+            <div class="row" style="gap:10px"><span>&#128100;</span><div><div class="hint">แก้ไขโดยผู้ใช้</div>
+              <b>${d.ocrPerf.pctEditedByUser}%</b></div></div>
+            <div class="row" style="gap:10px"><span>&#128203;</span><div><div class="hint">Token วันนี้</div>
+              <b>${num(d.ocrPerf.tokensToday).toLocaleString('en-US')}</b></div></div>
+          </div>
+        </div></div>
+      <div class="card" style="margin-bottom:0"><div class="card-h"><h2>งานที่ต้องดำเนินการ</h2></div>
+        <div class="card-b">
+          ${tasks.map(([icon, title, sub, n]) => `<div class="row" style="justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--line);cursor:pointer" onclick="viewAllInbox()">
+              <div class="row" style="gap:10px"><span style="font-size:18px">${icon}</span>
+                <div><div style="font-weight:600">${title}</div><div class="hint">${sub}</div></div></div>
+              <div class="row" style="gap:8px"><span class="badge b-warn">${n}</span><span class="hint">&rsaquo;</span></div>
+            </div>`).join('')}
+          <div style="text-align:right;margin-top:10px"><a href="#" onclick="event.preventDefault();viewAllInbox()">ดูงานทั้งหมด &rarr;</a></div>
+        </div></div>
+    </div>
+
+    <div class="card" style="margin-top:20px"><div class="card-h"><h2>รายการล่าสุด</h2><div class="sp"></div>
       <button class="btn sm" onclick="viewAllInbox()">ดูทั้งหมด &rarr;</button></div>
-    <div class="card-b">
-      <div class="modules" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px">
-        ${[['NEW', 'รออ่าน/แก้ไข'], ['INCOMPLETE', 'Mapping ไม่ผ่าน'], ['MAPPED', 'พร้อมส่ง SAP'], ['POSTED', 'ส่ง SAP แล้ว']]
-        .map(([k, l]) => `<div class="mod" style="cursor:default;padding:16px"><div class="hint">${l}</div>
-             <div style="font-size:30px;font-weight:600;line-height:40px">${cnt(k)}</div></div>`).join('')}
-      </div>
-      <div class="tw"><table><thead><tr><th>#</th><th>Module</th><th>เลขที่เอกสาร</th><th>คู่ค้า</th>
-        <th style="text-align:right">ยอดรวม</th><th>สถานะ</th><th>SAP Doc</th><th>เวลา</th></tr></thead><tbody>
-        ${d.recent.map(r => `<tr onclick="openDoc(${r.DocId})" style="cursor:pointer">
-          <td>${r.DocId}</td><td><span class="badge ${r.Module === 'AP' ? 'b-warn' : 'b-ok'}">${r.Module}</span></td>
-          <td>${esc(r.DocNo || r.FileName)}</td><td>${esc(r.PartnerName || '')}</td>
-          <td style="text-align:right">${fmt(r.TotalAmount)}</td><td>${statusBadge(r.Status)}</td>
-          <td>${esc(r.SapDocNo || '')}</td><td class="hint">${dt(r.CreatedAt)}</td></tr>`).join('')
-        || '<tr><td colspan="8" class="empty">ยังไม่มีเอกสาร</td></tr>'}
-      </tbody></table></div>
-    </div></div>`;
+    <div class="card-b"><div class="tw"><table>
+      <thead><tr><th>เลขที่เอกสาร</th><th>ประเภท</th><th>คู่ค้า</th><th>สถานะ</th><th>อัปเดตล่าสุด</th><th>ผู้ดำเนินการ</th><th></th></tr></thead>
+      <tbody>${d.recent.map(r => `<tr>
+          <td><b>${esc(r.DocNo || r.FileName || ('#' + r.DocId))}</b></td>
+          <td>${esc(moduleLabel(r.Module))}</td>
+          <td>${esc(r.PartnerName || '')}</td>
+          <td>${statusBadge(r.Status)}</td>
+          <td class="hint">${dt(r.UpdatedAt || r.CreatedAt)}</td>
+          <td>${esc(r.PostedBy || r.CreatedBy || '')}</td>
+          <td><button class="btn sm" onclick="openDoc(${r.DocId})">เปิด</button></td></tr>`).join('')
+        || '<tr><td colspan="7" class="empty">ยังไม่มีเอกสารในระบบ</td></tr>'}
+      </tbody></table></div></div></div>`;
   } catch (e) { $('#content').innerHTML = '<div class="card"><div class="card-b"><div class="empty">โหลดภาพรวมไม่สำเร็จ</div></div></div>'; }
 }
+function statTile(icon, bg, fg, label, val, pct) {
+  const up = (pct || 0) >= 0;
+  return `<div class="card" style="margin-bottom:0"><div class="card-b" style="padding:18px">
+      <div style="width:38px;height:38px;border-radius:var(--r3);background:${bg};color:${fg};
+           display:flex;align-items:center;justify-content:center;font-size:16px;margin-bottom:12px">${icon}</div>
+      <div class="hint" style="margin-bottom:2px">${esc(label)}</div>
+      <div style="font-size:26px;font-weight:700;line-height:34px;margin-bottom:6px">${num(val).toLocaleString('en-US')}</div>
+      <div style="font-size:12px;color:${up ? 'var(--green)' : 'var(--red)'}">${up ? '&#9650;' : '&#9660;'} ${Math.abs(pct || 0)}% จากสัปดาห์ที่แล้ว</div>
+    </div></div>`;
+}
+/* กราฟเส้น 2 เส้น (เอกสาร / OCR สำเร็จ) — ไม่พึ่ง library ภายนอก ใช้ CSS var ให้เข้ากับธีมสว่าง/มืดอัตโนมัติ */
+function lineChart2(data, series) {
+  const w = 960, h = 220, padL = 6, padR = 10, padB = 22, padT = 14;
+  const n = data.length || 1;
+  const allVals = data.flatMap(row => series.map(s => num(row[s.key])));
+  const max = Math.max(...allVals, 1);
+  const slot = n > 1 ? (w - padL - padR) / (n - 1) : 0;
+  const X = i => padL + i * slot;
+  const Y = v => h - padB - (v / max) * (h - padT - padB);
+  const grid = [0, .25, .5, .75, 1].map(f => {
+    const y = (padT + f * (h - padT - padB)).toFixed(1);
+    return `<line x1="${padL}" y1="${y}" x2="${w - padR}" y2="${y}" stroke="var(--line)" stroke-width="1"/>`;
+  }).join('');
+  const lines = series.map(s => {
+    const pts = data.map((row, i) => `${X(i).toFixed(1)},${Y(num(row[s.key])).toFixed(1)}`).join(' ');
+    const dots = data.map((row, i) => `<circle cx="${X(i).toFixed(1)}" cy="${Y(num(row[s.key])).toFixed(1)}" r="3" fill="${s.color}">
+        <title>${esc(row.date)} — ${esc(s.label)}: ${num(row[s.key]).toLocaleString('en-US')}</title></circle>`).join('');
+    return `<polyline points="${pts}" fill="none" stroke="${s.color}" stroke-width="2.5" ${s.dash ? 'stroke-dasharray="6 4"' : ''}/>${dots}`;
+  }).join('');
+  const labelEvery = Math.max(1, Math.ceil(n / 8));
+  const labels = data.map((row, i) => i % labelEvery !== 0 ? '' : `<text x="${X(i).toFixed(1)}" y="${h - 4}"
+      font-size="10" fill="var(--muted)" text-anchor="middle">${esc((row.date || '').slice(5))}</text>`).join('');
+  return `<svg viewBox="0 0 ${w} ${h}" style="width:100%;height:220px;display:block">${grid}${lines}${labels}</svg>`;
+}
+/* กราฟแท่งแนวนอน (เอกสารตามประเภท) */
+function hBarChart(data) {
+  const max = Math.max(...data.map(x => x.value), 1);
+  return `<div style="display:flex;flex-direction:column;gap:16px">${data.map(x => {
+    const pct = Math.max(4, x.value / max * 100);
+    return `<div class="row" style="gap:10px">
+      <div style="width:120px;flex-shrink:0;font-size:13px">${esc(x.label)}</div>
+      <div style="flex:1;background:var(--line-soft);border-radius:var(--pill);height:18px">
+        <div style="width:${pct.toFixed(1)}%;background:var(--brand);height:100%;border-radius:var(--pill)"></div>
+      </div>
+      <div style="width:50px;text-align:right;font-weight:600;font-size:13px">${num(x.value).toLocaleString('en-US')}</div>
+    </div>`;
+  }).join('')}</div>`;
+}
+/* ตารางค่าใช้จ่าย OCR แยกตาม Module — คู่กับกราฟ "เอกสารตามประเภท" ด้านบน (ช่วงวันเดียวกัน) */
+function costByModuleTable(rows) {
+  if (!rows || !rows.length) return '<div class="empty">ยังไม่มีข้อมูล</div>';
+  const totalCost = rows.reduce((a, r) => a + num(r.cost), 0);
+  const currency = rows.find(r => r.costCurrency)?.costCurrency || 'USD';
+  return `<div class="tw"><table>
+    <thead><tr><th>Module</th><th style="text-align:right">เอกสาร</th><th style="text-align:right">Token</th><th style="text-align:right">ค่าใช้จ่าย</th></tr></thead>
+    <tbody>${rows.map(r => `<tr>
+        <td><span class="badge ${r.module === 'AP' ? 'b-warn' : r.module === 'II' ? 'b-idle' : 'b-ok'}">${esc(moduleLabel(r.module))}</span></td>
+        <td style="text-align:right">${num(r.count).toLocaleString('en-US')}</td>
+        <td style="text-align:right">${num(r.tokens).toLocaleString('en-US')}</td>
+        <td style="text-align:right">${fmtCost(r.cost)} ${esc(r.costCurrency || '')}</td></tr>`).join('')}
+    </tbody>
+    <tfoot><tr class="totrow"><td>รวม</td><td></td><td></td>
+        <td style="text-align:right">${fmtCost(totalCost)} ${esc(currency)}</td></tr></tfoot>
+    </table></div>`;
+}
+/* โดนัทหลายสี (สถานะเอกสาร) — วาดด้วย stroke-dasharray ต่อเนื่องกันเป็นวง */
+function donutChart(segments, centerValue, centerLabel) {
+  const size = 180, r = 68, cx = size / 2, cy = size / 2, sw = 22;
+  const circ = 2 * Math.PI * r;
+  let offset = 0;
+  const arcs = segments.map(s => {
+    const len = s.pct / 100 * circ;
+    const rotate = offset / circ * 360 - 90;
+    offset += len;
+    return `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${s.color}" stroke-width="${sw}"
+        stroke-dasharray="${len.toFixed(2)} ${(circ - len).toFixed(2)}"
+        transform="rotate(${rotate.toFixed(2)} ${cx} ${cy})"><title>${esc(s.label)}: ${s.pct}%</title></circle>`;
+  }).join('');
+  return `<svg viewBox="0 0 ${size} ${size}" style="width:180px;height:180px;display:block;margin:0 auto">
+      <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="var(--line)" stroke-width="${sw}"/>${arcs}
+      <text x="${cx}" y="${cy - 4}" text-anchor="middle" font-size="22" font-weight="700" fill="var(--text)">${esc(centerValue)}</text>
+      <text x="${cx}" y="${cy + 16}" text-anchor="middle" font-size="11" fill="var(--muted)">${esc(centerLabel)}</text>
+    </svg>`;
+}
+/* วงแหวนแสดงค่าเดียว (ความแม่นยำ OCR) */
+function radialGauge(pct, label) {
+  const size = 150, r = 60, cx = size / 2, cy = size / 2, sw = 15;
+  const circ = 2 * Math.PI * r;
+  const len = Math.max(0, Math.min(100, pct)) / 100 * circ;
+  return `<svg viewBox="0 0 ${size} ${size}" style="width:150px;height:150px;display:block;margin:0 auto">
+      <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="var(--line)" stroke-width="${sw}"/>
+      <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="var(--brand)" stroke-width="${sw}" stroke-linecap="round"
+          stroke-dasharray="${len.toFixed(2)} ${(circ - len).toFixed(2)}" transform="rotate(-90 ${cx} ${cy})"/>
+      <text x="${cx}" y="${cy - 2}" text-anchor="middle" font-size="24" font-weight="700" fill="var(--text)">${pct}%</text>
+      <text x="${cx}" y="${cy + 18}" text-anchor="middle" font-size="10" fill="var(--muted)">${esc(label)}</text>
+    </svg>`;
+}
 function statusBadge(s) {
-  const m = { NEW: ['b-idle', 'รอ Mapping'], INCOMPLETE: ['b-fail', 'Mapping ไม่ผ่าน'], MAPPED: ['b-ok', 'พร้อมส่ง SAP'], POSTED: ['b-ok', 'ส่ง SAP แล้ว'] }[s] || ['b-idle', s];
+  const m = { NEW: ['b-idle', 'Pending Mapping'], INCOMPLETE: ['b-fail', 'Mapping Incomplete'], MAPPED: ['b-ok', 'Pending SAP Connection'], POSTED: ['b-ok', 'SAP Connected Successfully'], SPLIT: ['b-warn', 'แยกเป็นหลาย SO แล้ว'] }[s] || ['b-idle', s];
   return `<span class="badge ${m[0]}">${m[1]}</span>`;
 }
-function viewAllInbox() { S.module = null; go('inbox'); }
+function viewAllInbox() { S.module = null; S.inboxPage = 1; S.inboxDateFrom = ''; S.inboxDateTo = ''; go('inbox'); }
+
+/* ---------------------------------------------------------------- pagination (ใช้ร่วมกันทุกหน้า List) */
+// ตัดหน้าฝั่ง client จาก list ที่กรอง/ค้นหามาแล้ว — คืนแค่แถวของหน้าปัจจุบัน + ข้อมูลไว้วาด pager
+function paginate(list, pageKey, sizeKey) {
+  const pageSize = S[sizeKey] || 50;
+  const totalPages = Math.max(1, Math.ceil(list.length / pageSize));
+  S[pageKey] = Math.min(Math.max(1, S[pageKey] || 1), totalPages);
+  const start = (S[pageKey] - 1) * pageSize;
+  return { pageRows: list.slice(start, start + pageSize), totalPages, pageSize, total: list.length };
+}
+function pagerHtml(pageKey, sizeKey, totalPages, total, pageSize, rerenderFn) {
+  const page = S[pageKey];
+  return `<div class="row" style="justify-content:space-between;align-items:center;margin-top:12px;flex-wrap:wrap;gap:10px">
+    <div class="row" style="gap:6px;align-items:center">
+      <span class="hint">แสดง</span>
+      <select onchange="S.${sizeKey}=parseInt(this.value);S.${pageKey}=1;${rerenderFn}()">
+        ${[10, 50, 100].map(n => `<option value="${n}" ${n === pageSize ? 'selected' : ''}>${n}</option>`).join('')}
+      </select>
+      <span class="hint">รายการ/หน้า &middot; ทั้งหมด ${total} รายการ</span>
+    </div>
+    <div class="row" style="gap:6px;align-items:center">
+      <button class="btn sm ghost" onclick="S.${pageKey}=Math.max(1,S.${pageKey}-1);${rerenderFn}()" ${page <= 1 ? 'disabled' : ''}>&lsaquo; ก่อนหน้า</button>
+      <span class="hint">หน้า ${page} / ${totalPages}</span>
+      <button class="btn sm ghost" onclick="S.${pageKey}=Math.min(${totalPages},S.${pageKey}+1);${rerenderFn}()" ${page >= totalPages ? 'disabled' : ''}>ถัดไป &rsaquo;</button>
+    </div>
+  </div>`;
+}
+// ช่วงวันที่ (from/to แบบ YYYY-MM-DD) — เทียบกับ field ที่เป็น date หรือ datetime string ก็ได้ (ตัดมาแค่ 10 ตัวแรก)
+function dateRangeHtml(fromKey, toKey, onchangeFn) {
+  return `<input type="date" value="${esc(S[fromKey] || '')}" onchange="S.${fromKey}=this.value;${onchangeFn}()" title="วันที่เริ่มต้น">
+    <span class="hint">ถึง</span>
+    <input type="date" value="${esc(S[toKey] || '')}" onchange="S.${toKey}=this.value;${onchangeFn}()" title="วันที่สิ้นสุด">
+    ${S[fromKey] || S[toKey] ? `<button class="btn sm ghost" onclick="S.${fromKey}='';S.${toKey}='';${onchangeFn}()" title="ล้างช่วงวันที่">&#10005;</button>` : ''}`;
+}
+function inDateRange(dateStr, fromKey, toKey) {
+  const d = String(dateStr || '').slice(0, 10);
+  if (S[fromKey] && (!d || d < S[fromKey])) return false;
+  if (S[toKey] && (!d || d > S[toKey])) return false;
+  return true;
+}
 
 /* ---------------------------------------------------------------- WORK */
 async function renderWork() {
@@ -310,13 +589,7 @@ async function renderWork() {
 }
 
 async function uploadHtml() {
-  let list = '';
   const needCategory = S.module === 'AP' && !S.uploadApDocCategory;
-  try {
-    const s = await API.get('/api/samples/' + S.module);
-    list = s.map(x => `<tr><td><b>${esc(x.name)}</b></td><td>${esc(x.label)}</td><td>${Math.round(x.confidence * 100)}%</td>
-      <td style="text-align:right"><button class="btn sm primary" ${needCategory ? 'disabled' : ''} onclick="useSample(${x.index})">อ่านเอกสาร</button></td></tr>`).join('');
-  } catch (e) { }
   const providers = await ocrProviders();
   const active = providers.find(p => p.id === S.ocrProvider) || providers[0];
   if (S.module === 'AP') await apDocCategories();
@@ -344,13 +617,10 @@ async function uploadHtml() {
       <div style="margin:12px 0 4px;font-weight:600">ลากไฟล์มาวางที่นี่ หรือ</div>
       <input type="file" id="fileIn" accept=".pdf,.jpg,.jpeg,.png,.tif,.tiff" hidden>
       <button class="btn primary" onclick="document.getElementById('fileIn').click()">เลือกไฟล์เอกสาร</button>
-      <div class="hint" style="margin-top:12px">โมดูลปัจจุบัน: <b>${S.module === 'AP' ? 'AP Invoice (ใบแจ้งหนี้ผู้ขาย)' : 'Sales Order (ใบสั่งซื้อลูกค้า)'}</b></div>
+      <div class="hint" style="margin-top:12px">โมดูลปัจจุบัน: <b>${esc(moduleLabel(S.module))}</b></div>
       <div id="prog" style="display:none;max-width:440px;margin:18px auto 0">
         <div id="progText" class="hint"></div><div class="bar"><i id="progBar"></i></div></div>
     </div>
-    <p class="hint" style="margin:18px 0 10px">หรือเลือกเอกสารตัวอย่างเพื่อทดสอบขั้นตอนทั้งหมด:</p>
-    <div class="tw"><table style="min-width:600px"><thead><tr><th>ไฟล์</th><th>ลักษณะเอกสาร</th><th>ความมั่นใจ</th><th></th></tr></thead>
-      <tbody>${list}</tbody></table></div>
   </div></div>`;
 }
 
@@ -375,6 +645,20 @@ function progress(on, text, pct) {
   if ($('#progBar')) $('#progBar').style.width = (pct || 0) + '%';
 }
 
+/* ห้ามใช้ engine อื่นมาแทนแบบเงียบ ๆ เมื่ออ่านเอกสารไม่สำเร็จ — ต้อง popup แจ้งเตือนชัดเจน แล้วให้ผู้ใช้
+   แนบภาพเอกสารไปที่แชท AI (ด้านล่างของหน้าเอกสาร) เพื่อให้อ่านให้แทน */
+function showReadFailedPopup(doc) {
+  openModal(`<div class="card-h"><h2>&#9888; อ่านเอกสารไม่สำเร็จ</h2>
+      <div class="sp"></div><button class="btn sm" onclick="closeModal()">&#10005;</button></div>
+    <div class="card-b">
+      <p class="hint">${esc(doc.ocrNote || 'ระบบอ่านข้อมูลจากไฟล์นี้ไม่สำเร็จ')}</p>
+      <p>กรุณาแนบภาพเอกสารในกล่องแชท AI ด้านล่าง แล้วพิมพ์บอกข้อมูลที่ต้องการให้ AI ช่วยกรอกให้แทน</p>
+      <div class="row" style="margin-top:16px;justify-content:flex-end">
+        <button class="btn primary" onclick="focusChatAttach()">&#128206; ไปที่แชท AI</button>
+      </div>
+    </div>`);
+}
+
 async function uploadFile(file) {
   if (S.module === 'AP' && !S.uploadApDocCategory) { toast('&#9888; กรุณาเลือกประเภทเอกสารก่อน'); return; }
   const fd = new FormData();
@@ -388,8 +672,8 @@ async function uploadFile(file) {
     S.doc = doc; S.map = null; S.manual = { header: {}, lines: {} }; S.chatImage = null;
     await loadChatHistory(doc.docId);
     render();
-    toast(doc.ocrNote ? '&#9888; ' + esc(doc.ocrNote)
-      : '&#10003; อ่านเอกสารสำเร็จ (' + doc.provider + ') — พบ ' + doc.lines.length + ' รายการ', 5000);
+    if (doc.provider === 'failed') showReadFailedPopup(doc);
+    else toast('&#10003; อ่านเอกสารสำเร็จ (' + doc.provider + ') — พบ ' + doc.lines.length + ' รายการ', 5000);
   }).catch(() => progress(false));
 }
 
@@ -409,21 +693,19 @@ async function reOcr(btn) {
   const label = btn ? btn.innerHTML : '';
   if (btn) { btn.disabled = true; btn.innerHTML = '<span class="hg" style="display:inline-block">&#8987;</span> กำลังอ่านเอกสาร…'; }
   await guard(async () => {
-    const doc = await API.post('/api/documents/' + S.doc.docId + '/reocr', { ocr: engine });
+    const doc = await API.post('/api/documents/' + S.doc.docId + '/reocr', { ocr: engine, user: S.user });
     S.doc = doc; S.map = null; S.manual = { header: {}, lines: {} }; S.chatImage = null;
     // ไม่ล้างประวัติแชท — อ่านเอกสารใหม่ไม่ได้ลบ doc_id จึงยังอยู่บันทึกไว้ที่ server เหมือนเดิม
     await renderWork();
-    const failed = doc.ocrNote && doc.provider === 'demo';
-    openModal(`<div class="card-h"><h2>${failed ? '&#9888; อ่านเอกสารไม่สำเร็จ' : '&#10003; อ่านเอกสารใหม่เสร็จแล้ว'}</h2>
+    if (doc.provider === 'failed') { showReadFailedPopup(doc); return; }
+    openModal(`<div class="card-h"><h2>&#10003; อ่านเอกสารใหม่เสร็จแล้ว</h2>
         <div class="sp"></div><button class="btn sm" onclick="closeModal()">&#10005;</button></div>
       <div class="card-b">
-        ${failed
-          ? `<p class="hint">${esc(doc.ocrNote)}</p>`
-          : `<p>Engine: <b>${esc(doc.provider || '')}</b> &nbsp;·&nbsp; ความมั่นใจ: <b>${Math.round((doc.confidence || 0) * 100)}%</b></p>
-             <p>พบรายการ Item Detail: <b>${doc.lines.length}</b> รายการ</p>
-             ${doc.tokensIn != null ? `<p>Token ที่ใช้: <b>${num(doc.tokensIn).toLocaleString('en-US')}</b> input / <b>${num(doc.tokensOut).toLocaleString('en-US')}</b> output
-               ${doc.cost != null ? ` &nbsp;·&nbsp; ค่าใช้จ่ายโดยประมาณ: <b>${fmtCost(doc.costIn)}</b> input + <b>${fmtCost(doc.costOut)}</b> output = <b>${fmtCost(doc.cost)} ${esc(doc.costCurrency || '')}</b>` : ''}</p>` : ''}
-             ${doc.confidenceNote ? `<p class="hint">&#9888; ${esc(doc.confidenceNote)}</p>` : ''}`}
+        <p>Engine: <b>${esc(doc.provider || '')}</b> &nbsp;·&nbsp; ความมั่นใจ: <b>${Math.round((doc.confidence || 0) * 100)}%</b></p>
+        <p>พบรายการ Item Detail: <b>${doc.lines.length}</b> รายการ</p>
+        ${doc.tokensIn != null ? `<p>Token ที่ใช้: <b>${num(doc.tokensIn).toLocaleString('en-US')}</b> input / <b>${num(doc.tokensOut).toLocaleString('en-US')}</b> output
+          ${doc.cost != null ? ` &nbsp;·&nbsp; ค่าใช้จ่ายโดยประมาณ: <b>${fmtCost(doc.costIn)}</b> input + <b>${fmtCost(doc.costOut)}</b> output = <b>${fmtCost(doc.cost)} ${esc(doc.costCurrency || '')}</b>` : ''}</p>` : ''}
+        ${doc.confidenceNote ? `<p class="hint">&#9888; ${esc(doc.confidenceNote)}</p>` : ''}
         <div class="row" style="margin-top:16px;justify-content:flex-end">
           <button class="btn primary" onclick="closeModal()">ตกลง</button>
         </div>
@@ -472,20 +754,60 @@ async function docHtml() {
   const d = S.doc, h = d.header, mp = S.map, md = await masters();
   const providers = await ocrProviders();
   if (d.module === 'AP') await apDocCategories();
-  const def = d.module === 'SO' ? SO_H : AP_H;
+  const def = d.module === 'SO' ? SO_H : d.module === 'II' ? II_H : d.module === 'PODP' ? PODP_H : AP_H;
   const posted = d.status === 'POSTED';
+  const isSplit = d.status === 'SPLIT';
+  const canSplit = d.module === 'SO' && d.lines.length > 1 && !posted && !isSplit && !d.sourceDocId;
 
-  const headerFieldGrid = list => list.map(f => `<div class="f"><label>${f[1]}</label>
-      <input type="text" value="${esc(h[f[0]] == null ? '' : h[f[0]])}" ${posted ? 'readonly' : ''}
+  const headerFieldGrid = list => list.map(([k, label, type, opts]) => `<div class="f"><label>${esc(label)}</label>
+      ${type === 'select'
+        ? `<select ${posted ? 'disabled' : ''} onchange="editHeader('${k}',this.value)">
+             ${opts.map(([v, t]) => `<option value="${esc(v)}" ${v === (h[k] || '') ? 'selected' : ''}>${esc(t)}</option>`).join('')}
+           </select>`
+        : `<input type="text" value="${esc(h[k] == null ? '' : h[k])}" ${posted ? 'readonly' : ''}
+             oninput="editHeader('${k}',this.value)">`}
+    </div>`).join('');
+  // แสดงเป็น Tab แยกตามกลุ่ม เหมือนหน้าจอ MIRO/Incoming Invoices จริง — ใช้ helper เดียวกัน คนละชุด field ตาม module
+  const tabbedGroupsHtml = (groups, tabStateKey) => {
+    const active = groups.find(g => g.title === S[tabStateKey]) || groups[0];
+    const tabsHtml = groups.map(g =>
+      `<button class="${g.title === active.title ? 'on' : ''}" onclick="S.${tabStateKey}='${g.title}';renderWork()">${esc(g.title)}</button>`).join('');
+    return `<div class="tabs">${tabsHtml}</div><div class="card-b"><div class="grid">${headerFieldGrid(active.fields)}</div></div>`;
+  };
+  const tradeGroupsHtml = d.module === 'AP' ? tabbedGroupsHtml(AP_TRADE_GROUPS, 'miroTab') : '';
+  const iiGroupsHtml = d.module === 'II' ? tabbedGroupsHtml(II_GROUPS, 'iiTab') : '';
+  // ฟิลด์ยอดเงิน (subTotal/vatRate/vatAmount/whtAmount/totalAmount) — format 0,000.## (คั่นหลักพัน ไม่บังคับทศนิยม)
+  // สลับ raw/format ตอน focus/blur เหมือนช่องตัวเลขใน DETAIL
+  const totalsFieldGrid = list => list.map(f => `<div class="f"><label>${f[1]}</label>
+      <input type="text" value="${fmtAmt(h[f[0]])}" ${posted ? 'readonly' : ''}
+             onfocus="this.value=num(this.value)" onblur="this.value=fmtAmt(this.value)"
              oninput="editHeader('${f[0]}',this.value)"></div>`).join('');
   const fields = headerFieldGrid(def);
-  const tradeFields = (d.module === 'AP' && d.apDocCategory === 'TRADE') ? headerFieldGrid(AP_TRADE_H) : '';
-  const nonTradeNoPoFields = (d.module === 'AP' && d.apDocCategory === 'NONTRADE_NOPO') ? headerFieldGrid(AP_NONTRADE_NOPO_H) : '';
+  const totalsFields = d.module === 'AP' ? totalsFieldGrid(AP_TOTALS_H) : d.module === 'II' ? totalsFieldGrid(II_TOTALS_H)
+    : d.module === 'PODP' ? totalsFieldGrid(PODP_TOTALS_H) : '';
+  const glItems = h.glItems || [];
+  const showGlItems = d.module === 'AP' || d.module === 'II';
+  const showDetail = d.module !== 'II' && d.module !== 'PODP';   // ไม่มีรายการสินค้า/บริการแบบมี Material
+  const glItemsRows = glItems.map((g, i) => `<tr>
+      <td><input value="${esc(g.glAccount || '')}" ${posted ? 'readonly' : ''} oninput="editGlItem(${i},'glAccount',this.value)"></td>
+      <td><select ${posted ? 'disabled' : ''} onchange="editGlItem(${i},'drCr',this.value)">
+        <option value="">— เลือก —</option>
+        <option value="D" ${g.drCr === 'D' ? 'selected' : ''}>Debit</option>
+        <option value="C" ${g.drCr === 'C' ? 'selected' : ''}>Credit</option>
+      </select></td>
+      <td class="num"><input value="${fmt(g.amount)}" ${posted ? 'readonly' : ''} onfocus="this.value=num(this.value)" onblur="this.value=fmt(this.value)" oninput="editGlItem(${i},'amount',this.value)"></td>
+      <td><input value="${esc(g.taxCode || '')}" ${posted ? 'readonly' : ''} oninput="editGlItem(${i},'taxCode',this.value)"></td>
+      <td><input value="${esc(g.assignment || '')}" ${posted ? 'readonly' : ''} oninput="editGlItem(${i},'assignment',this.value)"></td>
+      <td><input value="${esc(g.itemText || '')}" ${posted ? 'readonly' : ''} oninput="editGlItem(${i},'itemText',this.value)"></td>
+      <td><input value="${esc(g.costCenter || '')}" ${posted ? 'readonly' : ''} oninput="editGlItem(${i},'costCenter',this.value)"></td>
+      <td>${posted ? '' : `<button class="btn sm ghost" onclick="delGlItem(${i})">&#10005;</button>`}</td></tr>`).join('');
 
   const mapCards = mp ? mappingCards(d, mp, md, posted) : '';
 
   const matOpts = md.materials.map(m => ({ v: m.MaterialCode, t: m.MaterialCode + ' — ' + m.Description }));
-  const showPoExtra = d.module === 'AP' && (d.apDocCategory === 'NONTRADE_PO_SERVICE' || d.apDocCategory === 'NONTRADE_PO_ITEM');
+  const showPoExtra = d.module === 'AP';
+  const showSoExtra = d.module === 'SO';
+  const extraCols = (showPoExtra ? 1 : 0) + (showSoExtra ? 2 : 0);
   const rows = d.lines.map((l, i) => {
     const r = mp ? mp.lines[i] : null;
     const cell = !mp ? '<span class="badge b-idle">รอ Mapping</span>'
@@ -511,6 +833,8 @@ async function docHtml() {
         ? `<button class="btn sm" style="margin-left:4px" onclick="learn(${i})">&#43; Master</button>` : ''}</td>
       ${showPoExtra ? `<td style="white-space:nowrap"><button class="btn sm ${lineExtraCount(l) ? '' : 'ghost'}" onclick="showLineExtra(${i})">
           &#128203; PO ${lineExtraCount(l) ? `(${lineExtraCount(l)}/${PO_LINE_EXTRA_FIELDS.length})` : ''}</button></td>` : ''}
+      ${showSoExtra ? `<td style="min-width:160px"><input value="${esc((l.extra || {}).salesEmployeeName || '')}" ${posted ? 'readonly' : ''} oninput="editLineExtra(${i},'salesEmployeeName',this.value)"></td>
+      <td style="min-width:140px"><input value="${esc((l.extra || {}).deliveryDate || '')}" ${posted ? 'readonly' : ''} oninput="editLineExtra(${i},'deliveryDate',this.value)"></td>` : ''}
       <td>${posted ? '' : `<button class="btn sm ghost" onclick="delLine(${i})">&#10005;</button>`}</td></tr>`;
   }).join('');
   const sum = d.lines.reduce((a, l) => a + num(l.amount), 0);
@@ -528,21 +852,30 @@ async function docHtml() {
          <span class="hint">หรือเลือกค่าที่ถูกต้องจาก dropdown ด้านล่าง</span></div></div>`;
   }
   const postedBox = posted ? `<div class="result ok"><h3>&#10003; ส่งเข้า SAP S/4HANA สำเร็จ</h3>
-      <div>เอกสาร SAP: <code>${esc(d.sapDocNo)}</code> &nbsp;|&nbsp; ${d.module === 'SO' ? 'Sales Order' : 'Supplier Invoice'} &nbsp;|&nbsp; ${dt(d.postedAt)}</div></div>` : '';
+      <div>เอกสาร SAP: <code>${esc(d.sapDocNo)}</code> &nbsp;|&nbsp; ${esc(moduleLabel(d.module))} &nbsp;|&nbsp; ${dt(d.postedAt)}</div></div>` : '';
+  const splitBanner = isSplit ? `<div class="result ok"><h3>&#10003; เอกสารนี้ถูกแยกออกเป็น ${d.splitChildren.length} Sales Order แล้ว</h3>
+      <div class="hint" style="margin-bottom:10px">เอกสารนี้เก็บไว้เป็นเอกสารอ้างอิงเท่านั้น — ไปทำ Mapping/ส่งเข้า SAP ที่เอกสารที่แยกไว้ด้านล่างแทน</div>
+      <div class="tw"><table><thead><tr><th>เอกสาร</th><th>เลขที่</th><th>สถานะ</th><th style="text-align:right">ยอดรวม</th></tr></thead>
+      <tbody>${d.splitChildren.map(c => `<tr><td><a href="#" onclick="event.preventDefault();openDoc(${c.DocId})">#${c.DocId}</a></td>
+        <td>${esc(c.DocNo || '')}</td><td>${statusBadge(c.Status)}</td><td style="text-align:right">${fmt(c.TotalAmount)}</td></tr>`).join('')}</tbody>
+      </table></div></div>` : '';
+  const splitFromNote = d.sourceDocId ? `<div class="hint" style="margin:-6px 0 14px;padding:8px 12px;background:var(--line-soft);border-radius:var(--r2)">
+      &#8617; แยกมาจากเอกสาร <a href="#" onclick="event.preventDefault();openDoc(${d.sourceDocId})">#${d.sourceDocId}</a></div>` : '';
 
-  return `${panel}${postedBox}
+  return `${panel}${postedBox}${splitBanner}
   <div class="card">
     <div class="card-h"><h2>เอกสาร #${d.docId}</h2>
-      <span class="badge ${d.confidence >= 0.9 ? 'b-ok' : 'b-warn'}" ${d.confidenceNote ? `title="${esc(d.confidenceNote)}"` : ''}>OCR ${Math.round((d.confidence || 0) * 100)}% · ${esc(d.provider || '')}</span>
+      <span class="badge ${d.provider === 'failed' ? 'b-fail' : d.confidence >= 0.9 ? 'b-ok' : 'b-warn'}" ${d.confidenceNote ? `title="${esc(d.confidenceNote)}"` : ''}>OCR ${Math.round((d.confidence || 0) * 100)}% · ${esc(d.provider || '')}</span>
       ${d.tokensIn != null ? `<span class="badge" title="Token ที่ใช้อ่านเอกสารนี้">&#9889; ${num(d.tokensIn).toLocaleString('en-US')} in / ${num(d.tokensOut).toLocaleString('en-US')} out</span>` : ''}
       ${d.cost != null ? `<span class="badge" title="Input: ${fmtCost(d.costIn)} ${esc(d.costCurrency || '')} · Output: ${fmtCost(d.costOut)} ${esc(d.costCurrency || '')}">&#128176; ${fmtCost(d.cost)} ${esc(d.costCurrency || '')}</span>` : ''}
       <span class="filechip">&#128196; ${esc(d.fileName)}</span>${statusBadge(d.status)}
       <div class="sp"></div>
-      ${!posted ? ocrProviderSelect('docOcrEngine', { ocr: 'tesseract', text: 'text', azure: 'azure', claude: 'claude', claude_text: 'claude_text', typhoon: 'typhoon', gemini: 'gemini', openai: 'openai' }[d.provider] || 'auto') : ''}
-      <button class="btn sm primary" onclick="reOcr(this)" ${posted ? 'disabled' : ''}
+      ${!posted && !isSplit && !d.sourceDocId ? ocrProviderSelect('docOcrEngine', { ocr: 'tesseract', text: 'text', azure: 'azure', claude: 'claude', claude_text: 'claude_text', typhoon: 'typhoon', gemini: 'gemini', openai: 'openai' }[d.provider] || 'auto') : ''}
+      <button class="btn sm primary" onclick="reOcr(this)" ${posted || isSplit || d.sourceDocId ? 'disabled' : ''}
         title="อ่านไฟล์ต้นฉบับใหม่ด้วย engine ที่เลือก">&#8635; อ่านเอกสารใหม่</button>
       <button class="btn sm ghost" onclick="showRaw()">&#128196; ข้อความที่อ่านได้</button>
       <button class="btn sm ghost" onclick="reviewDocument()" title="เปิดดูไฟล์ต้นฉบับ เทียบกับข้อมูลที่อ่านได้">&#128065; Review Document</button>
+      ${canSplit ? `<button class="btn sm ghost" onclick="openSplitModal()" title="แยกรายการสินค้าออกเป็นหลาย Sales Order">&#10740; แยกเป็นหลาย SO</button>` : ''}
       <button class="btn sm ghost" onclick="S.doc=null;S.map=null;S.chatHistory=[];S.chatImage=null;renderWork()">เปลี่ยนเอกสาร</button></div>
     <div class="card-b">
       ${d.module === 'AP' ? `<div class="f" style="max-width:320px;margin-bottom:14px">
@@ -551,6 +884,7 @@ async function docHtml() {
             <option value="">— เลือกประเภทเอกสาร —</option>
             ${(S.apDocCategories || []).map(c => `<option value="${esc(c.id)}" ${c.id === d.apDocCategory ? 'selected' : ''}>${esc(c.label)}</option>`).join('')}
           </select></div>` : ''}
+      ${splitFromNote}
       ${d.confidenceNote ? `<div class="hint" style="margin:-6px 0 14px;padding:8px 12px;background:var(--line-soft);border-radius:var(--r2)">
           &#9888; เหตุผลที่ความแม่นยำไม่ถึง 100%: ${esc(d.confidenceNote)}</div>` : ''}
       <p class="sec-title">HEADER — ข้อมูลส่วนหัว</p>
@@ -559,39 +893,109 @@ async function docHtml() {
   </div>
   ${mapCards}
 
-  <div class="card">
+  ${showDetail ? `<div class="card">
     <div class="card-h"><h2>DETAIL — รายการสินค้า (${d.lines.length} บรรทัด)</h2><div class="sp"></div>
       ${posted ? '' : '<button class="btn sm" onclick="addLine()">&#43; เพิ่มบรรทัด</button>'}</div>
     <div class="card-b"><div class="tw"><table>
       <thead><tr><th style="width:54px">Item</th><th style="width:150px">รหัสสินค้า (คู่ค้า)</th><th style="min-width:260px">ชื่อสินค้าตามเอกสาร</th>
-        <th style="width:92px">จำนวน</th><th style="width:74px">หน่วย</th><th style="width:104px">ราคา/หน่วย</th>
-        <th style="width:116px">จำนวนเงิน</th><th style="min-width:270px">Material (SAP)</th><th style="min-width:170px">หน่วย &rarr; SAP</th><th>สถานะ</th>
-        ${showPoExtra ? '<th style="width:120px">PO Detail</th>' : ''}<th style="width:44px"></th></tr></thead>
-      <tbody>${rows || `<tr><td colspan="${showPoExtra ? 12 : 11}" class="empty">ไม่มีรายการ</td></tr>`}</tbody>
+        <th style="min-width:110px">จำนวน</th><th style="width:74px">หน่วย</th><th style="min-width:130px">ราคา/หน่วย</th>
+        <th style="min-width:140px">จำนวนเงิน</th><th style="min-width:270px">Material (SAP)</th><th style="min-width:170px">หน่วย &rarr; SAP</th><th>สถานะ</th>
+        ${showPoExtra ? '<th style="width:120px">PO Detail</th>' : ''}
+        ${showSoExtra ? '<th style="min-width:160px">Sales Employee Name</th><th style="min-width:140px">Delivery Date</th>' : ''}
+        <th style="width:44px"></th></tr></thead>
+      <tbody>${rows || `<tr><td colspan="${11 + extraCols}" class="empty">ไม่มีรายการ</td></tr>`}</tbody>
       <tfoot><tr class="totrow"><td colspan="6" style="text-align:right">รวม</td>
-        <td style="text-align:right">${fmt(sum)}</td><td colspan="${showPoExtra ? 5 : 4}"></td></tr></tfoot>
+        <td style="text-align:right">${fmt(sum)}</td><td colspan="${4 + extraCols}"></td></tr></tfoot>
     </table></div></div>
-  </div>
-
-  ${tradeFields ? `<div class="card">
-    <div class="card-h"><h2>ข้อมูลสำหรับ Trade (MIRO)</h2></div>
-    <div class="card-b"><div class="grid">${tradeFields}</div></div>
   </div>` : ''}
 
-  ${nonTradeNoPoFields ? `<div class="card">
-    <div class="card-h"><h2>ข้อมูลสำหรับ Non-Trade ไม่มี PO</h2></div>
-    <div class="card-b"><div class="grid">${nonTradeNoPoFields}</div></div>
+  ${totalsFields ? `<div class="card">
+    <div class="card-h"><h2>ยอดรวม</h2></div>
+    <div class="card-b"><div class="grid">${totalsFields}</div></div>
+  </div>` : ''}
+
+  ${tradeGroupsHtml ? `<div class="card">
+    <div class="card-h"><h2>Supplier Invoice (MIRO)</h2></div>
+    ${tradeGroupsHtml}
+  </div>` : ''}
+
+  ${iiGroupsHtml ? `<div class="card">
+    <div class="card-h"><h2>Incoming Invoice</h2></div>
+    ${iiGroupsHtml}
+  </div>` : ''}
+
+  ${showGlItems ? `<div class="card">
+    <div class="card-h"><h2>${d.module === 'II' ? 'Line Items' : 'G/L Account Items'} (${glItems.length})</h2><div class="sp"></div>
+      ${posted ? '' : '<button class="btn sm" onclick="addGlItem()">&#43; เพิ่มรายการ</button>'}</div>
+    <div class="card-b"><div class="tw"><table>
+      <thead><tr><th style="min-width:140px">G/L Account</th><th style="width:100px">Dr/Cr</th>
+        <th style="min-width:130px">Amount</th><th style="min-width:100px">Tax Code</th>
+        <th style="min-width:140px">Assignment</th><th style="min-width:180px">Item Text</th>
+        <th style="min-width:130px">Cost Center</th><th style="width:44px"></th></tr></thead>
+      <tbody>${glItemsRows || '<tr><td colspan="8" class="empty">ไม่มีรายการ</td></tr>'}</tbody>
+    </table></div></div>
   </div>` : ''}
 
   ${!posted ? chatFixCard() : ''}
 
   <div class="card"><div class="card-b row">
-    <button class="btn primary" onclick="runMap()" ${posted ? 'disabled' : ''}>&#128269; ขั้นตอนที่ 2 — Mapping ข้อมูล</button>
-    <button class="btn success" onclick="postSAP()" ${mp && mp.pass && !posted ? '' : 'disabled'}>&#9099; ขั้นตอนที่ 3 — ส่งเข้า SAP S/4HANA</button>
+    <button class="btn primary" onclick="runMap()" ${posted || isSplit ? 'disabled' : ''}>&#128269; ขั้นตอนที่ 2 — Mapping ข้อมูล</button>
+    <button class="btn success" onclick="postSAP()" ${mp && mp.pass && !posted && !isSplit ? '' : 'disabled'}>&#9099; ขั้นตอนที่ 3 — ส่งเข้า SAP S/4HANA</button>
     <button class="btn" onclick="showPayload()" ${mp && mp.pass ? '' : 'disabled'}>&#123;&#125; ดู Payload</button>
     <div style="flex:1"></div>
-    <span class="hint">${posted ? 'เอกสารนี้ส่งเข้า SAP แล้ว' : (mp ? (mp.pass ? 'พร้อมส่งเข้า SAP' : 'แก้ไขข้อมูลที่ไม่ผ่านก่อนส่ง') : 'กด Mapping เพื่อตรวจสอบกับ Master Data')}</span>
+    <span class="hint">${isSplit ? 'เอกสารนี้ถูกแยกไปเป็น Sales Order อื่นแล้ว' : posted ? 'เอกสารนี้ส่งเข้า SAP แล้ว' : (mp ? (mp.pass ? 'พร้อมส่งเข้า SAP' : 'แก้ไขข้อมูลที่ไม่ผ่านก่อนส่ง') : 'กด Mapping เพื่อตรวจสอบกับ Master Data')}</span>
   </div></div>`;
+}
+
+/* ---------- แยกเอกสาร PO เป็นหลาย Sales Order — ผู้ใช้เลือกเองว่ารายการไหนไปกลุ่มไหน ---------- */
+function openSplitModal() {
+  const d = S.doc;
+  S._splitAssign = {};
+  const rows = d.lines.map(l => `<tr>
+      <td style="text-align:center">${l.itemNo}</td>
+      <td>${esc(l.desc)}</td>
+      <td class="num">${fmt(l.qty)} ${esc(l.uom)}</td>
+      <td class="num">${fmt(l.amount)}</td>
+      <td><input type="number" min="1" step="1" style="width:70px" placeholder="—"
+          oninput="S._splitAssign[${l.itemNo}]=this.value;updateSplitSummary()"></td>
+    </tr>`).join('');
+  openModal(`<div class="card-h"><h2>แยกเอกสารเป็นหลาย Sales Order</h2><div class="sp"></div>
+      <button class="btn sm" onclick="closeModal()">&#10005;</button></div>
+    <div class="card-b">
+      <p class="hint">ใส่หมายเลขกลุ่ม (1, 2, 3, ...) ให้แต่ละรายการที่จะแยกออกไปเป็น Sales Order ใหม่ —
+        รายการที่เว้นว่างจะไม่ถูกแยก (ยังอยู่ในเอกสารต้นฉบับเท่านั้น) ต้องมีอย่างน้อย 2 กลุ่มจึงจะ Split ได้</p>
+      <div class="tw"><table><thead><tr><th>Item</th><th>รายการ</th><th>จำนวน</th><th style="text-align:right">จำนวนเงิน</th><th>กลุ่ม SO</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>
+      <div id="splitSummary" class="hint" style="margin-top:12px"></div>
+      <div class="row" style="margin-top:16px;justify-content:flex-end">
+        <button class="btn primary" onclick="confirmSplit()">ยืนยัน Split</button>
+      </div>
+    </div>`, 'wide');
+  updateSplitSummary();
+}
+function updateSplitSummary() {
+  const groups = {};
+  Object.entries(S._splitAssign || {}).forEach(([itemNo, g]) => {
+    g = parseInt(g); if (g > 0) (groups[g] = groups[g] || []).push(itemNo);
+  });
+  const n = Object.keys(groups).length;
+  const el = $('#splitSummary');
+  if (!el) return;
+  el.innerHTML = n >= 2 ? `จะสร้าง <b>${n}</b> Sales Order ใหม่ (${Object.entries(groups).map(([g, items]) => `กลุ่ม ${g}: ${items.length} รายการ`).join(' · ')})`
+    : '<span style="color:var(--red)">ต้องแบ่งอย่างน้อย 2 กลุ่ม</span>';
+}
+async function confirmSplit() {
+  const assign = {};
+  Object.entries(S._splitAssign || {}).forEach(([itemNo, g]) => { g = parseInt(g); if (g > 0) assign[itemNo] = g; });
+  if (new Set(Object.values(assign)).size < 2) { toast('&#9888; ต้องแบ่งอย่างน้อย 2 กลุ่ม'); return; }
+  await guard(async () => {
+    const res = await API.post(`/api/documents/${S.doc.docId}/split`, { assign, user: S.user });
+    S._splitAssign = {};
+    closeModal();
+    S.doc = res.source; S.map = null;
+    toast(`&#10003; Split สำเร็จ — สร้าง ${res.created.length} Sales Order ใหม่`);
+    await renderWork();
+  });
 }
 
 /* ---------- แชทสั่งแก้ไขข้อมูล (AI) — แก้เฉพาะเอกสารนี้ ไม่บันทึกลง Master Data ---------- */
@@ -602,8 +1006,28 @@ async function loadChatHistory(docId) {
   catch (e) { S.chatHistory = []; }
 }
 
+/* เมื่ออ่านเอกสารไม่สำเร็จ — พาผู้ใช้ไปที่กล่องแชท AI ด้านล่างเพื่อแนบภาพเอกสารให้ AI อ่านแทน */
+function focusChatAttach() {
+  closeModal();
+  const card = $('#chatInput')?.closest('.card');
+  if (card) card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  $('#chatInput')?.focus();
+}
+
+const CHAT_MODEL_IDS = ['claude', 'gemini', 'openai'];
 function chatFixCard() {
-  const ready = (S.ocrProviders || []).find(p => p.id === 'claude')?.ready;
+  const chatModels = (S.ocrProviders || []).filter(p => CHAT_MODEL_IDS.includes(p.id));
+  // ถ้าโมเดลที่เลือกไว้ยังไม่พร้อมใช้งาน (ไม่ได้ตั้งค่า key) แต่มีโมเดลอื่นพร้อม — สลับไปตัวที่พร้อมให้อัตโนมัติ
+  if (!chatModels.find(p => p.id === S.chatProvider)?.ready) {
+    const firstReady = chatModels.find(p => p.ready);
+    if (firstReady) S.chatProvider = firstReady.id;
+  }
+  const ready = chatModels.some(p => p.ready);
+  const modelSelect = `<select id="chatModelSelect" class="ocr-pick" onchange="S.chatProvider=this.value"
+      title="เลือกโมเดล Vision ที่จะใช้อ่านภาพที่แนบมา — เผื่อโมเดลหลักอ่านเอกสารไม่สำเร็จ">
+      ${chatModels.map(p => `<option value="${esc(p.id)}" ${p.id === S.chatProvider ? 'selected' : ''} ${p.ready ? '' : 'class="hint"'}
+          title="${esc(p.desc)}">${esc(p.label)}${p.ready ? '' : ' (ยังไม่ได้ตั้งค่า)'}</option>`).join('')}
+    </select>`;
   const msgs = S.chatHistory.map(m => {
     // m.image = data URL ชั่วคราว (ข้อความที่เพิ่งส่ง ยังไม่ได้ค่า chatId จาก server)
     // m.hasImage + m.chatId = ภาพที่บันทึกถาวรแล้ว โหลดผ่าน URL แทนการฝัง data URL ซ้ำ
@@ -618,7 +1042,8 @@ function chatFixCard() {
     '<p class="hint">พิมพ์หรือแนบภาพ (capture จุดที่ผิดจาก Review Document ก็ได้) บอกจุดที่ OCR อ่านผิดด้วยภาษาธรรมดา เช่น "ชื่อผู้ขายที่ถูกคือ บริษัท เอบีซี จำกัด ไม่ใช่ เอ็กซ์วายแซด" หรือถามคำถามเกี่ยวกับเอกสารนี้ก็ได้ — AI จะแก้เฉพาะเอกสารนี้ให้ ไม่กระทบเอกสารอื่น</p>';
   return `<div class="card">
     <div class="card-h"><h2>&#129302; แชทสั่งแก้ไขข้อมูล (AI)</h2><div class="sp"></div>
-      ${!ready ? '<span class="hint">ต้องตั้งค่า ANTHROPIC_API_KEY ก่อนใช้งาน</span>' : ''}</div>
+      ${modelSelect}
+      ${!ready ? '<span class="hint">ต้องตั้งค่า API key ของโมเดล Vision อย่างน้อย 1 ตัวก่อนใช้งาน</span>' : ''}</div>
     <div class="card-b">
       <div class="chat-history" id="chatHistory">${msgs}</div>
       ${S.chatImage ? `<div class="chat-attach-preview">
@@ -674,7 +1099,7 @@ async function sendChatFix() {
   const hist = $('#chatHistory'); if (hist) hist.scrollTop = hist.scrollHeight;
 
   await guard(async () => {
-    const r = await API.post(`/api/documents/${S.doc.docId}/chat-fix`, { message, image, user: S.user });
+    const r = await API.post(`/api/documents/${S.doc.docId}/chat-fix`, { message, image, user: S.user, provider: S.chatProvider });
     S.doc = r.document; S.map = null;
   }).catch(() => { /* ข้อความผู้ใช้ถูกบันทึกที่ server แล้วแม้ Claude ตอบไม่สำเร็จ — โหลดประวัติจริงด้านล่างอยู่ดี */ })
     .finally(async () => {
@@ -727,7 +1152,7 @@ function mappingCards(d, mp, md, posted) {
   };
   const addBtn = (label, fn) => posted ? '' : ` <button class="btn sm" onclick="${fn}">&#43; ${label}</button>`;
   let cards = '', n = 0;
-  if (d.module === 'AP') {
+  if (d.module !== 'SO') {
     const r = mp.header.vendor;
     const picker = sel('vendors', 'vendor', r.code) + (r.status === 'fail' ? addBtn('เพิ่มผู้ขายใหม่', 'quickAddVendor()') : '');
     cards += cmpCard(++n, 'Vendor / Supplier', r, picker);
@@ -897,6 +1322,15 @@ function addLine() {
   S.map = null; renderWork();
 }
 function delLine(i) { S.doc.lines.splice(i, 1); S.map = null; renderWork(); }
+
+/* ---------- G/L Account Items — เฉพาะเอกสารประเภท Trade (Supplier Invoice/MIRO) เก็บใน header.glItems ---------- */
+function addGlItem() {
+  if (!S.doc.header.glItems) S.doc.header.glItems = [];
+  S.doc.header.glItems.push({ glAccount: '', drCr: '', amount: 0, taxCode: '', assignment: '', itemText: '', costCenter: '' });
+  markDirty(); renderWork();
+}
+function delGlItem(i) { S.doc.header.glItems.splice(i, 1); markDirty(); renderWork(); }
+function editGlItem(i, k, v) { S.doc.header.glItems[i][k] = v; markDirty(); }
 let _dirtyTimer = null;
 function markDirty() {
   clearTimeout(_dirtyTimer);
@@ -908,7 +1342,7 @@ function markDirty() {
 async function runMap(silent) {
   await guard(async () => {
     const res = await API.post('/api/documents/' + S.doc.docId + '/map',
-      { header: S.doc.header, lines: S.doc.lines, manual: S.manual });
+      { header: S.doc.header, lines: S.doc.lines, manual: S.manual, user: S.user });
     S.doc = res.document; S.map = res;
     await renderWork();
     if (!silent) {
@@ -945,7 +1379,7 @@ async function showPayload() {
 function postSAP() {
   const d = S.doc, mp = S.map;
   openModal(`<div class="card-h"><h2>ยืนยันการส่งเข้า SAP S/4HANA</h2></div><div class="card-b">
-    <p>ระบบจะสร้างเอกสาร <b>${d.module === 'SO' ? 'Sales Order' : 'Supplier Invoice (AP Invoice)'}</b> ในระบบ SAP</p>
+    <p>ระบบจะสร้างเอกสาร <b>${esc(moduleLabel(d.module))}</b> ในระบบ SAP</p>
     <div class="tw"><table style="min-width:auto"><tbody>
       ${d.module === 'SO'
       ? `<tr><th>Sold-to</th><td>${esc(mp.header.customer.code)} — ${esc(mp.header.customer.text)}</td></tr>
@@ -977,31 +1411,33 @@ async function renderInbox() {
   // ทะเบียนเอกสารแยกตามโมดูลที่เข้าจากเมนูซ้าย (AP INVOICE / SALES ORDER) — กรองด้วย S.module
   // ถ้าเข้าจากปุ่ม "ดูทั้งหมด" บนหน้าภาพรวม (S.module ว่าง) จะแสดงทุกโมดูลรวมกัน
   const catQs = (S.module === 'AP' && S.inboxApDocCategory) ? '&apDocCategory=' + S.inboxApDocCategory : '';
-  S.inboxList = await API.get('/api/documents?limit=200' + (S.module ? '&module=' + S.module : '') + catQs);
+  S.inboxList = await API.get('/api/documents?limit=5000' + (S.module ? '&module=' + S.module : '') + catQs);
   renderInboxLocal();
 }
 function renderInboxLocal() {
   const q = (S.inboxSearch || '').trim().toLowerCase();
-  const list = !q ? S.inboxList : S.inboxList.filter(r =>
+  let list = !q ? S.inboxList : S.inboxList.filter(r =>
     String(r.DocNo || '').toLowerCase().includes(q) ||
-    String(r.PartnerName || '').toLowerCase().includes(q) ||
-    String(r.DocDate || '').toLowerCase().includes(q));
-  const title = S.module ? `ทะเบียนเอกสาร — ${S.module === 'AP' ? 'AP Invoice' : 'Sales Order'} (${list.length})`
-    : `ทะเบียนเอกสารทั้งหมด (${list.length})`;
-  const catFilter = S.module === 'AP' ? `<select onchange="S.inboxApDocCategory=this.value;renderInbox()" style="margin-right:8px">
+    String(r.PartnerName || '').toLowerCase().includes(q));
+  list = list.filter(r => inDateRange(r.DocDate, 'inboxDateFrom', 'inboxDateTo'));
+  const title = `${esc(inboxTitle(S.module))} (${list.length})`;
+  const catFilter = S.module === 'AP' ? `<select onchange="S.inboxApDocCategory=this.value;S.inboxPage=1;renderInbox()" style="margin-right:8px">
       <option value="">ทุกประเภทเอกสาร</option>
       ${(S.apDocCategories || []).map(c => `<option value="${esc(c.id)}" ${c.id === S.inboxApDocCategory ? 'selected' : ''}>${esc(c.label)}</option>`).join('')}
     </select>` : '';
+  const { pageRows, totalPages, pageSize, total } = paginate(list, 'inboxPage', 'inboxPageSize');
   $('#content').innerHTML = `
   <div class="card"><div class="card-h"><h2>${title}</h2><div class="sp"></div>
-    <input id="inboxSearch" type="text" placeholder="ค้นหา วันที่ / คู่ค้า / เลขที่เอกสาร…" value="${esc(S.inboxSearch)}"
-           oninput="S.inboxSearch=this.value;renderInboxLocal()" style="max-width:260px;margin-right:8px">
+    <input id="inboxSearch" type="text" placeholder="ค้นหา คู่ค้า / เลขที่เอกสาร…" value="${esc(S.inboxSearch)}"
+           oninput="S.inboxSearch=this.value;S.inboxPage=1;renderInboxLocal()" style="max-width:220px;margin-right:8px">
+    <span class="hint" style="margin-right:4px">วันที่:</span>${dateRangeHtml('inboxDateFrom', 'inboxDateTo', "S.inboxPage=1;renderInboxLocal")}
+    <div style="margin-right:8px"></div>
     ${catFilter}<button class="btn sm" onclick="renderInbox()">&#8635; รีเฟรช</button></div>
   <div class="card-b"><div class="tw"><table>
     <thead><tr><th>#</th><th>Module</th><th>ไฟล์</th><th>เลขที่เอกสาร</th><th>วันที่</th><th>คู่ค้า</th>
-      <th style="text-align:right">ยอดรวม</th>${S.module === 'AP' ? '<th>ประเภทเอกสาร</th>' : ''}<th>สถานะ</th><th>SAP Doc</th><th>สร้างเมื่อ</th><th></th></tr></thead>
-    <tbody>${list.map(r => `<tr>
-      <td>${r.DocId}</td><td><span class="badge ${r.Module === 'AP' ? 'b-warn' : 'b-ok'}">${r.Module}</span></td>
+      <th style="text-align:right">ยอดรวม</th>${S.module === 'AP' ? '<th>ประเภทเอกสาร</th>' : ''}<th>สถานะ</th><th>Model</th><th>SAP Doc</th><th>สร้างเมื่อ</th><th></th></tr></thead>
+    <tbody>${pageRows.map(r => `<tr>
+      <td>${r.DocId}</td><td><span class="badge ${r.Module === 'AP' ? 'b-warn' : r.Module === 'II' ? 'b-idle' : 'b-ok'}">${r.Module}</span></td>
       <td>${esc(r.FileName || '')}</td><td>${esc(r.DocNo || '')}</td><td>${esc(r.DocDate || '')}</td>
       <td>${esc(r.PartnerName || '')}</td><td style="text-align:right">${fmt(r.TotalAmount)}</td>
       ${S.module === 'AP' ? `<td>${r.ApDocCategory ? esc(apDocCategoryLabel(r.ApDocCategory)) : '<span class="hint">—</span>'}</td>` : ''}
@@ -1009,11 +1445,14 @@ function renderInboxLocal() {
           r.OcrTokensIn != null ? `Token: ${r.OcrTokensIn} in / ${r.OcrTokensOut} out` : '',
           r.OcrCost != null ? `ค่าใช้จ่าย: ${r.OcrInputCost} in + ${r.OcrOutputCost} out = ${r.OcrCost} ${r.OcrCostCurrency || ''}` : ''].filter(Boolean).join(' — '))}"` : ''}>${statusBadge(r.Status)}
         ${r.OcrConfidence != null ? `<span class="hint">${Math.round(r.OcrConfidence * 100)}%</span>` : ''}</td>
+      <td>${providerBadge(r.OcrProvider)}</td>
       <td>${esc(r.SapDocNo || '')}</td><td class="hint">${dt(r.CreatedAt)}</td>
       <td style="white-space:nowrap"><button class="btn sm" onclick="openDoc(${r.DocId})">เปิด</button>
         ${r.Status === 'POSTED' ? '' : `<button class="btn sm ghost" onclick="delDoc(${r.DocId})">&#10005;</button>`}</td></tr>`).join('')
-      || `<tr><td colspan="${S.module === 'AP' ? 12 : 11}" class="empty">ยังไม่มีเอกสารในระบบ</td></tr>`}
-    </tbody></table></div></div></div>`;
+      || `<tr><td colspan="${S.module === 'AP' ? 13 : 12}" class="empty">ยังไม่มีเอกสารในระบบ</td></tr>`}
+    </tbody></table></div>
+    ${pagerHtml('inboxPage', 'inboxPageSize', totalPages, total, pageSize, 'renderInboxLocal')}
+  </div></div>`;
   // ค้นหาแบบ re-render ทั้ง card ทุกครั้งที่พิมพ์ ทำให้ input เดิมถูกแทนที่ด้วย element ใหม่และเสีย focus —
   // ต้องคืน focus + ตำแหน่ง cursor ให้กล่องค้นหาเองหลัง render เสร็จ
   const si = $('#inboxSearch');
@@ -1024,12 +1463,16 @@ function renderInboxLocal() {
 }
 async function delDoc(id) {
   if (!confirm('ลบเอกสาร #' + id + ' ?')) return;
-  await guard(async () => { await API.del('/api/documents/' + id); toast('ลบเอกสารแล้ว'); renderInbox(); });
+  await guard(async () => { await API.del('/api/documents/' + id + '?user=' + encodeURIComponent(S.user)); toast('ลบเอกสารแล้ว'); renderInbox(); });
 }
 
 /* ---------------------------------------------------------------- MASTER */
 async function renderMaster() {
-  const md = await masters(true);
+  await masters(true);
+  renderMasterLocal();
+}
+function renderMasterLocal() {
+  const md = S.masters;
   const grp = MASTER_GROUPS.find(g => g.key === S.masterGroup) || MASTER_GROUPS[0];
   if (!grp.tabs.includes(S.masterTab)) S.masterTab = grp.tabs[0];
 
@@ -1043,10 +1486,13 @@ async function renderMaster() {
 
   const subTabs = grp.tabs.length < 2 ? '' :
     `<div class="row" style="gap:8px;margin-bottom:16px">` + grp.tabs.map(k =>
-      `<button class="btn sm ${S.masterTab === k ? 'primary' : ''}" onclick="S.masterTab='${k}';renderMaster()">
+      `<button class="btn sm ${S.masterTab === k ? 'primary' : ''}" onclick="S.masterTab='${k}';S.masterSearch='';renderMasterLocal()">
          ${MASTER_DEF[k].label} <span style="opacity:.7">${count(k)}</span></button>`).join('') + `</div>`;
 
-  const def = MASTER_DEF[S.masterTab], rows = md[S.masterTab];
+  const def = MASTER_DEF[S.masterTab];
+  const q = (S.masterSearch || '').trim().toLowerCase();
+  const rows = !q ? md[S.masterTab] : md[S.masterTab].filter(r =>
+    def.cols.some(c => String(r[c.k] ?? '').toLowerCase().includes(q)));
   const cell = (r, c) => {
     if (c.sap) return r[c.k]
       ? `<b class="sapcode">${esc(r[c.k])}</b>`
@@ -1073,16 +1519,26 @@ async function renderMaster() {
         คือค่าที่ระบบใช้ยิงเข้า S/4HANA จริง — ถ้าเว้นว่างจะ Mapping ไม่ผ่านและส่งเอกสารไม่ได้</div>
       <div class="row" style="margin-bottom:14px">
         <button class="btn primary sm" onclick="editRow(null)">&#43; เพิ่มข้อมูล</button>
+        <input id="masterSearch" type="text" placeholder="ค้นหา..." value="${esc(S.masterSearch)}"
+               oninput="S.masterSearch=this.value;renderMasterLocal()" style="max-width:220px">
         <span class="hint">${MASTER_NOTE[S.masterTab]}</span>
       </div>
       <div class="tw"><table><thead><tr>${def.cols.map(c => `<th>${esc(c.l)}</th>`).join('')}<th style="width:130px"></th></tr></thead>
-      <tbody>${body || `<tr><td colspan="${def.cols.length + 1}" class="empty">ยังไม่มีข้อมูล</td></tr>`}</tbody></table></div>
+      <tbody>${body || `<tr><td colspan="${def.cols.length + 1}" class="empty">${q ? 'ไม่พบข้อมูลที่ค้นหา' : 'ยังไม่มีข้อมูล'}</td></tr>`}</tbody></table></div>
     </div></div>`;
+  // ค้นหาแบบ re-render ทั้ง card ทุกครั้งที่พิมพ์ ทำให้ input เดิมถูกแทนที่ด้วย element ใหม่และเสีย focus —
+  // ต้องคืน focus + ตำแหน่ง cursor ให้กล่องค้นหาเองหลัง render เสร็จ (เหมือน inboxSearch)
+  const ms = $('#masterSearch');
+  if (ms && document.activeElement !== ms) {
+    ms.focus();
+    ms.setSelectionRange(ms.value.length, ms.value.length);
+  }
 }
 function setGroup(k) {
   S.masterGroup = k;
   S.masterTab = (MASTER_GROUPS.find(g => g.key === k) || MASTER_GROUPS[0]).tabs[0];
-  renderMaster();
+  S.masterSearch = '';
+  renderMasterLocal();
 }
 
 function editRow(key, prefill, dupes) {
@@ -1149,22 +1605,33 @@ async function delRow(key) {
 
 /* ---------------------------------------------------------------- LOG */
 async function renderLog() {
-  const list = await API.get('/api/logs');
+  $('#content').innerHTML = '<div class="card"><div class="card-b"><div class="empty">กำลังโหลด…</div></div></div>';
+  S.logsList = await API.get('/api/logs?limit=5000');
+  renderLogLocal();
+}
+function renderLogLocal() {
+  const list = S.logsList.filter(l => inDateRange(l.PostedAt, 'logDateFrom', 'logDateTo'));
+  const { pageRows, totalPages, pageSize, total } = paginate(list, 'logPage', 'logPageSize');
   $('#content').innerHTML = `
   <div class="card"><div class="card-h"><h2>ประวัติการส่งเข้า SAP (${list.length})</h2><div class="sp"></div>
+    <span class="hint" style="margin-right:4px">วันที่:</span>${dateRangeHtml('logDateFrom', 'logDateTo', "S.logPage=1;renderLogLocal")}
+    <div style="margin-right:8px"></div>
     <button class="btn sm" onclick="renderLog()">&#8635; รีเฟรช</button></div>
   <div class="card-b"><div class="tw"><table>
     <thead><tr><th>เวลา</th><th>Module</th><th>SAP Doc</th><th>เอกสารอ้างอิง</th><th>คู่ค้า</th>
-      <th style="text-align:right">ยอดรวม</th><th>รายการ</th><th>ผล</th><th>ไฟล์</th><th></th></tr></thead>
-    <tbody>${list.map(l => `<tr>
-      <td class="hint">${dt(l.PostedAt)}</td><td><span class="badge ${l.Module === 'AP' ? 'b-warn' : 'b-ok'}">${esc(l.Module)}</span></td>
+      <th style="text-align:right">ยอดรวม</th><th>รายการ</th><th>ผล</th><th>Model</th><th>ไฟล์</th><th></th></tr></thead>
+    <tbody>${pageRows.map(l => `<tr>
+      <td class="hint">${dt(l.PostedAt)}</td><td><span class="badge ${l.Module === 'AP' ? 'b-warn' : l.Module === 'II' ? 'b-idle' : 'b-ok'}">${esc(l.Module)}</span></td>
       <td><b>${esc(l.SapDocNo || '-')}</b></td><td>${esc(l.DocNo || '')}</td><td>${esc(l.PartnerName || '')}</td>
       <td style="text-align:right">${fmt(l.TotalAmount)}</td><td style="text-align:center">${l.Lines || 0}</td>
-      <td>${l.Success ? '<span class="badge b-ok">&#10003; สำเร็จ</span>' : '<span class="badge b-fail">&#10007; ไม่สำเร็จ</span>'}</td>
+      <td>${l.Success ? '<span class="badge b-ok">&#10003; SAP Connected Successfully</span>' : '<span class="badge b-fail">&#10007; Unable to Connect to SAP</span>'}</td>
+      <td>${providerBadge(l.OcrProvider)}</td>
       <td>${esc(l.FileName || '')}</td>
       <td><button class="btn sm" onclick="showLogPayload(${l.LogId})">Payload</button></td></tr>`).join('')
-      || '<tr><td colspan="10" class="empty">ยังไม่มีเอกสารที่ส่งเข้า SAP</td></tr>'}
-    </tbody></table></div></div></div>`;
+      || '<tr><td colspan="11" class="empty">ยังไม่มีเอกสารที่ส่งเข้า SAP</td></tr>'}
+    </tbody></table></div>
+    ${pagerHtml('logPage', 'logPageSize', totalPages, total, pageSize, 'renderLogLocal')}
+  </div></div>`;
 }
 async function showLogPayload(id) {
   await guard(async () => {
@@ -1173,6 +1640,47 @@ async function showLogPayload(id) {
       <button class="btn sm" onclick="closeModal()">&#10005;</button></div>
       <div class="card-b"><pre class="json">${esc(JSON.stringify(p, null, 2))}</pre></div>`);
   });
+}
+
+/* ---------------------------------------------------------------- audit log (รวมทุก module — filter ในหน้าเดียว) */
+const AUDIT_ACTION_BADGE = {
+  CREATE: ['b-ok', 'เพิ่มเอกสาร'], UPDATE: ['b-warn', 'แก้ไข'], DELETE: ['b-fail', 'ลบเอกสาร'], REOCR: ['b-idle', 'อ่าน OCR ใหม่']
+};
+const AUDIT_MODULE_FILTERS = [['', 'ทั้งหมด'], ['AP', 'Supplier Invoice'], ['PODP', 'PO Down Payment'], ['II', 'Incoming Invoice'], ['SO', 'Sales Order']];
+async function renderAuditLog() {
+  $('#content').innerHTML = '<div class="card"><div class="card-b"><div class="empty">กำลังโหลด…</div></div></div>';
+  S.auditLogList = await API.get('/api/audit-logs?limit=5000');
+  renderAuditLogLocal();
+}
+function renderAuditLogLocal() {
+  const mod = S.auditLogModule || '';
+  let list = !mod ? S.auditLogList : S.auditLogList.filter(l => l.Module === mod);
+  list = list.filter(l => inDateRange(l.CreatedAt, 'auditLogDateFrom', 'auditLogDateTo'));
+  const filterBtns = AUDIT_MODULE_FILTERS.map(([v, l]) =>
+    `<button class="btn sm ${v === mod ? 'primary' : 'ghost'}" onclick="S.auditLogModule='${v}';S.auditLogPage=1;renderAuditLogLocal()">${l}</button>`).join('');
+  const { pageRows, totalPages, pageSize, total } = paginate(list, 'auditLogPage', 'auditLogPageSize');
+  $('#content').innerHTML = `
+  <div class="card"><div class="card-h"><h2>Log กิจกรรม (${list.length})</h2><div class="sp"></div>
+    <span class="hint" style="margin-right:4px">วันที่:</span>${dateRangeHtml('auditLogDateFrom', 'auditLogDateTo', "S.auditLogPage=1;renderAuditLogLocal")}
+    <div style="margin-right:8px"></div>
+    <button class="btn sm" onclick="renderAuditLog()">&#8635; รีเฟรช</button></div>
+  <div class="card-b">
+    <div class="row" style="gap:6px;margin-bottom:16px;flex-wrap:wrap">${filterBtns}</div>
+    <div class="tw"><table>
+    <thead><tr><th>เวลา</th><th>Module</th><th>Process</th><th>เอกสาร</th><th>รายละเอียด</th><th>Model</th><th>ทำโดย</th></tr></thead>
+    <tbody>${pageRows.map(l => {
+    const b = AUDIT_ACTION_BADGE[l.Action] || ['b-idle', l.Action];
+    return `<tr><td class="hint">${dt(l.CreatedAt)}</td>
+      <td><span class="badge ${l.Module === 'AP' ? 'b-warn' : l.Module === 'II' ? 'b-idle' : 'b-ok'}">${esc(moduleLabel(l.Module))}</span></td>
+      <td><span class="badge ${b[0]}">${b[1]}</span></td>
+      <td>#${l.DocId ?? '-'}${l.DocNo ? ' &middot; ' + esc(l.DocNo) : ''}${l.FileName ? '<div class="hint">' + esc(l.FileName) + '</div>' : ''}</td>
+      <td>${esc(l.Detail || '')}</td>
+      <td>${providerBadge(l.OcrProvider)}</td>
+      <td>${esc(l.PerformedBy || '')}</td></tr>`;
+  }).join('') || '<tr><td colspan="7" class="empty">ยังไม่มีประวัติ</td></tr>'}
+    </tbody></table></div>
+    ${pagerHtml('auditLogPage', 'auditLogPageSize', totalPages, total, pageSize, 'renderAuditLogLocal')}
+  </div></div>`;
 }
 
 /* ---------------------------------------------------------------- boot */

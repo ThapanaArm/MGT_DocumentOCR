@@ -7,30 +7,40 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Anuphan:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/style.css?v=16">
+<link rel="stylesheet" href="/style.css?v=19">
 </head>
 <body>
 <div class="app">
-  <aside class="sidebar">
+  <aside class="sidebar" id="sidebar">
     <div class="brand">
       <img src="/assets/logo.png" alt="MGT" class="brand-logo">
-      <b>MGT Document OCR</b>
-      <span>Document Intake → SAP S/4HANA</span>
+      <b class="lbl">MGT Document OCR</b>
+      <span class="lbl">Document Intake → SAP S/4HANA</span>
     </div>
     <nav class="nav" id="nav">
-      <a href="#" data-page="home" class="active"><span class="ic">&#9635;</span> ภาพรวม</a>
-      <div class="nav-title">AP INVOICE</div>
-      <a href="#" data-page="work" data-mod="AP"><span class="ic">&#9781;</span> นำเข้าเอกสาร / OCR</a>
-      <a href="#" data-page="inbox" data-mod="AP"><span class="ic">&#9776;</span> ทะเบียนเอกสาร</a>
-      <div class="nav-title">SALES ORDER</div>
-      <a href="#" data-page="work" data-mod="SO"><span class="ic">&#9781;</span> นำเข้าเอกสาร / OCR</a>
-      <a href="#" data-page="inbox" data-mod="SO"><span class="ic">&#9776;</span> ทะเบียนเอกสาร</a>
-      <div class="nav-title">MASTER DATA</div>
-      <a href="#" data-page="master"><span class="ic">&#9873;</span> Master Mapping</a>
-      <div class="nav-title">LOG</div>
-      <a href="#" data-page="log"><span class="ic">&#9783;</span> ประวัติส่ง SAP</a>
+      <a href="#" data-page="home" class="active" title="Overview"><span class="ic">&#9635;</span><span class="lbl">Overview</span></a>
+      <div class="nav-title lbl">SUPPLIER INVOICE</div>
+      <a href="#" data-page="work" data-mod="AP" title="Import Supplier Invoice"><span class="ic">&#9781;</span><span class="lbl">Import Supplier Invoice</span></a>
+      <a href="#" data-page="inbox" data-mod="AP" title="Supplier Invoice List"><span class="ic">&#9776;</span><span class="lbl">Supplier Invoice List</span></a>
+      <div class="nav-title lbl">PURCHASE ORDER DOWN PAYMENTS</div>
+      <a href="#" data-page="work" data-mod="PODP" title="Import PO Down Payment"><span class="ic">&#9781;</span><span class="lbl">Import PO Down Payment</span></a>
+      <a href="#" data-page="inbox" data-mod="PODP" title="PO Down Payment List"><span class="ic">&#9776;</span><span class="lbl">PO Down Payment List</span></a>
+      <div class="nav-title lbl">INCOMING INVOICES</div>
+      <a href="#" data-page="work" data-mod="II" title="Import Incoming Invoice"><span class="ic">&#9781;</span><span class="lbl">Import Incoming Invoice</span></a>
+      <a href="#" data-page="inbox" data-mod="II" title="Incoming Invoice List"><span class="ic">&#9776;</span><span class="lbl">Incoming Invoice List</span></a>
+      <div class="nav-title lbl">SALES ORDER</div>
+      <a href="#" data-page="work" data-mod="SO" title="Import Sales Order"><span class="ic">&#9781;</span><span class="lbl">Import Sales Order</span></a>
+      <a href="#" data-page="inbox" data-mod="SO" title="Sales Order List"><span class="ic">&#9776;</span><span class="lbl">Sales Order List</span></a>
+      <div class="nav-title lbl">MASTER DATA</div>
+      <a href="#" data-page="master" title="Master Mapping"><span class="ic">&#9873;</span><span class="lbl">Master Mapping</span></a>
+      <div class="nav-title lbl">LOG</div>
+      <a href="#" data-page="log" title="ประวัติส่ง SAP"><span class="ic">&#9783;</span><span class="lbl">ประวัติส่ง SAP</span></a>
+      <a href="#" data-page="auditlog" title="Log กิจกรรม"><span class="ic">&#9873;</span><span class="lbl">Log กิจกรรม</span></a>
     </nav>
-    <div class="sidebar-foot" id="foot">กำลังเชื่อมต่อฐานข้อมูล…</div>
+    <button class="nav-collapse-btn" id="navToggle" onclick="toggleNav()" title="ย่อ/ขยายเมนู">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+    </button>
+    <div class="sidebar-foot lbl" id="foot">กำลังเชื่อมต่อฐานข้อมูล…</div>
   </aside>
 
   <div class="main">
@@ -48,6 +58,6 @@
 <div class="ov" id="ov"><div class="modal" id="modal"></div></div>
 <div class="toast" id="toast"></div>
 <div class="busy-indicator" id="busyIndicator"><span class="hg">&#8987;</span> กำลังประมวลผล…</div>
-<script src="/app.js?v=29"></script>
+<script src="/app.js?v=56"></script>
 </body>
 </html>

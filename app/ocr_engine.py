@@ -753,10 +753,10 @@ def _from_azure(data: dict, module: str) -> dict:
             "price": ((o.get("UnitPrice", {}) or {}).get("valueCurrency", {}) or {}).get("amount", 0) or 0,
             "amount": ((o.get("Amount", {}) or {}).get("valueCurrency", {}) or {}).get("amount", 0) or 0,
         })
-    name = g("VendorName") if module == "AP" else g("CustomerName")
-    tax = g("VendorTaxId") if module == "AP" else g("CustomerTaxId")
+    name = g("CustomerName") if module == "SO" else g("VendorName")
+    tax = g("CustomerTaxId") if module == "SO" else g("VendorTaxId")
     header = _blank_header(module)
-    if module == "AP":
+    if module != "SO":
         header.update({"invoiceNo": g("InvoiceId"), "invoiceDate": g("InvoiceDate", "valueDate"),
                        "postingDate": g("InvoiceDate", "valueDate"), "vendorName": name, "vendorTaxId": tax,
                        "subTotal": gnum("SubTotal"), "vatAmount": gnum("TotalTax"),
@@ -1046,24 +1046,128 @@ def openai_vision_extract(path: Path, module: str) -> dict | None:
         return None
 
 
+def _chat_fix_call_claude(system_prompt: str, history: list[dict], message: str,
+                          image_b64: str | None, image_media_type: str) -> str | None:
+    if not config.ANTHROPIC_API_KEY:
+        return None
+    import json as _json
+    import urllib.request
+
+    messages = []
+    for h in (history or [])[-12:]:                  # จำกัดความยาวบทสนทนาย้อนหลัง กันบวม token
+        role = "assistant" if h.get("role") == "assistant" else "user"
+        text = str(h.get("text") or "").strip()
+        suffix = " [แนบภาพประกอบ]" if h.get("hasImage") and role == "user" else ""
+        if text or suffix:
+            messages.append({"role": role, "content": text + suffix})
+
+    cur_content: list | str
+    if image_b64:
+        cur_content = [{"type": "image", "source": {"type": "base64", "media_type": image_media_type, "data": image_b64}},
+                       {"type": "text", "text": message}]
+    else:
+        cur_content = message
+    messages.append({"role": "user", "content": cur_content})
+
+    body = {"model": config.ANTHROPIC_MODEL, "max_tokens": 3000,
+            "system": system_prompt, "messages": messages}
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages", data=_json.dumps(body).encode("utf-8"),
+        method="POST", headers={"x-api-key": config.ANTHROPIC_API_KEY,
+                                "anthropic-version": "2023-06-01", "content-type": "application/json"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        resp = _json.loads(r.read().decode("utf-8"))
+    return "".join(b.get("text", "") for b in resp.get("content", []) if b.get("type") == "text")
+
+
+def _chat_fix_call_gemini(system_prompt: str, history: list[dict], message: str,
+                          image_b64: str | None, image_media_type: str) -> str | None:
+    if not config.GEMINI_API_KEY:
+        return None
+    import json as _json
+    import urllib.request
+
+    contents = []
+    for h in (history or [])[-12:]:
+        role = "model" if h.get("role") == "assistant" else "user"
+        text = str(h.get("text") or "").strip()
+        suffix = " [แนบภาพประกอบ]" if h.get("hasImage") and role == "user" else ""
+        if text or suffix:
+            contents.append({"role": role, "parts": [{"text": text + suffix}]})
+    cur_parts = [{"text": message or " "}]
+    if image_b64:
+        cur_parts.append({"inline_data": {"mime_type": image_media_type, "data": image_b64}})
+    contents.append({"role": "user", "parts": cur_parts})
+
+    body = {"contents": contents, "systemInstruction": {"parts": [{"text": system_prompt}]},
+            "generationConfig": {"responseMimeType": "application/json", "maxOutputTokens": 3000}}
+    url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+          f"{config.GEMINI_MODEL}:generateContent?key={config.GEMINI_API_KEY}")
+    req = urllib.request.Request(url, data=_json.dumps(body).encode("utf-8"),
+                                 method="POST", headers={"content-type": "application/json"})
+    with urllib.request.urlopen(req, timeout=90) as r:
+        resp = _json.loads(r.read().decode("utf-8"))
+    return "".join(p.get("text", "") for c in resp.get("candidates", [])
+                  for p in (c.get("content") or {}).get("parts", []))
+
+
+def _chat_fix_call_openai(system_prompt: str, history: list[dict], message: str,
+                          image_b64: str | None, image_media_type: str) -> str | None:
+    if not config.OPENAI_API_KEY:
+        return None
+    import json as _json
+    import urllib.request
+
+    messages = [{"role": "system", "content": system_prompt}]
+    for h in (history or [])[-12:]:
+        role = "assistant" if h.get("role") == "assistant" else "user"
+        text = str(h.get("text") or "").strip()
+        suffix = " [แนบภาพประกอบ]" if h.get("hasImage") and role == "user" else ""
+        if text or suffix:
+            messages.append({"role": role, "content": text + suffix})
+
+    cur_content: list | str
+    if image_b64:
+        cur_content = [{"type": "image_url", "image_url": {"url": f"data:{image_media_type};base64,{image_b64}"}},
+                       {"type": "text", "text": message or " "}]
+    else:
+        cur_content = message or " "
+    messages.append({"role": "user", "content": cur_content})
+
+    body = {"model": config.OPENAI_MODEL, "max_tokens": 3000,
+            "response_format": {"type": "json_object"}, "messages": messages}
+    req = urllib.request.Request(
+        "https://api.openai.com/v1/chat/completions", data=_json.dumps(body).encode("utf-8"),
+        method="POST", headers={"Authorization": "Bearer " + config.OPENAI_API_KEY,
+                                "content-type": "application/json"})
+    with urllib.request.urlopen(req, timeout=90) as r:
+        resp = _json.loads(r.read().decode("utf-8"))
+    return ((resp.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+
+
+_CHAT_FIX_CALLERS = {"claude": _chat_fix_call_claude, "gemini": _chat_fix_call_gemini, "openai": _chat_fix_call_openai}
+
+
 def chat_fix_document(module: str, header: dict, lines: list[dict], history: list[dict], message: str,
-                      image_b64: str | None = None, image_media_type: str = "image/png") -> dict | None:
+                      image_b64: str | None = None, image_media_type: str = "image/png",
+                      provider: str = "claude") -> dict | None:
     """เมนู "แชทสั่งแก้" — ผู้ใช้พิมพ์บอกจุดที่ผิดด้วยภาษาธรรมดา (เช่น "ชื่อผู้ขายที่ถูกคือ ABC จำกัด ไม่ใช่ XYZ")
-    พร้อมแนบภาพประกอบได้ (เช่น capture หน้าจอจุดที่อ่านผิดจาก Review Document) ให้ Claude ดูภาพนั้นด้วย
-    แล้วให้ Claude แก้เฉพาะจุดที่ระบุในข้อมูล header/lines ปัจจุบัน ไม่แตะข้อมูลอื่น — ใช้กับเอกสารนี้เท่านั้น
+    พร้อมแนบภาพประกอบได้ (เช่น capture หน้าจอจุดที่อ่านผิดจาก Review Document) ให้ AI ดูภาพนั้นด้วย
+    แล้วให้ AI แก้เฉพาะจุดที่ระบุในข้อมูล header/lines ปัจจุบัน ไม่แตะข้อมูลอื่น — ใช้กับเอกสารนี้เท่านั้น
     (ไม่ auto-learn ไปเอกสารอื่น ต่างจาก /learn ที่บันทึกลง Master Data ถาวร)
 
+    provider: "claude" | "gemini" | "openai" — เลือกโมเดล Vision ที่จะใช้อ่านภาพที่แนบมา (เผื่อโมเดลหลักอ่านเอกสาร
+    ไม่สำเร็จ หรือยังไม่ได้ตั้งค่า API key ของโมเดลนั้น ผู้ใช้เลือกโมเดลอื่นที่พร้อมใช้งานแทนได้)
+
     history: บทสนทนาก่อนหน้า [{"role": "user"|"assistant", "text": str}, ...] เรียงเก่า->ใหม่ — ส่งเข้าไปเป็น
-    บริบทให้ Claude ตอบแบบถามตอบต่อเนื่องได้ (เช่น ถามคำถามต่อจากที่คุยไว้ก่อนหน้า) ไม่ใช่แค่คำสั่งเดี่ยว ๆ ทีละครั้ง
+    บริบทให้ AI ตอบแบบถามตอบต่อเนื่องได้ (เช่น ถามคำถามต่อจากที่คุยไว้ก่อนหน้า) ไม่ใช่แค่คำสั่งเดี่ยว ๆ ทีละครั้ง
     ไม่ใส่ภาพของเทิร์นก่อนหน้ากลับเข้าไปซ้ำ (คุมขนาด prompt/ค่าใช้จ่าย) เพราะผลของการแก้ไขที่ยืนยันแล้วอยู่ใน
     header/lines ปัจจุบันที่ส่งให้ทุกครั้งอยู่แล้ว
 
-    คืนค่า {reply, header, lines} หรือ None ถ้าเรียก API ไม่สำเร็จ"""
-    if not config.ANTHROPIC_API_KEY:
-        return None
+    คืนค่า {reply, header, lines} หรือ None ถ้าเรียก API ไม่สำเร็จ/ยังไม่ได้ตั้งค่า key ของโมเดลที่เลือก"""
+    caller = _CHAT_FIX_CALLERS.get(provider, _chat_fix_call_claude)
     try:
         import json as _json
-        import urllib.request
 
         system_prompt = (
             "คุณคือผู้ช่วยแก้ไขข้อมูลเอกสาร (ใบกำกับภาษี/ใบแจ้งหนี้/ใบสั่งซื้อ) ที่อ่านมาจาก OCR ในระบบ OCR-to-SAP\n"
@@ -1087,31 +1191,9 @@ def chat_fix_document(module: str, header: dict, lines: list[dict], history: lis
             '"lines": [ ...lines ที่แก้ไขแล้ว (หรือเดิมถ้าไม่ได้แก้)... ]}'
         )
 
-        messages = []
-        for h in (history or [])[-12:]:                  # จำกัดความยาวบทสนทนาย้อนหลัง กันบวม token
-            role = "assistant" if h.get("role") == "assistant" else "user"
-            text = str(h.get("text") or "").strip()
-            suffix = " [แนบภาพประกอบ]" if h.get("hasImage") and role == "user" else ""
-            if text or suffix:
-                messages.append({"role": role, "content": text + suffix})
-
-        cur_content: list | str
-        if image_b64:
-            cur_content = [{"type": "image", "source": {"type": "base64", "media_type": image_media_type, "data": image_b64}},
-                           {"type": "text", "text": message}]
-        else:
-            cur_content = message
-        messages.append({"role": "user", "content": cur_content})
-
-        body = {"model": config.ANTHROPIC_MODEL, "max_tokens": 3000,
-                "system": system_prompt, "messages": messages}
-        req = urllib.request.Request(
-            "https://api.anthropic.com/v1/messages", data=_json.dumps(body).encode("utf-8"),
-            method="POST", headers={"x-api-key": config.ANTHROPIC_API_KEY,
-                                    "anthropic-version": "2023-06-01", "content-type": "application/json"})
-        with urllib.request.urlopen(req, timeout=60) as r:
-            resp = _json.loads(r.read().decode("utf-8"))
-        raw = "".join(b.get("text", "") for b in resp.get("content", []) if b.get("type") == "text")
+        raw = caller(system_prompt, history, message, image_b64, image_media_type)
+        if raw is None:
+            return None
         m = re.search(r"\{.*\}", raw, re.S)
         parsed = None
         if m:
@@ -1148,13 +1230,44 @@ def _blank_header(module: str) -> dict:
                 "shipToName": "", "shipToAddress": "", "deliveryDate": "", "currency": "THB",
                 "paymentTerms": "", "incoterms": "", "subTotal": 0, "vatAmount": 0,
                 "totalAmount": 0, "remark": ""}
+    if module == "II":
+        # Incoming Invoices (Fiori F0859) — เอกสารตั้งหนี้เจ้าหนี้แบบไม่มี PO อ้างอิง แยกจาก Supplier Invoice (MIRO)
+        # เก็บในตาราง ocr.Document/DocumentLine ชุดเดียวกัน แต่แยกด้วย Module='II' (คนละชุดข้อมูลกับ AP/SO โดยสมบูรณ์)
+        return {"docType": "ใบกำกับภาษี/ใบแจ้งหนี้", "transaction": "", "invoiceNo": "", "invoiceDate": "",
+                "postingDate": "", "vendorName": "", "vendorTaxId": "", "sapDocType": "", "currency": "THB",
+                "calculateTax": "", "taxCode": "", "businessPlace": "", "headerText": "",
+                "subTotal": 0, "vatRate": 7, "vatAmount": 0, "whtAmount": 0, "totalAmount": 0,
+                # Address and Bank Data — ข้อมูลที่อยู่/ธนาคารของเจ้าหนี้ (override เฉพาะเอกสารนี้)
+                "language": "", "vendorName2": "", "vendorName3": "", "vendorName4": "",
+                "addressStreet": "", "addressCity": "", "addressPostalCode": "", "addressCountry": "",
+                "vendorEmail": "", "bankCountry": "", "bankKey": "", "bankAccountNo": "", "taxNumber3": "",
+                # Payment
+                "baselineDate": "", "paymentTerms": "", "paymentMethod": "", "paymentBlock": "",
+                "partnerBank": "", "houseBank": "", "bankAccountId": "",
+                # Details
+                "assignmentText": "", "refKey1": "", "refKey2": "", "refKey3": "",
+                # Withholding Tax
+                "whtCode": "", "whtBaseAmount": 0,
+                # Line Items (G/L distribution) — โครงสร้างเดียวกับ glItems ของ Supplier Invoice
+                "glItems": []}
+    if module == "PODP":
+        # Purchase Order Down Payments — module แยกจาก Supplier Invoice/Incoming Invoices โดยสมบูรณ์
+        # ฟิลด์เริ่มต้นแบบพื้นฐาน (baseline เดียวกับ Incoming Invoices) รอรายละเอียดฟิลด์ฉบับเต็มจากผู้ใช้
+        return {"docType": "PO Down Payment", "invoiceNo": "", "invoiceDate": "", "postingDate": "",
+                "vendorName": "", "vendorTaxId": "", "poRef": "", "currency": "THB", "paymentTerms": "",
+                "totalAmount": 0}
     return {"docType": "ใบกำกับภาษี/ใบแจ้งหนี้", "invoiceNo": "", "invoiceDate": "", "postingDate": "",
             "vendorName": "", "vendorTaxId": "", "branch": "", "poRef": "", "currency": "THB",
             "paymentTerms": "", "subTotal": 0, "vatRate": 7, "vatAmount": 0, "whtAmount": 0, "totalAmount": 0,
             # ฟิลด์สำหรับเอกสารประเภท Trade (MIRO) — ผู้ใช้กรอกเอง ไม่ได้เดาจาก OCR
             "taxCode": "", "calculateTax": "", "baselineDate": "", "paymentMethod": "", "assignmentText": "",
             # ฟิลด์เพิ่มสำหรับเอกสารประเภท Non-Trade ไม่มี PO — ผู้ใช้กรอกเอง ไม่ได้เดาจาก OCR
-            "companyCode": "", "headerText": ""}
+            "companyCode": "", "headerText": "",
+            # ฟิลด์เพิ่มสำหรับ Supplier Invoice (MIRO) ฉบับเต็ม — ผู้ใช้กรอกเอง ไม่ได้เดาจาก OCR
+            "businessPlace": "", "refDocType": "", "taxDate": "", "taxReportingDate": "", "taxFulfillDate": "",
+            "paymentBlock": "", "partnerBank": "", "houseBank": "", "bankAccountId": "",
+            "unplannedDeliveryCost": 0, "whtCode": "", "whtBaseAmount": 0,
+            "glItems": []}
 
 
 def _po_number_date(text: str) -> tuple[str, str]:
@@ -1241,7 +1354,7 @@ def parse_text(text: str, module: str, blocks: dict | None = None, provider: str
     if mi:
         inco = mi.group(1).strip()
 
-    if module == "AP":
+    if module != "SO":
         d = find_date(text, [th("วันที่ใบกำกับภาษี"), th("วันที่ใบแจ้งหนี้"), r"INVOICE\s*DATE", r"DATE"])
         h.update({"invoiceNo": find_doc_no(text, [th("เลขที่ใบกำกับภาษี"), th("เลขที่ใบแจ้งหนี้"),
                                                   r"INVOICE\s*NO\.?", r"INV\.?\s*NO\.?", th("เลขที่"), r"No\.?"]),
@@ -1376,6 +1489,25 @@ DEMO = {
                     "vatAmount": 3640, "whtAmount": 0, "totalAmount": 55640},
          "lines": [{"extCode": "RR-ACET", "desc": "ACETONE 99%", "qty": 1300, "uom": "L", "price": 40, "amount": 52000}]},
     ],
+    "II": [
+        {"name": "II-BANGKOK-AUDIT-6808.pdf", "label": "ใบแจ้งหนี้ค่าที่ปรึกษา — ไม่มี PO อ้างอิง", "confidence": 0.9,
+         "header": {"docType": "ใบแจ้งหนี้", "transaction": "R", "invoiceNo": "AUD-6808", "invoiceDate": "2026-08-14",
+                    "postingDate": "2026-08-14", "vendorName": "บริษัท กรุงเทพ ออดิท จำกัด",
+                    "vendorTaxId": "0105558003344", "sapDocType": "KR", "currency": "THB",
+                    "calculateTax": "", "taxCode": "", "businessPlace": "", "headerText": "ค่าที่ปรึกษาบัญชีเดือน ก.ค.",
+                    "subTotal": 40000, "vatRate": 7, "vatAmount": 2800, "whtAmount": 1200, "totalAmount": 42800,
+                    "glItems": [{"glAccount": "5200100", "drCr": "D", "amount": 40000, "taxCode": "V7",
+                                 "assignment": "AUD-6808", "itemText": "ค่าที่ปรึกษาบัญชี", "costCenter": "CC-1001"}]},
+         "lines": []},
+    ],
+    "PODP": [
+        {"name": "PODP-4500098765.pdf", "label": "เงินมัดจำล่วงหน้าตาม PO", "confidence": 0.9,
+         "header": {"docType": "PO Down Payment", "invoiceNo": "DP-4500098765", "invoiceDate": "2026-08-15",
+                    "postingDate": "2026-08-15", "vendorName": "บริษัท ไทยเอ็นจิเนียริ่ง แอนด์ คอนสตรัคชั่น จำกัด",
+                    "vendorTaxId": "0105549001122", "poRef": "4500098765", "currency": "THB",
+                    "paymentTerms": "เครดิต 30 วัน", "totalAmount": 150000},
+         "lines": []},
+    ],
 }
 
 
@@ -1429,6 +1561,13 @@ def _demo_fallback(path: Path, module: str, note: str) -> dict:
     return d
 
 
+def _read_failed(path: Path, module: str, note: str) -> dict:
+    """เมื่ออ่านเอกสารไม่สำเร็จจริง ๆ (ต่างจากการเลือก 'ข้อมูลตัวอย่าง' โดยตั้งใจ) — คืนข้อมูลว่างเปล่าตรง ๆ
+    ห้ามใช้ engine อื่นหรือข้อมูลตัวอย่างมาแทนแบบเงียบ ๆ เพราะจะทำให้ผู้ใช้เข้าใจผิดว่าเป็นข้อมูลจริงจากเอกสาร
+    ผู้ใช้ต้องเห็น popup แจ้งเตือนชัดเจน แล้วแนบภาพเอกสารไปคุยกับแชท AI เพื่อให้อ่านให้แทน"""
+    return {"header": _blank_header(module), "lines": [], "confidence": 0.0, "provider": "failed", "_note": note}
+
+
 # ฟิลด์สำคัญต่อโมดูล ใช้สร้างเหตุผลอธิบายว่าทำไมความแม่นยำไม่ถึง 100% — ไม่รวมทุกฟิลด์ เพราะบางฟิลด์
 # (เช่น remark, incoterms) ว่างได้ตามปกติโดยไม่ถือว่าอ่านไม่ครบ
 _AP_IMPORTANT = {"invoiceNo": "เลขที่ใบกำกับภาษี/ใบแจ้งหนี้", "invoiceDate": "วันที่เอกสาร",
@@ -1450,7 +1589,7 @@ _PROVIDER_CAVEAT = {
 def _confidence_note(module: str, header: dict, lines: list[dict], provider: str) -> str:
     """สร้างคำอธิบายว่าทำไมความแม่นยำ OCR ไม่ถึง 100% — ใช้เก็บลง Document.OcrConfidenceNote
     เพื่อให้ผู้ใช้เห็นเหตุผลตรง ๆ แทนที่จะเห็นแค่ตัวเลข % เฉย ๆ"""
-    important = _AP_IMPORTANT if module == "AP" else _SO_IMPORTANT
+    important = _SO_IMPORTANT if module == "SO" else _AP_IMPORTANT
     missing = [label for key, label in important.items()
               if str(header.get(key) or "").strip() in ("", "0", "0.0")]
     reasons = []
@@ -1491,6 +1630,8 @@ def extract(path: Path, module: str, provider_override: str | None = None) -> di
     out = _extract_dispatch(path, module, provider_override)
     if out.get("provider") == "demo":
         out["confidenceNote"] = out.get("_note") or "ใช้ข้อมูลตัวอย่าง (demo) ไม่ได้อ่านจากไฟล์จริง"
+    elif out.get("provider") == "failed":
+        out["confidenceNote"] = out.get("_note") or "อ่านเอกสารไม่สำเร็จ"
     else:
         out["confidenceNote"] = _confidence_note(module, out.get("header") or {}, out.get("lines") or [],
                                                   out.get("provider") or "")
@@ -1514,42 +1655,41 @@ def _extract_dispatch(path: Path, module: str, provider_override: str | None = N
         data = azure_extract(path)
         if data:
             return _from_azure(data, module)
-        return _demo_fallback(path, module,
-                              "เชื่อมต่อ Azure Document Intelligence ไม่สำเร็จ หรือยังไม่ได้ตั้งค่า AZURE_DI_ENDPOINT/AZURE_DI_KEY ใน .env")
+        return _read_failed(path, module,
+                            "เชื่อมต่อ Azure Document Intelligence ไม่สำเร็จ หรือยังไม่ได้ตั้งค่า AZURE_DI_ENDPOINT/AZURE_DI_KEY ใน .env")
     if provider == "claude":
         out = claude_vision_extract(path, module)
         if out:
             return out
-        return _demo_fallback(path, module,
-                              "เชื่อมต่อ Claude Vision ไม่สำเร็จ หรือยังไม่ได้ตั้งค่า ANTHROPIC_API_KEY ใน .env")
+        return _read_failed(path, module,
+                            "เชื่อมต่อ Claude Vision ไม่สำเร็จ หรือยังไม่ได้ตั้งค่า ANTHROPIC_API_KEY ใน .env")
     if provider == "gemini":
         out = gemini_vision_extract(path, module)
         if out:
             return out
-        return _demo_fallback(path, module,
-                              "เชื่อมต่อ Gemini Vision ไม่สำเร็จ หรือยังไม่ได้ตั้งค่า GEMINI_API_KEY ใน .env")
+        return _read_failed(path, module,
+                            "เชื่อมต่อ Gemini Vision ไม่สำเร็จ หรือยังไม่ได้ตั้งค่า GEMINI_API_KEY ใน .env")
     if provider == "openai":
         out = openai_vision_extract(path, module)
         if out:
             return out
-        return _demo_fallback(path, module,
-                              "เชื่อมต่อ ChatGPT Vision ไม่สำเร็จ หรือยังไม่ได้ตั้งค่า OPENAI_API_KEY ใน .env")
+        return _read_failed(path, module,
+                            "เชื่อมต่อ ChatGPT Vision ไม่สำเร็จ หรือยังไม่ได้ตั้งค่า OPENAI_API_KEY ใน .env")
     if provider == "claude_text":
         pre_text = pdf_text(path) if ext == ".pdf" else ""
         if not pre_text.strip() and (ext in IMAGE_EXT or ext == ".pdf"):
             pre_text = tesseract_text(path)
         if not pre_text.strip():
-            return _demo_fallback(path, module,
-                                  "OCR อ่านข้อความจากไฟล์ไม่ได้ จึงส่งให้ Claude จัดโครงสร้างไม่ได้ (ลองใช้ Claude Vision แทน)")
+            return _read_failed(path, module, "OCR อ่านข้อความจากไฟล์ไม่ได้ จึงส่งให้ Claude จัดโครงสร้างไม่ได้")
         out = claude_text_extract(path, module, pre_text)
         if out:
             return out
-        return _demo_fallback(path, module,
-                              "เชื่อมต่อ Claude (จัดโครงสร้างจากข้อความ) ไม่สำเร็จ หรือยังไม่ได้ตั้งค่า ANTHROPIC_API_KEY ใน .env")
+        return _read_failed(path, module,
+                            "เชื่อมต่อ Claude (จัดโครงสร้างจากข้อความ) ไม่สำเร็จ หรือยังไม่ได้ตั้งค่า ANTHROPIC_API_KEY ใน .env")
     if provider == "typhoon":
         text, err = typhoon_text(path)
         if not text.strip():
-            return _demo_fallback(path, module, err or "Typhoon OCR ไม่คืนข้อความใด ๆ กลับมา")
+            return _read_failed(path, module, err or "Typhoon OCR ไม่คืนข้อความใด ๆ กลับมา")
         out = parse_text(text, module, pdf_blocks(path) if ext == ".pdf" else None, provider="typhoon")
         if out["lines"] or out["header"].get("vendorTaxId") or out["header"].get("customerTaxId"):
             return out
@@ -1571,4 +1711,4 @@ def _extract_dispatch(path: Path, module: str, provider_override: str | None = N
         out["confidence"] = 0.3
         return out
 
-    return _demo_fallback(path, module, "อ่านข้อความจากไฟล์ไม่ได้ (ไฟล์สแกน/ยังไม่ได้ตั้งค่า OCR engine)")
+    return _read_failed(path, module, "อ่านข้อความจากไฟล์ไม่ได้ (ไฟล์สแกน/ยังไม่ได้ตั้งค่า OCR engine)")
