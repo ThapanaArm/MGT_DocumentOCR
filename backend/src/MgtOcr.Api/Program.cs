@@ -1,5 +1,5 @@
 using DotNetEnv;
-using MgtOcr.Api.Json;
+using MgtOcr.Core.Json;
 using MgtOcr.Core.Config;
 using MgtOcr.Data;
 using MgtOcr.Ocr;
@@ -75,6 +75,8 @@ builder.Services.AddSingleton<DbConnectionFactory>();
 builder.Services.AddSingleton<Db>();
 builder.Services.AddSingleton<MasterRepository>();
 builder.Services.AddSingleton<OcrEngine>();
+builder.Services.AddSingleton(sp => new DocumentRepository(sp.GetRequiredService<Db>(), appConfig.UploadDir));
+builder.Services.AddHttpClient<MgtOcr.Core.Sap.SapClient>();
 
 builder.Services.AddControllers().AddJsonOptions(o =>
 {
@@ -84,6 +86,7 @@ builder.Services.AddControllers().AddJsonOptions(o =>
     o.JsonSerializerOptions.PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase;
     o.JsonSerializerOptions.Converters.Add(new PythonDateTimeConverter());
     o.JsonSerializerOptions.Converters.Add(new PythonDecimalConverter());
+    o.JsonSerializerOptions.Converters.Add(new PythonDoubleConverter());
 });
 builder.Services.AddOpenApi();
 
@@ -102,8 +105,57 @@ if (app.Environment.IsDevelopment())
     app.MapOpenApi();
 }
 
+// Matches FastAPI/Starlette's default behavior for any exception that isn't an explicit
+// HTTPException: a plain-text "Internal Server Error" body (content-type text/plain), NOT
+// {"detail": ...} — verified directly against the live Python instance on :8090 (curl -i), which
+// returns exactly `HTTP/1.1 500`, `content-type: text/plain; charset=utf-8`, body "Internal Server
+// Error". Endpoints that raise their own HTTPException-equivalent (BadRequest/NotFound with a
+// {detail} body) never reach this — it only catches genuinely unhandled exceptions, same as Python.
+app.Use(async (context, next) =>
+{
+    try
+    {
+        await next(context);
+    }
+    catch (Exception)
+    {
+        context.Response.Clear();
+        context.Response.StatusCode = 500;
+        context.Response.ContentType = "text/plain; charset=utf-8";
+        await context.Response.WriteAsync("Internal Server Error");
+    }
+});
+
+// Mirrors FastAPI's HTTPException handling: {"detail": ...} with the given status. Registered
+// after the generic catch-all above so it runs closer to the endpoint and gets first chance to
+// handle an HttpApiException — only exceptions it doesn't catch fall through to the generic one.
+app.Use(async (context, next) =>
+{
+    try
+    {
+        await next(context);
+    }
+    catch (MgtOcr.Core.HttpApiException ex)
+    {
+        context.Response.Clear();
+        context.Response.StatusCode = ex.Status;
+        context.Response.ContentType = "application/json";
+        await context.Response.WriteAsJsonAsync(new { detail = ex.Detail });
+    }
+});
+
 app.UseCors("frontend");
 app.UseAuthorization();
 app.MapControllers();
+
+// Mirrors app.mount("/", StaticFiles(directory=str(config.PUBLIC_DIR), html=True)) in Python:
+// serves public/ unmodified — index.html at "/", app.js/style.css/assets/* at their existing paths.
+var publicDir = Path.Combine(repoRoot, "public");
+if (Directory.Exists(publicDir))
+{
+    var fileProvider = new Microsoft.Extensions.FileProviders.PhysicalFileProvider(publicDir);
+    app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = fileProvider });
+    app.UseStaticFiles(new StaticFileOptions { FileProvider = fileProvider });
+}
 
 app.Run();

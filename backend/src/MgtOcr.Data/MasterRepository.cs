@@ -1,4 +1,6 @@
 using Dapper;
+using MgtOcr.Core;
+using MgtOcr.Core.Mapping;
 using Microsoft.Data.SqlClient;
 
 namespace MgtOcr.Data;
@@ -25,6 +27,23 @@ public class MasterRepository(Db db)
         result["uoms"] = await db.QueryAsync(
             "SELECT * FROM ocr.UomConversion ORDER BY CASE WHEN MaterialCode IS NULL THEN 0 ELSE 1 END, MaterialCode, ExtUom");
         return result;
+    }
+
+    // Same data as LoadAllAsync(), reshaped into plain dicts for the mapping engine / SAP payload
+    // builder (which need dict.get()-style field access, not raw dynamic Dapper rows).
+    public async Task<MasterData> LoadForMappingAsync()
+    {
+        var all = await LoadAllAsync();
+        return new MasterData
+        {
+            Customers = DynamicRow.ToDictList(all["customers"]),
+            ShipTos = DynamicRow.ToDictList(all["shiptos"]),
+            Materials = DynamicRow.ToDictList(all["materials"]),
+            CustomerMaterials = DynamicRow.ToDictList(all["custmaterials"]),
+            Vendors = DynamicRow.ToDictList(all["vendors"]),
+            VendorMaterials = DynamicRow.ToDictList(all["venmaterials"]),
+            Uoms = DynamicRow.ToDictList(all["uoms"]),
+        };
     }
 
     // masters_list(): unfiltered (no IsActive check) + optional OR-across-all-columns LIKE search.
@@ -59,11 +78,14 @@ public class MasterRepository(Db db)
     }
 
     // masters_update(): SET only recognized columns present in the body, plus UpdatedAt.
+    // Bug-for-bug with Python's masters_update (main.py:378-385, ", ".join(cols) + ", UpdatedAt=..."):
+    // an empty/unrecognized body yields a leading comma ("SET , UpdatedAt=...") which SQL Server
+    // rejects as a syntax error — a 500, not a validation error. Preserved deliberately, not fixed
+    // (see the approved migration plan's bug-for-bug preservation policy).
     public async Task<bool> UpdateAsync(MasterDefinition m, string key, Dictionary<string, object?> body)
     {
         var cols = m.Cols.Where(body.ContainsKey).ToArray();
-        var sets = string.Join(", ", cols.Select((c, i) => $"{c}=@p{i}")) +
-                   (cols.Length > 0 ? ", " : "") + "UpdatedAt=SYSDATETIME()";
+        var sets = string.Join(", ", cols.Select((c, i) => $"{c}=@p{i}")) + ", UpdatedAt=SYSDATETIME()";
         var sql = $"UPDATE {m.Table} SET {sets} WHERE {m.Key}=@key";
         var p = new DynamicParameters();
         for (var i = 0; i < cols.Length; i++) p.Add($"p{i}", body[cols[i]]);

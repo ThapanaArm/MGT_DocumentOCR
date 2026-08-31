@@ -27,7 +27,7 @@ public static class DemoData
                     ["shipToName"] = "คลังสินค้า บางปู",
                     ["shipToAddress"] = "นิคมอุตสาหกรรมบางปู ซ.7 ต.แพรกษา อ.เมือง สมุทรปราการ 10280",
                     ["deliveryDate"] = "2026-08-25", ["currency"] = "THB", ["paymentTerms"] = "เครดิต 30 วัน",
-                    ["incoterms"] = "DDP", ["totalAmount"] = 385000.0, ["remark"] = "ส่งของช่วงเช้า 08:00-11:00",
+                    ["incoterms"] = "DDP", ["totalAmount"] = 385000, ["remark"] = "ส่งของช่วงเช้า 08:00-11:00",
                 },
                 Lines =
                 [
@@ -45,7 +45,7 @@ public static class DemoData
                     ["shipToName"] = "โรงงานอยุธยา (โรจนะ)",
                     ["shipToAddress"] = "สวนอุตสาหกรรมโรจนะ ต.คานหาม อ.อุทัย พระนครศรีอยุธยา 13210",
                     ["deliveryDate"] = "2026-08-28", ["currency"] = "THB", ["paymentTerms"] = "เครดิต 60 วัน",
-                    ["incoterms"] = "DDP", ["totalAmount"] = 640000.0, ["remark"] = "",
+                    ["incoterms"] = "DDP", ["totalAmount"] = 640000, ["remark"] = "",
                 },
                 Lines =
                 [
@@ -63,7 +63,7 @@ public static class DemoData
                     ["shipToName"] = "คลังสินค้าลาดกระบัง",
                     ["shipToAddress"] = "ถ.ฉลองกรุง แขวงลำปลาทิว เขตลาดกระบัง กรุงเทพฯ 10520",
                     ["deliveryDate"] = "2026-08-30", ["currency"] = "THB", ["paymentTerms"] = "เงินสด",
-                    ["incoterms"] = "EXW", ["totalAmount"] = 124000.0, ["remark"] = "",
+                    ["incoterms"] = "EXW", ["totalAmount"] = 124000, ["remark"] = "",
                 },
                 Lines = [new() { ExtCode = "NW-EP828", Desc = "อีพ็อกซี่เรซิน EP-828", Qty = 2000, Uom = "KG", Price = 62, Amount = 124000 }],
             },
@@ -78,8 +78,8 @@ public static class DemoData
                     ["docType"] = "ใบกำกับภาษี/ใบส่งของ", ["invoiceNo"] = "UC-25080456", ["invoiceDate"] = "2026-08-08",
                     ["postingDate"] = "2026-08-08", ["vendorName"] = "บริษัท ยูนิเวอร์แซล เคมีคอล ซัพพลาย จำกัด",
                     ["vendorTaxId"] = "0105546007788", ["branch"] = "สำนักงานใหญ่", ["poRef"] = "4500012345",
-                    ["currency"] = "THB", ["paymentTerms"] = "เครดิต 30 วัน", ["subTotal"] = 268000.0, ["vatRate"] = 7.0,
-                    ["vatAmount"] = 18760.0, ["whtAmount"] = 0.0, ["totalAmount"] = 286760.0,
+                    ["currency"] = "THB", ["paymentTerms"] = "เครดิต 30 วัน", ["subTotal"] = 268000, ["vatRate"] = 7,
+                    ["vatAmount"] = 18760, ["whtAmount"] = 0, ["totalAmount"] = 286760,
                 },
                 Lines =
                 [
@@ -95,8 +95,8 @@ public static class DemoData
                     ["docType"] = "ใบแจ้งหนี้", ["invoiceNo"] = "NC-LOG-6808", ["invoiceDate"] = "2026-08-11",
                     ["postingDate"] = "2026-08-11", ["vendorName"] = "บริษัท เอ็น.ซี. โลจิสติกส์ เซอร์วิส จำกัด",
                     ["vendorTaxId"] = "0115551002233", ["branch"] = "สำนักงานใหญ่", ["poRef"] = "",
-                    ["currency"] = "THB", ["paymentTerms"] = "เครดิต 15 วัน", ["subTotal"] = 85000.0, ["vatRate"] = 7.0,
-                    ["vatAmount"] = 5950.0, ["whtAmount"] = 2550.0, ["totalAmount"] = 88400.0,
+                    ["currency"] = "THB", ["paymentTerms"] = "เครดิต 15 วัน", ["subTotal"] = 85000, ["vatRate"] = 7,
+                    ["vatAmount"] = 5950, ["whtAmount"] = 2550, ["totalAmount"] = 88400,
                 },
                 Lines = [new() { ExtCode = "NC-FREIGHT", Desc = "ค่าขนส่ง เดือน ก.ค. 2569", Qty = 1, Uom = "AU", Price = 85000, Amount = 85000 }],
             },
@@ -108,10 +108,49 @@ public static class DemoData
                     ["docType"] = "ใบกำกับภาษี", ["invoiceNo"] = "77120", ["invoiceDate"] = "2026-08-12",
                     ["postingDate"] = "2026-08-12", ["vendorName"] = "หจก. รุ่งเรือง เคมีภัณฑ์",
                     ["vendorTaxId"] = "0103552009999", ["branch"] = "สำนักงานใหญ่", ["poRef"] = "",
-                    ["currency"] = "THB", ["paymentTerms"] = "เงินสด", ["subTotal"] = 52000.0, ["vatRate"] = 7.0,
-                    ["vatAmount"] = 3640.0, ["whtAmount"] = 0.0, ["totalAmount"] = 55640.0,
+                    ["currency"] = "THB", ["paymentTerms"] = "เงินสด", ["subTotal"] = 52000, ["vatRate"] = 7,
+                    ["vatAmount"] = 3640, ["whtAmount"] = 0, ["totalAmount"] = 55640,
                 },
                 Lines = [new() { ExtCode = "RR-ACET", Desc = "ACETONE 99%", Qty = 1300, Uom = "L", Price = 40, Amount = 52000 }],
+            },
+        ],
+        ["II"] =
+        [
+            new DemoSample
+            {
+                Name = "II-BANGKOK-AUDIT-6808.pdf", Label = "ใบแจ้งหนี้ค่าที่ปรึกษา — ไม่มี PO อ้างอิง", Confidence = 0.9,
+                Header = new Dictionary<string, object?>
+                {
+                    ["docType"] = "ใบแจ้งหนี้", ["transaction"] = "R", ["invoiceNo"] = "AUD-6808", ["invoiceDate"] = "2026-08-14",
+                    ["postingDate"] = "2026-08-14", ["vendorName"] = "บริษัท กรุงเทพ ออดิท จำกัด",
+                    ["vendorTaxId"] = "0105558003344", ["sapDocType"] = "KR", ["currency"] = "THB",
+                    ["calculateTax"] = "", ["taxCode"] = "", ["businessPlace"] = "", ["headerText"] = "ค่าที่ปรึกษาบัญชีเดือน ก.ค.",
+                    ["subTotal"] = 40000, ["vatRate"] = 7, ["vatAmount"] = 2800, ["whtAmount"] = 1200, ["totalAmount"] = 42800,
+                    ["glItems"] = new List<object>
+                    {
+                        new Dictionary<string, object?>
+                        {
+                            ["glAccount"] = "5200100", ["drCr"] = "D", ["amount"] = 40000, ["taxCode"] = "V7",
+                            ["assignment"] = "AUD-6808", ["itemText"] = "ค่าที่ปรึกษาบัญชี", ["costCenter"] = "CC-1001",
+                        },
+                    },
+                },
+                Lines = [],
+            },
+        ],
+        ["PODP"] =
+        [
+            new DemoSample
+            {
+                Name = "PODP-4500098765.pdf", Label = "เงินมัดจำล่วงหน้าตาม PO", Confidence = 0.9,
+                Header = new Dictionary<string, object?>
+                {
+                    ["docType"] = "PO Down Payment", ["invoiceNo"] = "DP-4500098765", ["invoiceDate"] = "2026-08-15",
+                    ["postingDate"] = "2026-08-15", ["vendorName"] = "บริษัท ไทยเอ็นจิเนียริ่ง แอนด์ คอนสตรัคชั่น จำกัด",
+                    ["vendorTaxId"] = "0105549001122", ["poRef"] = "4500098765", ["currency"] = "THB",
+                    ["paymentTerms"] = "เครดิต 30 วัน", ["totalAmount"] = 150000,
+                },
+                Lines = [],
             },
         ],
     };

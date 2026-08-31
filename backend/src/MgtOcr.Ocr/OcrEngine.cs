@@ -33,11 +33,11 @@ public class OcrEngine(AppConfig config)
         new("claude", "Claude Vision (AI)",
             "แม่นที่สุดสำหรับเอกสารยุ่งเหยิง/ตารางซับซ้อน เข้าใจบริบทได้ — ต้องตั้งค่า ANTHROPIC_API_KEY ใน .env (มีค่าใช้จ่ายต่อครั้ง)",
             !string.IsNullOrEmpty(config.AnthropicApiKey)),
-        new("gemini", "Google Gemini Vision (AI)",
-            "โมเดล Gemini 2.5/3 อ่านภาพเอกสารโดยตรง เข้าใจบริบทได้ดี — ต้องตั้งค่า GEMINI_API_KEY ใน .env (มีค่าใช้จ่ายต่อครั้ง)",
+        new("gemini", "Gemini Vision (AI)",
+            "โมเดล Vision ของ Google อ่านภาพเอกสารโดยตรง เข้าใจบริบทได้ — ต้องตั้งค่า GEMINI_API_KEY ใน .env (มีค่าใช้จ่ายต่อครั้ง)",
             !string.IsNullOrEmpty(config.GeminiApiKey)),
-        new("openai", "OpenAI GPT-4o / GPT-5 Vision (AI)",
-            "โมเดล GPT-4o/GPT-5 อ่านภาพเอกสารโดยตรง — ต้องตั้งค่า OPENAI_API_KEY ใน .env (มีค่าใช้จ่ายต่อครั้ง)",
+        new("openai", "ChatGPT Vision (AI)",
+            "โมเดล GPT-4o/GPT-5 ของ OpenAI อ่านภาพเอกสารโดยตรง เข้าใจบริบทได้ — ต้องตั้งค่า OPENAI_API_KEY ใน .env (มีค่าใช้จ่ายต่อครั้ง)",
             !string.IsNullOrEmpty(config.OpenAiApiKey)),
         new("demo", "ข้อมูลตัวอย่าง (ทดสอบ)", "ไม่อ่านไฟล์จริง ใช้สำหรับทดสอบขั้นตอน Mapping/ส่ง SAP เท่านั้น", true),
     ];
@@ -50,10 +50,80 @@ public class OcrEngine(AppConfig config)
         return d;
     }
 
+    private static readonly Dictionary<string, string> ProviderCaveat = new()
+    {
+        ["ocr"] = "อ่านด้วย Tesseract OCR จากไฟล์สแกน ซึ่งแม่นยำต่ำกว่าอ่านข้อความจากไฟล์ต้นฉบับโดยตรง",
+        ["typhoon"] = "อ่านด้วย Typhoon OCR จากภาพเอกสาร อาจมีข้อผิดพลาดจากคุณภาพภาพ/ลายมือ",
+        ["azure"] = "อ่านด้วย Azure Document Intelligence จากภาพเอกสาร",
+        ["claude"] = "อ่านด้วย Claude Vision จากภาพเอกสาร อาจตีความคลาดเคลื่อนได้ในบางจุด",
+        ["claude_text"] = "ใช้ OCR อ่านข้อความก่อนแล้วให้ Claude จัดโครงสร้าง ความแม่นยำขึ้นกับคุณภาพข้อความจาก OCR รอบแรก",
+        ["gemini"] = "อ่านด้วย Gemini Vision จากภาพเอกสาร อาจตีความคลาดเคลื่อนได้ในบางจุด",
+        ["openai"] = "อ่านด้วย ChatGPT Vision จากภาพเอกสาร อาจตีความคลาดเคลื่อนได้ในบางจุด",
+    };
+
+    private static readonly Dictionary<string, string> ApImportant = new()
+    {
+        ["invoiceNo"] = "เลขที่ใบกำกับภาษี/ใบแจ้งหนี้", ["invoiceDate"] = "วันที่เอกสาร",
+        ["vendorName"] = "ชื่อผู้ขาย", ["vendorTaxId"] = "เลขทะเบียนผู้เสียภาษีของผู้ขาย", ["totalAmount"] = "ยอดรวมทั้งสิ้น",
+    };
+    private static readonly Dictionary<string, string> SoImportant = new()
+    {
+        ["poNo"] = "เลขที่ใบสั่งซื้อ", ["poDate"] = "วันที่เอกสาร", ["customerName"] = "ชื่อลูกค้า",
+        ["customerTaxId"] = "เลขทะเบียนผู้เสียภาษีของลูกค้า", ["totalAmount"] = "ยอดรวมทั้งสิ้น",
+    };
+
+    // Ported from ocr_engine.py's _confidence_note() (lines 1589-1603).
+    private static string ConfidenceNote(string module, Dictionary<string, object?> header, List<LineItem> lines, string provider)
+    {
+        var important = module == "SO" ? SoImportant : ApImportant;
+        var missing = important.Where(kv =>
+        {
+            var s = (header.TryGetValue(kv.Key, out var v) ? v?.ToString() : "")?.Trim() ?? "";
+            return s is "" or "0" or "0.0";
+        }).Select(kv => kv.Value).ToList();
+        var reasons = new List<string>();
+        if (missing.Count > 0) reasons.Add("ไม่พบข้อมูล: " + string.Join(", ", missing));
+        if (lines.Count == 0) reasons.Add("ไม่พบรายการสินค้า/บริการ (Item Detail)");
+        if (ProviderCaveat.TryGetValue(provider, out var caveat)) reasons.Add(caveat);
+        return string.Join(" / ", reasons);
+    }
+
+    // Token price per 1M tokens (USD), only for AI/LLM providers that bill per token.
+    private static readonly Dictionary<string, (decimal In, decimal Out)> TokenPrice = new()
+    {
+        ["claude"] = (2.00m, 10.00m), ["claude_text"] = (2.00m, 10.00m),
+        ["gemini"] = (0.75m, 3.75m), ["openai"] = (2.50m, 10.00m),
+    };
+
+    // extract(): wraps ExtractDispatchAsync to add confidenceNote + estimated cost uniformly for
+    // every provider, mirroring ocr_engine.py's extract() (lines 1627-1644) without duplicating
+    // this logic into every dispatch branch's return statement.
+    public async Task<ParsedDocument> ExtractAsync(string path, string module, string? providerOverride = null)
+    {
+        var doc = await ExtractDispatchAsync(path, module, providerOverride);
+        doc.Note = doc.Provider switch
+        {
+            "demo" => string.IsNullOrEmpty(doc.Note) ? "ใช้ข้อมูลตัวอย่าง (demo) ไม่ได้อ่านจากไฟล์จริง" : doc.Note,
+            "failed" => string.IsNullOrEmpty(doc.Note) ? "อ่านเอกสารไม่สำเร็จ" : doc.Note,
+            _ => doc.Note,
+        };
+        // confidenceNote is distinct from Note ("_note" — a fallback/failure explanation): it
+        // explains why a normal-but-imperfect read isn't 100% confident.
+        doc.ConfidenceNote = doc.Provider is "demo" or "failed" ? (doc.Note ?? "") : ConfidenceNote(module, doc.Header, doc.Lines, doc.Provider);
+
+        if (TokenPrice.TryGetValue(doc.Provider, out var price) && doc.TokensIn is { } tin && doc.TokensOut is { } tout)
+        {
+            var costIn = Math.Round(tin / 1_000_000m * price.In, 4);
+            var costOut = Math.Round(tout / 1_000_000m * price.Out, 4);
+            doc.CostIn = costIn; doc.CostOut = costOut; doc.Cost = Math.Round(costIn + costOut, 4); doc.CostCurrency = "USD";
+        }
+        return doc;
+    }
+
     // provider_override: the engine id chosen in the UI — if given, "forces" that provider with
     // no silent fallback to another one. Empty/"auto" uses the normal text->local-OCR chain (does
     // NOT call Azure/Claude/Gemini/OpenAI automatically, since those cost money — must be chosen explicitly).
-    public async Task<ParsedDocument> ExtractAsync(string path, string module, string? providerOverride = null)
+    private async Task<ParsedDocument> ExtractDispatchAsync(string path, string module, string? providerOverride = null)
     {
         var provider = (providerOverride ?? config.OcrProvider ?? "auto").ToLowerInvariant();
         if (provider == "") provider = "auto";

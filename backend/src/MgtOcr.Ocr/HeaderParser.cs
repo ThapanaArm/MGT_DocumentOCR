@@ -11,6 +11,16 @@ public class ParsedDocument
     public string RawText { get; set; } = "";
     public string? Note { get; set; } // mirrors Python's "_note" — non-null means a fallback/failure happened
     public string? SampleName { get; set; }
+    public string ConfidenceNote { get; set; } = "";
+
+    // Token usage / estimated cost — only set by AI/LLM-based providers (Claude, Gemini, OpenAI);
+    // Tesseract/Azure/Typhoon leave these null. Mirrors ext.get("tokensIn"/"cost"/etc.) in Python.
+    public int? TokensIn { get; set; }
+    public int? TokensOut { get; set; }
+    public decimal? Cost { get; set; }
+    public decimal? CostIn { get; set; }
+    public decimal? CostOut { get; set; }
+    public string? CostCurrency { get; set; }
 }
 
 public static class HeaderParser

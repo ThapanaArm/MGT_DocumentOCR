@@ -19,7 +19,9 @@ public class HealthController(Db db, AppConfig config) : ControllerBase
             int customers = (int)(await db.QueryOneAsync("SELECT COUNT(*) AS n FROM ocr.Customer"))!.n;
             int vendors = (int)(await db.QueryOneAsync("SELECT COUNT(*) AS n FROM ocr.Vendor"))!.n;
             int materials = (int)(await db.QueryOneAsync("SELECT COUNT(*) AS n FROM ocr.Material"))!.n;
-            int documents = (int)(await db.QueryOneAsync("SELECT COUNT(*) AS n FROM ocr.Document"))!.n;
+            // Sales Order lives in its own physical table (ocr.SalesOrder) since the AP/SO split —
+            // this count must include both, matching the current app/main.py health() query.
+            int documents = (int)(await db.QueryOneAsync("SELECT (SELECT COUNT(*) FROM ocr.Document) + (SELECT COUNT(*) FROM ocr.SalesOrder) AS n"))!.n;
 
             return Ok(new
             {

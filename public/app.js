@@ -222,8 +222,10 @@ async function masters(force) {
 const SO_H = [['docType', 'ประเภทเอกสาร'], ['poNo', 'เลขที่ใบสั่งซื้อลูกค้า'], ['poDate', 'วันที่เอกสาร'],
 ['customerName', 'ชื่อลูกค้า'], ['customerTaxId', 'เลขทะเบียนนิติบุคคล'], ['shipToName', 'สถานที่ส่งของ'],
 ['shipToAddress', 'ที่อยู่จัดส่ง'], ['deliveryDate', 'วันที่ต้องการรับสินค้า'], ['currency', 'สกุลเงิน'],
-['paymentTerms', 'เงื่อนไขชำระเงิน'], ['incoterms', 'Incoterms'], ['subTotal', 'มูลค่าก่อนภาษี'],
-['vatAmount', 'ภาษีมูลค่าเพิ่ม'], ['totalAmount', 'ยอดรวมทั้งสิ้น'], ['remark', 'หมายเหตุ']];
+['paymentTerms', 'เงื่อนไขชำระเงิน'], ['incoterms', 'Incoterms']];
+// ฟิลด์ยอดเงิน + หมายเหตุ — ย้ายมาแสดงเป็นการ์ดแยกด้านล่าง DETAIL (ใกล้รายการสินค้าที่รวมยอดมาจาก)
+const SO_TOTALS_H = [['subTotal', 'มูลค่าก่อนภาษี'], ['vatAmount', 'ภาษีมูลค่าเพิ่ม'], ['totalAmount', 'ยอดรวมทั้งสิ้น']];
+const SO_REMARK_H = [['remark', 'หมายเหตุ']];
 const AP_H = [['docType', 'ประเภทเอกสาร'], ['invoiceNo', 'เลขที่ใบแจ้งหนี้'], ['invoiceDate', 'วันที่ใบแจ้งหนี้'],
 ['postingDate', 'วันที่ผ่านรายการ'], ['vendorName', 'ชื่อผู้ขาย'], ['vendorTaxId', 'เลขทะเบียนนิติบุคคล'],
 ['branch', 'สาขา'], ['poRef', 'อ้างอิง PO'], ['currency', 'สกุลเงิน'], ['paymentTerms', 'เงื่อนไขชำระเงิน']];
@@ -783,7 +785,9 @@ async function docHtml() {
              onfocus="this.value=num(this.value)" onblur="this.value=fmtAmt(this.value)"
              oninput="editHeader('${f[0]}',this.value)"></div>`).join('');
   const fields = headerFieldGrid(def);
-  const totalsFields = d.module === 'AP' ? totalsFieldGrid(AP_TOTALS_H) : d.module === 'II' ? totalsFieldGrid(II_TOTALS_H)
+  const totalsFields = d.module === 'AP' ? totalsFieldGrid(AP_TOTALS_H)
+    : d.module === 'SO' ? totalsFieldGrid(SO_TOTALS_H) + headerFieldGrid(SO_REMARK_H)
+    : d.module === 'II' ? totalsFieldGrid(II_TOTALS_H)
     : d.module === 'PODP' ? totalsFieldGrid(PODP_TOTALS_H) : '';
   const glItems = h.glItems || [];
   const showGlItems = d.module === 'AP' || d.module === 'II';
@@ -822,10 +826,10 @@ async function docHtml() {
       <td style="text-align:center">${l.itemNo}</td>
       <td><input value="${esc(l.extCode)}" ${posted ? 'readonly' : ''} oninput="editLine(${i},'extCode',this.value)"></td>
       <td><input value="${esc(l.desc)}" ${posted ? 'readonly' : ''} oninput="editLine(${i},'desc',this.value)"></td>
-      <td class="num"><input value="${fmt(l.qty)}" ${posted ? 'readonly' : ''} onfocus="this.value=num(this.value)" onblur="this.value=fmt(this.value)" oninput="editLine(${i},'qty',this.value)"></td>
+      <td class="num"><input value="${fmtAmt(l.qty)}" ${posted ? 'readonly' : ''} onfocus="this.value=num(this.value)" onblur="this.value=fmtAmt(this.value)" oninput="editLine(${i},'qty',this.value)"></td>
       <td><input value="${esc(l.uom)}" ${posted ? 'readonly' : ''} oninput="editLine(${i},'uom',this.value)" style="width:64px"></td>
-      <td class="num"><input value="${fmt(l.price)}" ${posted ? 'readonly' : ''} onfocus="this.value=num(this.value)" onblur="this.value=fmt(this.value)" oninput="editLine(${i},'price',this.value)"></td>
-      <td class="num"><input value="${fmt(l.amount)}" ${posted ? 'readonly' : ''} onfocus="this.value=num(this.value)" onblur="this.value=fmt(this.value)" oninput="editLine(${i},'amount',this.value)"></td>
+      <td class="num"><input value="${fmtAmt(l.price)}" ${posted ? 'readonly' : ''} onfocus="this.value=num(this.value)" onblur="this.value=fmtAmt(this.value)" oninput="editLine(${i},'price',this.value)"></td>
+      <td class="num"><input value="${fmtAmt(l.amount)}" ${posted ? 'readonly' : ''} onfocus="this.value=num(this.value)" onblur="this.value=fmtAmt(this.value)" oninput="editLine(${i},'amount',this.value)"></td>
       <td class="${mp && mp.lines[i].status === 'fail' ? 'cell-fail' : ''}" style="min-width:270px">${cell}</td>
       <td class="${mp && (mp.lines[i].uom || {}).status === 'fail' ? 'cell-fail' : ''}" style="min-width:170px">${uomCell(mp, i, l, posted)}</td>
       <td style="white-space:nowrap">${st}
@@ -905,7 +909,7 @@ async function docHtml() {
         <th style="width:44px"></th></tr></thead>
       <tbody>${rows || `<tr><td colspan="${11 + extraCols}" class="empty">ไม่มีรายการ</td></tr>`}</tbody>
       <tfoot><tr class="totrow"><td colspan="6" style="text-align:right">รวม</td>
-        <td style="text-align:right">${fmt(sum)}</td><td colspan="${4 + extraCols}"></td></tr></tfoot>
+        <td style="text-align:right">${fmtAmt(sum)}</td><td colspan="${4 + extraCols}"></td></tr></tfoot>
     </table></div></div>
   </div>` : ''}
 
@@ -1434,10 +1438,10 @@ function renderInboxLocal() {
     <div style="margin-right:8px"></div>
     ${catFilter}<button class="btn sm" onclick="renderInbox()">&#8635; รีเฟรช</button></div>
   <div class="card-b"><div class="tw"><table>
-    <thead><tr><th>#</th><th>Module</th><th>ไฟล์</th><th>เลขที่เอกสาร</th><th>วันที่</th><th>คู่ค้า</th>
-      <th style="text-align:right">ยอดรวม</th>${S.module === 'AP' ? '<th>ประเภทเอกสาร</th>' : ''}<th>สถานะ</th><th>Model</th><th>SAP Doc</th><th>สร้างเมื่อ</th><th></th></tr></thead>
+    <thead><tr><th>#</th>${!S.module ? '<th>Module</th>' : ''}<th>File</th><th>${['AP', 'II', 'PODP'].includes(S.module) ? 'Invoice Number' : 'PO Number'}</th><th>PO Date</th><th>Supplier</th>
+      <th style="text-align:right">Total</th>${S.module === 'AP' ? '<th>Document Type</th>' : ''}<th>Status</th><th>Model OCR</th><th>SAP Doc</th><th>Create Date</th><th></th></tr></thead>
     <tbody>${pageRows.map(r => `<tr>
-      <td>${r.DocId}</td><td><span class="badge ${r.Module === 'AP' ? 'b-warn' : r.Module === 'II' ? 'b-idle' : 'b-ok'}">${r.Module}</span></td>
+      <td>${r.DocId}</td>${!S.module ? `<td><span class="badge ${r.Module === 'AP' ? 'b-warn' : r.Module === 'II' ? 'b-idle' : 'b-ok'}">${r.Module}</span></td>` : ''}
       <td>${esc(r.FileName || '')}</td><td>${esc(r.DocNo || '')}</td><td>${esc(r.DocDate || '')}</td>
       <td>${esc(r.PartnerName || '')}</td><td style="text-align:right">${fmt(r.TotalAmount)}</td>
       ${S.module === 'AP' ? `<td>${r.ApDocCategory ? esc(apDocCategoryLabel(r.ApDocCategory)) : '<span class="hint">—</span>'}</td>` : ''}
@@ -1449,7 +1453,7 @@ function renderInboxLocal() {
       <td>${esc(r.SapDocNo || '')}</td><td class="hint">${dt(r.CreatedAt)}</td>
       <td style="white-space:nowrap"><button class="btn sm" onclick="openDoc(${r.DocId})">เปิด</button>
         ${r.Status === 'POSTED' ? '' : `<button class="btn sm ghost" onclick="delDoc(${r.DocId})">&#10005;</button>`}</td></tr>`).join('')
-      || `<tr><td colspan="${S.module === 'AP' ? 13 : 12}" class="empty">ยังไม่มีเอกสารในระบบ</td></tr>`}
+      || `<tr><td colspan="${11 + (!S.module ? 1 : 0) + (S.module === 'AP' ? 1 : 0)}" class="empty">ยังไม่มีเอกสารในระบบ</td></tr>`}
     </tbody></table></div>
     ${pagerHtml('inboxPage', 'inboxPageSize', totalPages, total, pageSize, 'renderInboxLocal')}
   </div></div>`;

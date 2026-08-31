@@ -17,7 +17,11 @@ public static class JsonBodyHelpers
         return el.ValueKind switch
         {
             JsonValueKind.String => el.GetString(),
-            JsonValueKind.Number => el.TryGetInt64(out var l) ? l : el.GetDouble(),
+            // Cast to `object` explicitly: without it, C#'s conditional operator unifies `long`
+            // and `double` branches to `double` (long -> double is an implicit numeric conversion),
+            // silently turning every whole-number JSON value into a double and losing Python's
+            // int-vs-float distinction (e.g. a demo header's "vatRate": 7 round-tripping as 7.0).
+            JsonValueKind.Number => el.TryGetInt64(out var l) ? (object)l : el.GetDouble(),
             JsonValueKind.True => true,
             JsonValueKind.False => false,
             JsonValueKind.Null or JsonValueKind.Undefined => null,
