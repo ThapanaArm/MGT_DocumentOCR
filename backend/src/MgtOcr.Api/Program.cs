@@ -149,8 +149,8 @@ app.UseAuthorization();
 app.MapControllers();
 
 // Mirrors app.mount("/", StaticFiles(directory=str(config.PUBLIC_DIR), html=True)) in Python:
-// serves public/ unmodified — index.html at "/", app.js/style.css/assets/* at their existing paths.
-var publicDir = Path.Combine(repoRoot, "public");
+// serves frontend/ unmodified — index.html at "/", app.js/style.css/assets/* at their existing paths.
+var publicDir = Path.Combine(repoRoot, "frontend");
 if (Directory.Exists(publicDir))
 {
     var fileProvider = new Microsoft.Extensions.FileProviders.PhysicalFileProvider(publicDir);

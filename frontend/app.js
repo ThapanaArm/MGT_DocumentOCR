@@ -2,6 +2,10 @@
    MGT Document OCR -> SAP S/4HANA  (frontend)
    ทุกข้อมูลอ่าน/เขียนผ่าน REST API ที่ต่อกับ SQL Server: MGT_Document_OCR
    ===================================================================== */
+// ปกติ frontend/ ถูก serve มาจาก backend เอง (same-origin) — เรียก /api/... แบบ relative ได้ตรงๆ
+// ยกเว้นตอนรัน frontend เดี่ยวๆ ผ่าน dev server คนละ port (เช่น :5500 จาก .vscode/tasks.json "Run Frontend")
+// ซึ่งต้องยิงข้าม origin ไปหา .NET backend (dotnet run, ค่าเริ่มต้น :8091 ตาม DOTNET_APP_PORT ใน .env)
+const API_BASE = location.port === '5500' ? 'http://localhost:8091' : '';
 const S = {
   page: 'home', module: null, doc: null, map: null, manual: { header: {}, lines: {} },
   masters: null, masterGroup: 'vendor', masterTab: 'vendors', busy: false, inbox: [], logs: [], health: null,
@@ -122,7 +126,7 @@ async function api(method, url, body, isForm) {
     if (isForm) opt.body = body;
     else { opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body); }
   }
-  const r = await fetch(url, opt);
+  const r = await fetch(API_BASE + url, opt);
   const txt = await r.text();
   let data = null; try { data = txt ? JSON.parse(txt) : null; } catch (e) { data = { detail: txt }; }
   if (!r.ok) throw new Error((data && (data.detail || data.error)) || ('HTTP ' + r.status));
@@ -727,7 +731,7 @@ async function showRaw() {
 
 function reviewDocument() {
   const d = S.doc;
-  const fileUrl = `/api/documents/${d.docId}/file`;
+  const fileUrl = `${API_BASE}/api/documents/${d.docId}/file`;
   const ext = (d.fileName || '').split('.').pop().toLowerCase();
   const isImg = ['jpg', 'jpeg', 'png', 'tif', 'tiff', 'bmp', 'webp'].includes(ext);
   const viewer = d.provider === 'demo'
@@ -1035,7 +1039,7 @@ function chatFixCard() {
   const msgs = S.chatHistory.map(m => {
     // m.image = data URL ชั่วคราว (ข้อความที่เพิ่งส่ง ยังไม่ได้ค่า chatId จาก server)
     // m.hasImage + m.chatId = ภาพที่บันทึกถาวรแล้ว โหลดผ่าน URL แทนการฝัง data URL ซ้ำ
-    const imgSrc = m.image || (m.hasImage && m.chatId ? `/api/documents/${S.doc.docId}/chat/${m.chatId}/image` : '');
+    const imgSrc = m.image || (m.hasImage && m.chatId ? `${API_BASE}/api/documents/${S.doc.docId}/chat/${m.chatId}/image` : '');
     return `
     <div class="chat-msg ${m.role}">
       <b>${m.role === 'user' ? 'คุณ' : 'AI'}</b>

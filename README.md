@@ -209,7 +209,8 @@ app/
   tools/seed.py   ใส่ข้อมูล Master ตัวอย่าง
   tools/seed_uom.py  ใส่กฎการแปลงหน่วยตัวอย่าง
   tools/seed_sapcode.py  เติมรหัสของ SAP ให้ข้อมูลตัวอย่าง
-public/           หน้าเว็บ (index.html / app.js / style.css) — ธีมตาม design system ของ bitkub.com
+frontend/         หน้าเว็บ (index.html / app.js / style.css) — ธีมตาม design system ของ bitkub.com
+                  แยกโฟลเดอร์ออกจาก backend/ เพื่อรันเดี่ยวๆ ผ่าน dev server คนละ port ได้ (ดู .vscode/tasks.json)
 sql/01_schema.sql สคริปต์สร้างตาราง
 sql/02_uom.sql    ตารางการแปลงหน่วย + คอลัมน์หน่วยฝั่ง SAP
 sql/03_sapcode.sql คอลัมน์รหัสของระบบ SAP ในทุก master

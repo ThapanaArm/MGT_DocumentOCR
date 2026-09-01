@@ -1,0 +1,33 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Run Backend (.NET)",
+      "type": "shell",
+      "command": "dotnet",
+      "args": ["run", "--project", "backend/src/MgtOcr.Api/MgtOcr.Api.csproj"],
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": { "group": "run-all", "panel": "dedicated", "clear": true },
+      "detail": "ASP.NET Core API on http://localhost:8091 (DOTNET_APP_PORT in .env overrides)."
+    },
+    {
+      "label": "Run Frontend (Static Server)",
+      "type": "shell",
+      "command": "python",
+      "args": ["-m", "http.server", "5500"],
+      "options": { "cwd": "${workspaceFolder}/frontend" },
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": { "group": "run-all", "panel": "dedicated", "clear": true },
+      "detail": "Serves frontend/ standalone on http://localhost:5500 — app.js auto-detects this port and calls the .NET backend on :8091 across origins (see API_BASE in frontend/app.js)."
+    },
+    {
+      "label": "Run All (Frontend + Backend)",
+      "dependsOn": ["Run Backend (.NET)", "Run Frontend (Static Server)"],
+      "dependsOrder": "parallel",
+      "problemMatcher": [],
+      "group": { "kind": "build", "isDefault": true }
+    }
+  ]
+}

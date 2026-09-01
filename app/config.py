@@ -61,7 +61,7 @@ SAP_DEFAULT_PLANT = _get("SAP_DEFAULT_PLANT", "1000")
 
 UPLOAD_DIR = BASE_DIR / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
-PUBLIC_DIR = BASE_DIR / "public"
+PUBLIC_DIR = BASE_DIR / "frontend"
 
 CONN_STR = (
     f"Driver={{{DB_DRIVER}}};Server={DB_SERVER};Database={DB_NAME};"
