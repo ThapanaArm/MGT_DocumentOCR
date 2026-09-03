@@ -38,7 +38,7 @@ export const statusBadge = (s: string): StatusBadge => {
     INCOMPLETE: ['b-fail', 'Mapping Incomplete'],
     MAPPED: ['b-ok', 'Pending SAP Connection'],
     POSTED: ['b-ok', 'SAP Connected Successfully'],
-    SPLIT: ['b-warn', 'แยกเป็นหลาย SO แล้ว'],
+    SPLIT: ['b-warn', 'Split into multiple SOs'],
   };
   const [cls, label] = map[s] || ['b-idle', s];
   return { cls, label };

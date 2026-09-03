@@ -8,7 +8,7 @@ function SideList({ items, side }: { items?: MapField[]; side: 'doc' | 'sap' }) 
   if (!items || !items.length)
     return (
       <div className="hint" style={{ padding: '6px 0' }}>
-        {side === 'sap' ? 'ยังไม่พบข้อมูลใน SAP' : '—'}
+        {side === 'sap' ? 'No data found in SAP yet' : '—'}
       </div>
     );
   return (
@@ -38,12 +38,12 @@ function SideList({ items, side }: { items?: MapField[]; side: 'doc' | 'sap' }) 
 }
 
 function StatusChip({ st }: { st: string }) {
-  if (st === 'ok') return <span className="badge b-ok">✓ จับคู่อัตโนมัติ</span>;
-  if (st === 'manual') return <span className="badge b-warn">✎ เลือกด้วยตนเอง</span>;
-  if (st === 'convert') return <span className="badge b-ok">⇄ แปลงหน่วยแล้ว</span>;
-  if (st === 'fail') return <span className="badge b-fail">✗ ไม่พบข้อมูล</span>;
-  if (st === 'unitfail') return <span className="badge b-fail">✗ ไม่พบกฎแปลงหน่วย</span>;
-  return <span className="badge b-idle">รอ Mapping</span>;
+  if (st === 'ok') return <span className="badge b-ok">✓ Auto-matched</span>;
+  if (st === 'manual') return <span className="badge b-warn">✎ Manually selected</span>;
+  if (st === 'convert') return <span className="badge b-ok">⇄ Unit converted</span>;
+  if (st === 'fail') return <span className="badge b-fail">✗ Not found</span>;
+  if (st === 'unitfail') return <span className="badge b-fail">✗ No unit conversion rule</span>;
+  return <span className="badge b-idle">Pending Mapping</span>;
 }
 
 function CmpCard({
@@ -67,7 +67,7 @@ function CmpCard({
         <b>{title}</b>
         <StatusChip st={st} />
         {r.sapCode && (
-          <span className="badge b-ok" title="รหัสที่ส่งเข้า SAP">
+          <span className="badge b-ok" title="Code posted to SAP">
             SAP: {r.sapCode}
           </span>
         )}
@@ -77,12 +77,12 @@ function CmpCard({
       </div>
       <div className="cmp-body">
         <div className="cmp-col">
-          <div className="cmp-label">📄 ข้อมูลจากเอกสาร</div>
+          <div className="cmp-label">📄 Data from Document</div>
           <SideList items={r.doc} side="doc" />
         </div>
         <div className="cmp-arrow">→</div>
         <div className="cmp-col sap">
-          <div className="cmp-label">🏦 ข้อมูลจาก SAP</div>
+          <div className="cmp-label">🏦 Data from SAP</div>
           <SideList items={r.sap} side="sap" />
         </div>
       </div>
@@ -141,7 +141,7 @@ export default function MappingCards({
         disabled={posted}
         onChange={(e) => onManualHeader(key, e.target.value)}
       >
-        <option value="">-- เลือกเอง --</option>
+        <option value="">-- Select manually --</option>
         {opts.map((o) => (
           <option key={o.v} value={o.v}>
             {o.t}
@@ -177,7 +177,7 @@ export default function MappingCards({
         picker={
           <>
             {headerSel('vendors', 'vendor', r.code)}
-            {r.status === 'fail' && addBtn('เพิ่มผู้ขายใหม่', onQuickAddVendor)}
+            {r.status === 'fail' && addBtn('Add New Vendor', onQuickAddVendor)}
           </>
         }
       />,
@@ -195,7 +195,7 @@ export default function MappingCards({
         picker={
           <>
             {headerSel('customers', 'customer', c.code)}
-            {c.status === 'fail' && addBtn('เพิ่มลูกค้าใหม่', onQuickAddCustomer)}
+            {c.status === 'fail' && addBtn('Add New Customer', onQuickAddCustomer)}
           </>
         }
       />,
@@ -212,10 +212,10 @@ export default function MappingCards({
             {headerSel('shiptos', 'shipTo', sh.code)}
             {sh.status === 'fail' &&
               (c.code ? (
-                addBtn('เพิ่ม Ship-to ใหม่', onQuickAddShipTo)
+                addBtn('Add New Ship-to', onQuickAddShipTo)
               ) : (
                 <span className="hint" style={{ marginLeft: 6 }}>
-                  ต้องระบุลูกค้าก่อน
+                  A customer must be specified first
                 </span>
               ))}
           </>
@@ -232,7 +232,7 @@ export default function MappingCards({
       <CmpCard
         key={i}
         no={`${nMat}.${i + 1}`}
-        title={`Material — บรรทัดที่ ${i + 1}`}
+        title={`Material — Row ${i + 1}`}
         r={r}
         picker={
           <>
@@ -242,14 +242,14 @@ export default function MappingCards({
               disabled={posted}
               onChange={(e) => onManualLine(i, e.target.value)}
             >
-              <option value="">-- เลือกเอง --</option>
+              <option value="">-- Select manually --</option>
               {matOpts.map((o) => (
                 <option key={o.v} value={o.v}>
                   {o.t}
                 </option>
               ))}
             </select>
-            {r.status === 'fail' && addBtn('เพิ่ม Material ใหม่', () => onQuickAddMaterial(i))}
+            {r.status === 'fail' && addBtn('Add New Material', () => onQuickAddMaterial(i))}
           </>
         }
       >
@@ -257,12 +257,12 @@ export default function MappingCards({
           <div className={'cmp-sub ' + (u.status === 'fail' ? 'bad' : '')}>
             <div className="cmp-head">
               <span className="cmp-no sub">{nMat + 1}</span>
-              <b>Relate Unit — การแปลงหน่วย</b>
+              <b>Relate Unit — Unit Conversion</b>
               <StatusChip st={u.status === 'fail' ? 'unitfail' : u.status} />
               <div className="sp" />
               {u.status === 'fail' && !posted && (
                 <button className="btn sm" onClick={() => onAddUomRule(i)}>
-                  + เพิ่มกฎแปลงหน่วย
+                  + Add Unit Conversion Rule
                 </button>
               )}
             </div>
@@ -284,18 +284,18 @@ export default function MappingCards({
   return (
     <div className="card">
       <div className="card-h">
-        <h2>ผลการ Mapping — เทียบข้อมูลเอกสารกับ SAP</h2>
+        <h2>Mapping Results — Document vs SAP Comparison</h2>
         <div className="sp" />
         {map.pass ? (
-          <span className="badge b-ok">✓ ครบทุกจุด</span>
+          <span className="badge b-ok">✓ All matched</span>
         ) : (
-          <span className="badge b-fail">✗ ไม่พบข้อมูล {map.errors.length} จุด</span>
+          <span className="badge b-fail">✗ {map.errors.length} items not found</span>
         )}
       </div>
       <div className="card-b">
         {headerCards}
         <p className="sec-title" style={{ marginTop: 20 }}>
-          {nMat}. MATERIAL &amp; {nMat + 1}. RELATE UNIT (รายบรรทัด)
+          {nMat}. MATERIAL &amp; {nMat + 1}. RELATE UNIT (per line)
         </p>
         {matCards}
       </div>

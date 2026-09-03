@@ -18,29 +18,29 @@ export interface FieldGroup {
 }
 
 export const SO_H: FieldDef[] = [
-  ['docType', 'ประเภทเอกสาร'], ['poNo', 'เลขที่ใบสั่งซื้อลูกค้า'], ['poDate', 'วันที่เอกสาร'],
-  ['customerName', 'ชื่อลูกค้า'], ['customerTaxId', 'เลขทะเบียนนิติบุคคล'], ['shipToName', 'สถานที่ส่งของ'],
-  ['shipToAddress', 'ที่อยู่จัดส่ง'], ['deliveryDate', 'วันที่ต้องการรับสินค้า'], ['currency', 'สกุลเงิน'],
-  ['paymentTerms', 'เงื่อนไขชำระเงิน'], ['incoterms', 'Incoterms'],
+  ['docType', 'Document Type'], ['poNo', 'Customer PO No.'], ['poDate', 'Document Date'],
+  ['customerName', 'Customer Name'], ['customerTaxId', 'Tax ID'], ['shipToName', 'Ship-to Location'],
+  ['shipToAddress', 'Delivery Address'], ['deliveryDate', 'Requested Delivery Date'], ['currency', 'Currency'],
+  ['paymentTerms', 'Payment Terms'], ['incoterms', 'Incoterms'],
 ];
 export const SO_TOTALS_H: FieldDef[] = [
-  ['subTotal', 'มูลค่าก่อนภาษี'], ['vatAmount', 'ภาษีมูลค่าเพิ่ม'], ['totalAmount', 'ยอดรวมทั้งสิ้น'],
+  ['subTotal', 'Amount before Tax'], ['vatAmount', 'VAT'], ['totalAmount', 'Grand Total'],
 ];
-export const SO_REMARK_H: FieldDef[] = [['remark', 'หมายเหตุ']];
+export const SO_REMARK_H: FieldDef[] = [['remark', 'Remark']];
 
 export const AP_H: FieldDef[] = [
-  ['docType', 'ประเภทเอกสาร'], ['invoiceNo', 'เลขที่ใบแจ้งหนี้'], ['invoiceDate', 'วันที่ใบแจ้งหนี้'],
-  ['postingDate', 'วันที่ผ่านรายการ'], ['vendorName', 'ชื่อผู้ขาย'], ['vendorTaxId', 'เลขทะเบียนนิติบุคคล'],
-  ['branch', 'สาขา'], ['poRef', 'อ้างอิง PO'], ['currency', 'สกุลเงิน'], ['paymentTerms', 'เงื่อนไขชำระเงิน'],
+  ['docType', 'Document Type'], ['invoiceNo', 'Invoice No.'], ['invoiceDate', 'Invoice Date'],
+  ['postingDate', 'Posting Date'], ['vendorName', 'Vendor Name'], ['vendorTaxId', 'Tax ID'],
+  ['branch', 'Branch'], ['poRef', 'PO Reference'], ['currency', 'Currency'], ['paymentTerms', 'Payment Terms'],
 ];
 export const AP_TOTALS_H: FieldDef[] = [
-  ['subTotal', 'มูลค่าก่อนภาษี'], ['vatRate', 'อัตราภาษี (%)'], ['vatAmount', 'ภาษีมูลค่าเพิ่ม'],
-  ['whtAmount', 'ภาษีหัก ณ ที่จ่าย'], ['totalAmount', 'ยอดรวมสุทธิ'],
+  ['subTotal', 'Amount before Tax'], ['vatRate', 'Tax Rate (%)'], ['vatAmount', 'VAT'],
+  ['whtAmount', 'Withholding Tax'], ['totalAmount', 'Net Total'],
 ];
 
 export const II_H: FieldDef[] = [
   ['transaction', 'Transaction'], ['invoiceNo', 'Reference'], ['invoiceDate', 'Invoice Date'],
-  ['postingDate', 'Posting Date'], ['vendorName', 'Supplier'], ['vendorTaxId', 'เลขทะเบียนนิติบุคคล'],
+  ['postingDate', 'Posting Date'], ['vendorName', 'Supplier'], ['vendorTaxId', 'Tax ID'],
   ['sapDocType', 'Document type'], ['currency', 'Currency'],
 ];
 export const II_TOTALS_H: FieldDef[] = [
@@ -133,11 +133,11 @@ export const II_GROUPS: FieldGroup[] = [
 ];
 
 export const PODP_H: FieldDef[] = [
-  ['docType', 'ประเภทเอกสาร'], ['invoiceNo', 'เลขที่เอกสาร'], ['invoiceDate', 'วันที่เอกสาร'],
-  ['postingDate', 'วันที่ผ่านรายการ'], ['vendorName', 'ผู้ขาย'], ['vendorTaxId', 'เลขทะเบียนนิติบุคคล'],
-  ['poRef', 'อ้างอิง PO'], ['currency', 'สกุลเงิน'], ['paymentTerms', 'เงื่อนไขชำระเงิน'],
+  ['docType', 'Document Type'], ['invoiceNo', 'Document No.'], ['invoiceDate', 'Document Date'],
+  ['postingDate', 'Posting Date'], ['vendorName', 'Vendor'], ['vendorTaxId', 'Tax ID'],
+  ['poRef', 'PO Reference'], ['currency', 'Currency'], ['paymentTerms', 'Payment Terms'],
 ];
-export const PODP_TOTALS_H: FieldDef[] = [['totalAmount', 'จำนวนเงินมัดจำ']];
+export const PODP_TOTALS_H: FieldDef[] = [['totalAmount', 'Down Payment Amount']];
 
 export const AP_TRADE_GROUPS: FieldGroup[] = [
   {
@@ -245,27 +245,27 @@ export const AP_TRADE_GROUPS: FieldGroup[] = [
 ];
 
 export const PO_LINE_EXTRA_FIELDS: FieldDef[] = [
-  ['accountAssignment', 'Account Assignment Category', 'select', [['', '— เลือก —'], ['K', 'K — Cost Center'], ['A', 'A — Asset'], ['P', 'P — Project']]],
-  ['itemCategory', 'Item Category', 'select', [['', '— เลือก —'], ['STANDARD', 'Standard'], ['SERVICE', 'Service']]],
+  ['accountAssignment', 'Account Assignment Category', 'select', [['', '— Select —'], ['K', 'K — Cost Center'], ['A', 'A — Asset'], ['P', 'P — Project']]],
+  ['itemCategory', 'Item Category', 'select', [['', '— Select —'], ['STANDARD', 'Standard'], ['SERVICE', 'Service']]],
   ['plant', 'Plant'], ['glAccount', 'G/L Account'], ['costCenter', 'Cost Center'],
   ['internalOrder', 'Internal Order'], ['wbsElement', 'WBS Element'], ['assetNumber', 'Asset Number'],
   ['taxCode', 'Tax Code'], ['deliveryDate', 'Delivery Date'],
-  ['grIndicator', 'GR Indicator', 'select', [['', '— เลือก —'], ['YES', 'ใช่ — ต้องรับของ/บริการ'], ['NO', 'ไม่ใช่']]],
-  ['irIndicator', 'IR Indicator', 'select', [['', '— เลือก —'], ['YES', 'ใช่ — รับ Invoice ได้'], ['NO', 'ไม่ใช่']]],
-  ['grBasedIv', 'GR-Based IV', 'select', [['', '— เลือก —'], ['YES', 'ใช่ — ต้องอ้างอิงรายการที่รับแล้ว'], ['NO', 'ไม่ใช่']]],
+  ['grIndicator', 'GR Indicator', 'select', [['', '— Select —'], ['YES', 'Yes — Goods/service receipt required'], ['NO', 'No']]],
+  ['irIndicator', 'IR Indicator', 'select', [['', '— Select —'], ['YES', 'Yes — Invoice receipt allowed'], ['NO', 'No']]],
+  ['grBasedIv', 'GR-Based IV', 'select', [['', '— Select —'], ['YES', 'Yes — Must reference goods already received'], ['NO', 'No']]],
 ];
 
 export const AA_GUIDE: Record<string, { hint: string; field: string }> = {
-  '': { hint: 'ของเข้า Stock ปกติไม่ใช้ Account Assignment (เว้นว่างไว้ได้ เว้นแต่ Configuration บริษัทกำหนดไว้)', field: '' },
-  K: { hint: 'ค่าใช้จ่ายของแผนก → กรอก Cost Center (หรือ Internal Order เพิ่มถ้าเป็นค่าใช้จ่ายเฉพาะกิจกรรม)', field: 'costCenter' },
-  A: { hint: 'ซื้อทรัพย์สินถาวร → กรอก Asset Number', field: 'assetNumber' },
-  P: { hint: 'ค่าใช้จ่ายโครงการ → กรอก WBS Element', field: 'wbsElement' },
+  '': { hint: 'Goods received into normal stock do not use Account Assignment (can be left blank unless required by company configuration)', field: '' },
+  K: { hint: 'Departmental expense → enter Cost Center (or add Internal Order for activity-specific expenses)', field: 'costCenter' },
+  A: { hint: 'Fixed asset purchase → enter Asset Number', field: 'assetNumber' },
+  P: { hint: 'Project expense → enter WBS Element', field: 'wbsElement' },
 };
 
 export const OCR_PROVIDER_SHORT: Record<string, string> = {
-  auto: 'อัตโนมัติ', text: 'ข้อความในไฟล์', ocr: 'Tesseract OCR', tesseract: 'Tesseract OCR',
+  auto: 'Automatic', text: 'Text in File', ocr: 'Tesseract OCR', tesseract: 'Tesseract OCR',
   typhoon: 'Typhoon', azure: 'Azure', claude_text: 'Claude (text)', claude: 'Claude', gemini: 'Gemini',
-  openai: 'ChatGPT', demo: 'ตัวอย่าง', failed: 'อ่านไม่สำเร็จ',
+  openai: 'ChatGPT', demo: 'Demo', failed: 'Read Failed',
 };
 
 // ---- Master-data schema ----
@@ -285,58 +285,58 @@ export interface MasterDef {
 
 export const MASTER_DEF: Record<string, MasterDef> = {
   customers: {
-    label: 'ลูกค้า (Customer)', mod: 'SO', key: 'CustomerCode', cols: [
-      { k: 'CustomerCode', l: 'รหัสลูกค้า (ภายใน)' }, { k: 'SapCustomerCode', l: 'รหัสใน SAP (Sold-to)', sap: true },
-      { k: 'NameTh', l: 'ชื่อ (TH)' }, { k: 'NameEn', l: 'ชื่อ (EN)' },
-      { k: 'TaxId', l: 'เลขทะเบียน / ผู้เสียภาษี' }, { k: 'Branch', l: 'สาขา' }, { k: 'SalesOrg', l: 'Sales Org' },
-      { k: 'DistChannel', l: 'Distr.Ch' }, { k: 'Division', l: 'Div' }, { k: 'Currency', l: 'สกุลเงิน' },
+    label: 'Customer', mod: 'SO', key: 'CustomerCode', cols: [
+      { k: 'CustomerCode', l: 'Customer Code (Internal)' }, { k: 'SapCustomerCode', l: 'SAP Code (Sold-to)', sap: true },
+      { k: 'NameTh', l: 'Name (TH)' }, { k: 'NameEn', l: 'Name (EN)' },
+      { k: 'TaxId', l: 'Tax ID' }, { k: 'Branch', l: 'Branch' }, { k: 'SalesOrg', l: 'Sales Org' },
+      { k: 'DistChannel', l: 'Distr.Ch' }, { k: 'Division', l: 'Div' }, { k: 'Currency', l: 'Currency' },
       { k: 'PaymentTerms', l: 'Payment Terms' }],
   },
   shiptos: {
-    label: 'สถานที่ส่งของ (Ship-to)', mod: 'SO', key: 'ShipToCode', cols: [
-      { k: 'CustomerCode', l: 'รหัสลูกค้า', ref: 'customers' }, { k: 'ShipToCode', l: 'รหัส Ship-to (ภายใน)' },
-      { k: 'SapShipToCode', l: 'รหัสใน SAP (Ship-to)', sap: true }, { k: 'ShipToName', l: 'ชื่อสถานที่' }, { k: 'Address', l: 'ที่อยู่' }],
+    label: 'Ship-to Location', mod: 'SO', key: 'ShipToCode', cols: [
+      { k: 'CustomerCode', l: 'Customer Code', ref: 'customers' }, { k: 'ShipToCode', l: 'Ship-to Code (Internal)' },
+      { k: 'SapShipToCode', l: 'SAP Code (Ship-to)', sap: true }, { k: 'ShipToName', l: 'Location Name' }, { k: 'Address', l: 'Address' }],
   },
   custmaterials: {
-    label: 'สินค้าฝั่งลูกค้า', mod: 'SO', key: 'Id', cols: [
-      { k: 'CustomerCode', l: 'รหัสลูกค้า', ref: 'customers' }, { k: 'ExtCode', l: 'รหัสสินค้าของลูกค้า' },
-      { k: 'ExtDesc', l: 'ชื่อสินค้าของลูกค้า' }, { k: 'MaterialCode', l: 'Material (SAP)', ref: 'materials' }],
+    label: 'Customer Materials', mod: 'SO', key: 'Id', cols: [
+      { k: 'CustomerCode', l: 'Customer Code', ref: 'customers' }, { k: 'ExtCode', l: "Customer's Item Code" },
+      { k: 'ExtDesc', l: "Customer's Item Description" }, { k: 'MaterialCode', l: 'Material (SAP)', ref: 'materials' }],
   },
   vendors: {
-    label: 'ผู้ขาย (Vendor)', mod: 'AP', key: 'VendorCode', cols: [
-      { k: 'VendorCode', l: 'รหัสผู้ขาย (ภายใน)' }, { k: 'SapVendorCode', l: 'รหัสใน SAP (Supplier)', sap: true },
-      { k: 'VendorName', l: 'ชื่อผู้ขาย' },
-      { k: 'TaxId', l: 'เลขทะเบียน / ผู้เสียภาษี' }, { k: 'Branch', l: 'สาขา' }, { k: 'Currency', l: 'สกุลเงิน' },
-      { k: 'PaymentTerms', l: 'Payment Terms' }, { k: 'ReconAcct', l: 'Recon. Account' }, { k: 'WhtCode', l: 'ภาษีหัก ณ ที่จ่าย' }],
+    label: 'Vendor', mod: 'AP', key: 'VendorCode', cols: [
+      { k: 'VendorCode', l: 'Vendor Code (Internal)' }, { k: 'SapVendorCode', l: 'SAP Code (Supplier)', sap: true },
+      { k: 'VendorName', l: 'Vendor Name' },
+      { k: 'TaxId', l: 'Tax ID' }, { k: 'Branch', l: 'Branch' }, { k: 'Currency', l: 'Currency' },
+      { k: 'PaymentTerms', l: 'Payment Terms' }, { k: 'ReconAcct', l: 'Recon. Account' }, { k: 'WhtCode', l: 'Withholding Tax' }],
   },
   venmaterials: {
-    label: 'สินค้าฝั่งผู้ขาย', mod: 'AP', key: 'Id', cols: [
-      { k: 'VendorCode', l: 'รหัสผู้ขาย', ref: 'vendors' }, { k: 'ExtCode', l: 'รหัสสินค้าของผู้ขาย' },
-      { k: 'ExtDesc', l: 'ชื่อสินค้าของผู้ขาย' }, { k: 'MaterialCode', l: 'Material (SAP)', ref: 'materials' }],
+    label: 'Vendor Materials', mod: 'AP', key: 'Id', cols: [
+      { k: 'VendorCode', l: 'Vendor Code', ref: 'vendors' }, { k: 'ExtCode', l: "Vendor's Item Code" },
+      { k: 'ExtDesc', l: "Vendor's Item Description" }, { k: 'MaterialCode', l: 'Material (SAP)', ref: 'materials' }],
   },
   uoms: {
-    label: 'การแปลงหน่วย (UoM)', mod: 'ALL', key: 'Id', cols: [
-      { k: 'MaterialCode', l: 'Material (เว้นว่าง = ทุกสินค้า)', ref: 'materials', blank: true },
-      { k: 'ExtUom', l: 'หน่วยตามเอกสาร' }, { k: 'SapUom', l: 'หน่วยใน SAP' },
+    label: 'Unit Conversion (UoM)', mod: 'ALL', key: 'Id', cols: [
+      { k: 'MaterialCode', l: 'Material (blank = all materials)', ref: 'materials', blank: true },
+      { k: 'ExtUom', l: 'Document Unit' }, { k: 'SapUom', l: 'SAP Unit' },
       { k: 'SapUomIso', l: 'ISO code', sap: true },
-      { k: 'Factor', l: 'ตัวคูณ (1 หน่วยเอกสาร = ? หน่วย SAP)' }, { k: 'Note', l: 'หมายเหตุ' }],
+      { k: 'Factor', l: 'Factor (1 document unit = ? SAP units)' }, { k: 'Note', l: 'Note' }],
   },
   materials: {
-    label: 'สินค้า/บริการ (Material)', mod: 'ALL', key: 'MaterialCode', cols: [
-      { k: 'MaterialCode', l: 'รหัส Material (ภายใน)' }, { k: 'SapMaterialCode', l: 'รหัสใน SAP (Material)', sap: true },
-      { k: 'Description', l: 'รายละเอียด' }, { k: 'Uom', l: 'หน่วยฐาน' },
+    label: 'Material / Service', mod: 'ALL', key: 'MaterialCode', cols: [
+      { k: 'MaterialCode', l: 'Material Code (Internal)' }, { k: 'SapMaterialCode', l: 'SAP Code (Material)', sap: true },
+      { k: 'Description', l: 'Description' }, { k: 'Uom', l: 'Base Unit' },
       { k: 'Plant', l: 'Plant' }, { k: 'MatGroup', l: 'Material Group' }],
   },
 };
 
 export const MASTER_NOTE: Record<string, string> = {
-  customers: 'ใช้จับคู่ Sold-to: ตรวจจาก เลขทะเบียนนิติบุคคล ก่อน ถ้าไม่พบจึงเทียบ ชื่อ (ความคล้าย ≥ 82%)',
-  shiptos: 'ใช้จับคู่ Ship-to จาก ชื่อสถานที่/ที่อยู่ ภายใต้ลูกค้าเดียวกัน',
-  custmaterials: 'ใช้แปลง รหัส/ชื่อสินค้าของลูกค้า เป็น Material ของ SAP',
-  vendors: 'ใช้จับคู่ Vendor: ตรวจจาก เลขทะเบียนนิติบุคคล ก่อน ถ้าไม่พบจึงเทียบ ชื่อ',
-  venmaterials: 'ใช้แปลง รหัส/ชื่อสินค้าของผู้ขาย เป็น Material ของ SAP',
-  materials: 'ข้อมูล Material ของ SAP (ควร replicate จาก S/4HANA)',
-  uoms: 'แปลงหน่วยตามเอกสารของคู่ค้าเป็นหน่วยของ SAP เช่น 1 BAG = 25 KG — ระบบจะหากฎเฉพาะสินค้าก่อน ถ้าไม่พบจึงใช้กฎกลาง (แถวที่ไม่ระบุ Material)',
+  customers: 'Used to match Sold-to: checks the Tax ID first, then compares the name if not found (similarity ≥ 82%)',
+  shiptos: 'Used to match Ship-to by location name/address under the same customer',
+  custmaterials: "Used to convert the customer's item code/name to a SAP Material",
+  vendors: 'Used to match Vendor: checks the Tax ID first, then compares the name if not found',
+  venmaterials: "Used to convert the vendor's item code/name to a SAP Material",
+  materials: 'SAP Material data (should be replicated from S/4HANA)',
+  uoms: 'Converts the partner document unit to a SAP unit, e.g. 1 BAG = 25 KG — the system looks for a material-specific rule first, then falls back to the global rule (rows without a Material)',
 };
 
 export interface MasterGroup {
@@ -347,10 +347,10 @@ export interface MasterGroup {
   note: string;
 }
 export const MASTER_GROUPS: MasterGroup[] = [
-  { key: 'vendor', label: '1. Vendor / Supplier', mod: 'AP', tabs: ['vendors'], note: 'ตรวจจาก เลขทะเบียนนิติบุคคล 13 หลัก ก่อน ถ้าไม่พบจึงเทียบ ชื่อผู้ขาย (ความคล้าย ≥ 82%)' },
-  { key: 'customer', label: '2. Customer', mod: 'SO', tabs: ['customers'], note: 'ตรวจจาก เลขทะเบียนนิติบุคคล 13 หลัก ก่อน ถ้าไม่พบจึงเทียบ ชื่อลูกค้า (ไทย/อังกฤษ) (ความคล้าย ≥ 82%)' },
-  { key: 'shipto', label: '3. Ship-to', mod: 'SO', tabs: ['shiptos'], note: 'เทียบ ชื่อสถานที่ + ที่อยู่จัดส่ง เฉพาะภายใต้ลูกค้าที่จับคู่ได้แล้ว (ความคล้าย ≥ 70%)' },
-  { key: 'material', label: '4. Material', mod: 'ALL', tabs: ['materials', 'custmaterials', 'venmaterials', 'uoms'], note: 'ตรวจ รหัสสินค้าของคู่ค้า ตรงตัวก่อน → ชื่อสินค้าของคู่ค้า ≥ 85% → Material master ≥ 93% จากนั้นจึง แปลงหน่วย ให้ตรงกับหน่วยของ Material' },
+  { key: 'vendor', label: '1. Vendor / Supplier', mod: 'AP', tabs: ['vendors'], note: 'Checks the 13-digit Tax ID first, then compares the vendor name if not found (similarity ≥ 82%)' },
+  { key: 'customer', label: '2. Customer', mod: 'SO', tabs: ['customers'], note: 'Checks the 13-digit Tax ID first, then compares the customer name (Thai/English) if not found (similarity ≥ 82%)' },
+  { key: 'shipto', label: '3. Ship-to', mod: 'SO', tabs: ['shiptos'], note: 'Compares location name + delivery address, only under a customer that has already been matched (similarity ≥ 70%)' },
+  { key: 'material', label: '4. Material', mod: 'ALL', tabs: ['materials', 'custmaterials', 'venmaterials', 'uoms'], note: "Checks the partner's item code for an exact match first → partner's item name ≥ 85% → Material master ≥ 93%, then converts the unit to match the Material's unit" },
 ];
 
 export const M_LABEL: Record<string, string> = {

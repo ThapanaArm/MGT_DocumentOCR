@@ -43,7 +43,7 @@ export default function StatTile({
           {intFmt(value)}
         </div>
         <div style={{ fontSize: 12, color: up ? 'var(--green)' : 'var(--red)' }}>
-          {up ? '▲' : '▼'} {Math.abs(pct || 0)}% จากสัปดาห์ที่แล้ว
+          {up ? '▲' : '▼'} {Math.abs(pct || 0)}% from last week
         </div>
       </div>
     </div>

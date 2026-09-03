@@ -37,15 +37,15 @@ export default function LogPage() {
   return (
     <div className="card">
       <div className="card-h">
-        <h2>ประวัติการส่งเข้า SAP ({filtered.length})</h2>
+        <h2>SAP Submission History ({filtered.length})</h2>
         <div className="sp" />
         <span className="hint" style={{ marginRight: 4 }}>
-          วันที่:
+          Date:
         </span>
         <DateRange from={from} to={to} setFrom={setFrom} setTo={setTo} />
         <div style={{ marginRight: 8 }} />
         <button className="btn sm" onClick={reload}>
-          ↻ รีเฟรช
+          ↻ Refresh
         </button>
       </div>
       <div className="card-b">
@@ -53,16 +53,16 @@ export default function LogPage() {
           <table>
             <thead>
               <tr>
-                <th>เวลา</th>
+                <th>Time</th>
                 <th>Module</th>
                 <th>SAP Doc</th>
-                <th>เอกสารอ้างอิง</th>
-                <th>คู่ค้า</th>
-                <th style={{ textAlign: 'right' }}>ยอดรวม</th>
-                <th>รายการ</th>
-                <th>ผล</th>
+                <th>Reference Document</th>
+                <th>Partner</th>
+                <th style={{ textAlign: 'right' }}>Total</th>
+                <th>Lines</th>
+                <th>Result</th>
                 <th>Model</th>
-                <th>ไฟล์</th>
+                <th>File</th>
                 <th />
               </tr>
             </thead>
@@ -70,7 +70,7 @@ export default function LogPage() {
               {!rows ? (
                 <tr>
                   <td colSpan={11} className="empty">
-                    กำลังโหลด…
+                    Loading…
                   </td>
                 </tr>
               ) : pageRows.length ? (
@@ -116,7 +116,7 @@ export default function LogPage() {
               ) : (
                 <tr>
                   <td colSpan={11} className="empty">
-                    ยังไม่มีเอกสารที่ส่งเข้า SAP
+                    No documents submitted to SAP yet
                   </td>
                 </tr>
               )}

@@ -23,7 +23,7 @@ export default function TaxDataTable({
   const total = items.reduce((a, t) => a + num(t.docCurrencyAmt), 0);
   const addBtn = !posted ? (
     <button className="btn sm" onClick={onAdd}>
-      + เพิ่มแถว
+      + Add Row
     </button>
   ) : null;
 
@@ -84,7 +84,7 @@ export default function TaxDataTable({
                         value={t.taxCode || ''}
                         readOnly={posted}
                         onChange={(e) => onEdit(i, 'taxCode', e.target.value)}
-                        placeholder="เช่น V1 (Input VAT 7%)"
+                        placeholder="e.g. V1 (Input VAT 7%)"
                       />
                     </td>
                     <td>
@@ -113,7 +113,7 @@ export default function TaxDataTable({
               ) : (
                 <tr>
                   <td colSpan={6} className="empty">
-                    ไม่มีรายการ
+                    No items
                   </td>
                 </tr>
               )}

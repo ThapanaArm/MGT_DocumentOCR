@@ -64,12 +64,12 @@ export function findDupes(
       let reason = '';
       if (taxField && taxVal && taxDigits(taxVal) && taxDigits(r[taxField]) === taxDigits(taxVal)) {
         score = 1;
-        reason = 'เลขทะเบียนนิติบุคคลตรงกัน';
+        reason = 'Matching Tax ID';
       } else {
         const s = simJS(nameVal, r[nameField]);
         if (s > score) {
           score = s;
-          reason = 'ชื่อคล้ายกัน ' + Math.round(s * 100) + '%';
+          reason = 'Similar name ' + Math.round(s * 100) + '%';
         }
       }
       return { row: r, score, reason };

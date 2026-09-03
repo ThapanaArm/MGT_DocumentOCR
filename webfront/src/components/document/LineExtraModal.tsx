@@ -18,7 +18,7 @@ export default function LineExtraModal({
   return (
     <Modal open onClose={onClose} wide>
       <ModalHeader
-        title={`📋 ข้อมูล PO เพิ่มเติม — รายการ ${line.itemNo} (${line.desc || ''})`}
+        title={`📋 Additional PO Details — Item ${line.itemNo} (${line.desc || ''})`}
         onClose={onClose}
       />
       <div className="card-b">
@@ -40,7 +40,7 @@ export default function LineExtraModal({
               >
                 <label>
                   {label}
-                  {isRelevant && <span style={{ color: 'var(--brand)' }}> ★ แนะนำให้กรอก</span>}
+                  {isRelevant && <span style={{ color: 'var(--brand)' }}> ★ Recommended</span>}
                 </label>
                 {type === 'select' ? (
                   <select value={ex[k] || ''} onChange={(e) => onEdit(k, e.target.value)}>
@@ -59,7 +59,7 @@ export default function LineExtraModal({
         </div>
         <div className="row" style={{ marginTop: 16, justifyContent: 'flex-end' }}>
           <button className="btn primary" onClick={onClose}>
-            เสร็จสิ้น
+            Done
           </button>
         </div>
       </div>

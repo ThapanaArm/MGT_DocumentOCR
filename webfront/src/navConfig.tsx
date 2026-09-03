@@ -71,8 +71,8 @@ export const navSections: NavSection[] = [
   {
     title: 'LOG',
     items: [
-      { label: 'ประวัติส่ง SAP', to: '/log', icon: LOG },
-      { label: 'Log กิจกรรม', to: '/audit-log', icon: AUDIT },
+      { label: 'SAP Submission History', to: '/log', icon: LOG },
+      { label: 'Activity Log', to: '/audit-log', icon: AUDIT },
     ],
   },
 ];

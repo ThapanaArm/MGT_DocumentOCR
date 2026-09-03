@@ -22,18 +22,18 @@ function UomCell({
   posted: boolean;
   onAddUomRule: (i: number) => void;
 }) {
-  if (!map) return <span className="badge b-idle">รอ Mapping</span>;
+  if (!map) return <span className="badge b-idle">Pending Mapping</span>;
   const r = map.lines[i];
   const u = r.uom || ({} as NonNullable<typeof r.uom>);
   if (!r.code) return <span className="hint">—</span>;
   if (u.status === 'fail')
     return (
       <>
-        <span className="badge b-fail">✗ ไม่มีกฎแปลงหน่วย</span>
+        <span className="badge b-fail">✗ No unit conversion rule</span>
         {!posted && (
           <div style={{ marginTop: 6 }}>
             <button className="btn sm" onClick={() => onAddUomRule(i)}>
-              + เพิ่มกฎ
+              + Add Rule
             </button>
           </div>
         )}
@@ -119,7 +119,7 @@ export default function DetailTable({
 
   const addBtn = !posted ? (
     <button className="btn sm" onClick={onAddLine}>
-      + เพิ่มบรรทัด
+      + Add Row
     </button>
   ) : null;
 
@@ -127,7 +127,7 @@ export default function DetailTable({
     <div className={bare ? undefined : 'card'}>
       {!bare && (
         <div className="card-h">
-          <h2>DETAIL — รายการสินค้า ({doc.lines.length} บรรทัด)</h2>
+          <h2>DETAIL — Line Items ({doc.lines.length} rows)</h2>
           <div className="sp" />
           {addBtn}
         </div>
@@ -141,15 +141,15 @@ export default function DetailTable({
             <thead>
               <tr>
                 <th style={{ width: 54 }}>Item</th>
-                <th style={{ width: 150 }}>รหัสสินค้า (คู่ค้า)</th>
-                <th style={{ minWidth: 260 }}>ชื่อสินค้าตามเอกสาร</th>
-                <th style={{ minWidth: 110 }}>จำนวน</th>
-                <th style={{ width: 74 }}>หน่วย</th>
-                <th style={{ minWidth: 130 }}>ราคา/หน่วย</th>
-                <th style={{ minWidth: 140 }}>จำนวนเงิน</th>
+                <th style={{ width: 150 }}>Item Code (Partner)</th>
+                <th style={{ minWidth: 260 }}>Item Description (per Document)</th>
+                <th style={{ minWidth: 110 }}>Quantity</th>
+                <th style={{ width: 74 }}>Unit</th>
+                <th style={{ minWidth: 130 }}>Unit Price</th>
+                <th style={{ minWidth: 140 }}>Amount</th>
                 <th style={{ minWidth: 270 }}>Material (SAP)</th>
-                <th style={{ minWidth: 170 }}>หน่วย → SAP</th>
-                <th>สถานะ</th>
+                <th style={{ minWidth: 170 }}>Unit → SAP</th>
+                <th>Status</th>
                 {showPoExtra && <th style={{ width: 120 }}>PO Detail</th>}
                 {showSoExtra && (
                   <>
@@ -197,14 +197,14 @@ export default function DetailTable({
                         style={{ minWidth: 270 }}
                       >
                         {!map ? (
-                          <span className="badge b-idle">รอ Mapping</span>
+                          <span className="badge b-idle">Pending Mapping</span>
                         ) : (
                           <select
                             value={r?.code || ''}
                             disabled={posted}
                             onChange={(e) => onManualLine(i, e.target.value)}
                           >
-                            <option value="">-- ไม่พบ / กรุณาเลือก --</option>
+                            <option value="">-- Not found / Please select --</option>
                             {matOpts.map((o) => (
                               <option key={o.v} value={o.v}>
                                 {o.t}
@@ -222,9 +222,9 @@ export default function DetailTable({
                       <td style={{ whiteSpace: 'nowrap' }}>
                         {r &&
                           (r.status === 'fail' ? (
-                            <span className="badge b-fail">✗ ไม่พบ</span>
+                            <span className="badge b-fail">✗ Not found</span>
                           ) : r.status === 'manual' ? (
-                            <span className="badge b-warn">✎ เลือกเอง</span>
+                            <span className="badge b-warn">✎ Manual</span>
                           ) : (
                             <span className="badge b-ok">✓ {r.method}</span>
                           ))}
@@ -282,7 +282,7 @@ export default function DetailTable({
               ) : (
                 <tr>
                   <td colSpan={11 + extraCols} className="empty">
-                    ไม่มีรายการ
+                    No items
                   </td>
                 </tr>
               )}
@@ -290,7 +290,7 @@ export default function DetailTable({
             <tfoot>
               <tr className="totrow">
                 <td colSpan={6} style={{ textAlign: 'right' }}>
-                  รวม
+                  Total
                 </td>
                 <td style={{ textAlign: 'right' }}>{fmtAmt(sum)}</td>
                 <td colSpan={4 + extraCols} />

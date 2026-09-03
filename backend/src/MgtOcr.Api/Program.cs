@@ -30,6 +30,8 @@ var appConfig = new AppConfig
     DbUser = Get("Database:User", "sa"),
     DbPassword = cfg["Database:Password"] ?? "", // not trimmed — a password may contain spaces
     DbDriver = Get("Database:Driver", "ODBC Driver 17 for SQL Server"),
+    // Prefer a full ConnectionStrings entry (ConnectionStrings:Default, then dbDW) if present.
+    DbConnectionString = (cfg.GetConnectionString("Default") ?? cfg.GetConnectionString("dbDW") ?? "").Trim(),
     AppHost = Get("App:Host", "0.0.0.0"),
     AppPort = int.TryParse(Get("App:Port", "8091"), out var p) ? p : 8091,
     OwnCompanyKeywords = Get("App:OwnCompanyKeywords", "MEGACHEM").Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries),

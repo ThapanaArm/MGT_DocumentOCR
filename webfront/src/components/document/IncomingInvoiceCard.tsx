@@ -34,7 +34,7 @@ export default function IncomingInvoiceCard({ values: h, posted, onEdit, glItems
     <>
     <div className="card">
       <div className="card-h">
-        <h2>Incoming Invoice — Enter Supplier Invoice (ไม่มี PO)</h2>
+        <h2>Incoming Invoice — Enter Supplier Invoice (Without PO)</h2>
       </div>
 
       {/* Transaction + Balance strip (SAP top row) */}
@@ -56,7 +56,7 @@ export default function IncomingInvoiceCard({ values: h, posted, onEdit, glItems
               width: 12, height: 12, borderRadius: 3,
               background: balanced ? 'var(--ok, #16a34a)' : 'var(--warn, #d97706)',
             }}
-            title={balanced ? 'Balance OK' : 'ยังไม่สมดุล'}
+            title={balanced ? 'Balance OK' : 'Not balanced'}
           />
           <label style={{ margin: 0 }}>Balance</label>
           <span
@@ -74,7 +74,6 @@ export default function IncomingInvoiceCard({ values: h, posted, onEdit, glItems
 
       {/* FB60 tabs + vendor panel */}
       <div
-        style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) 300px', gap: 24, alignItems: 'start' }}
         className="ii-body"
       >
         <div style={{ minWidth: 0 }}>
@@ -90,7 +89,7 @@ export default function IncomingInvoiceCard({ values: h, posted, onEdit, glItems
           />
         </div>
 
-        <aside
+        {/* <aside
           style={{
             border: '1px solid var(--line)', borderRadius: 'var(--r2, 10px)',
             background: 'var(--line-soft)', padding: 16, margin: '16px 20px 20px 0',
@@ -100,7 +99,7 @@ export default function IncomingInvoiceCard({ values: h, posted, onEdit, glItems
             Vendor{h.vendorCode || h.partnerCode ? ' · ' + (h.vendorCode || h.partnerCode) : ''}
           </div>
           <div style={{ fontWeight: 700, fontSize: 15, margin: '4px 0 2px' }}>{h.vendorName || '—'}</div>
-          {h.vendorTaxId && <div className="hint">เลขผู้เสียภาษี {h.vendorTaxId}</div>}
+          {h.vendorTaxId && <div className="hint">Tax ID {h.vendorTaxId}</div>}
           {(h.addressCity || h.addressStreet) && (
             <div className="hint" style={{ marginTop: 6 }}>{[h.addressStreet, h.addressCity].filter(Boolean).join(' · ')}</div>
           )}
@@ -112,7 +111,7 @@ export default function IncomingInvoiceCard({ values: h, posted, onEdit, glItems
               <div style={{ fontFamily: 'monospace', marginTop: 4 }}>{h.bankAccountNo}</div>
             </>
           )}
-        </aside>
+        </aside> */}
       </div>
     </div>
 
@@ -120,7 +119,7 @@ export default function IncomingInvoiceCard({ values: h, posted, onEdit, glItems
     {h.oneTimeVendor && (
       <div className="card">
         <div className="card-h">
-          <h2>Address and Bank Data — เจ้าหนี้ขาจร (One-Time)</h2>
+          <h2>Address and Bank Data — One-Time Vendor</h2>
         </div>
         <div className="card-b">
           <FieldGrid fields={II_ONETIME_H} values={h} posted={posted} onEdit={onEdit} />

@@ -38,39 +38,39 @@ export default function ImportPage() {
 
   async function handleFile(file: File) {
     if (mod === 'AP' && !category) {
-      showToast('⚠ กรุณาเลือกประเภทเอกสารก่อน');
+      showToast('⚠ Please select a document type first');
       return;
     }
     const fd = new FormData();
     fd.append('module', mod);
     fd.append('user', USER);
-    fd.append('ocr', provider);
+    fd.append('ocr_', provider);
     fd.append('file', file);
     fd.append('apDocCategory', category || '');
-    setProgress({ text: 'กำลังอัปโหลด ' + file.name + ' …', pct: 35 });
+    setProgress({ text: 'Uploading ' + file.name + ' …', pct: 35 });
     const doc = await guard(async () => {
-      setProgress({ text: 'กำลังอ่านเอกสาร (' + provider + ') …', pct: 70 });
+      setProgress({ text: 'Reading document (' + provider + ') …', pct: 70 });
       return uploadDocument(fd);
     });
     setProgress(null);
     if (doc) {
       if (doc.provider === 'failed')
-        showToast('⚠ อ่านเอกสารไม่สำเร็จ — แนบภาพในแชท AI ในหน้าเอกสารเพื่อให้ช่วยกรอกแทน');
-      else showToast('✓ อ่านเอกสารสำเร็จ (' + doc.provider + ') — พบ ' + doc.lines.length + ' รายการ');
+        showToast('⚠ Failed to read document — attach an image in the AI chat on the document page for help filling it in');
+      else showToast('✓ Document read successfully (' + doc.provider + ') — found ' + doc.lines.length + ' items');
       navigate('/doc/' + doc.docId);
     }
   }
 
   async function useSample(i: number) {
     if (mod === 'AP' && !category) {
-      showToast('⚠ กรุณาเลือกประเภทเอกสารก่อน');
+      showToast('⚠ Please select a document type first');
       return;
     }
     const doc = await guard(() =>
       sampleDocument({ module: mod, index: i, user: USER, apDocCategory: category }),
     );
     if (doc) {
-      showToast('✓ สร้างเอกสารในระบบแล้ว (DocId ' + doc.docId + ')');
+      showToast('✓ Document created in the system (DocId ' + doc.docId + ')');
       navigate('/doc/' + doc.docId);
     }
   }
@@ -80,18 +80,18 @@ export default function ImportPage() {
       <Steps current={1} />
       <div className="card">
         <div className="card-h">
-          <h2>ขั้นตอนที่ 1 — นำเข้าเอกสาร</h2>
+          <h2>Step 1 — Import Document</h2>
           <div className="sp" />
-          <span className="hint">รองรับ PDF / JPG / PNG / TIFF</span>
+          <span className="hint">Supports PDF / JPG / PNG / TIFF</span>
         </div>
         <div className="card-b">
           {mod === 'AP' && (
             <div className="row" style={{ marginBottom: 16 }}>
               <label className="hint" style={{ fontWeight: 600 }}>
-                📋 ประเภทเอกสาร
+                📋 Document Type
               </label>
               <select value={category} onChange={(e) => setCategory(e.target.value)}>
-                <option value="">— เลือกประเภทเอกสาร —</option>
+                <option value="">— Select Document Type —</option>
                 {(apDocCategories ?? []).map((c) => (
                   <option key={c.id} value={c.id}>
                     {c.label}
@@ -102,7 +102,7 @@ export default function ImportPage() {
           )}
           {needCategory && (
             <p className="hint" style={{ margin: '-8px 0 16px' }}>
-              ⚠ กรุณาเลือกประเภทเอกสารก่อน จึงจะเลือกวิธีอ่านเอกสาร/นำเข้าไฟล์ได้
+              ⚠ Please select a document type first before choosing a reading method / importing a file
             </p>
           )}
 
@@ -111,7 +111,7 @@ export default function ImportPage() {
             style={{ marginBottom: 16, ...(needCategory ? { opacity: 0.45, pointerEvents: 'none' } : {}) }}
           >
             <label className="hint" style={{ fontWeight: 600 }}>
-              🧠 วิธีอ่านเอกสาร (OCR Engine)
+              🧠 Reading Method (OCR Engine)
             </label>
             <OcrProviderSelect providers={providers} value={provider} onChange={setProvider} />
           </div>
@@ -139,7 +139,7 @@ export default function ImportPage() {
             }}
           >
             <div className="big">📤</div>
-            <div style={{ margin: '12px 0 4px', fontWeight: 600 }}>ลากไฟล์มาวางที่นี่ หรือ</div>
+            <div style={{ margin: '12px 0 4px', fontWeight: 600 }}>Drag and drop a file here, or</div>
             <input
               ref={fileRef}
               type="file"
@@ -151,10 +151,10 @@ export default function ImportPage() {
               }}
             />
             <button className="btn primary" onClick={() => fileRef.current?.click()}>
-              เลือกไฟล์เอกสาร
+              Select a Document File
             </button>
             <div className="hint" style={{ marginTop: 12 }}>
-              โมดูลปัจจุบัน: <b>{MODULE_LABEL[mod] || moduleLabel(mod)}</b>
+              Current module: <b>{MODULE_LABEL[mod] || moduleLabel(mod)}</b>
             </div>
             {progress && (
               <div style={{ maxWidth: 440, margin: '18px auto 0' }}>
@@ -165,7 +165,7 @@ export default function ImportPage() {
               </div>
             )}
             <div className="hint" style={{ marginTop: 18 }}>
-              หรือ{' '}
+              or{' '}
               <a
                 href="#"
                 onClick={(e) => {
@@ -173,9 +173,9 @@ export default function ImportPage() {
                   useSample(0);
                 }}
               >
-                ใช้ข้อมูลตัวอย่าง
+                use sample data
               </a>{' '}
-              เพื่อทดสอบขั้นตอน Mapping / ส่ง SAP
+              to test the Mapping / SAP submission steps
             </div>
           </div>
         </div>

@@ -33,7 +33,7 @@ export default function MasterPage() {
       : all.filter((r) => def.cols.some((c) => String(r[c.k] ?? '').toLowerCase().includes(q)));
   }, [masters, activeTab, search, def]);
 
-  if (!masters) return <div className="card"><div className="empty">กำลังโหลด…</div></div>;
+  if (!masters) return <div className="card"><div className="empty">Loading…</div></div>;
 
   const count = (k: string) => (masters[k] || []).length;
 
@@ -42,28 +42,28 @@ export default function MasterPage() {
       return r[c.k] ? (
         <b className="sapcode">{r[c.k]}</b>
       ) : (
-        <span className="badge b-fail">✗ ยังไม่ระบุ</span>
+        <span className="badge b-fail">✗ Not specified</span>
       );
     if (activeTab === 'uoms' && c.k === 'MaterialCode' && !r[c.k])
-      return <span className="badge b-idle">ทุกสินค้า (กฎกลาง)</span>;
+      return <span className="badge b-idle">All materials (global rule)</span>;
     if (activeTab === 'uoms' && c.k === 'Factor')
       return <b>{num(r[c.k]).toLocaleString('en-US', { maximumFractionDigits: 6 })}</b>;
     return r[c.k];
   };
 
   const delRow = (key: string) => {
-    if (!window.confirm('ลบข้อมูลนี้?')) return;
+    if (!window.confirm('Delete this record?')) return;
     guard(async () => {
       await deleteMaster(activeTab, key);
       await loadMasters(true);
-      showToast('ลบข้อมูลแล้ว');
+      showToast('Record deleted');
     });
   };
 
   return (
     <div className="card">
       <div className="card-h">
-        <h2>Master Mapping — แยกตามจุดที่ต้องจับคู่</h2>
+        <h2>Master Mapping — Grouped by Matching Point</h2>
         <div className="sp" />
         <span className="hint">
           SQL Server · schema <code>ocr</code>
@@ -114,8 +114,8 @@ export default function MasterPage() {
         )}
 
         <div className="hint" style={{ marginBottom: 12 }}>
-          🔑 คอลัมน์ <b className="sapcode">รหัสใน SAP</b> คือค่าที่ระบบใช้ยิงเข้า S/4HANA จริง —
-          ถ้าเว้นว่างจะ Mapping ไม่ผ่านและส่งเอกสารไม่ได้
+          🔑 The <b className="sapcode">SAP Code</b> column is the value the system actually posts to S/4HANA —
+          if left blank, Mapping will fail and the document cannot be submitted
         </div>
 
         <div className="row" style={{ marginBottom: 14 }}>
@@ -123,11 +123,11 @@ export default function MasterPage() {
             className="btn primary sm"
             onClick={() => setEdit({ tab: activeTab, rowKey: null })}
           >
-            + เพิ่มข้อมูล
+            + Add Record
           </button>
           <input
             type="text"
-            placeholder="ค้นหา..."
+            placeholder="Search..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             style={{ maxWidth: 220 }}
@@ -157,10 +157,10 @@ export default function MasterPage() {
                         className="btn sm"
                         onClick={() => setEdit({ tab: activeTab, rowKey: r[def.key] })}
                       >
-                        แก้ไข
+                        Edit
                       </button>{' '}
                       <button className="btn sm ghost" onClick={() => delRow(String(r[def.key]))}>
-                        ลบ
+                        Delete
                       </button>
                     </td>
                   </tr>
@@ -168,7 +168,7 @@ export default function MasterPage() {
               ) : (
                 <tr>
                   <td colSpan={def.cols.length + 1} className="empty">
-                    {search ? 'ไม่พบข้อมูลที่ค้นหา' : 'ยังไม่มีข้อมูล'}
+                    {search ? 'No matching records found' : 'No records yet'}
                   </td>
                 </tr>
               )}

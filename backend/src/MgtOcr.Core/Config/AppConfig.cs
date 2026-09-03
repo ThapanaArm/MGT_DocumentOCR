@@ -45,7 +45,12 @@ public class AppConfig
     // Microsoft.Data.SqlClient talks TDS directly and uses ADO.NET connection string syntax instead —
     // there is no "Driver=" concept here. Same server/database/credentials/TrustServerCertificate
     // semantics as the Python side, just the .NET-native string format.
+    // If a full connection string is supplied via ConnectionStrings (Default / dbDW),
+    // use it as-is; otherwise compose one from the Database:* parts (back-compat).
+    public string DbConnectionString { get; init; } = "";
     public string ConnectionString =>
-        $"Server={DbServer};Database={DbName};User Id={DbUser};Password={DbPassword};" +
-        "TrustServerCertificate=True;";
+        !string.IsNullOrWhiteSpace(DbConnectionString)
+            ? DbConnectionString
+            : $"Server={DbServer};Database={DbName};User Id={DbUser};Password={DbPassword};" +
+              "TrustServerCertificate=True;";
 }

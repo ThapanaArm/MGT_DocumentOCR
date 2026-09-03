@@ -22,7 +22,7 @@ export default function GlItemsTable({
 }) {
   const addBtn = !posted ? (
     <button className="btn sm" onClick={onAdd}>
-      + เพิ่มรายการ
+      + Add Item
     </button>
   ) : null;
 
@@ -72,9 +72,9 @@ export default function GlItemsTable({
                         disabled={posted}
                         onChange={(e) => onEdit(i, 'drCr', e.target.value)}
                       >
-                        <option value="">— เลือก —</option>
-                        <option value="D">Debit</option>
-                        <option value="C">Credit</option>
+                        <option value="">— Select —</option>
+                        <option value="D">S-Debit</option>
+                        <option value="C">H-Credit</option>
                       </select>
                     </td>
                     <td className="num">
@@ -126,7 +126,7 @@ export default function GlItemsTable({
               ) : (
                 <tr>
                   <td colSpan={8} className="empty">
-                    ไม่มีรายการ
+                    No items
                   </td>
                 </tr>
               )}

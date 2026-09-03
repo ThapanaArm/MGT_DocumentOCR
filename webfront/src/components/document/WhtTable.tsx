@@ -27,7 +27,7 @@ export default function WhtTable({
 }) {
   const addBtn = !posted ? (
     <button className="btn sm" onClick={onAdd}>
-      + เพิ่มแถว
+      + Add Row
     </button>
   ) : null;
 
@@ -110,7 +110,7 @@ export default function WhtTable({
               ) : (
                 <tr>
                   <td colSpan={5} className="empty">
-                    ไม่มีรายการ
+                    No items
                   </td>
                 </tr>
               )}
@@ -123,7 +123,7 @@ export default function WhtTable({
           </datalist>
         </div>
         <p className="hint" style={{ marginTop: 10 }}>
-          หากไม่ระบุ W/Tax Base FC ระบบจะดึงจากจำนวนเงินในเอกสาร (ไม่รวม VAT)
+          If W/Tax Base FC is not specified, the system will use the document amount (excluding VAT)
         </p>
       </div>
     </div>

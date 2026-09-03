@@ -12,23 +12,23 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 const providers = [
-  { id: 'auto', label: 'อัตโนมัติ (แนะนำ)', desc: 'อ่านข้อความในไฟล์ก่อน ถ้าเป็นไฟล์สแกนจะใช้ Tesseract OCR ให้อัตโนมัติ', ready: true },
-  { id: 'text', label: 'ข้อความในไฟล์เท่านั้น', desc: 'เร็วที่สุด แต่ใช้ไม่ได้กับไฟล์สแกน/รูปภาพ', ready: true },
-  { id: 'tesseract', label: 'Tesseract OCR (ในเครื่อง)', desc: 'บังคับอ่านด้วย OCR แม้ไฟล์จะมีชั้นข้อความอยู่แล้ว', ready: true },
-  { id: 'typhoon', label: 'Typhoon OCR (ไทยโดยเฉพาะ)', desc: 'โมเดล OCR ไทย/อังกฤษของ SCB 10X', ready: false },
-  { id: 'azure', label: 'Azure Document Intelligence', desc: 'แม่นกว่ามากสำหรับฟอร์ม/ตาราง', ready: false },
-  { id: 'claude', label: 'Claude Vision (AI)', desc: 'แม่นที่สุดสำหรับเอกสารยุ่งเหยิง', ready: false },
-  { id: 'gemini', label: 'Gemini Vision (AI)', desc: 'โมเดล Vision ของ Google', ready: false },
-  { id: 'openai', label: 'ChatGPT Vision (AI)', desc: 'โมเดล GPT-4o ของ OpenAI', ready: false },
-  { id: 'demo', label: 'ข้อมูลตัวอย่าง (ทดสอบ)', desc: 'ไม่อ่านไฟล์จริง ใช้ทดสอบขั้นตอน Mapping/ส่ง SAP', ready: true },
+  { id: 'auto', label: 'Automatic (Recommended)', desc: 'Reads the text in the file first; for scanned files it automatically uses Tesseract OCR', ready: true },
+  { id: 'text', label: 'Text in File Only', desc: 'Fastest, but does not work with scanned files/images', ready: true },
+  { id: 'tesseract', label: 'Tesseract OCR (Local)', desc: 'Forces OCR reading even if the file already has a text layer', ready: true },
+  { id: 'typhoon', label: 'Typhoon OCR (Thai-specialized)', desc: 'Thai/English OCR model by SCB 10X', ready: false },
+  { id: 'azure', label: 'Azure Document Intelligence', desc: 'Much more accurate for forms/tables', ready: false },
+  { id: 'claude', label: 'Claude Vision (AI)', desc: 'Most accurate for messy documents', ready: false },
+  { id: 'gemini', label: 'Gemini Vision (AI)', desc: "Google's Vision model", ready: false },
+  { id: 'openai', label: 'ChatGPT Vision (AI)', desc: "OpenAI's GPT-4o model", ready: false },
+  { id: 'demo', label: 'Sample Data (Test)', desc: 'Does not read a real file; used to test the Mapping / SAP submission steps', ready: true },
 ];
 
 const apDocCategories = [
-  { id: 'INVENTORY', label: 'การบันทึกรายการตั้งหนี้เจ้า - Inventory' },
-  { id: 'EXPENSE', label: 'การบันทึกรายการตั้งหนี้เจ้า - Expense' },
-  { id: 'FIXED_ASSET_BUDGET', label: 'การบันทึกรายการตั้งหนี้เจ้า - Fixed Asset กรณีคุมงบประมาณ' },
-  { id: 'FIXED_ASSET_NO_BUDGET', label: 'การบันทึกรายการตั้งหนี้เจ้า - Fixed Asset กรณีไม่คุมงบประมาณ' },
-  { id: 'SUB_CONTRACT', label: 'การบันทึกรายการตั้งหนี้เจ้า - Sub Contract' },
+  { id: 'INVENTORY', label: 'AP Liability Recognition - Inventory' },
+  { id: 'EXPENSE', label: 'AP Liability Recognition - Expense' },
+  { id: 'FIXED_ASSET_BUDGET', label: 'AP Liability Recognition - Fixed Asset (Budget-Controlled)' },
+  { id: 'FIXED_ASSET_NO_BUDGET', label: 'AP Liability Recognition - Fixed Asset (Not Budget-Controlled)' },
+  { id: 'SUB_CONTRACT', label: 'AP Liability Recognition - Sub Contract' },
 ];
 
 const health = {
@@ -70,51 +70,51 @@ function dashboard(days: number) {
 }
 
 const inbox = [
-  { DocId: 1042, Module: 'AP', FileName: 'invoice_UC_2024.pdf', DocNo: 'INV-2024-0042', DocDate: '2026-08-30', PartnerName: 'บริษัท ยูนิเวอร์แซล เคมีคอล ซัพพลาย จำกัด', TotalAmount: 128400, Status: 'POSTED', ApDocCategory: 'INVENTORY', OcrConfidence: 0.94, OcrConfidenceNote: null, OcrProvider: 'claude', OcrTokensIn: 3200, OcrTokensOut: 900, OcrCost: 0.021, OcrInputCost: 0.015, OcrOutputCost: 0.006, OcrCostCurrency: 'USD', SapDocNo: '5100004210', CreatedAt: '2026-09-01T09:12:00' },
-  { DocId: 1041, Module: 'SO', FileName: 'po_scicorp.pdf', DocNo: 'PO-778120', DocDate: '2026-08-29', PartnerName: 'บริษัท สยาม เคมิคอล อินดัสทรี จำกัด', TotalAmount: 64200, Status: 'MAPPED', ApDocCategory: null, OcrConfidence: 0.9, OcrConfidenceNote: null, OcrProvider: 'auto', OcrTokensIn: null, OcrTokensOut: null, OcrCost: null, OcrInputCost: null, OcrOutputCost: null, OcrCostCurrency: null, SapDocNo: null, CreatedAt: '2026-09-01T08:40:00' },
-  { DocId: 1040, Module: 'AP', FileName: 'freight_nc.jpg', DocNo: 'NC-0091', DocDate: '2026-08-28', PartnerName: 'บริษัท เอ็น.ซี. โลจิสติกส์ เซอร์วิส จำกัด', TotalAmount: 8500, Status: 'INCOMPLETE', ApDocCategory: 'EXPENSE', OcrConfidence: 0.72, OcrConfidenceNote: 'ภาพเบลอบางส่วน', OcrProvider: 'tesseract', OcrTokensIn: null, OcrTokensOut: null, OcrCost: null, OcrInputCost: null, OcrOutputCost: null, OcrCostCurrency: null, SapDocNo: null, CreatedAt: '2026-08-31T16:20:00' },
+  { DocId: 1042, Module: 'AP', FileName: 'invoice_UC_2024.pdf', DocNo: 'INV-2024-0042', DocDate: '2026-08-30', PartnerName: 'Universal Chemical Supply Co., Ltd.', TotalAmount: 128400, Status: 'POSTED', ApDocCategory: 'INVENTORY', OcrConfidence: 0.94, OcrConfidenceNote: null, OcrProvider: 'claude', OcrTokensIn: 3200, OcrTokensOut: 900, OcrCost: 0.021, OcrInputCost: 0.015, OcrOutputCost: 0.006, OcrCostCurrency: 'USD', SapDocNo: '5100004210', CreatedAt: '2026-09-01T09:12:00' },
+  { DocId: 1041, Module: 'SO', FileName: 'po_scicorp.pdf', DocNo: 'PO-778120', DocDate: '2026-08-29', PartnerName: 'Siam Chemical Industry Co., Ltd.', TotalAmount: 64200, Status: 'MAPPED', ApDocCategory: null, OcrConfidence: 0.9, OcrConfidenceNote: null, OcrProvider: 'auto', OcrTokensIn: null, OcrTokensOut: null, OcrCost: null, OcrInputCost: null, OcrOutputCost: null, OcrCostCurrency: null, SapDocNo: null, CreatedAt: '2026-09-01T08:40:00' },
+  { DocId: 1040, Module: 'AP', FileName: 'freight_nc.jpg', DocNo: 'NC-0091', DocDate: '2026-08-28', PartnerName: 'N.C. Logistics Service Co., Ltd.', TotalAmount: 8500, Status: 'INCOMPLETE', ApDocCategory: 'EXPENSE', OcrConfidence: 0.72, OcrConfidenceNote: 'Image partially blurred', OcrProvider: 'tesseract', OcrTokensIn: null, OcrTokensOut: null, OcrCost: null, OcrInputCost: null, OcrOutputCost: null, OcrCostCurrency: null, SapDocNo: null, CreatedAt: '2026-08-31T16:20:00' },
   { DocId: 1043, Module: 'II', FileName: 'supplier_invoice_no_po.pdf', DocNo: 'INV250400286', DocDate: '2025-04-23', PartnerName: 'Excellent Chemical Co., Ltd.', TotalAmount: 10700, Status: 'NEW', ApDocCategory: null, OcrConfidence: 0.93, OcrConfidenceNote: null, OcrProvider: 'claude', OcrTokensIn: 3120, OcrTokensOut: 840, OcrCost: 0.019, OcrInputCost: 0.013, OcrOutputCost: 0.006, OcrCostCurrency: 'USD', SapDocNo: null, CreatedAt: '2026-09-01T10:05:00' },
-  { DocId: 1044, Module: 'PODP', FileName: 'po_downpayment.pdf', DocNo: 'DP-0007', DocDate: '2026-08-30', PartnerName: 'บริษัท ยูนิเวอร์แซล เคมีคอล ซัพพลาย จำกัด', TotalAmount: 30000, Status: 'NEW', ApDocCategory: null, OcrConfidence: 0.9, OcrConfidenceNote: null, OcrProvider: 'auto', OcrTokensIn: null, OcrTokensOut: null, OcrCost: null, OcrInputCost: null, OcrOutputCost: null, OcrCostCurrency: null, SapDocNo: null, CreatedAt: '2026-08-31T11:00:00' },
+  { DocId: 1044, Module: 'PODP', FileName: 'po_downpayment.pdf', DocNo: 'DP-0007', DocDate: '2026-08-30', PartnerName: 'Universal Chemical Supply Co., Ltd.', TotalAmount: 30000, Status: 'NEW', ApDocCategory: null, OcrConfidence: 0.9, OcrConfidenceNote: null, OcrProvider: 'auto', OcrTokensIn: null, OcrTokensOut: null, OcrCost: null, OcrInputCost: null, OcrOutputCost: null, OcrCostCurrency: null, SapDocNo: null, CreatedAt: '2026-08-31T11:00:00' },
 ];
 
 const masters = {
   customers: [
-    { CustomerCode: '0010001', SapCustomerCode: '0000100023', NameTh: 'บริษัท สยาม เคมิคอล อินดัสทรี จำกัด', NameEn: 'Siam Chemical Industry Co., Ltd.', TaxId: '0105533012345', Branch: '00000', SalesOrg: '1000', DistChannel: '10', Division: '00', Currency: 'THB', PaymentTerms: 'N030' },
-    { CustomerCode: '0010002', SapCustomerCode: '0000100047', NameTh: 'บริษัท ไทย โพลีเมอร์ กรุ๊ป จำกัด (มหาชน)', NameEn: 'Thai Polymer Group PCL.', TaxId: '0107536000123', Branch: '00000', SalesOrg: '1000', DistChannel: '10', Division: '00', Currency: 'THB', PaymentTerms: 'N060' },
-    { CustomerCode: '0010003', SapCustomerCode: '', NameTh: 'บริษัท เอเชีย โคทติ้ง แอนด์ พลาสติก จำกัด', NameEn: 'Asia Coating & Plastic Co., Ltd.', TaxId: '0125548009876', Branch: '00000', SalesOrg: '1000', DistChannel: '10', Division: '00', Currency: 'THB', PaymentTerms: 'N030' },
+    { CustomerCode: '0010001', SapCustomerCode: '0000100023', NameTh: 'Siam Chemical Industry Co., Ltd.', NameEn: 'Siam Chemical Industry Co., Ltd.', TaxId: '0105533012345', Branch: '00000', SalesOrg: '1000', DistChannel: '10', Division: '00', Currency: 'THB', PaymentTerms: 'N030' },
+    { CustomerCode: '0010002', SapCustomerCode: '0000100047', NameTh: 'Thai Polymer Group PCL.', NameEn: 'Thai Polymer Group PCL.', TaxId: '0107536000123', Branch: '00000', SalesOrg: '1000', DistChannel: '10', Division: '00', Currency: 'THB', PaymentTerms: 'N060' },
+    { CustomerCode: '0010003', SapCustomerCode: '', NameTh: 'Asia Coating & Plastic Co., Ltd.', NameEn: 'Asia Coating & Plastic Co., Ltd.', TaxId: '0125548009876', Branch: '00000', SalesOrg: '1000', DistChannel: '10', Division: '00', Currency: 'THB', PaymentTerms: 'N030' },
   ],
   vendors: [
-    { VendorCode: 'V-500012', SapVendorCode: '0000200015', VendorName: 'บริษัท ยูนิเวอร์แซล เคมีคอล ซัพพลาย จำกัด', TaxId: '0105546007788', Branch: '00000', Currency: 'THB', PaymentTerms: 'N030', ReconAcct: '2110100', WhtCode: '-' },
-    { VendorCode: 'V-500034', SapVendorCode: '0000200037', VendorName: 'บริษัท เอ็น.ซี. โลจิสติกส์ เซอร์วิส จำกัด', TaxId: '0115551002233', Branch: '00000', Currency: 'THB', PaymentTerms: 'N015', ReconAcct: '2110100', WhtCode: '53 (3%)' },
-    { VendorCode: 'V-500051', SapVendorCode: '', VendorName: 'บริษัท พีทีจี เพโทรเคมิคอล จำกัด (มหาชน)', TaxId: '0107545000456', Branch: '00001', Currency: 'THB', PaymentTerms: 'N045', ReconAcct: '2110100', WhtCode: '-' },
+    { VendorCode: 'V-500012', SapVendorCode: '0000200015', VendorName: 'Universal Chemical Supply Co., Ltd.', TaxId: '0105546007788', Branch: '00000', Currency: 'THB', PaymentTerms: 'N030', ReconAcct: '2110100', WhtCode: '-' },
+    { VendorCode: 'V-500034', SapVendorCode: '0000200037', VendorName: 'N.C. Logistics Service Co., Ltd.', TaxId: '0115551002233', Branch: '00000', Currency: 'THB', PaymentTerms: 'N015', ReconAcct: '2110100', WhtCode: '53 (3%)' },
+    { VendorCode: 'V-500051', SapVendorCode: '', VendorName: 'PTG Petrochemical PCL.', TaxId: '0107545000456', Branch: '00001', Currency: 'THB', PaymentTerms: 'N045', ReconAcct: '2110100', WhtCode: '-' },
   ],
   materials: [
     { MaterialCode: 'FG-100021', SapMaterialCode: '000000000000100021', Description: 'Titanium Dioxide R-902 (25 KG/BAG)', Uom: 'KG', Plant: '1000', MatGroup: 'PIG01' },
     { MaterialCode: 'FG-100045', SapMaterialCode: '000000000000100045', Description: 'Calcium Carbonate CC-800 (25 KG/BAG)', Uom: 'KG', Plant: '1000', MatGroup: 'FIL01' },
     { MaterialCode: 'RM-200011', SapMaterialCode: '000000000000200011', Description: 'Methyl Ethyl Ketone (MEK) 99.5%', Uom: 'L', Plant: '1000', MatGroup: 'SOL01' },
-    { MaterialCode: 'SV-900001', SapMaterialCode: '', Description: 'ค่าขนส่งสินค้า / Freight Charge', Uom: 'AU', Plant: '1000', MatGroup: 'SRV01' },
+    { MaterialCode: 'SV-900001', SapMaterialCode: '', Description: 'Freight Charge', Uom: 'AU', Plant: '1000', MatGroup: 'SRV01' },
   ],
   shiptos: [
-    { ShipToCode: '0010001-01', CustomerCode: '0010001', SapShipToCode: '0000100024', ShipToName: 'คลังสินค้า บางปู', Address: 'นิคมอุตสาหกรรมบางปู ซ.7 ต.แพรกษา อ.เมือง สมุทรปราการ 10280' },
-    { ShipToCode: '0010002-01', CustomerCode: '0010002', SapShipToCode: '0000100048', ShipToName: 'โรงงานอยุธยา (โรจนะ)', Address: 'สวนอุตสาหกรรมโรจนะ ต.คานหาม อ.อุทัย พระนครศรีอยุธยา 13210' },
+    { ShipToCode: '0010001-01', CustomerCode: '0010001', SapShipToCode: '0000100024', ShipToName: 'Bang Pu Warehouse', Address: 'Bang Pu Industrial Estate, Soi 7, Phraeksa, Mueang, Samut Prakan 10280' },
+    { ShipToCode: '0010002-01', CustomerCode: '0010002', SapShipToCode: '0000100048', ShipToName: 'Ayutthaya Plant (Rojana)', Address: 'Rojana Industrial Park, Khan Ham, Uthai, Phra Nakhon Si Ayutthaya 13210' },
   ],
-  custmaterials: [{ Id: 1, CustomerCode: '0010001', ExtCode: 'SCI-TIO2-902', ExtDesc: 'TIO2 R902 ถุง 25 กก.', MaterialCode: 'FG-100021' }],
+  custmaterials: [{ Id: 1, CustomerCode: '0010001', ExtCode: 'SCI-TIO2-902', ExtDesc: 'TIO2 R902 25 kg bag', MaterialCode: 'FG-100021' }],
   venmaterials: [{ Id: 1, VendorCode: 'V-500012', ExtCode: 'UC-MEK-995', ExtDesc: 'MEK 99.5 PCT', MaterialCode: 'RM-200011' }],
   uoms: [
-    { Id: 1, MaterialCode: '', ExtUom: 'กก.', SapUom: 'KG', SapUomIso: 'KGM', Factor: 1, Note: 'กฎกลาง' },
-    { Id: 2, MaterialCode: 'FG-100021', ExtUom: 'BAG', SapUom: 'KG', SapUomIso: 'KGM', Factor: 25, Note: 'บรรจุ 25 กก./ถุง' },
+    { Id: 1, MaterialCode: '', ExtUom: 'kg', SapUom: 'KG', SapUomIso: 'KGM', Factor: 1, Note: 'Global rule' },
+    { Id: 2, MaterialCode: 'FG-100021', ExtUom: 'BAG', SapUom: 'KG', SapUomIso: 'KGM', Factor: 25, Note: 'Packed 25 kg/bag' },
   ],
 };
 
 const logs = [
-  { LogId: 5001, PostedAt: '2026-09-01T10:03:00', Module: 'AP', SapDocNo: '5100004210', DocNo: 'INV-2024-0042', PartnerName: 'บริษัท ยูนิเวอร์แซล เคมีคอล ซัพพลาย จำกัด', TotalAmount: 128400, Lines: 3, Success: true, OcrProvider: 'claude', FileName: 'invoice_UC_2024.pdf' },
-  { LogId: 5000, PostedAt: '2026-08-30T14:20:00', Module: 'SO', SapDocNo: '0000012345', DocNo: 'PO-770001', PartnerName: 'บริษัท ไทย โพลีเมอร์ กรุ๊ป จำกัด (มหาชน)', TotalAmount: 250000, Lines: 5, Success: true, OcrProvider: 'auto', FileName: 'po_tpg.pdf' },
+  { LogId: 5001, PostedAt: '2026-09-01T10:03:00', Module: 'AP', SapDocNo: '5100004210', DocNo: 'INV-2024-0042', PartnerName: 'Universal Chemical Supply Co., Ltd.', TotalAmount: 128400, Lines: 3, Success: true, OcrProvider: 'claude', FileName: 'invoice_UC_2024.pdf' },
+  { LogId: 5000, PostedAt: '2026-08-30T14:20:00', Module: 'SO', SapDocNo: '0000012345', DocNo: 'PO-770001', PartnerName: 'Thai Polymer Group PCL.', TotalAmount: 250000, Lines: 5, Success: true, OcrProvider: 'auto', FileName: 'po_tpg.pdf' },
 ];
 
 const auditLogs = [
-  { Action: 'POSTED', CreatedAt: '2026-09-01T10:03:00', Module: 'AP', DocId: 1042, DocNo: 'INV-2024-0042', FileName: 'invoice_UC_2024.pdf', Detail: 'ส่งเข้า SAP สำเร็จ 5100004210', OcrProvider: 'claude', PerformedBy: 'it-digital@megachem.co.th' },
-  { Action: 'UPDATE', CreatedAt: '2026-09-01T09:50:00', Module: 'AP', DocId: 1042, DocNo: 'INV-2024-0042', FileName: 'invoice_UC_2024.pdf', Detail: 'แก้ไขยอดรวม', OcrProvider: 'claude', PerformedBy: 'it-digital@megachem.co.th' },
-  { Action: 'CREATE', CreatedAt: '2026-09-01T09:12:00', Module: 'AP', DocId: 1042, DocNo: 'INV-2024-0042', FileName: 'invoice_UC_2024.pdf', Detail: 'อ่านเอกสารด้วย Claude', OcrProvider: 'claude', PerformedBy: 'it-digital@megachem.co.th' },
+  { Action: 'POSTED', CreatedAt: '2026-09-01T10:03:00', Module: 'AP', DocId: 1042, DocNo: 'INV-2024-0042', FileName: 'invoice_UC_2024.pdf', Detail: 'Sent to SAP successfully 5100004210', OcrProvider: 'claude', PerformedBy: 'it-digital@megachem.co.th' },
+  { Action: 'UPDATE', CreatedAt: '2026-09-01T09:50:00', Module: 'AP', DocId: 1042, DocNo: 'INV-2024-0042', FileName: 'invoice_UC_2024.pdf', Detail: 'Edited totals', OcrProvider: 'claude', PerformedBy: 'it-digital@megachem.co.th' },
+  { Action: 'CREATE', CreatedAt: '2026-09-01T09:12:00', Module: 'AP', DocId: 1042, DocNo: 'INV-2024-0042', FileName: 'invoice_UC_2024.pdf', Detail: 'Read document with Claude', OcrProvider: 'claude', PerformedBy: 'it-digital@megachem.co.th' },
 ];
 
 // ---- stateful document store (attach → edit → map → post) ----
@@ -131,13 +131,13 @@ function buildDoc(module: string, id: number, fileName: string): any {
   if (module === 'SO') {
     base.partnerCode = '0010001';
     base.header = {
-      docType: 'ใบสั่งซื้อ', poNo: 'PO-778120', poDate: '2026-08-29', customerName: 'บริษัท สยาม เคมิคอล อินดัสทรี จำกัด',
-      customerTaxId: '0105533012345', shipToName: 'คลังสินค้า บางปู', shipToAddress: 'นิคมอุตสาหกรรมบางปู ต.แพรกษา สมุทรปราการ',
+      docType: 'Purchase Order', poNo: 'PO-778120', poDate: '2026-08-29', customerName: 'Siam Chemical Industry Co., Ltd.',
+      customerTaxId: '0105533012345', shipToName: 'Bang Pu Warehouse', shipToAddress: 'Bang Pu Industrial Estate, Phraeksa, Samut Prakan',
       deliveryDate: '2026-09-10', currency: 'THB', paymentTerms: 'N030', incoterms: 'DAP',
       subTotal: 60000, vatAmount: 4200, totalAmount: 64200, remark: '',
     };
     base.lines = [
-      { itemNo: 10, extCode: 'SCI-TIO2-902', desc: 'TIO2 R902 ถุง 25 กก.', qty: 40, uom: 'BAG', price: 1500, amount: 60000, materialCode: '', extra: {} },
+      { itemNo: 10, extCode: 'SCI-TIO2-902', desc: 'TIO2 R902 25 kg bag', qty: 40, uom: 'BAG', price: 1500, amount: 60000, materialCode: '', extra: {} },
     ];
   } else if (module === 'II') {
     // Data mirrors the "Enter Supplier Invoice" (FB60, no PO) training doc.
@@ -150,7 +150,7 @@ function buildDoc(module: string, id: number, fileName: string): any {
       totalAmount: 10700, vatAmount: '', whtAmount: 0,
       calculateTax: '', taxCode: 'D1', businessPlace: '0000',
       headerText: 'AP Invoice without Purchase Order',
-      notes: 'ตั้งหนี้ค่าลิขสิทธิ์ (Licence Fee) — ไม่อ้างอิงใบสั่งซื้อ',
+      notes: 'AP liability for licence fee — not referencing a purchase order',
       // Payment
       baselineDate: '2025-04-23', paymentTerms: '0001', dueDate: '2025-04-23', paymentMethod: 'T',
       // Address & bank (one-time vendor)
@@ -176,15 +176,15 @@ function buildDoc(module: string, id: number, fileName: string): any {
   } else if (module === 'PODP') {
     base.partnerCode = 'V-500012';
     base.header = {
-      docType: 'ใบมัดจำ', invoiceNo: 'DP-0007', invoiceDate: '2026-08-30', postingDate: '2026-08-30',
-      vendorName: 'บริษัท ยูนิเวอร์แซล เคมีคอล ซัพพลาย จำกัด', vendorTaxId: '0105546007788', poRef: 'PO-9001',
+      docType: 'Down Payment Slip', invoiceNo: 'DP-0007', invoiceDate: '2026-08-30', postingDate: '2026-08-30',
+      vendorName: 'Universal Chemical Supply Co., Ltd.', vendorTaxId: '0105546007788', poRef: 'PO-9001',
       currency: 'THB', paymentTerms: 'N030', totalAmount: 30000,
     };
   } else {
     // AP — Supplier Invoice (MIRO, with PO). Data mirrors the supplierInvoice training doc.
     base.partnerCode = '0001000001';
     base.header = {
-      docType: 'ใบกำกับภาษี', transaction: 'Invoice', invoiceNo: 'IV2504210024',
+      docType: 'Tax Invoice', transaction: 'Invoice', invoiceNo: 'IV2504210024',
       invoiceDate: '2025-04-21', postingDate: '2025-04-21',
       vendorName: 'Comfort Company', vendorTaxId: '', branch: '00000',
       poRef: '2130000016', currency: 'THB',
@@ -243,27 +243,27 @@ function buildMap(doc: any): any {
   const header: any = {};
   if (doc.module === 'SO') {
     header.customer = {
-      status: 'ok', code: '0010001', method: 'จับคู่จากเลขทะเบียน', sapCode: '0000100023', text: 'บริษัท สยาม เคมิคอล อินดัสทรี จำกัด',
-      doc: [f('ชื่อลูกค้า', doc.header.customerName), f('เลขทะเบียน', doc.header.customerTaxId)],
-      sap: [f('รหัสลูกค้า', '0010001'), f('ชื่อ', 'บริษัท สยาม เคมิคอล อินดัสทรี จำกัด'), f('Sold-to SAP', '0000100023')],
+      status: 'ok', code: '0010001', method: 'Matched by Tax ID', sapCode: '0000100023', text: 'Siam Chemical Industry Co., Ltd.',
+      doc: [f('Customer Name', doc.header.customerName), f('Tax ID', doc.header.customerTaxId)],
+      sap: [f('Customer Code', '0010001'), f('Name', 'Siam Chemical Industry Co., Ltd.'), f('Sold-to SAP', '0000100023')],
     };
     header.shipTo = {
-      status: 'ok', code: '0010001-01', method: 'จับคู่จากชื่อสถานที่', sapCode: '0000100024', text: 'คลังสินค้า บางปู',
-      doc: [f('สถานที่ส่ง', doc.header.shipToName)], sap: [f('รหัส Ship-to', '0010001-01'), f('ชื่อ', 'คลังสินค้า บางปู')],
+      status: 'ok', code: '0010001-01', method: 'Matched by location name', sapCode: '0000100024', text: 'Bang Pu Warehouse',
+      doc: [f('Ship-to Location', doc.header.shipToName)], sap: [f('Ship-to Code', '0010001-01'), f('Name', 'Bang Pu Warehouse')],
     };
   } else {
     header.vendor = {
-      status: 'ok', code: 'V-500012', method: 'จับคู่จากเลขทะเบียน', sapCode: '0000200015', text: 'บริษัท ยูนิเวอร์แซล เคมีคอล ซัพพลาย จำกัด',
-      doc: [f('ชื่อผู้ขาย', doc.header.vendorName), f('เลขทะเบียน', doc.header.vendorTaxId)],
-      sap: [f('รหัสผู้ขาย', 'V-500012'), f('ชื่อ', 'บริษัท ยูนิเวอร์แซล เคมีคอล ซัพพลาย จำกัด'), f('Supplier SAP', '0000200015')],
+      status: 'ok', code: 'V-500012', method: 'Matched by Tax ID', sapCode: '0000200015', text: 'Universal Chemical Supply Co., Ltd.',
+      doc: [f('Vendor Name', doc.header.vendorName), f('Tax ID', doc.header.vendorTaxId)],
+      sap: [f('Vendor Code', 'V-500012'), f('Name', 'Universal Chemical Supply Co., Ltd.'), f('Supplier SAP', '0000200015')],
     };
   }
   const lines = (doc.lines || []).map((l: any) => ({
-    status: 'ok', code: 'RM-200011', method: 'จับคู่จากรหัสคู่ค้า', sapCode: '000000000000200011',
-    doc: [f('สินค้า', l.desc), f('จำนวน', l.qty + ' ' + l.uom)],
-    sap: [f('Material', 'RM-200011'), f('รายละเอียด', 'Methyl Ethyl Ketone (MEK) 99.5%')],
-    uom: { status: 'ok', sapQty: Number(l.qty), sapUom: l.uom, factor: 1, method: 'หน่วยตรงกัน' },
-    unit: { status: 'ok', doc: [f('หน่วยเอกสาร', l.uom)], sap: [f('หน่วย SAP', l.uom)] },
+    status: 'ok', code: 'RM-200011', method: 'Matched by partner code', sapCode: '000000000000200011',
+    doc: [f('Item', l.desc), f('Quantity', l.qty + ' ' + l.uom)],
+    sap: [f('Material', 'RM-200011'), f('Description', 'Methyl Ethyl Ketone (MEK) 99.5%')],
+    uom: { status: 'ok', sapQty: Number(l.qty), sapUom: l.uom, factor: 1, method: 'Units match' },
+    unit: { status: 'ok', doc: [f('Document Unit', l.uom)], sap: [f('SAP Unit', l.uom)] },
   }));
   return { document: doc, pass: true, errors: [], warns: [], header, lines };
 }
@@ -295,7 +295,7 @@ export function getMock(method: string, url: string, body?: unknown): unknown {
   if (method === 'GET' && /^\/api\/documents\/\d+$/.test(clean)) return getDoc(idOf(clean));
   if (method === 'GET' && /^\/api\/documents\/\d+\/chat$/.test(clean)) return [];
   if (method === 'GET' && /^\/api\/documents\/\d+\/rawtext$/.test(clean))
-    return { text: '(mock) ข้อความตัวอย่างที่อ่านได้จากไฟล์\nINVOICE No. INV-2024-0042\nMEK 99.5 PCT  200 L  600  120,000' };
+    return { text: '(mock) Sample text extracted from the file\nINVOICE No. INV-2024-0042\nMEK 99.5 PCT  200 L  600  120,000' };
   if (method === 'GET' && /^\/api\/documents\/\d+\/payload$/.test(clean))
     return { payload: { _target: 'API_SUPPLIERINVOICE_PROCESS_SRV', CompanyCode: '1000', DocumentDate: '2026-08-30', _mock: true } };
 

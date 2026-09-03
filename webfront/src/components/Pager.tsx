@@ -20,7 +20,7 @@ export default function Pager({
       style={{ justifyContent: 'space-between', alignItems: 'center', marginTop: 12, flexWrap: 'wrap', gap: 10 }}
     >
       <div className="row" style={{ gap: 6, alignItems: 'center' }}>
-        <span className="hint">แสดง</span>
+        <span className="hint">Show</span>
         <select
           value={pageSize}
           onChange={(e) => {
@@ -34,21 +34,21 @@ export default function Pager({
             </option>
           ))}
         </select>
-        <span className="hint">รายการ/หน้า · ทั้งหมด {total} รายการ</span>
+        <span className="hint">per page · {total} items total</span>
       </div>
       <div className="row" style={{ gap: 6, alignItems: 'center' }}>
         <button className="btn sm ghost" onClick={() => setPage(Math.max(1, cur - 1))} disabled={cur <= 1}>
-          ‹ ก่อนหน้า
+          ‹ Previous
         </button>
         <span className="hint">
-          หน้า {cur} / {totalPages}
+          Page {cur} / {totalPages}
         </span>
         <button
           className="btn sm ghost"
           onClick={() => setPage(Math.min(totalPages, cur + 1))}
           disabled={cur >= totalPages}
         >
-          ถัดไป ›
+          Next ›
         </button>
       </div>
     </div>
@@ -76,9 +76,9 @@ export function DateRange({
 }) {
   return (
     <>
-      <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} title="วันที่เริ่มต้น" />
-      <span className="hint">ถึง</span>
-      <input type="date" value={to} onChange={(e) => setTo(e.target.value)} title="วันที่สิ้นสุด" />
+      <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} title="Start date" />
+      <span className="hint">to</span>
+      <input type="date" value={to} onChange={(e) => setTo(e.target.value)} title="End date" />
       {(from || to) && (
         <button
           className="btn sm ghost"
@@ -86,7 +86,7 @@ export function DateRange({
             setFrom('');
             setTo('');
           }}
-          title="ล้างช่วงวันที่"
+          title="Clear date range"
         >
           ✕
         </button>

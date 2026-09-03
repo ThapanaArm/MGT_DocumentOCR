@@ -11,16 +11,16 @@ import Pager, { DateRange, inDateRange, paginate } from '../components/Pager';
 const USER = 'it-digital@megachem.co.th';
 
 function inboxTitle(mod?: string | null) {
-  if (!mod) return 'ทะเบียนเอกสารทั้งหมด';
+  if (!mod) return 'All Documents';
   return (mod === 'II' ? 'Incoming' : moduleLabel(mod)) + ' List';
 }
 
 // Document format by module: AP = with PO (MIRO), II = no PO (FB60).
 function docFormat(mod?: string | null): { label: string; cls: string } {
-  if (mod === 'AP') return { label: 'มี PO', cls: 'b-ok' };
-  if (mod === 'II') return { label: 'ไม่มี PO', cls: 'b-warn' };
-  if (mod === 'PODP') return { label: 'มัดจำ PO', cls: 'b-idle' };
-  if (mod === 'SO') return { label: 'ขาย', cls: 'b-idle' };
+  if (mod === 'AP') return { label: 'With PO', cls: 'b-ok' };
+  if (mod === 'II') return { label: 'Without PO', cls: 'b-warn' };
+  if (mod === 'PODP') return { label: 'PO Down Payment', cls: 'b-idle' };
+  if (mod === 'SO') return { label: 'Sales', cls: 'b-idle' };
   return { label: '—', cls: '' };
 }
 
@@ -72,10 +72,10 @@ export default function InboxPage() {
     (apDocCategories ?? []).find((c) => c.id === id)?.label || id || '';
 
   const delDoc = (id: number) => {
-    if (!window.confirm('ลบเอกสาร #' + id + ' ?')) return;
+    if (!window.confirm('Delete document #' + id + ' ?')) return;
     guard(async () => {
       await deleteDocument(id, USER);
-      showToast('ลบเอกสารแล้ว');
+      showToast('Document deleted');
       reload();
     });
   };
@@ -92,7 +92,7 @@ export default function InboxPage() {
         <div className="sp" />
         <input
           type="text"
-          placeholder="ค้นหา คู่ค้า / เลขที่เอกสาร…"
+          placeholder="Search partner / document no.…"
           value={search}
           onChange={(e) => {
             setSearch(e.target.value);
@@ -101,7 +101,7 @@ export default function InboxPage() {
           style={{ maxWidth: 220, marginRight: 8 }}
         />
         <span className="hint" style={{ marginRight: 4 }}>
-          วันที่:
+          Date:
         </span>
         <DateRange from={from} to={to} setFrom={setFrom} setTo={setTo} />
         <div style={{ marginRight: 8 }} />
@@ -116,7 +116,7 @@ export default function InboxPage() {
             }}
             style={{ marginRight: 8 }}
           >
-            <option value="">ทุกประเภทเอกสาร</option>
+            <option value="">All Document Types</option>
             {(apDocCategories ?? []).map((c) => (
               <option key={c.id} value={c.id}>
                 {c.label}
@@ -125,7 +125,7 @@ export default function InboxPage() {
           </select>
         )}
         <button className="btn sm" onClick={reload}>
-          ↻ รีเฟรช
+          ↻ Refresh
         </button>
       </div>
       <div className="card-b">
@@ -137,7 +137,7 @@ export default function InboxPage() {
                 {!mod && <th>Module</th>}
                 <th>File</th>
                 <th>{invColHead}</th>
-                <th>รูปแบบ</th>
+                <th>Type</th>
                 <th>PO Date</th>
                 <th>Supplier</th>
                 <th style={{ textAlign: 'right' }}>Total</th>
@@ -153,7 +153,7 @@ export default function InboxPage() {
               {!rows ? (
                 <tr>
                   <td colSpan={colCount} className="empty">
-                    กำลังโหลด…
+                    Loading…
                   </td>
                 </tr>
               ) : pageRows.length ? (
@@ -205,7 +205,7 @@ export default function InboxPage() {
                       <td className="hint">{dt(r.CreatedAt)}</td>
                       <td style={{ whiteSpace: 'nowrap' }}>
                         <button className="btn sm" onClick={() => navigate('/doc/' + r.DocId)}>
-                          เปิด
+                          Open
                         </button>{' '}
                         {r.Status !== 'POSTED' && (
                           <button className="btn sm ghost" onClick={() => delDoc(r.DocId)}>
@@ -219,7 +219,7 @@ export default function InboxPage() {
               ) : (
                 <tr>
                   <td colSpan={colCount} className="empty">
-                    ยังไม่มีเอกสารในระบบ
+                    No documents in the system yet
                   </td>
                 </tr>
               )}

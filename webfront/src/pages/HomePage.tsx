@@ -41,7 +41,7 @@ export default function HomePage() {
     return (
       <div className="card">
         <div className="card-b">
-          <div className="empty">โหลดภาพรวมไม่สำเร็จ</div>
+          <div className="empty">Failed to load overview</div>
         </div>
       </div>
     );
@@ -51,7 +51,7 @@ export default function HomePage() {
     return (
       <div className="card">
         <div className="card-b">
-          <div className="empty">กำลังโหลด…</div>
+          <div className="empty">Loading…</div>
         </div>
       </div>
     );
@@ -66,18 +66,18 @@ export default function HomePage() {
   const tr = data.trend;
 
   const tiles = [
-    { icon: '📄', bg: 'var(--info-bg)', fg: 'var(--info)', label: 'เอกสารทั้งหมด', value: total, pct: tr.total },
-    { icon: '⏳', bg: 'var(--orange-bg)', fg: 'var(--orange)', label: 'รอตรวจสอบ', value: pendingReview, pct: tr.NEW },
-    { icon: '❌', bg: 'var(--red-bg)', fg: 'var(--red)', label: 'Mapping ไม่ผ่าน', value: mappingFailed, pct: tr.INCOMPLETE },
-    { icon: '📤', bg: 'var(--info-bg)', fg: 'var(--info)', label: 'พร้อมส่ง SAP', value: readyToSend, pct: tr.MAPPED },
-    { icon: '✅', bg: 'var(--green-bg)', fg: 'var(--green)', label: 'ส่ง SAP สำเร็จ', value: sentOk, pct: tr.POSTED },
+    { icon: '📄', bg: 'var(--info-bg)', fg: 'var(--info)', label: 'Total Documents', value: total, pct: tr.total },
+    { icon: '⏳', bg: 'var(--orange-bg)', fg: 'var(--orange)', label: 'Pending Review', value: pendingReview, pct: tr.NEW },
+    { icon: '❌', bg: 'var(--red-bg)', fg: 'var(--red)', label: 'Mapping Failed', value: mappingFailed, pct: tr.INCOMPLETE },
+    { icon: '📤', bg: 'var(--info-bg)', fg: 'var(--info)', label: 'Ready to Send to SAP', value: readyToSend, pct: tr.MAPPED },
+    { icon: '✅', bg: 'var(--green-bg)', fg: 'var(--green)', label: 'Sent to SAP Successfully', value: sentOk, pct: tr.POSTED },
   ];
 
   const donutSegs: DonutSeg[] = (
     [
-      { label: 'สำเร็จ', value: sentOk, color: 'var(--green)' },
-      { label: 'รอตรวจสอบ', value: pendingReview + mappingFailed, color: 'var(--orange)' },
-      { label: 'พร้อมส่ง', value: readyToSend, color: 'var(--info)' },
+      { label: 'Successful', value: sentOk, color: 'var(--green)' },
+      { label: 'Pending Review', value: pendingReview + mappingFailed, color: 'var(--orange)' },
+      { label: 'Ready to Send', value: readyToSend, color: 'var(--info)' },
     ] as DonutSeg[]
   ).filter((s) => s.value > 0);
   const donutTotal = donutSegs.reduce((a, s) => a + s.value, 0) || 1;
@@ -87,16 +87,16 @@ export default function HomePage() {
     <select value={days} onChange={(e) => setDays(parseInt(e.target.value))} style={{ width: 'auto' }}>
       {DAY_OPTIONS.map((n) => (
         <option key={n} value={n}>
-          {n} วัน
+          {n} days
         </option>
       ))}
     </select>
   );
 
   const tasks = [
-    { icon: '📋', title: 'ตรวจสอบข้อมูล OCR', sub: 'เอกสารรอตรวจสอบ', n: pendingReview },
-    { icon: '⚙', title: 'แก้ไข Master Mapping', sub: 'รายการที่ต้องแก้ไข', n: mappingFailed },
-    { icon: '☁', title: 'ส่งข้อมูลไป SAP', sub: 'เอกสารพร้อมส่ง', n: readyToSend },
+    { icon: '📋', title: 'Review OCR Data', sub: 'Documents pending review', n: pendingReview },
+    { icon: '⚙', title: 'Fix Master Mapping', sub: 'Items needing correction', n: mappingFailed },
+    { icon: '☁', title: 'Send Data to SAP', sub: 'Documents ready to send', n: readyToSend },
   ];
 
   const viewAllInbox = () => navigate('/list');
@@ -126,7 +126,7 @@ export default function HomePage() {
       >
         <div className="card" style={{ marginBottom: 0 }}>
           <div className="card-h">
-            <h2>ปริมาณเอกสารและความสำเร็จ OCR</h2>
+            <h2>Document Volume and OCR Success</h2>
             <div className="sp" />
             {daySelect}
           </div>
@@ -143,7 +143,7 @@ export default function HomePage() {
                     marginRight: 6,
                   }}
                 />
-                เอกสาร
+                Documents
               </span>
               <span>
                 <span
@@ -156,7 +156,7 @@ export default function HomePage() {
                     marginRight: 6,
                   }}
                 />
-                OCR สำเร็จ
+                OCR Successful
               </span>
             </div>
             <DocTrendChart data={data.ocrDaily} />
@@ -165,13 +165,13 @@ export default function HomePage() {
 
         <div className="card" style={{ marginBottom: 0 }}>
           <div className="card-h">
-            <h2>สถานะเอกสาร</h2>
+            <h2>Document Status</h2>
           </div>
           <div className="card-b">
             <StatusDonut
               segments={donutWithPct}
               centerValue={intFmt(total)}
-              centerLabel="รวมทั้งหมด เอกสาร"
+              centerLabel="Total Documents"
             />
             <div style={{ marginTop: 14 }}>
               {donutWithPct.map((s) => (
@@ -194,7 +194,7 @@ export default function HomePage() {
                     {s.label}
                   </span>
                   <span className="hint">
-                    {s.pct}% · {intFmt(s.value)} เอกสาร
+                    {s.pct}% · {intFmt(s.value)} documents
                   </span>
                 </div>
               ))}
@@ -216,7 +216,7 @@ export default function HomePage() {
       >
         <div className="card" style={{ marginBottom: 0 }}>
           <div className="card-h">
-            <h2>เอกสารตามประเภท</h2>
+            <h2>Documents by Type</h2>
             <div className="sp" />
             {daySelect}
           </div>
@@ -224,10 +224,10 @@ export default function HomePage() {
             {data.byModule.length ? (
               <ModuleBarChart data={data.byModule} />
             ) : (
-              <div className="empty">ยังไม่มีข้อมูล</div>
+              <div className="empty">No data yet</div>
             )}
             <p className="sec-title" style={{ marginTop: 20 }}>
-              ค่าใช้จ่าย OCR แต่ละ Module
+              OCR Cost by Module
             </p>
             {data.costByModule.length ? (
               <div className="tw">
@@ -235,9 +235,9 @@ export default function HomePage() {
                   <thead>
                     <tr>
                       <th>Module</th>
-                      <th style={{ textAlign: 'right' }}>เอกสาร</th>
+                      <th style={{ textAlign: 'right' }}>Documents</th>
                       <th style={{ textAlign: 'right' }}>Token</th>
-                      <th style={{ textAlign: 'right' }}>ค่าใช้จ่าย</th>
+                      <th style={{ textAlign: 'right' }}>Cost</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -263,7 +263,7 @@ export default function HomePage() {
                   </tbody>
                   <tfoot>
                     <tr className="totrow">
-                      <td>รวม</td>
+                      <td>Total</td>
                       <td />
                       <td />
                       <td style={{ textAlign: 'right' }}>
@@ -274,25 +274,25 @@ export default function HomePage() {
                 </table>
               </div>
             ) : (
-              <div className="empty">ยังไม่มีข้อมูล</div>
+              <div className="empty">No data yet</div>
             )}
           </div>
         </div>
 
         <div className="card" style={{ marginBottom: 0 }}>
           <div className="card-h">
-            <h2>ประสิทธิภาพ OCR</h2>
+            <h2>OCR Performance</h2>
           </div>
           <div className="card-b">
-            <OcrGauge pct={data.ocrPerf.avgConfidencePct ?? 0} label="ความแม่นยำ OCR" />
+            <OcrGauge pct={data.ocrPerf.avgConfidencePct ?? 0} label="OCR Accuracy" />
             <div style={{ marginTop: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
               <div className="row" style={{ gap: 10 }}>
                 <span>⏱</span>
                 <div>
-                  <div className="hint">เฉลี่ยต่อเอกสาร</div>
+                  <div className="hint">Average per Document</div>
                   <b>
                     {data.ocrPerf.avgDurationSec != null
-                      ? data.ocrPerf.avgDurationSec + ' วินาที'
+                      ? data.ocrPerf.avgDurationSec + ' seconds'
                       : '—'}
                   </b>
                 </div>
@@ -300,14 +300,14 @@ export default function HomePage() {
               <div className="row" style={{ gap: 10 }}>
                 <span>👤</span>
                 <div>
-                  <div className="hint">แก้ไขโดยผู้ใช้</div>
+                  <div className="hint">Edited by User</div>
                   <b>{data.ocrPerf.pctEditedByUser}%</b>
                 </div>
               </div>
               <div className="row" style={{ gap: 10 }}>
                 <span>📋</span>
                 <div>
-                  <div className="hint">Token วันนี้</div>
+                  <div className="hint">Tokens Today</div>
                   <b>{intFmt(data.ocrPerf.tokensToday)}</b>
                 </div>
               </div>
@@ -317,7 +317,7 @@ export default function HomePage() {
 
         <div className="card" style={{ marginBottom: 0 }}>
           <div className="card-h">
-            <h2>งานที่ต้องดำเนินการ</h2>
+            <h2>Tasks to Complete</h2>
           </div>
           <div className="card-b">
             {tasks.map((t) => (
@@ -353,7 +353,7 @@ export default function HomePage() {
                   viewAllInbox();
                 }}
               >
-                ดูงานทั้งหมด →
+                View all tasks →
               </a>
             </div>
           </div>
@@ -363,10 +363,10 @@ export default function HomePage() {
       {/* Recent documents */}
       <div className="card" style={{ marginTop: 20 }}>
         <div className="card-h">
-          <h2>รายการล่าสุด</h2>
+          <h2>Recent Documents</h2>
           <div className="sp" />
           <button className="btn sm" onClick={viewAllInbox}>
-            ดูทั้งหมด →
+            View all →
           </button>
         </div>
         <div className="card-b">
@@ -374,12 +374,12 @@ export default function HomePage() {
             <table>
               <thead>
                 <tr>
-                  <th>เลขที่เอกสาร</th>
-                  <th>ประเภท</th>
-                  <th>คู่ค้า</th>
-                  <th>สถานะ</th>
-                  <th>อัปเดตล่าสุด</th>
-                  <th>ผู้ดำเนินการ</th>
+                  <th>Document No.</th>
+                  <th>Type</th>
+                  <th>Partner</th>
+                  <th>Status</th>
+                  <th>Last Updated</th>
+                  <th>Performed By</th>
                   <th />
                 </tr>
               </thead>
@@ -403,9 +403,9 @@ export default function HomePage() {
                           <button
                             className="btn sm"
                             onClick={() => navigate(`/list/${r.Module}`)}
-                            title="เปิดในทะเบียนเอกสาร (การเปิดเอกสารจะพอร์ตใน Phase C)"
+                            title="Open in Document Register (document opening will be ported in Phase C)"
                           >
-                            เปิด
+                            Open
                           </button>
                         </td>
                       </tr>
@@ -414,7 +414,7 @@ export default function HomePage() {
                 ) : (
                   <tr>
                     <td colSpan={7} className="empty">
-                      ยังไม่มีเอกสารในระบบ
+                      No documents in the system yet
                     </td>
                   </tr>
                 )}

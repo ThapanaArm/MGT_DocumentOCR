@@ -1,11 +1,11 @@
 /* =====================================================================
-     Design tokens — อ้างอิงระบบดีไซน์ของ bitkub.com (bk-global tokens)
-     ฟอนต์จริงของ Bitkub คือ "Graphik TH" (ลิขสิทธิ์เชิงพาณิชย์)
-     ถ้าเครื่องมีติดตั้งไว้จะถูกใช้ก่อน มิฉะนั้น fallback เป็น Anuphan (ทรงใกล้เคียง)
+     Design tokens — based on the bitkub.com design system (bk-global tokens)
+     Bitkub's actual font is "Graphik TH" (commercial license)
+     It is used first if installed on the machine, otherwise falls back to Anuphan (similar shape)
      ---------------------------------------------------------------------
-     ยกมาจาก frontend/style.css เดิมทั้งชุด เพื่อคง look & feel เดิมไว้
-     ในเวอร์ชัน React (WebFront) — คลาสทั้งหมด (.card/.btn/.badge/.steps/
-     table/.cmp-card ฯลฯ) ยังใช้ได้เหมือนเดิม
+     Ported in full from the original frontend/style.css to preserve the original look & feel
+     in the React version (WebFront) — all classes (.card/.btn/.badge/.steps/
+     table/.cmp-card etc.) still work as before
      ===================================================================== */
   :root{
     /* palette */
@@ -222,7 +222,7 @@
   .tabs button:hover{color:var(--text)}
   .tabs button.on{color:var(--brand);border-bottom-color:var(--brand);font-weight:600}
 
-  /* ---------- แชทสั่งแก้ไขข้อมูล ---------- */
+  /* ---------- Chat to Fix Data ---------- */
   .chat-history{max-height:280px;overflow-y:auto;display:flex;flex-direction:column;gap:10px;padding:2px}
   .chat-msg{padding:10px 14px;border-radius:var(--r3);max-width:80%;font-size:14px;line-height:22px}
   .chat-msg b{display:block;font-size:11px;font-weight:600;letter-spacing:.04em;color:var(--muted);margin-bottom:2px}
@@ -245,7 +245,7 @@
   .toast.on{display:block;animation:pop .25s}
   @keyframes pop{from{transform:translateY(10px);opacity:0}}
 
-  /* ---------- Busy indicator (ระหว่างอ่านเอกสาร/OCR/บันทึกข้อมูล) ---------- */
+  /* ---------- Busy indicator (during document reading/OCR/saving) ---------- */
   .busy-indicator{position:fixed;top:20px;right:24px;z-index:300;display:none;align-items:center;gap:10px;
         background:var(--card);border:1px solid var(--line);border-radius:var(--pill);padding:10px 18px;
         box-shadow:var(--sh4);font-size:14px;font-weight:600;color:var(--text)}
@@ -261,7 +261,7 @@
   ::-webkit-scrollbar-thumb{background:var(--g300);border-radius:var(--pill);border:2px solid var(--bg)}
   [data-theme="dark"] ::-webkit-scrollbar-thumb{background:var(--g1600)}
 
-  /* ---------- การ์ดเทียบข้อมูล เอกสาร <-> SAP ---------- */
+  /* ---------- Document <-> SAP comparison cards ---------- */
   .cmp-card{border:1px solid var(--line);border-radius:var(--r4);margin-bottom:14px;background:var(--card);overflow:hidden}
   .cmp-card.bad{border-color:var(--rd300)}
   [data-theme="dark"] .cmp-card.bad{border-color:rgba(240,69,66,.5)}

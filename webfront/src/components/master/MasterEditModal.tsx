@@ -56,7 +56,7 @@ export default function MasterEditModal({
       o[c.k] = (form[c.k] ?? '').toString().trim();
     });
     if (state!.rowKey == null && def.key !== 'Id' && !o[def.key]) {
-      showToast('กรุณากรอก ' + def.cols.find((c) => c.k === def.key)?.l);
+      showToast('Please enter ' + def.cols.find((c) => c.k === def.key)?.l);
       return;
     }
     const ok = await guard(async () => {
@@ -68,7 +68,7 @@ export default function MasterEditModal({
     if (state!.onSaved) {
       await state!.onSaved(o[def.key]);
     } else {
-      showToast('✓ บันทึกข้อมูลหลักเรียบร้อย');
+      showToast('✓ Master data saved successfully');
     }
     await afterSave();
     onClose();
@@ -84,15 +84,15 @@ export default function MasterEditModal({
   return (
     <Modal open onClose={onClose}>
       <ModalHeader
-        title={`${state.rowKey == null ? 'เพิ่ม' : 'แก้ไข'} — ${def.label}`}
+        title={`${state.rowKey == null ? 'Add' : 'Edit'} — ${def.label}`}
         onClose={onClose}
       />
       <div className="card-b">
         {hasDupes && (
           <div className="result bad" style={{ marginBottom: 16 }}>
-            <h3>⚠ พบข้อมูลที่อาจซ้ำกัน {state.dupes!.length} รายการ</h3>
+            <h3>⚠ Found {state.dupes!.length} possibly duplicate records</h3>
             <p className="hint" style={{ margin: '0 0 10px' }}>
-              ตรวจสอบก่อนเพิ่มใหม่ — ถ้าเป็นรายการเดียวกัน ให้กด "ใช้รายการนี้แทน" แทนการสร้างซ้ำ
+              Please review before adding a new record — if it is the same record, click "Use this record instead" rather than creating a duplicate
             </p>
             <div className="tw">
               <table style={{ minWidth: 'auto' }}>
@@ -110,7 +110,7 @@ export default function MasterEditModal({
                           className="btn sm primary"
                           onClick={() => useDupe(String(x.row[def.key]))}
                         >
-                          ใช้รายการนี้แทน
+                          Use this record instead
                         </button>
                       </td>
                     </tr>
@@ -126,7 +126,7 @@ export default function MasterEditModal({
               <label>{c.l}</label>
               {c.ref ? (
                 <select value={form[c.k] ?? ''} onChange={(e) => setField(c.k, e.target.value)}>
-                  {c.blank && <option value="">— ทุกสินค้า (กฎกลาง) —</option>}
+                  {c.blank && <option value="">— All materials (global rule) —</option>}
                   {masters[c.ref].map((o) => {
                     const vk = MASTER_DEF[c.ref!].key;
                     const lk = M_LABEL[c.ref!];
@@ -145,10 +145,10 @@ export default function MasterEditModal({
         </div>
         <div className="row" style={{ marginTop: 18 }}>
           <button className="btn primary" onClick={save}>
-            {hasDupes ? 'ยืนยัน — บันทึกเป็นรายการใหม่' : 'บันทึก'}
+            {hasDupes ? 'Confirm — Save as New Record' : 'Save'}
           </button>
           <button className="btn" onClick={onClose}>
-            ยกเลิก
+            Cancel
           </button>
         </div>
       </div>

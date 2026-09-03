@@ -54,22 +54,22 @@ export default function ChatFixCard({
   return (
     <div className="card">
       <div className="card-h">
-        <h2>🤖 แชทสั่งแก้ไขข้อมูล (AI)</h2>
+        <h2>🤖 Chat to Fix Data (AI)</h2>
         <div className="sp" />
         <select
           className="ocr-pick"
           value={chatProvider}
           onChange={(e) => setChatProvider(e.target.value)}
-          title="เลือกโมเดล Vision ที่จะใช้อ่านภาพที่แนบมา"
+          title="Select the Vision model used to read the attached image"
         >
           {chatModels.map((p) => (
             <option key={p.id} value={p.id} title={p.desc}>
               {p.label}
-              {p.ready ? '' : ' (ยังไม่ได้ตั้งค่า)'}
+              {p.ready ? '' : ' (Not configured)'}
             </option>
           ))}
         </select>
-        {!ready && <span className="hint">ต้องตั้งค่า API key ของโมเดล Vision อย่างน้อย 1 ตัวก่อนใช้งาน</span>}
+        {!ready && <span className="hint">You must configure at least one Vision model API key before using this feature</span>}
       </div>
       <div className="card-b">
         <div className="chat-history">
@@ -82,7 +82,7 @@ export default function ChatFixCard({
                   : '');
               return (
                 <div className={'chat-msg ' + m.role} key={i}>
-                  <b>{m.role === 'user' ? 'คุณ' : 'AI'}</b>
+                  <b>{m.role === 'user' ? 'You' : 'AI'}</b>
                   {imgSrc && <img src={imgSrc} className="chat-img" alt="" />}
                   {m.text && <div>{m.text}</div>}
                 </div>
@@ -90,17 +90,17 @@ export default function ChatFixCard({
             })
           ) : (
             <p className="hint">
-              พิมพ์หรือแนบภาพ บอกจุดที่ OCR อ่านผิดด้วยภาษาธรรมดา หรือถามคำถามเกี่ยวกับเอกสารนี้ — AI
-              จะแก้เฉพาะเอกสารนี้ให้ ไม่กระทบเอกสารอื่น
+              Type or attach an image, describe in plain language where the OCR read incorrectly, or ask a
+              question about this document — the AI will fix only this document, without affecting others
             </p>
           )}
         </div>
         {chatImage && (
           <div className="chat-attach-preview">
             <img src={chatImage} alt="" />
-            <span className="hint">แนบภาพแล้ว</span>
+            <span className="hint">Image attached</span>
             <button className="btn sm ghost" onClick={() => setChatImage(null)}>
-              ✕ เอาภาพออก
+              ✕ Remove image
             </button>
           </div>
         )}
@@ -115,14 +115,14 @@ export default function ChatFixCard({
           <button
             className="btn sm ghost"
             onClick={() => fileRef.current?.click()}
-            title="แนบภาพ"
+            title="Attach image"
             disabled={!ready}
           >
             📎
           </button>
           <input
             type="text"
-            placeholder="เช่น ยอดรวมที่ถูกคือ 25,680 บาท (หรือวางภาพด้วย Ctrl+V)"
+            placeholder="e.g. the correct total is 25,680 THB (or paste an image with Ctrl+V)"
             style={{ flex: 1 }}
             value={text}
             disabled={!ready}
@@ -141,7 +141,7 @@ export default function ChatFixCard({
             }}
           />
           <button className="btn primary" onClick={send} disabled={!ready}>
-            ➤ ส่ง
+            ➤ Send
           </button>
         </div>
       </div>

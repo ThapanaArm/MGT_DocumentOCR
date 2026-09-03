@@ -12,3 +12,4 @@ server.log
 server_err.log
 .vs/
 _to_delete/
+*.bak

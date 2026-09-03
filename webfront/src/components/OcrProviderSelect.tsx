@@ -27,7 +27,7 @@ export default function OcrProviderSelect({
       {providers.map((p) => (
         <option key={p.id} value={p.id} title={p.desc}>
           {p.label}
-          {p.ready ? '' : ' (ยังไม่ได้ตั้งค่า)'}
+          {p.ready ? '' : ' (Not configured)'}
         </option>
       ))}
     </select>

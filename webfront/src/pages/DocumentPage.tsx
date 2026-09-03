@@ -101,8 +101,8 @@ export default function DocumentPage() {
         if (!silent) {
           showToast(
             res.pass
-              ? '✓ Mapping ผ่าน — บันทึกลงฐานข้อมูลแล้ว'
-              : '✗ Mapping ไม่ผ่าน — ไม่พบข้อมูล ' + res.errors.length + ' จุด',
+              ? '✓ Mapping passed — saved to the database'
+              : '✗ Mapping failed — ' + res.errors.length + ' items not found',
           );
           window.scrollTo({ top: 0, behavior: 'smooth' });
         }
@@ -144,8 +144,8 @@ export default function DocumentPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
-  if (failed) return <div className="card"><div className="empty">โหลดเอกสารไม่สำเร็จ</div></div>;
-  if (!doc || !masters) return <div className="card"><div className="empty">กำลังโหลด…</div></div>;
+  if (failed) return <div className="card"><div className="empty">Failed to load document</div></div>;
+  if (!doc || !masters) return <div className="card"><div className="empty">Loading…</div></div>;
 
   const h = doc.header;
   const posted = doc.status === 'POSTED';
@@ -274,7 +274,7 @@ export default function DocumentPage() {
         materialCode: code,
       });
       await loadMasters(true);
-      showToast('✓ บันทึกลง Master Mapping แล้ว — ครั้งถัดไประบบจะจับคู่อัตโนมัติ');
+      showToast('✓ Saved to Master Mapping — the system will match it automatically next time');
       await runMap(true);
     });
 
@@ -285,21 +285,21 @@ export default function DocumentPage() {
       setMap(null);
       manual.current = { header: {}, lines: {} };
       if (d.provider === 'failed')
-        showToast('⚠ อ่านเอกสารไม่สำเร็จ — ลองแนบภาพในแชท AI ด้านล่าง');
+        showToast('⚠ Failed to read document — try attaching an image in the AI chat below');
       else
         showToast(
-          '✓ อ่านเอกสารใหม่เสร็จ — engine ' +
+          '✓ Document re-read complete — engine ' +
             (d.provider || '') +
-            ' · พบ ' +
+            ' · found ' +
             d.lines.length +
-            ' รายการ',
+            ' items',
         );
     });
 
   const openRaw = () =>
     guard(async () => {
       const r = await getRawText(doc.docId);
-      setRawText(r.text || '(ไม่มีข้อความ — เป็นไฟล์สแกนหรือสร้างจากชุดตัวอย่าง)');
+      setRawText(r.text || '(No text — this is a scanned file or generated from sample data)');
     });
   const openPayload = () =>
     guard(async () => {
@@ -315,7 +315,7 @@ export default function DocumentPage() {
         setDoc(r.document);
         setPostOpen(false);
         showToast(
-          (r.simulated ? '✓ (โหมดจำลอง) ' : '✓ ') + 'สร้างเอกสารใน SAP สำเร็จ — เลขที่ ' + r.sapDocNo,
+          (r.simulated ? '✓ (Simulation Mode) ' : '✓ ') + 'Document created in SAP successfully — No. ' + r.sapDocNo,
         );
         window.scrollTo({ top: 0, behavior: 'smooth' });
       } finally {
@@ -329,7 +329,7 @@ export default function DocumentPage() {
       setSplitOpen(false);
       setDoc(res.source);
       setMap(null);
-      showToast(`✓ Split สำเร็จ — สร้าง ${res.created.length} Sales Order ใหม่`);
+      showToast(`✓ Split successful — created ${res.created.length} new Sales Orders`);
     });
 
   const changeCategory = (v: string) =>
@@ -360,7 +360,7 @@ export default function DocumentPage() {
   const quickAddShipTo = () => {
     const custCode = map?.header.customer.code;
     if (!custCode) {
-      showToast('⚠ กรุณาระบุลูกค้าให้ได้ก่อน');
+      showToast('⚠ Please identify the customer first');
       return;
     }
     setMasterEdit({
@@ -404,10 +404,10 @@ export default function DocumentPage() {
         MaterialCode: code || '',
         ExtUom: l.uom || '',
         SapUom: mat.Uom || '',
-        Note: 'เพิ่มจากเอกสาร #' + doc.docId,
+        Note: 'Added from document #' + doc.docId,
       },
       onSaved: async () => {
-        showToast('✓ เพิ่มกฎแปลงหน่วยแล้ว — กำลัง Mapping ใหม่');
+        showToast('✓ Unit conversion rule added — re-running Mapping');
         await runMap(true);
       },
     });
@@ -497,7 +497,7 @@ export default function DocumentPage() {
         (map.pass ? (
           <div className="result ok">
             <h3>
-              <span className="badge b-ok">✓ ผ่าน</span> Mapping ข้อมูลครบถ้วน — พร้อมส่งเข้า SAP
+              <span className="badge b-ok">✓ Passed</span> Data mapping complete — ready to send to SAP
             </h3>
             {map.warns.length > 0 && (
               <ul>
@@ -510,31 +510,31 @@ export default function DocumentPage() {
         ) : (
           <div className="result bad">
             <h3>
-              <span className="badge b-fail">✗ ไม่ผ่าน</span> ไม่พบข้อมูล {map.errors.length} จุด
+              <span className="badge b-fail">✗ Failed</span> {map.errors.length} items not found
             </h3>
             <ul>
               {map.errors.map((e, i) => (
                 <li key={i}>
                   <b>{e.field}:</b> {e.msg}
                   <br />
-                  <span className="hint">↳ วิธีแก้: {e.fix}</span>
+                  <span className="hint">↳ How to fix: {e.fix}</span>
                 </li>
               ))}
             </ul>
             <div className="row" style={{ marginTop: 14 }}>
               <button className="btn" onClick={() => navigate('/master')}>
-                ⚙ ไปหน้า Master Mapping
+                ⚙ Go to Master Mapping
               </button>
-              <span className="hint">หรือเลือกค่าที่ถูกต้องจาก dropdown ด้านล่าง</span>
+              <span className="hint">or select the correct value from the dropdown below</span>
             </div>
           </div>
         ))}
 
       {posted && (
         <div className="result ok">
-          <h3>✓ ส่งเข้า SAP S/4HANA สำเร็จ</h3>
+          <h3>✓ Sent to SAP S/4HANA successfully</h3>
           <div>
-            เอกสาร SAP: <code>{doc.sapDocNo}</code> | {moduleLabel(doc.module)} | {dt(doc.postedAt)}
+            SAP Document: <code>{doc.sapDocNo}</code> | {moduleLabel(doc.module)} | {dt(doc.postedAt)}
           </div>
         </div>
       )}
@@ -542,7 +542,7 @@ export default function DocumentPage() {
       {/* Document header card */}
       <div className="card">
         <div className="card-h">
-          <h2>เอกสาร #{doc.docId}</h2>
+          <h2>Document #{doc.docId}</h2>
           <span
             className={
               'badge ' +
@@ -553,7 +553,7 @@ export default function DocumentPage() {
             OCR {Math.round((doc.confidence || 0) * 100)}% · {doc.provider || ''}
           </span>
           {doc.tokensIn != null && (
-            <span className="badge" title="Token ที่ใช้อ่านเอกสารนี้">
+            <span className="badge" title="Tokens used to read this document">
               ⚡ {intFmt(doc.tokensIn)} in / {intFmt(doc.tokensOut)} out
             </span>
           )}
@@ -577,33 +577,33 @@ export default function DocumentPage() {
             onClick={doReocr}
             disabled={posted || isSplit || !!doc.sourceDocId}
           >
-            ↻ อ่านเอกสารใหม่
+            ↻ Re-read Document
           </button>
           <button className="btn sm ghost" onClick={openRaw}>
-            📄 ข้อความที่อ่านได้
+            📄 Extracted Text
           </button>
           <button className="btn sm ghost" onClick={() => setReviewOpen(true)}>
             👁 Review Document
           </button>
           {canSplit && (
             <button className="btn sm ghost" onClick={() => setSplitOpen(true)}>
-              ⑃ แยกเป็นหลาย SO
+              ⑃ Split into Multiple SOs
             </button>
           )}
           <button className="btn sm ghost" onClick={() => navigate('/import/' + doc.module)}>
-            เปลี่ยนเอกสาร
+            Change Document
           </button>
         </div>
         <div className="card-b">
           {doc.module === 'AP' && (
             <div className="f" style={{ maxWidth: 320, marginBottom: 14 }}>
-              <label>ประเภทเอกสาร</label>
+              <label>Document Type</label>
               <select
                 disabled={posted}
                 value={doc.apDocCategory || ''}
                 onChange={(e) => changeCategory(e.target.value)}
               >
-                <option value="">— เลือกประเภทเอกสาร —</option>
+                <option value="">— Select Document Type —</option>
                 {(apDocCategories ?? []).map((c) => (
                   <option key={c.id} value={c.id}>
                     {c.label}
@@ -617,7 +617,7 @@ export default function DocumentPage() {
               className="hint"
               style={{ margin: '-6px 0 14px', padding: '8px 12px', background: 'var(--line-soft)', borderRadius: 'var(--r2)' }}
             >
-              ↩ แยกมาจากเอกสาร{' '}
+              ↩ Split from document{' '}
               <a href="#" onClick={(e) => { e.preventDefault(); navigate('/doc/' + doc.sourceDocId); }}>
                 #{doc.sourceDocId}
               </a>
@@ -628,12 +628,12 @@ export default function DocumentPage() {
               className="hint"
               style={{ margin: '-6px 0 14px', padding: '8px 12px', background: 'var(--line-soft)', borderRadius: 'var(--r2)' }}
             >
-              ⚠ เหตุผลที่ความแม่นยำไม่ถึง 100%: {doc.confidenceNote}
+              ⚠ Reason accuracy is below 100%: {doc.confidenceNote}
             </div>
           )}
           {doc.module !== 'II' && (
             <>
-              <p className="sec-title">HEADER — ข้อมูลส่วนหัว</p>
+              <p className="sec-title">HEADER — Header Information</p>
               <FieldGrid fields={headerDefFor(doc.module)} values={h} posted={posted} onEdit={editHeader} />
             </>
           )}
@@ -664,7 +664,7 @@ export default function DocumentPage() {
       {totalsFields && (
         <div className="card">
           <div className="card-h">
-            <h2>ยอดรวม</h2>
+            <h2>Totals</h2>
           </div>
           <div className="card-b">{totalsFields}</div>
         </div>
@@ -723,29 +723,29 @@ export default function DocumentPage() {
       <div className="card">
         <div className="card-b row">
           <button className="btn primary" onClick={() => runMap(false)} disabled={posted || isSplit}>
-            🔍 ขั้นตอนที่ 2 — Mapping ข้อมูล
+            🔍 Step 2 — Data Mapping
           </button>
           <button
             className="btn success"
             onClick={() => setPostOpen(true)}
             disabled={!(map && map.pass && !posted && !isSplit)}
           >
-            ⎋ ขั้นตอนที่ 3 — ส่งเข้า SAP S/4HANA
+            ⎋ Step 3 — Send to SAP S/4HANA
           </button>
           <button className="btn" onClick={openPayload} disabled={!(map && map.pass)}>
-            {'{}'} ดู Payload
+            {'{}'} View Payload
           </button>
           <div style={{ flex: 1 }} />
           <span className="hint">
             {isSplit
-              ? 'เอกสารนี้ถูกแยกไปเป็น Sales Order อื่นแล้ว'
+              ? 'This document has been split into other Sales Orders'
               : posted
-                ? 'เอกสารนี้ส่งเข้า SAP แล้ว'
+                ? 'This document has been sent to SAP'
                 : map
                   ? map.pass
-                    ? 'พร้อมส่งเข้า SAP'
-                    : 'แก้ไขข้อมูลที่ไม่ผ่านก่อนส่ง'
-                  : 'กด Mapping เพื่อตรวจสอบกับ Master Data'}
+                    ? 'Ready to send to SAP'
+                    : 'Fix the items that failed before sending'
+                  : 'Click Mapping to validate against Master Data'}
           </span>
         </div>
       </div>
@@ -754,9 +754,9 @@ export default function DocumentPage() {
       <Modal open={reviewOpen} onClose={() => setReviewOpen(false)} wide>
         <ModalHeader title={`👁 Review Document — ${doc.fileName}`} onClose={() => setReviewOpen(false)} />
         <div className="card-b">
-          <p className="hint">เปรียบเทียบไฟล์ต้นฉบับกับข้อมูลที่อ่านได้ในหน้า HEADER/DETAIL</p>
+          <p className="hint">Compare the original file with the data extracted in the HEADER/DETAIL sections</p>
           {doc.provider === 'demo' ? (
-            <p className="hint">เอกสารนี้สร้างจากชุดตัวอย่าง (demo) ไม่มีไฟล์ต้นฉบับให้เปิดดู</p>
+            <p className="hint">This document was generated from sample data (demo) — no original file to view</p>
           ) : ['jpg', 'jpeg', 'png', 'tif', 'tiff', 'bmp', 'webp'].includes(
               (doc.fileName || '').split('.').pop()?.toLowerCase() || '',
             ) ? (
@@ -776,15 +776,15 @@ export default function DocumentPage() {
       </Modal>
 
       <Modal open={rawText != null} onClose={() => setRawText(null)}>
-        <ModalHeader title="ข้อความที่อ่านได้จากไฟล์" onClose={() => setRawText(null)} />
+        <ModalHeader title="Text Extracted from File" onClose={() => setRawText(null)} />
         <div className="card-b">
-          <p className="hint">ใช้ตรวจว่าตัวอ่านเอกสารเห็นอะไรบ้าง</p>
+          <p className="hint">Use this to check what the document reader detected</p>
           <pre className="json">{rawText}</pre>
         </div>
       </Modal>
 
       <Modal open={payload != null} onClose={() => setPayload(null)}>
-        <ModalHeader title="Payload ที่จะส่งเข้า SAP" onClose={() => setPayload(null)} />
+        <ModalHeader title="Payload to Send to SAP" onClose={() => setPayload(null)} />
         <div className="card-b">
           <p className="hint">
             Endpoint: <code>{payload?._target}</code>
@@ -794,10 +794,10 @@ export default function DocumentPage() {
       </Modal>
 
       <Modal open={postOpen} onClose={() => setPostOpen(false)}>
-        <ModalHeader title="ยืนยันการส่งเข้า SAP S/4HANA" onClose={() => setPostOpen(false)} />
+        <ModalHeader title="Confirm Submission to SAP S/4HANA" onClose={() => setPostOpen(false)} />
         <div className="card-b">
           <p>
-            ระบบจะสร้างเอกสาร <b>{moduleLabel(doc.module)}</b> ในระบบ SAP
+            The system will create a <b>{moduleLabel(doc.module)}</b> document in SAP
           </p>
           <div className="tw">
             <table style={{ minWidth: 'auto' }}>
@@ -813,7 +813,7 @@ export default function DocumentPage() {
                       <td>{map?.header.shipTo.code} — {map?.header.shipTo.text}</td>
                     </tr>
                     <tr>
-                      <th>PO ลูกค้า</th>
+                      <th>Customer PO</th>
                       <td>{h.poNo || ''}</td>
                     </tr>
                   </>
@@ -824,17 +824,17 @@ export default function DocumentPage() {
                       <td>{map?.header.vendor.code} — {map?.header.vendor.text}</td>
                     </tr>
                     <tr>
-                      <th>เลขที่ใบแจ้งหนี้</th>
+                      <th>Invoice No.</th>
                       <td>{h.invoiceNo || ''}</td>
                     </tr>
                   </>
                 )}
                 <tr>
-                  <th>จำนวนรายการ</th>
-                  <td>{doc.lines.length} บรรทัด</td>
+                  <th>Number of Items</th>
+                  <td>{doc.lines.length} rows</td>
                 </tr>
                 <tr>
-                  <th>ยอดรวม</th>
+                  <th>Total</th>
                   <td>
                     <b>
                       {fmt(h.totalAmount)} {h.currency || 'THB'}
@@ -846,10 +846,10 @@ export default function DocumentPage() {
           </div>
           <div className="row" style={{ marginTop: 18 }}>
             <button className="btn success" onClick={confirmPost} disabled={posting}>
-              {posting ? 'กำลังส่ง…' : 'ยืนยันส่งเข้า SAP'}
+              {posting ? 'Sending…' : 'Confirm Send to SAP'}
             </button>
             <button className="btn" onClick={() => setPostOpen(false)}>
-              ยกเลิก
+              Cancel
             </button>
           </div>
         </div>

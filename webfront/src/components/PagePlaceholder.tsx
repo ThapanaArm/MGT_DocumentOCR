@@ -5,7 +5,7 @@ export default function PagePlaceholder({ title, phase }: { title: string; phase
       <div className="card-h">
         <h2>{title}</h2>
       </div>
-      <div className="empty">หน้านี้จะพอร์ตจาก frontend เดิมใน {phase}</div>
+      <div className="empty">This page will be ported from the existing frontend in {phase}</div>
     </div>
   );
 }

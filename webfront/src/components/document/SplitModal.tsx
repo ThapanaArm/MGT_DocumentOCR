@@ -34,21 +34,21 @@ export default function SplitModal({
 
   return (
     <Modal open onClose={onClose} wide>
-      <ModalHeader title="แยกเอกสารเป็นหลาย Sales Order" onClose={onClose} />
+      <ModalHeader title="Split Document into Multiple Sales Orders" onClose={onClose} />
       <div className="card-b">
         <p className="hint">
-          ใส่หมายเลขกลุ่ม (1, 2, 3, ...) ให้แต่ละรายการที่จะแยกออกไปเป็น Sales Order ใหม่ —
-          รายการที่เว้นว่างจะไม่ถูกแยก ต้องมีอย่างน้อย 2 กลุ่มจึงจะ Split ได้
+          Enter a group number (1, 2, 3, ...) for each item to be split into a new Sales Order —
+          items left blank will not be split. At least 2 groups are required to Split.
         </p>
         <div className="tw">
           <table>
             <thead>
               <tr>
                 <th>Item</th>
-                <th>รายการ</th>
-                <th>จำนวน</th>
-                <th style={{ textAlign: 'right' }}>จำนวนเงิน</th>
-                <th>กลุ่ม SO</th>
+                <th>Description</th>
+                <th>Quantity</th>
+                <th style={{ textAlign: 'right' }}>Amount</th>
+                <th>SO Group</th>
               </tr>
             </thead>
             <tbody>
@@ -81,19 +81,19 @@ export default function SplitModal({
         <div className="hint" style={{ marginTop: 12 }}>
           {nGroups >= 2 ? (
             <>
-              จะสร้าง <b>{nGroups}</b> Sales Order ใหม่ (
+              Will create <b>{nGroups}</b> new Sales Orders (
               {Object.entries(groups)
-                .map(([g, items]) => `กลุ่ม ${g}: ${items.length} รายการ`)
+                .map(([g, items]) => `Group ${g}: ${items.length} items`)
                 .join(' · ')}
               )
             </>
           ) : (
-            <span style={{ color: 'var(--red)' }}>ต้องแบ่งอย่างน้อย 2 กลุ่ม</span>
+            <span style={{ color: 'var(--red)' }}>At least 2 groups are required</span>
           )}
         </div>
         <div className="row" style={{ marginTop: 16, justifyContent: 'flex-end' }}>
           <button className="btn primary" onClick={confirm} disabled={nGroups < 2}>
-            ยืนยัน Split
+            Confirm Split
           </button>
         </div>
       </div>

@@ -1,8 +1,8 @@
 /* Ports stepsHtml() — the 3-step progress header. */
 const STEPS: [string, string][] = [
-  ['นำเข้า & อ่านเอกสาร', 'OCR → Header / Detail'],
-  ['Mapping ข้อมูล', 'ตรวจกับ Master Data'],
-  ['ส่งเข้า SAP', 'สร้างเอกสารใน S/4HANA'],
+  ['Import & Read Document', 'OCR → Header / Detail'],
+  ['Data Mapping', 'Validate against Master Data'],
+  ['Submit to SAP', 'Create document in S/4HANA'],
 ];
 
 export default function Steps({ current }: { current: number }) {

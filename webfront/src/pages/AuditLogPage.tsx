@@ -7,13 +7,13 @@ import Pager, { DateRange, inDateRange, paginate } from '../components/Pager';
 
 /* Ports renderAuditLog()/renderAuditLogLocal(). */
 const ACTION_BADGE: Record<string, [string, string]> = {
-  CREATE: ['b-ok', 'เพิ่มเอกสาร'],
-  UPDATE: ['b-warn', 'แก้ไข'],
-  DELETE: ['b-fail', 'ลบเอกสาร'],
-  REOCR: ['b-idle', 'อ่าน OCR ใหม่'],
+  CREATE: ['b-ok', 'Document Created'],
+  UPDATE: ['b-warn', 'Edited'],
+  DELETE: ['b-fail', 'Document Deleted'],
+  REOCR: ['b-idle', 'Re-run OCR'],
 };
 const MODULE_FILTERS: [string, string][] = [
-  ['', 'ทั้งหมด'],
+  ['', 'All'],
   ['AP', 'Supplier Invoice'],
   ['PODP', 'PO Down Payment'],
   ['II', 'Incoming Invoice'],
@@ -45,15 +45,15 @@ export default function AuditLogPage() {
   return (
     <div className="card">
       <div className="card-h">
-        <h2>Log กิจกรรม ({filtered.length})</h2>
+        <h2>Activity Log ({filtered.length})</h2>
         <div className="sp" />
         <span className="hint" style={{ marginRight: 4 }}>
-          วันที่:
+          Date:
         </span>
         <DateRange from={from} to={to} setFrom={setFrom} setTo={setTo} />
         <div style={{ marginRight: 8 }} />
         <button className="btn sm" onClick={reload}>
-          ↻ รีเฟรช
+          ↻ Refresh
         </button>
       </div>
       <div className="card-b">
@@ -75,20 +75,20 @@ export default function AuditLogPage() {
           <table>
             <thead>
               <tr>
-                <th>เวลา</th>
+                <th>Time</th>
                 <th>Module</th>
                 <th>Process</th>
-                <th>เอกสาร</th>
-                <th>รายละเอียด</th>
+                <th>Document</th>
+                <th>Details</th>
                 <th>Model</th>
-                <th>ทำโดย</th>
+                <th>Performed By</th>
               </tr>
             </thead>
             <tbody>
               {!rows ? (
                 <tr>
                   <td colSpan={7} className="empty">
-                    กำลังโหลด…
+                    Loading…
                   </td>
                 </tr>
               ) : pageRows.length ? (
@@ -127,7 +127,7 @@ export default function AuditLogPage() {
               ) : (
                 <tr>
                   <td colSpan={7} className="empty">
-                    ยังไม่มีประวัติ
+                    No history yet
                   </td>
                 </tr>
               )}

@@ -55,7 +55,7 @@ export function DocTrendChart({ data }: { data: OcrDailyRow[] }) {
         <Line
           type="monotone"
           dataKey="docCount"
-          name="เอกสาร"
+          name="Documents"
           stroke={c.brand}
           strokeWidth={2.5}
           dot={{ r: 3 }}
@@ -63,7 +63,7 @@ export function DocTrendChart({ data }: { data: OcrDailyRow[] }) {
         <Line
           type="monotone"
           dataKey="okCount"
-          name="OCR สำเร็จ"
+          name="OCR Successful"
           stroke={c.info}
           strokeWidth={2.5}
           strokeDasharray="6 4"
@@ -156,7 +156,7 @@ export function ModuleBarChart({ data }: { data: ByModuleRow[] }) {
             fontSize: 12,
           }}
         />
-        <Bar dataKey="value" name="เอกสาร" fill={c.brand} radius={[0, 100, 100, 0]} barSize={18} />
+        <Bar dataKey="value" name="Documents" fill={c.brand} radius={[0, 100, 100, 0]} barSize={18} />
       </BarChart>
     </ResponsiveContainer>
   );

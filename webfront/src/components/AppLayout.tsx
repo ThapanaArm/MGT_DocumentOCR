@@ -18,11 +18,11 @@ function currentModule(pathname: string): ModuleCode | null {
 
 function pageTitle(pathname: string): string {
   if (pathname === '/') return 'Overview';
-  if (pathname.startsWith('/import')) return 'นำเข้าเอกสาร / OCR';
-  if (pathname.startsWith('/list')) return 'ทะเบียนเอกสาร';
+  if (pathname.startsWith('/import')) return 'Document Import / OCR';
+  if (pathname.startsWith('/list')) return 'Document Register';
   if (pathname.startsWith('/master')) return 'Master Mapping';
   if (pathname.startsWith('/audit-log')) return 'Log';
-  if (pathname.startsWith('/log')) return 'ประวัติส่ง SAP';
+  if (pathname.startsWith('/log')) return 'SAP Submission History';
   return '';
 }
 
@@ -44,13 +44,13 @@ function SidebarFoot() {
   if (error || (health && !health.ok))
     return (
       <div className="sidebar-foot lbl" id="foot">
-        <span style={{ color: 'var(--red)' }}>● เชื่อมต่อฐานข้อมูลไม่ได้</span>
+        <span style={{ color: 'var(--red)' }}>● Unable to connect to database</span>
       </div>
     );
   if (!health)
     return (
       <div className="sidebar-foot lbl" id="foot">
-        กำลังเชื่อมต่อฐานข้อมูล…
+        Connecting to database…
       </div>
     );
   return (
@@ -59,7 +59,7 @@ function SidebarFoot() {
       <br />
       {health.db?.srv}
       <br />
-      SAP: {health.sapMode === 'live' ? 'เชื่อมต่อจริง' : 'โหมดจำลอง'} · OCR: {health.ocrProvider}
+      SAP: {health.sapMode === 'live' ? 'Live' : 'Simulation Mode'} · OCR: {health.ocrProvider}
       <br />
       <span className="hint">{USER}</span>
     </div>
@@ -107,8 +107,8 @@ export default function AppLayout() {
           <button
             className="sidebar-toggle"
             onClick={toggleNav}
-            title={navCollapsed ? 'ขยายเมนู' : 'ย่อเมนู'}
-            aria-label={navCollapsed ? 'ขยายเมนู' : 'ย่อเมนู'}
+            title={navCollapsed ? 'Expand menu' : 'Collapse menu'}
+            aria-label={navCollapsed ? 'Expand menu' : 'Collapse menu'}
           >
             <svg
               viewBox="0 0 24 24"
@@ -132,11 +132,11 @@ export default function AppLayout() {
           <button
             className="btn sm ghost"
             onClick={toggleTheme}
-            title="สลับโหมดสว่าง/มืด"
+            title="Toggle light/dark mode"
             dangerouslySetInnerHTML={{ __html: themeMode === 'dark' ? '&#9788;' : '&#9789;' }}
           />
           <Link className="btn sm" to="/">
-            ↻ เริ่มเอกสารใหม่
+            ↻ Start New Document
           </Link>
         </div>
 
@@ -147,7 +147,7 @@ export default function AppLayout() {
 
       <GlobalToast />
       <div className="busy-indicator" id="busyIndicator">
-        <span className="hg">⏳</span> กำลังประมวลผล…
+        <span className="hg">⏳</span> Processing…
       </div>
     </div>
   );
