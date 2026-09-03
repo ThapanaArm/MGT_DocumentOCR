@@ -1,6 +1,8 @@
 using System.Text.RegularExpressions;
 using MgtOcr.Core.Config;
 
+using MgtOcr.Ocr.Providers;
+
 namespace MgtOcr.Ocr;
 
 public record OcrProviderInfo(string Id, string Label, string Desc, bool Ready);

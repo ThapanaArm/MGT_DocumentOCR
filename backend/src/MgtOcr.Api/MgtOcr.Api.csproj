@@ -7,7 +7,6 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="DotNetEnv" Version="3.2.0" />
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.10" />
   </ItemGroup>
 
@@ -15,6 +14,7 @@
     <ProjectReference Include="..\MgtOcr.Core\MgtOcr.Core.csproj" />
     <ProjectReference Include="..\MgtOcr.Ocr\MgtOcr.Ocr.csproj" />
     <ProjectReference Include="..\MgtOcr.Data\MgtOcr.Data.csproj" />
+    <ProjectReference Include="..\MgtOcr.Sap\MgtOcr.Sap.csproj" />
   </ItemGroup>
 
 </Project>

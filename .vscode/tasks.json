@@ -2,6 +2,19 @@
   "version": "2.0.0",
   "tasks": [
     {
+      "label": "build",
+      "type": "process",
+      "command": "dotnet",
+      "args": [
+        "build",
+        "backend/src/MgtOcr.Api/MgtOcr.Api.csproj",
+        "/property:GenerateFullPaths=true",
+        "/consoleloggerparameters:NoSummary"
+      ],
+      "problemMatcher": "$msCompile",
+      "detail": "Compiles MgtOcr.Api (and its project references) — used as the debugger's preLaunchTask."
+    },
+    {
       "label": "Run Backend (.NET)",
       "type": "shell",
       "command": "dotnet",
@@ -12,19 +25,19 @@
       "detail": "ASP.NET Core API on http://localhost:8091 (DOTNET_APP_PORT in .env overrides)."
     },
     {
-      "label": "Run Frontend (Static Server)",
+      "label": "Run Frontend (Vite dev)",
       "type": "shell",
-      "command": "python",
-      "args": ["-m", "http.server", "5500"],
-      "options": { "cwd": "${workspaceFolder}/frontend" },
+      "command": "npm",
+      "args": ["run", "dev"],
+      "options": { "cwd": "${workspaceFolder}/webfront" },
       "isBackground": true,
       "problemMatcher": [],
       "presentation": { "group": "run-all", "panel": "dedicated", "clear": true },
-      "detail": "Serves frontend/ standalone on http://localhost:5500 — app.js auto-detects this port and calls the .NET backend on :8091 across origins (see API_BASE in frontend/app.js)."
+      "detail": "React (Vite) dev server on http://localhost:5173 — proxies /api to the .NET backend on :8091 (see webfront/vite.config.ts). Run 'npm install' in webfront/ once first."
     },
     {
       "label": "Run All (Frontend + Backend)",
-      "dependsOn": ["Run Backend (.NET)", "Run Frontend (Static Server)"],
+      "dependsOn": ["Run Backend (.NET)", "Run Frontend (Vite dev)"],
       "dependsOrder": "parallel",
       "problemMatcher": [],
       "group": { "kind": "build", "isDefault": true }

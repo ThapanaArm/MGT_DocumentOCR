@@ -1,0 +1,157 @@
+import { useState } from 'react';
+import Modal, { ModalHeader } from '../Modal';
+import { MASTER_DEF, M_LABEL } from '../../constants/fields';
+import { createMaster, updateMaster, type MasterRow, type MastersData } from '../../api/masters';
+import { useAppState } from '../../state/AppState';
+import type { Dupe } from '../../utils/dupes';
+
+/* Ports editRow()/saveRow()/useDupe() — the add/edit master row modal, shared
+   by MasterPage and the document quick-add flow. */
+
+export interface MasterEditState {
+  tab: string;
+  rowKey: string | number | null;
+  prefill?: MasterRow;
+  dupes?: Dupe[];
+  /** called with the saved row's key after a successful save */
+  onSaved?: (savedKey: string) => void | Promise<void>;
+  /** called when the user picks an existing duplicate instead */
+  onUseDupe?: (code: string) => void;
+}
+
+export default function MasterEditModal({
+  state,
+  masters,
+  onClose,
+  afterSave,
+}: {
+  state: MasterEditState | null;
+  masters: MastersData;
+  onClose: () => void;
+  afterSave: () => void | Promise<void>;
+}) {
+  const { guard, showToast } = useAppState();
+  const [form, setForm] = useState<MasterRow>({});
+  const [initedFor, setInitedFor] = useState<string | null>(null);
+
+  if (!state) return null;
+  const def = MASTER_DEF[state.tab];
+  const editing = state.rowKey != null;
+  const existing = editing
+    ? masters[state.tab].find((x) => String(x[def.key]) === String(state.rowKey)) || {}
+    : state.prefill || {};
+
+  // Initialise form once per opened state.
+  const stateSig = state.tab + ':' + String(state.rowKey);
+  if (initedFor !== stateSig) {
+    setForm({ ...existing });
+    setInitedFor(stateSig);
+  }
+
+  const setField = (k: string, v: string) => setForm((f) => ({ ...f, [k]: v }));
+
+  async function save() {
+    const o: MasterRow = {};
+    def.cols.forEach((c) => {
+      o[c.k] = (form[c.k] ?? '').toString().trim();
+    });
+    if (state!.rowKey == null && def.key !== 'Id' && !o[def.key]) {
+      showToast('กรุณากรอก ' + def.cols.find((c) => c.k === def.key)?.l);
+      return;
+    }
+    const ok = await guard(async () => {
+      if (state!.rowKey == null) await createMaster(state!.tab, o);
+      else await updateMaster(state!.tab, String(state!.rowKey), o);
+      return true;
+    });
+    if (!ok) return;
+    if (state!.onSaved) {
+      await state!.onSaved(o[def.key]);
+    } else {
+      showToast('✓ บันทึกข้อมูลหลักเรียบร้อย');
+    }
+    await afterSave();
+    onClose();
+  }
+
+  function useDupe(code: string) {
+    onClose();
+    state!.onUseDupe?.(code);
+  }
+
+  const hasDupes = !!state.dupes && state.dupes.length > 0;
+
+  return (
+    <Modal open onClose={onClose}>
+      <ModalHeader
+        title={`${state.rowKey == null ? 'เพิ่ม' : 'แก้ไข'} — ${def.label}`}
+        onClose={onClose}
+      />
+      <div className="card-b">
+        {hasDupes && (
+          <div className="result bad" style={{ marginBottom: 16 }}>
+            <h3>⚠ พบข้อมูลที่อาจซ้ำกัน {state.dupes!.length} รายการ</h3>
+            <p className="hint" style={{ margin: '0 0 10px' }}>
+              ตรวจสอบก่อนเพิ่มใหม่ — ถ้าเป็นรายการเดียวกัน ให้กด "ใช้รายการนี้แทน" แทนการสร้างซ้ำ
+            </p>
+            <div className="tw">
+              <table style={{ minWidth: 'auto' }}>
+                <tbody>
+                  {state.dupes!.map((x, i) => (
+                    <tr key={i}>
+                      <td>
+                        <b>{x.row[def.key]}</b> — {x.row[M_LABEL[state.tab]] || ''}
+                      </td>
+                      <td>
+                        <span className="badge b-warn">{x.reason}</span>
+                      </td>
+                      <td>
+                        <button
+                          className="btn sm primary"
+                          onClick={() => useDupe(String(x.row[def.key]))}
+                        >
+                          ใช้รายการนี้แทน
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+        <div className="grid">
+          {def.cols.map((c) => (
+            <div className="f" key={c.k}>
+              <label>{c.l}</label>
+              {c.ref ? (
+                <select value={form[c.k] ?? ''} onChange={(e) => setField(c.k, e.target.value)}>
+                  {c.blank && <option value="">— ทุกสินค้า (กฎกลาง) —</option>}
+                  {masters[c.ref].map((o) => {
+                    const vk = MASTER_DEF[c.ref!].key;
+                    const lk = M_LABEL[c.ref!];
+                    return (
+                      <option key={o[vk]} value={o[vk]}>
+                        {o[vk]} — {o[lk]}
+                      </option>
+                    );
+                  })}
+                </select>
+              ) : (
+                <input value={form[c.k] ?? ''} onChange={(e) => setField(c.k, e.target.value)} />
+              )}
+            </div>
+          ))}
+        </div>
+        <div className="row" style={{ marginTop: 18 }}>
+          <button className="btn primary" onClick={save}>
+            {hasDupes ? 'ยืนยัน — บันทึกเป็นรายการใหม่' : 'บันทึก'}
+          </button>
+          <button className="btn" onClick={onClose}>
+            ยกเลิก
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}

@@ -1,4 +1,3 @@
-using DotNetEnv;
 using MgtOcr.Core.Json;
 using MgtOcr.Core.Config;
 using MgtOcr.Data;
@@ -6,66 +5,54 @@ using MgtOcr.Ocr;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// .env lives at the repo root and is shared with the Python system that's still running
-// side-by-side during the migration (see the approved plan, Phase 0/8) — load it directly
-// instead of duplicating secrets into appsettings.json.
+// Configuration now comes from appsettings.json (+ appsettings.{Environment}.json and
+// environment variables, merged by the .NET config system — env vars use "__" for nesting,
+// e.g. Database__Password, and override the JSON for production/secret injection).
+// repoRoot is still used for the uploads folder, the bundled tessdata, and webfront/dist.
+var cfg = builder.Configuration;
 var repoRoot = Path.GetFullPath(Path.Combine(builder.Environment.ContentRootPath, "..", "..", ".."));
-var envPath = Path.Combine(repoRoot, ".env");
-if (File.Exists(envPath))
-{
-    Env.Load(envPath);
-}
-else
-{
-    // Fail loudly rather than silently falling back to empty credentials — a wrong repoRoot
-    // calculation here previously caused a confusing "Login failed for user 'sa'" instead of
-    // an obvious "config file not found" error.
-    throw new FileNotFoundException($".env not found at expected repo root path: {envPath}");
-}
 
-string Get(string key, string fallback = "") => Environment.GetEnvironmentVariable(key)?.Trim() ?? fallback;
+string Get(string key, string fallback = "") => (cfg[key] ?? fallback).Trim();
 
-// Mirrors config.py's auto-detection: if TESSERACT_CMD/TESSDATA_PREFIX aren't set explicitly,
-// fall back to the well-known local install path this project already ships with.
+// Auto-detection: if Ocr:TesseractCmd / Ocr:TessdataPrefix aren't set explicitly, fall back to
+// the well-known local install path this project already ships with.
 var defaultTesseractCmd = @"C:\Program Files\Tesseract-OCR\tesseract.exe";
-var tesseractCmd = Get("TESSERACT_CMD");
+var tesseractCmd = Get("Ocr:TesseractCmd");
 if (tesseractCmd == "" && File.Exists(defaultTesseractCmd)) tesseractCmd = defaultTesseractCmd;
 var defaultTessdata = Path.Combine(repoRoot, "tessdata");
-var tessdataPrefix = Get("TESSDATA_PREFIX");
+var tessdataPrefix = Get("Ocr:TessdataPrefix");
 if (tessdataPrefix == "" && Directory.Exists(defaultTessdata)) tessdataPrefix = defaultTessdata;
 
 var appConfig = new AppConfig
 {
-    DbServer = Get("DB_SERVER", @"1P69044\SQLEXPRESS"),
-    DbName = Get("DB_NAME", "MGT_Document_OCR"),
-    DbUser = Get("DB_USER", "sa"),
-    DbPassword = Environment.GetEnvironmentVariable("DB_PASSWORD") ?? "", // not trimmed, mirrors config.py
-    DbDriver = Get("DB_DRIVER", "ODBC Driver 17 for SQL Server"),
-    AppHost = Get("APP_HOST", "0.0.0.0"),
-    // Deliberately NOT reading the shared APP_PORT (that's Python's port, 8090, and Python stays
-    // running side-by-side on it throughout the migration per the plan) — a separate port here.
-    AppPort = int.TryParse(Get("DOTNET_APP_PORT", "8091"), out var p) ? p : 8091,
-    OwnCompanyKeywords = Get("OWN_COMPANY_KEYWORDS", "MEGACHEM").Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries),
-    OwnTaxId = Get("OWN_TAX_ID"),
-    OcrProvider = Get("OCR_PROVIDER", "auto"),
+    DbServer = Get("Database:Server", @"1P69044\SQLEXPRESS"),
+    DbName = Get("Database:Name", "MGT_Document_OCR"),
+    DbUser = Get("Database:User", "sa"),
+    DbPassword = cfg["Database:Password"] ?? "", // not trimmed — a password may contain spaces
+    DbDriver = Get("Database:Driver", "ODBC Driver 17 for SQL Server"),
+    AppHost = Get("App:Host", "0.0.0.0"),
+    AppPort = int.TryParse(Get("App:Port", "8091"), out var p) ? p : 8091,
+    OwnCompanyKeywords = Get("App:OwnCompanyKeywords", "MEGACHEM").Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries),
+    OwnTaxId = Get("App:OwnTaxId"),
+    OcrProvider = Get("Ocr:Provider", "auto"),
     TesseractCmd = tesseractCmd,
     TessdataPrefix = tessdataPrefix,
-    AzureDiEndpoint = Get("AZURE_DI_ENDPOINT"),
-    AzureDiKey = Get("AZURE_DI_KEY"),
-    AnthropicApiKey = Get("ANTHROPIC_API_KEY"),
-    AnthropicModel = Get("ANTHROPIC_MODEL", "claude-sonnet-5"),
-    TyphoonApiKey = Get("TYPHOON_API_KEY"),
-    TyphoonModel = Get("TYPHOON_MODEL", "typhoon-ocr"),
-    GeminiApiKey = Get("GEMINI_API_KEY"),
-    GeminiModel = Get("GEMINI_MODEL", "gemini-2.5-flash"),
-    OpenAiApiKey = Get("OPENAI_API_KEY"),
-    OpenAiModel = Get("OPENAI_MODEL", "gpt-4o"),
-    SapBaseUrl = Get("SAP_BASE_URL"),
-    SapUser = Get("SAP_USER"),
-    SapPassword = Environment.GetEnvironmentVariable("SAP_PASSWORD") ?? "",
-    SapClient = Get("SAP_CLIENT", "100"),
-    SapCompanyCode = Get("SAP_COMPANY_CODE", "1000"),
-    SapDefaultPlant = Get("SAP_DEFAULT_PLANT", "1000"),
+    AzureDiEndpoint = Get("Ocr:AzureDiEndpoint"),
+    AzureDiKey = Get("Ocr:AzureDiKey"),
+    AnthropicApiKey = Get("Ocr:AnthropicApiKey"),
+    AnthropicModel = Get("Ocr:AnthropicModel", "claude-sonnet-5"),
+    TyphoonApiKey = Get("Ocr:TyphoonApiKey"),
+    TyphoonModel = Get("Ocr:TyphoonModel", "typhoon-ocr"),
+    GeminiApiKey = Get("Ocr:GeminiApiKey"),
+    GeminiModel = Get("Ocr:GeminiModel", "gemini-2.5-flash"),
+    OpenAiApiKey = Get("Ocr:OpenAiApiKey"),
+    OpenAiModel = Get("Ocr:OpenAiModel", "gpt-4o"),
+    SapBaseUrl = Get("Sap:BaseUrl"),
+    SapUser = Get("Sap:User"),
+    SapPassword = cfg["Sap:Password"] ?? "",
+    SapClient = Get("Sap:Client", "100"),
+    SapCompanyCode = Get("Sap:CompanyCode", "1000"),
+    SapDefaultPlant = Get("Sap:DefaultPlant", "1000"),
     UploadDir = Path.Combine(repoRoot, "uploads"),
 };
 Directory.CreateDirectory(appConfig.UploadDir);
@@ -76,7 +63,7 @@ builder.Services.AddSingleton<Db>();
 builder.Services.AddSingleton<MasterRepository>();
 builder.Services.AddSingleton<OcrEngine>();
 builder.Services.AddSingleton(sp => new DocumentRepository(sp.GetRequiredService<Db>(), appConfig.UploadDir));
-builder.Services.AddHttpClient<MgtOcr.Core.Sap.SapClient>();
+builder.Services.AddHttpClient<MgtOcr.Sap.SapClient>();
 
 builder.Services.AddControllers().AddJsonOptions(o =>
 {
@@ -144,18 +131,29 @@ app.Use(async (context, next) =>
     }
 });
 
+// Serve the built React SPA (webfront/dist) as static files, same-origin.
+// In development the Vite dev server (:5173) proxies /api here instead, so this
+// path only matters for the production build — run `npm run build` in webfront/.
+// Registered before routing so real asset files are served before the SPA fallback.
+var publicDir = Path.Combine(repoRoot, "webfront", "dist");
+Microsoft.Extensions.FileProviders.PhysicalFileProvider? spaFiles = null;
+if (Directory.Exists(publicDir))
+{
+    spaFiles = new Microsoft.Extensions.FileProviders.PhysicalFileProvider(publicDir);
+    app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = spaFiles });
+    app.UseStaticFiles(new StaticFileOptions { FileProvider = spaFiles });
+}
+
 app.UseCors("frontend");
 app.UseAuthorization();
 app.MapControllers();
 
-// Mirrors app.mount("/", StaticFiles(directory=str(config.PUBLIC_DIR), html=True)) in Python:
-// serves frontend/ unmodified — index.html at "/", app.js/style.css/assets/* at their existing paths.
-var publicDir = Path.Combine(repoRoot, "frontend");
-if (Directory.Exists(publicDir))
+// SPA client-side routing fallback: any non-/api path that is not a real file
+// returns index.html so React Router can handle it (e.g. /doc/5, /master, /list/AP).
+// Lowest priority — never intercepts /api/* (matched by controllers) or static assets.
+if (spaFiles != null)
 {
-    var fileProvider = new Microsoft.Extensions.FileProviders.PhysicalFileProvider(publicDir);
-    app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = fileProvider });
-    app.UseStaticFiles(new StaticFileOptions { FileProvider = fileProvider });
+    app.MapFallbackToFile("index.html", new StaticFileOptions { FileProvider = spaFiles });
 }
 
 app.Run();

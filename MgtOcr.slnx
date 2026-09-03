@@ -5,6 +5,7 @@
     <Project Path="backend/src/MgtOcr.Core/MgtOcr.Core.csproj" />
     <Project Path="backend/src/MgtOcr.Data/MgtOcr.Data.csproj" />
     <Project Path="backend/src/MgtOcr.Ocr/MgtOcr.Ocr.csproj" />
+    <Project Path="backend/src/MgtOcr.Sap/MgtOcr.Sap.csproj" />
   </Folder>
   <Folder Name="/backend/tests/">
     <Project Path="backend/tests/MgtOcr.Core.Tests/MgtOcr.Core.Tests.csproj" />

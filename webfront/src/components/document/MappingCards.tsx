@@ -1,0 +1,306 @@
+import { num } from '../../utils/format';
+import type { DocModel, MapEntry, MapField, MapResult } from '../../api/documents';
+import type { MastersData } from '../../api/masters';
+
+/* Ports mappingCards()/cmpCard()/sideList()/statusChip()/uomCell(). */
+
+function SideList({ items, side }: { items?: MapField[]; side: 'doc' | 'sap' }) {
+  if (!items || !items.length)
+    return (
+      <div className="hint" style={{ padding: '6px 0' }}>
+        {side === 'sap' ? 'ยังไม่พบข้อมูลใน SAP' : '—'}
+      </div>
+    );
+  return (
+    <table className="cmp">
+      <tbody>
+        {items.map((f, i) => (
+          <tr key={i}>
+            <th>{f.label}</th>
+            <td>
+              {f.value || <span className="hint">—</span>}
+              {f.match === true && (
+                <span className="badge b-ok" style={{ padding: '1px 7px', marginLeft: 4 }}>
+                  ✓
+                </span>
+              )}
+              {f.match === false && (
+                <span className="badge b-warn" style={{ padding: '1px 7px', marginLeft: 4 }}>
+                  ≠
+                </span>
+              )}
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function StatusChip({ st }: { st: string }) {
+  if (st === 'ok') return <span className="badge b-ok">✓ จับคู่อัตโนมัติ</span>;
+  if (st === 'manual') return <span className="badge b-warn">✎ เลือกด้วยตนเอง</span>;
+  if (st === 'convert') return <span className="badge b-ok">⇄ แปลงหน่วยแล้ว</span>;
+  if (st === 'fail') return <span className="badge b-fail">✗ ไม่พบข้อมูล</span>;
+  if (st === 'unitfail') return <span className="badge b-fail">✗ ไม่พบกฎแปลงหน่วย</span>;
+  return <span className="badge b-idle">รอ Mapping</span>;
+}
+
+function CmpCard({
+  no,
+  title,
+  r,
+  picker,
+  children,
+}: {
+  no: string | number;
+  title: string;
+  r: MapEntry;
+  picker?: React.ReactNode;
+  children?: React.ReactNode;
+}) {
+  const st = r.status || 'idle';
+  return (
+    <div className={'cmp-card ' + (st === 'fail' ? 'bad' : '')}>
+      <div className="cmp-head">
+        <span className="cmp-no">{no}</span>
+        <b>{title}</b>
+        <StatusChip st={st} />
+        {r.sapCode && (
+          <span className="badge b-ok" title="รหัสที่ส่งเข้า SAP">
+            SAP: {r.sapCode}
+          </span>
+        )}
+        <span className="hint">{r.method || ''}</span>
+        <div className="sp" />
+        {picker}
+      </div>
+      <div className="cmp-body">
+        <div className="cmp-col">
+          <div className="cmp-label">📄 ข้อมูลจากเอกสาร</div>
+          <SideList items={r.doc} side="doc" />
+        </div>
+        <div className="cmp-arrow">→</div>
+        <div className="cmp-col sap">
+          <div className="cmp-label">🏦 ข้อมูลจาก SAP</div>
+          <SideList items={r.sap} side="sap" />
+        </div>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function qtyTxt(n: unknown) {
+  return num(n).toLocaleString('en-US', { maximumFractionDigits: 3 });
+}
+
+interface Props {
+  doc: DocModel;
+  map: MapResult;
+  masters: MastersData;
+  posted: boolean;
+  onManualHeader: (key: string, value: string) => void;
+  onManualLine: (i: number, value: string) => void;
+  onQuickAddVendor: () => void;
+  onQuickAddCustomer: () => void;
+  onQuickAddShipTo: () => void;
+  onQuickAddMaterial: (i: number) => void;
+  onAddUomRule: (i: number) => void;
+}
+
+export default function MappingCards({
+  doc,
+  map,
+  masters,
+  posted,
+  onManualHeader,
+  onManualLine,
+  onQuickAddVendor,
+  onQuickAddCustomer,
+  onQuickAddShipTo,
+  onQuickAddMaterial,
+  onAddUomRule,
+}: Props) {
+  const headerSel = (kind: string, key: string, code?: string) => {
+    let opts: { v: string; t: string }[] = [];
+    if (kind === 'customers')
+      opts = masters.customers.map((c) => ({ v: c.CustomerCode, t: c.CustomerCode + ' — ' + c.NameTh }));
+    else if (kind === 'vendors')
+      opts = masters.vendors.map((c) => ({ v: c.VendorCode, t: c.VendorCode + ' — ' + c.VendorName }));
+    else if (kind === 'shiptos') {
+      const cc = map.header.customer?.code || '';
+      opts = masters.shiptos
+        .filter((s) => !cc || s.CustomerCode === cc)
+        .map((s) => ({ v: s.ShipToCode, t: s.ShipToCode + ' — ' + s.ShipToName }));
+    }
+    return (
+      <select
+        className="cmp-pick"
+        value={code || ''}
+        disabled={posted}
+        onChange={(e) => onManualHeader(key, e.target.value)}
+      >
+        <option value="">-- เลือกเอง --</option>
+        {opts.map((o) => (
+          <option key={o.v} value={o.v}>
+            {o.t}
+          </option>
+        ))}
+      </select>
+    );
+  };
+
+  const addBtn = (label: string, fn: () => void) =>
+    posted ? null : (
+      <button className="btn sm" style={{ marginLeft: 6 }} onClick={fn}>
+        + {label}
+      </button>
+    );
+
+  const matOpts = masters.materials.map((m) => ({
+    v: m.MaterialCode,
+    t: m.MaterialCode + ' — ' + m.Description,
+  }));
+
+  const headerCards: React.ReactNode[] = [];
+  let n = 0;
+  if (doc.module !== 'SO') {
+    const r = map.header.vendor;
+    n++;
+    headerCards.push(
+      <CmpCard
+        key="vendor"
+        no={n}
+        title="Vendor / Supplier"
+        r={r}
+        picker={
+          <>
+            {headerSel('vendors', 'vendor', r.code)}
+            {r.status === 'fail' && addBtn('เพิ่มผู้ขายใหม่', onQuickAddVendor)}
+          </>
+        }
+      />,
+    );
+  } else {
+    const c = map.header.customer;
+    const sh = map.header.shipTo;
+    n++;
+    headerCards.push(
+      <CmpCard
+        key="customer"
+        no={n}
+        title="Customer"
+        r={c}
+        picker={
+          <>
+            {headerSel('customers', 'customer', c.code)}
+            {c.status === 'fail' && addBtn('เพิ่มลูกค้าใหม่', onQuickAddCustomer)}
+          </>
+        }
+      />,
+    );
+    n++;
+    headerCards.push(
+      <CmpCard
+        key="shipto"
+        no={n}
+        title="Ship-to"
+        r={sh}
+        picker={
+          <>
+            {headerSel('shiptos', 'shipTo', sh.code)}
+            {sh.status === 'fail' &&
+              (c.code ? (
+                addBtn('เพิ่ม Ship-to ใหม่', onQuickAddShipTo)
+              ) : (
+                <span className="hint" style={{ marginLeft: 6 }}>
+                  ต้องระบุลูกค้าก่อน
+                </span>
+              ))}
+          </>
+        }
+      />,
+    );
+  }
+
+  const nMat = ++n;
+  const matCards = doc.lines.map((_l, i) => {
+    const r = map.lines[i];
+    const u = r.unit || { doc: [], sap: [], status: 'idle' };
+    return (
+      <CmpCard
+        key={i}
+        no={`${nMat}.${i + 1}`}
+        title={`Material — บรรทัดที่ ${i + 1}`}
+        r={r}
+        picker={
+          <>
+            <select
+              className="cmp-pick"
+              value={r.code || ''}
+              disabled={posted}
+              onChange={(e) => onManualLine(i, e.target.value)}
+            >
+              <option value="">-- เลือกเอง --</option>
+              {matOpts.map((o) => (
+                <option key={o.v} value={o.v}>
+                  {o.t}
+                </option>
+              ))}
+            </select>
+            {r.status === 'fail' && addBtn('เพิ่ม Material ใหม่', () => onQuickAddMaterial(i))}
+          </>
+        }
+      >
+        {r.code && (
+          <div className={'cmp-sub ' + (u.status === 'fail' ? 'bad' : '')}>
+            <div className="cmp-head">
+              <span className="cmp-no sub">{nMat + 1}</span>
+              <b>Relate Unit — การแปลงหน่วย</b>
+              <StatusChip st={u.status === 'fail' ? 'unitfail' : u.status} />
+              <div className="sp" />
+              {u.status === 'fail' && !posted && (
+                <button className="btn sm" onClick={() => onAddUomRule(i)}>
+                  + เพิ่มกฎแปลงหน่วย
+                </button>
+              )}
+            </div>
+            <div className="cmp-body">
+              <div className="cmp-col">
+                <SideList items={u.doc} side="doc" />
+              </div>
+              <div className="cmp-arrow">→</div>
+              <div className="cmp-col sap">
+                <SideList items={u.sap} side="sap" />
+              </div>
+            </div>
+          </div>
+        )}
+      </CmpCard>
+    );
+  });
+
+  return (
+    <div className="card">
+      <div className="card-h">
+        <h2>ผลการ Mapping — เทียบข้อมูลเอกสารกับ SAP</h2>
+        <div className="sp" />
+        {map.pass ? (
+          <span className="badge b-ok">✓ ครบทุกจุด</span>
+        ) : (
+          <span className="badge b-fail">✗ ไม่พบข้อมูล {map.errors.length} จุด</span>
+        )}
+      </div>
+      <div className="card-b">
+        {headerCards}
+        <p className="sec-title" style={{ marginTop: 20 }}>
+          {nMat}. MATERIAL &amp; {nMat + 1}. RELATE UNIT (รายบรรทัด)
+        </p>
+        {matCards}
+      </div>
+    </div>
+  );
+}
+
+export { qtyTxt };

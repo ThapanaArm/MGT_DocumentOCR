@@ -4,7 +4,7 @@ using MgtOcr.Core;
 using MgtOcr.Core.Config;
 using MgtOcr.Core.Json;
 using MgtOcr.Core.Mapping;
-using MgtOcr.Core.Sap;
+using MgtOcr.Sap;
 using MgtOcr.Data;
 using MgtOcr.Ocr;
 using Microsoft.AspNetCore.Mvc;
