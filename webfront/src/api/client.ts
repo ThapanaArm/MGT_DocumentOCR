@@ -7,6 +7,7 @@
    ===================================================================== */
 
 import { getMock, MOCK_ALWAYS } from './mocks';
+import { clearLocalToken, getAuthToken } from './auth';
 
 export class ApiError extends Error {
   status: number;
@@ -34,6 +35,12 @@ async function request<T>(
   }
 
   const opt: RequestInit = { method, headers: {} };
+
+  // Every call carries a Bearer token — a password session if there is one, otherwise the Microsoft
+  // token (renewed silently near expiry). Null only when truly signed out.
+  const token = await getAuthToken();
+  if (token) (opt.headers as Record<string, string>)['Authorization'] = `Bearer ${token}`;
+
   if (body !== undefined) {
     if (isForm) {
       opt.body = body as BodyInit;
@@ -59,6 +66,14 @@ async function request<T>(
   } catch {
     // Backend mirrors FastAPI: unhandled errors come back as plain-text bodies.
     data = { detail: txt };
+  }
+
+  // 401 = token missing/expired/rejected (either kind) — the session is gone, not the request wrong.
+  // Drop any password session and tell the gate to show sign-in again. 403 is different (signed in,
+  // but not in Ms_User) and is left to surface as text for the person to read.
+  if (r.status === 401) {
+    clearLocalToken();
+    window.dispatchEvent(new Event('mgtocr:signedout'));
   }
 
   if (!r.ok) {

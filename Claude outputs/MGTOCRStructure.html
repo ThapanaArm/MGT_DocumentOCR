@@ -1,0 +1,611 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>แผนผังโครงสร้าง MGT OCR</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+  :root {
+    --bg: #f4f7f5;
+    --surface: #ffffff;
+    --surface-2: #eef2f0;
+    --ink: #15211b;
+    --ink-2: #465049;
+    --ink-3: #6c7c73;
+    --line: #dce4df;
+    --line-2: #cfdad3;
+    --brand: #00994d;
+    --brand-soft: #e2f7ec;
+    --blue: #1d4ed8;
+    --blue-soft: #e4eafb;
+    --teal: #0f766e;
+    --teal-soft: #d9f0ed;
+    --amber: #b45309;
+    --amber-soft: #f7ecd9;
+    --violet: #6d28d9;
+    --violet-soft: #ece4fb;
+    --shadow: 0 1px 2px rgba(20,40,30,.04), 0 6px 20px rgba(20,40,30,.05);
+    --font: 'IBM Plex Sans Thai', system-ui, -apple-system, 'Segoe UI', sans-serif;
+    --mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0d1310;
+      --surface: #141d18;
+      --surface-2: #1a2620;
+      --ink: #e9f1ec;
+      --ink-2: #a6b6ad;
+      --ink-3: #77877e;
+      --line: #243128;
+      --line-2: #2e3d33;
+      --brand: #1ec777;
+      --brand-soft: #102c1e;
+      --blue: #8fb0ff;
+      --blue-soft: #16203a;
+      --teal: #34d2c2;
+      --teal-soft: #0e2b28;
+      --amber: #edab52;
+      --amber-soft: #2c2411;
+      --violet: #b79bf5;
+      --violet-soft: #201a35;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.35);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0d1310;
+    --surface: #141d18;
+    --surface-2: #1a2620;
+    --ink: #e9f1ec;
+    --ink-2: #a6b6ad;
+    --ink-3: #77877e;
+    --line: #243128;
+    --line-2: #2e3d33;
+    --brand: #1ec777;
+    --brand-soft: #102c1e;
+    --blue: #8fb0ff;
+    --blue-soft: #16203a;
+    --teal: #34d2c2;
+    --teal-soft: #0e2b28;
+    --amber: #edab52;
+    --amber-soft: #2c2411;
+    --violet: #b79bf5;
+    --violet-soft: #201a35;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.35);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--font);
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 0 24px; }
+  h1, h2, h3 { text-wrap: balance; line-height: 1.22; margin: 0; }
+  code {
+    font-family: var(--mono);
+    font-size: .86em;
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    padding: 1px 6px;
+    color: var(--ink);
+    white-space: nowrap;
+  }
+
+  /* header */
+  header.top {
+    border-bottom: 1px solid var(--line);
+    background:
+      radial-gradient(120% 150% at 88% -30%, var(--brand-soft), transparent 62%),
+      var(--surface);
+  }
+  header.top .wrap { display: flex; flex-direction: column; gap: 12px; padding-top: 44px; padding-bottom: 34px; }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    color: var(--brand);
+    font-weight: 600;
+  }
+  header.top h1 { font-size: clamp(28px, 4.4vw, 42px); font-weight: 700; letter-spacing: -.02em; }
+  header.top p.lede { font-size: 17.5px; color: var(--ink-2); max-width: 64ch; margin: 0; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+  .chip {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    padding: 5px 11px;
+    border-radius: 100px;
+    border: 1px solid var(--line-2);
+    background: var(--surface);
+    color: var(--ink-2);
+    white-space: nowrap;
+  }
+  .chip b { color: var(--ink); font-weight: 600; }
+
+  /* sections */
+  section { padding: 48px 0 0; }
+  section:last-of-type { padding-bottom: 8px; }
+  .sec-head { display: flex; flex-direction: column; gap: 6px; margin-bottom: 22px; }
+  .kicker {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    font-weight: 600;
+  }
+  .sec-head h2 { font-size: clamp(21px, 3vw, 28px); font-weight: 700; letter-spacing: -.015em; }
+  .sec-head p { color: var(--ink-2); max-width: 68ch; margin: 2px 0 0; font-size: 15.5px; }
+
+  /* solution dependency board */
+  .board {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    box-shadow: var(--shadow);
+    padding: 18px 20px 14px;
+    overflow-x: auto;
+  }
+  .board svg { display: block; width: 100%; min-width: 640px; height: auto; }
+  .board .cap {
+    font-size: 13.5px; color: var(--ink-3);
+    border-top: 1px dashed var(--line);
+    margin-top: 12px; padding-top: 11px;
+  }
+  .board .cap b { color: var(--ink-2); font-weight: 600; }
+
+  /* tree panels */
+  .cols { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 18px; align-items: start; }
+  @media (max-width: 900px) { .cols { grid-template-columns: 1fr; } }
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+  }
+  .panel-h {
+    display: flex; align-items: baseline; gap: 10px;
+    padding: 13px 18px;
+    border-bottom: 1px solid var(--line);
+  }
+  .panel-h .rail { width: 3px; align-self: stretch; border-radius: 2px; }
+  .panel-h h3 { font-family: var(--mono); font-size: 14.5px; font-weight: 600; }
+  .panel-h .sub { margin-left: auto; font-size: 12.5px; color: var(--ink-3); }
+  .panel.fe .rail { background: var(--blue); } .panel.fe h3 { color: var(--blue); }
+  .panel.be .rail { background: var(--brand); } .panel.be h3 { color: var(--brand); }
+  .panel.db .rail { background: var(--teal); } .panel.db h3 { color: var(--teal); }
+  .panel.inf .rail { background: var(--violet); } .panel.inf h3 { color: var(--violet); }
+
+  .tree { padding: 6px 18px 14px; }
+  .grp { padding: 9px 0; border-bottom: 1px dashed var(--line); display: flex; flex-direction: column; gap: 3px; }
+  .grp:last-child { border-bottom: 0; }
+  .grp > .p {
+    font-family: var(--mono); font-size: 13px; font-weight: 600; color: var(--ink);
+  }
+  .grp > .p .dim { color: var(--ink-3); font-weight: 400; }
+  .grp > .d { font-size: 13.5px; color: var(--ink-2); line-height: 1.45; }
+  .files {
+    display: flex; flex-wrap: wrap; gap: 4px 6px; margin-top: 3px;
+  }
+  .f {
+    font-family: var(--mono); font-size: 11.5px;
+    padding: 1px 7px; border-radius: 5px;
+    background: var(--surface-2); border: 1px solid var(--line);
+    color: var(--ink-2);
+  }
+  .f.hi { background: var(--brand-soft); border-color: color-mix(in srgb, var(--brand) 30%, transparent); color: var(--brand); font-weight: 600; }
+
+  /* flow strip */
+  .flow { display: flex; flex-wrap: wrap; align-items: stretch; gap: 0; overflow-x: auto; }
+  .fn {
+    flex: 1 1 155px; min-width: 155px;
+    border: 1px solid var(--line); border-radius: 10px;
+    background: var(--surface-2);
+    padding: 13px 14px;
+    display: flex; flex-direction: column; gap: 3px;
+  }
+  .fn .k { font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-3); font-weight: 600; }
+  .fn .t { font-weight: 600; font-size: 14.5px; }
+  .fn .d { font-size: 12.5px; color: var(--ink-2); line-height: 1.4; }
+  .fn .t, .fn .d { overflow-wrap: anywhere; }
+  .fn code { white-space: normal; overflow-wrap: anywhere; }
+  .fn.fe { border-color: var(--blue); background: var(--blue-soft); }
+  .fn.be { border-color: var(--brand); background: var(--brand-soft); }
+  .fn.db { border-color: var(--teal); background: var(--teal-soft); }
+  .fn.ext { border-color: var(--amber); background: var(--amber-soft); }
+  .arw { align-self: center; padding: 0 7px; color: var(--ink-3); font-family: var(--mono); font-size: 19px; flex: 0 0 auto; }
+
+  /* endpoint table */
+  .tbl-wrap { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; min-width: 560px; font-size: 14px; table-layout: fixed; }
+  th, td { text-align: left; padding: 10px 16px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th:nth-child(1), td:nth-child(1) { width: 34%; }
+  th:nth-child(2), td:nth-child(2) { width: 30%; }
+  thead th {
+    font-family: var(--mono); font-size: 11.5px; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--ink-3); font-weight: 600; background: var(--surface-2);
+  }
+  tbody tr:last-child td { border-bottom: 0; }
+  td.m { font-family: var(--mono); font-size: 12.5px; color: var(--ink); overflow-wrap: anywhere; line-height: 1.5; }
+  td.m code, td.n code { white-space: normal; }
+  td.n { color: var(--ink-2); }
+  td.num { font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--ink-2); text-align: right; white-space: nowrap; }
+  .was { color: var(--ink-3); text-decoration: line-through; }
+
+  /* notes */
+  .note {
+    display: flex; gap: 13px;
+    border-radius: 12px; padding: 14px 16px;
+    font-size: 14.5px; margin-top: 18px;
+    background: var(--amber-soft);
+    border: 1px solid color-mix(in srgb, var(--amber) 40%, transparent);
+  }
+  .note .ni { color: var(--amber); font-weight: 700; flex: 0 0 auto; font-family: var(--mono); font-size: 12.5px; letter-spacing: .06em; text-transform: uppercase; padding-top: 2px; }
+  .note div p { margin: 0 0 6px; }
+  .note div p:last-child { margin-bottom: 0; }
+
+  footer {
+    margin-top: 54px; border-top: 1px solid var(--line);
+    padding: 24px 0 44px; color: var(--ink-3); font-size: 13.5px;
+  }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <div class="eyebrow">MGT Document OCR → SAP S/4HANA</div>
+    <h1>แผนผังโครงสร้างโปรเจกต์ — ตามโค้ดจริงในดิสก์</h1>
+    <p class="lede">อ่านจากโฟลเดอร์ <code>D:\Sukanya\WorkSpace\02_OCR\OCR</code> โดยตรง ทุกชื่อไฟล์/โฟลเดอร์ในหน้านี้มีอยู่จริงในเครื่อง — ใช้แทนแผนผังเดิมที่วาดไว้ตอนวางแผน (frontend/ + backend/Controllers,Services,DTOs…) ซึ่งไม่ตรงกับสิ่งที่ build อยู่ทุกวันนี้</p>
+    <div class="chips">
+      <span class="chip"><b>Solution</b> · MgtOcr.slnx · 5 src + 2 tests</span>
+      <span class="chip"><b>Backend</b> · .NET 10 · Dapper + SqlClient</span>
+      <span class="chip"><b>Frontend</b> · React 19 · Vite 8 · TS 6</span>
+      <span class="chip"><b>DB</b> · SQL Server · schema ocr · 16 ตาราง</span>
+      <span class="chip"><b>Modules</b> · AP · PODP · II · SO</span>
+    </div>
+  </div>
+</header>
+
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="kicker">Solution</div>
+      <h2>7 projects และทิศทางการอ้างอิง</h2>
+      <p>ไม่ใช่ backend โปรเจกต์เดียวที่แบ่งเป็นโฟลเดอร์ แต่เป็น .NET class library แยกกัน 5 ตัว (+ unit test 2 ตัว) ทุกเส้นคือ <code>ProjectReference</code> จริงใน <code>.csproj</code> — ชี้เข้าหา <code>Core</code> เสมอ และไม่มีเส้นย้อนกลับ</p>
+    </div>
+    <div class="board">
+      <svg viewBox="0 0 780 300" role="img" aria-label="แผนผังการอ้างอิงระหว่าง 5 โปรเจกต์: Api อ้างถึง Ocr, Data, Sap และ Core ส่วน Ocr, Data, Sap อ้างถึง Core">
+        <defs>
+          <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--ink-3)"></path>
+          </marker>
+        </defs>
+
+        <!-- edges: Api -> middle -->
+        <path d="M 178 150 C 220 150, 220 55, 292 55" fill="none" stroke="var(--ink-3)" stroke-width="1.4" marker-end="url(#ah)"></path>
+        <path d="M 178 150 L 292 150" fill="none" stroke="var(--ink-3)" stroke-width="1.4" marker-end="url(#ah)"></path>
+        <path d="M 178 150 C 220 150, 220 245, 292 245" fill="none" stroke="var(--ink-3)" stroke-width="1.4" marker-end="url(#ah)"></path>
+        <!-- edges: middle -> Core -->
+        <path d="M 448 55 C 520 55, 520 150, 572 150" fill="none" stroke="var(--ink-3)" stroke-width="1.4" marker-end="url(#ah)"></path>
+        <path d="M 448 150 L 572 150" fill="none" stroke="var(--ink-3)" stroke-width="1.4" marker-end="url(#ah)"></path>
+        <path d="M 448 245 C 520 245, 520 150, 572 150" fill="none" stroke="var(--ink-3)" stroke-width="1.4" marker-end="url(#ah)"></path>
+        <!-- Api -> Core direct -->
+        <path d="M 110 118 C 110 30, 300 14, 640 14 L 640 118" fill="none" stroke="var(--ink-3)" stroke-width="1.2" stroke-dasharray="4 4" marker-end="url(#ah)"></path>
+        <text x="375" y="9" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="var(--ink-3)">Api อ้าง Core โดยตรงด้วย</text>
+
+        <!-- Api -->
+        <rect x="20" y="118" width="158" height="64" rx="9" fill="var(--brand-soft)" stroke="var(--brand)" stroke-width="1.4"></rect>
+        <text x="99" y="143" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="13.5" font-weight="600" fill="var(--brand)">MgtOcr.Api</text>
+        <text x="99" y="162" text-anchor="middle" font-family="IBM Plex Sans Thai, sans-serif" font-size="11.5" fill="var(--ink-2)">Web · Controllers · DI</text>
+
+        <!-- Ocr -->
+        <rect x="292" y="23" width="156" height="64" rx="9" fill="var(--surface-2)" stroke="var(--line-2)" stroke-width="1.4"></rect>
+        <text x="370" y="48" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="13.5" font-weight="600" fill="var(--ink)">MgtOcr.Ocr</text>
+        <text x="370" y="67" text-anchor="middle" font-family="IBM Plex Sans Thai, sans-serif" font-size="11.5" fill="var(--ink-2)">อ่านเอกสาร · 6 providers</text>
+
+        <!-- Data -->
+        <rect x="292" y="118" width="156" height="64" rx="9" fill="var(--teal-soft)" stroke="var(--teal)" stroke-width="1.4"></rect>
+        <text x="370" y="143" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="13.5" font-weight="600" fill="var(--teal)">MgtOcr.Data</text>
+        <text x="370" y="162" text-anchor="middle" font-family="IBM Plex Sans Thai, sans-serif" font-size="11.5" fill="var(--ink-2)">Dapper → SQL Server</text>
+
+        <!-- Sap -->
+        <rect x="292" y="213" width="156" height="64" rx="9" fill="var(--amber-soft)" stroke="var(--amber)" stroke-width="1.4"></rect>
+        <text x="370" y="238" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="13.5" font-weight="600" fill="var(--amber)">MgtOcr.Sap</text>
+        <text x="370" y="257" text-anchor="middle" font-family="IBM Plex Sans Thai, sans-serif" font-size="11.5" fill="var(--ink-2)">payload → SAP OData</text>
+
+        <!-- Core -->
+        <rect x="572" y="118" width="158" height="64" rx="9" fill="var(--surface)" stroke="var(--ink)" stroke-width="1.6"></rect>
+        <text x="651" y="143" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="13.5" font-weight="600" fill="var(--ink)">MgtOcr.Core</text>
+        <text x="651" y="162" text-anchor="middle" font-family="IBM Plex Sans Thai, sans-serif" font-size="11.5" fill="var(--ink-2)">mapping · config · json</text>
+        <text x="651" y="196" text-anchor="middle" font-family="IBM Plex Sans Thai, sans-serif" font-size="11" fill="var(--ink-3)">ไม่อ้างถึงใครเลย</text>
+      </svg>
+      <div class="cap"><b>Tests:</b> <code>backend/tests/MgtOcr.Core.Tests</code> และ <code>MgtOcr.Ocr.Tests</code> — xUnit ทั้งคู่ อ้างถึง src ที่ตัวเองทดสอบเท่านั้น (ยังไม่มีไฟล์เทสต์ในนั้น มีแต่ <code>.csproj</code>)</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="kicker">Backend</div>
+      <h2>ไฟล์จริงในแต่ละโปรเจกต์</h2>
+      <p>ทั้งหมดอยู่ใต้ <code>backend/src/</code> — 44 ไฟล์ <code>.cs</code> รวมกัน ไม่มีโฟลเดอร์ <code>Services/</code> <code>DTOs/</code> <code>Models/</code> <code>Repositories/</code> <code>Validation/</code> แบบในแผนผังเดิม หน้าที่พวกนั้นถูกกระจายไปอยู่ในโปรเจกต์ที่รับผิดชอบแทน</p>
+    </div>
+    <div class="cols">
+
+      <div class="panel be">
+        <div class="panel-h"><span class="rail"></span><h3>MgtOcr.Api/</h3><span class="sub">จุดเข้า · :8091</span></div>
+        <div class="tree">
+          <div class="grp">
+            <div class="p">Controllers/ <span class="dim">— 7 ไฟล์</span></div>
+            <div class="d">รับทุก <code>/api/*</code> เรียกต่อไปยัง Ocr / Data / Sap</div>
+            <div class="files">
+              <span class="f hi">DocumentsController.cs</span><span class="f">MastersController.cs</span><span class="f">DashboardController.cs</span><span class="f">OcrController.cs</span><span class="f">LogsController.cs</span><span class="f">AuditLogController.cs</span><span class="f">HealthController.cs</span>
+            </div>
+          </div>
+          <div class="grp">
+            <div class="p">Program.cs</div>
+            <div class="d">อ่าน <code>appsettings.json</code> → ลงทะเบียน DI → เสิร์ฟ <code>webfront/dist</code> + SPA fallback</div>
+          </div>
+          <div class="grp">
+            <div class="p">ExtConversion.cs · appsettings.json</div>
+            <div class="d">helper แปลงชนิดข้อมูล และ config 5 section: <code>Database</code> · <code>App</code> · <code>Ocr</code> · <code>Sap</code> · <code>ConnectionStrings</code></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel be">
+        <div class="panel-h"><span class="rail"></span><h3>MgtOcr.Core/</h3><span class="sub">business logic ล้วน</span></div>
+        <div class="tree">
+          <div class="grp">
+            <div class="p">Mapping/</div>
+            <div class="d">หัวใจของระบบ — จับคู่ค่าที่อ่านได้กับข้อมูลหลัก</div>
+            <div class="files"><span class="f hi">MappingEngine.cs</span><span class="f">MappingHelpers.cs</span><span class="f">MasterData.cs</span></div>
+          </div>
+          <div class="grp">
+            <div class="p">Json/</div>
+            <div class="d">ตัวแปลง JSON ให้เข้ากันกับรูปแบบเดิมสมัยเป็น Python</div>
+            <div class="files"><span class="f">PyJson.cs</span><span class="f">PythonCompatConverters.cs</span><span class="f">JsonBodyHelpers.cs</span></div>
+          </div>
+          <div class="grp">
+            <div class="p">Config/AppConfig.cs <span class="dim">· DynamicRow.cs · HttpApiException.cs</span></div>
+            <div class="d">ค่าตั้งค่าทั้งระบบรวมอยู่ที่ <code>AppConfig</code> ตัวเดียว</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel be">
+        <div class="panel-h"><span class="rail"></span><h3>MgtOcr.Ocr/</h3><span class="sub">18 ไฟล์ · ใหญ่สุด</span></div>
+        <div class="tree">
+          <div class="grp">
+            <div class="p">Providers/ <span class="dim">— 6 เจ้า</span></div>
+            <div class="d">แต่ละไฟล์ห่อ API ของผู้ให้บริการหนึ่งราย</div>
+            <div class="files"><span class="f">TesseractOcr.cs</span><span class="f">AzureOcr.cs</span><span class="f">ClaudeOcr.cs</span><span class="f">GeminiOcr.cs</span><span class="f">OpenAiOcr.cs</span><span class="f">TyphoonOcr.cs</span></div>
+          </div>
+          <div class="grp">
+            <div class="p">OcrEngine.cs</div>
+            <div class="d">ทะเบียน engine ที่โชว์ใน dropdown — จริงๆ มี <b>10 ตัวเลือก</b> ไม่ใช่ 6: <code>auto</code>, <code>text</code>, <code>tesseract</code>, <code>typhoon</code>, <code>azure</code>, <code>claude_text</code>, <code>claude</code>, <code>gemini</code>, <code>openai</code>, <code>demo</code></div>
+          </div>
+          <div class="grp">
+            <div class="p">parser + finder</div>
+            <div class="d">แยกหัวเอกสาร/บรรทัด และเดาค่าเฉพาะทาง</div>
+            <div class="files"><span class="f">HeaderParser.cs</span><span class="f">LineParser.cs</span><span class="f">AmountFinder.cs</span><span class="f">DateFinder.cs</span><span class="f">CompanyFinder.cs</span><span class="f">ChatFix.cs</span><span class="f">VisionPrompt.cs</span></div>
+          </div>
+          <div class="grp">
+            <div class="p">PdfExtraction.cs · PdfRasterizer.cs</div>
+            <div class="d">ดึง text layer (PdfPig) และแปลง PDF เป็นภาพ (PDFtoImage) — โปรเจกต์นี้ถูกมาร์กเป็น <code>windows-only</code></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel db">
+        <div class="panel-h"><span class="rail"></span><h3>MgtOcr.Data/ &amp; MgtOcr.Sap/</h3><span class="sub">ขาออกทั้งสองทาง</span></div>
+        <div class="tree">
+          <div class="grp">
+            <div class="p">Data/ <span class="dim">— Dapper</span></div>
+            <div class="d">ทุก query/insert/update ผ่านที่นี่ที่เดียว</div>
+            <div class="files"><span class="f">Db.cs</span><span class="f">DbConnectionFactory.cs</span><span class="f">DocumentRepository.cs</span><span class="f">DocumentTables.cs</span><span class="f">MasterRepository.cs</span><span class="f">MasterDefinitions.cs</span></div>
+          </div>
+          <div class="grp">
+            <div class="p">Sap/ <span class="dim">— 2 ไฟล์</span></div>
+            <div class="d">ประกอบ payload แล้วยิงเข้า SAP — ถ้า <code>Sap:BaseUrl</code> ว่าง จะเป็นโหมดจำลอง</div>
+            <div class="files"><span class="f">SapPayloadBuilder.cs</span><span class="f">SapClient.cs</span></div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="kicker">Frontend</div>
+      <h2><code>webfront/</code> — ไม่ใช่ <code>frontend/</code></h2>
+      <p>React 19 + TypeScript 6 บน Vite 8 · จัดเป็น 8 โฟลเดอร์ใต้ <code>src/</code> · ไม่มี <code>routes/</code> <code>layouts/</code> <code>services/</code> <code>types/</code> แยก — route อยู่ใน <code>App.tsx</code>, layout เป็นคอมโพเนนต์ตัวหนึ่ง, การเรียก API อยู่ใน <code>api/</code></p>
+    </div>
+    <div class="cols">
+      <div class="panel fe">
+        <div class="panel-h"><span class="rail"></span><h3>src/ — ข้อมูล &amp; สถานะ</h3><span class="sub">คุยกับ backend</span></div>
+        <div class="tree">
+          <div class="grp">
+            <div class="p">api/ <span class="dim">— 6 ไฟล์</span></div>
+            <div class="d"><code>client.ts</code> ห่อ fetch + จัดการ error · ที่เหลือแยกตามกลุ่ม endpoint พร้อม type</div>
+            <div class="files"><span class="f">client.ts</span><span class="f">documents.ts</span><span class="f">masters.ts</span><span class="f">dashboard.ts</span><span class="f">types.ts</span><span class="f">mocks.ts</span></div>
+          </div>
+          <div class="grp">
+            <div class="p">state/</div>
+            <div class="d"><code>AppState.tsx</code> ธีม/เมนู/busy/toast · <code>MetaContext.tsx</code> cache masters &amp; providers</div>
+          </div>
+          <div class="grp">
+            <div class="p">constants/fields.ts</div>
+            <div class="d">ไฟล์เดียวที่นิยาม field ของทุก module และ schema ของ master — เพิ่มช่องใหม่แก้ที่นี่</div>
+          </div>
+          <div class="grp">
+            <div class="p">utils/ · hooks/ · styles/</div>
+            <div class="d"><code>format.ts</code> · <code>dupes.ts</code> · <code>useThemeColors.ts</code> · <code>legacy.css</code> (ดีไซน์เดิมยกมาทั้งก้อน)</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel fe">
+        <div class="panel-h"><span class="rail"></span><h3>src/ — หน้าจอ &amp; UI</h3><span class="sub">8 หน้า · 21 คอมโพเนนต์</span></div>
+        <div class="tree">
+          <div class="grp">
+            <div class="p">pages/ <span class="dim">— 8 ไฟล์</span></div>
+            <div class="d">route จริงใน <code>App.tsx</code>: <code>/</code> · <code>/import/:module</code> · <code>/doc/:docId</code> · <code>/list/:module</code> · <code>/master</code> · <code>/log</code> · <code>/audit-log</code> · <code>/404</code></div>
+            <div class="files"><span class="f">HomePage</span><span class="f">ImportPage</span><span class="f hi">DocumentPage</span><span class="f">InboxPage</span><span class="f">MasterPage</span><span class="f">LogPage</span><span class="f">AuditLogPage</span><span class="f">NotFoundPage</span></div>
+          </div>
+          <div class="grp">
+            <div class="p">components/document/ <span class="dim">— 11 ไฟล์</span></div>
+            <div class="d">หน้าจอแก้เอกสารคือส่วนที่หนักที่สุดของ UI</div>
+            <div class="files"><span class="f">FieldGrid</span><span class="f">DetailTable</span><span class="f">MappingCards</span><span class="f">ChatFixCard</span><span class="f">SplitModal</span><span class="f">TaxDataTable</span><span class="f">WhtTable</span><span class="f">GlItemsTable</span><span class="f">IncomingInvoiceCard</span><span class="f">LineExtraModal</span><span class="f">TabbedGroups</span></div>
+          </div>
+          <div class="grp">
+            <div class="p">components/ <span class="dim">ส่วนกลาง</span></div>
+            <div class="files"><span class="f">AppLayout</span><span class="f">GlobalToast</span><span class="f">Modal</span><span class="f">Pager</span><span class="f">Steps</span><span class="f">OcrProviderSelect</span><span class="f">PagePlaceholder</span><span class="f">dashboard/DashCharts</span><span class="f">dashboard/StatTile</span><span class="f">master/MasterEditModal</span></div>
+          </div>
+          <div class="grp">
+            <div class="p">App.tsx · navConfig.tsx · main.tsx</div>
+            <div class="d">เมนูซ้ายจัดเป็น 6 กลุ่มตาม module — <code>navConfig</code> กับ <code>App.tsx</code> ต้อง sync กันเสมอ</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="kicker">Runtime</div>
+      <h2>ข้อมูลไหลจริงตอนอัปโหลดเอกสารหนึ่งใบ</h2>
+      <p>ลำดับนี้คือ endpoint จริงที่ถูกเรียกเรียงกันใน <code>DocumentsController</code> ตั้งแต่อัปโหลดจนโพสต์เข้า SAP</p>
+    </div>
+    <div class="flow">
+      <div class="fn fe"><span class="k">1 · Browser</span><span class="t">ImportPage</span><span class="d">เลือกไฟล์ + engine → <code>POST /api/documents/upload</code></span></div>
+      <div class="arw">→</div>
+      <div class="fn be"><span class="k">2 · Api</span><span class="t">DocumentsController</span><span class="d">เซฟไฟล์ลง <code>uploads/</code> แล้วเรียก OcrEngine</span></div>
+      <div class="arw">→</div>
+      <div class="fn ext"><span class="k">3 · Ocr</span><span class="t">Provider ที่เลือก</span><span class="d">text layer / Tesseract / Vision API</span></div>
+      <div class="arw">→</div>
+      <div class="fn be"><span class="k">4 · Core</span><span class="t">MappingEngine</span><span class="d"><code>POST …/map</code> จับคู่กับ master</span></div>
+      <div class="arw">→</div>
+      <div class="fn db"><span class="k">5 · Data</span><span class="t">DocumentRepository</span><span class="d">บันทึกลง <code>ocr.Document</code> + <code>ocr.DocumentLine</code></span></div>
+      <div class="arw">→</div>
+      <div class="fn ext"><span class="k">6 · Sap</span><span class="t">SapClient</span><span class="d"><code>POST …/post</code> → log ลง <code>ocr.PostLog</code></span></div>
+    </div>
+    <div class="note">
+      <span class="ni">แก้ตรงไหน</span>
+      <div>
+        <p>ระหว่างขั้น 2–4 มี endpoint ช่วยแก้งานอีกชุด — <code>…/reocr</code> (อ่านใหม่ด้วย engine อื่น), <code>…/chat-fix</code> (ให้ AI แก้ค่าที่อ่านผิด), <code>…/split</code> (แยกเอกสารที่รวมกันมาหลายใบ), <code>…/learn</code> (จำการจับคู่ของผู้ขายรายนั้นไว้ใน <code>ocr.VendorMemory</code>)</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="kicker">Database &amp; Infra</div>
+      <h2>ส่วนที่แผนผังเดิมไม่มีเลย</h2>
+      <p>สคีมาไม่ได้อยู่ในโค้ด C# แต่อยู่ในสคริปต์ SQL 18 ไฟล์ที่รันเรียงเลข — เป็น migration ตามลำดับเวลา</p>
+    </div>
+    <div class="cols">
+      <div class="panel db">
+        <div class="panel-h"><span class="rail"></span><h3>sql/ + init_db.bat</h3><span class="sub">schema ocr · 16 ตาราง</span></div>
+        <div class="tree">
+          <div class="grp">
+            <div class="p">01–17 <span class="dim">+ 90_seed_sample.sql</span></div>
+            <div class="d">เพิ่มตารางใหม่ = สร้าง <code>NN_xxx.sql</code> แล้วเติมบรรทัดรันใน <code>init_db.bat</code></div>
+          </div>
+          <div class="grp">
+            <div class="p">ตารางเอกสาร</div>
+            <div class="files"><span class="f hi">ocr.Document</span><span class="f">ocr.DocumentLine</span><span class="f">ocr.DocumentChat</span><span class="f">ocr.SalesOrder</span><span class="f">ocr.SalesOrderLine</span><span class="f">ocr.SalesOrderChat</span></div>
+          </div>
+          <div class="grp">
+            <div class="p">ตารางข้อมูลหลัก</div>
+            <div class="files"><span class="f">ocr.Vendor</span><span class="f">ocr.Customer</span><span class="f">ocr.Material</span><span class="f">ocr.VendorMaterial</span><span class="f">ocr.CustomerMaterial</span><span class="f">ocr.ShipTo</span><span class="f">ocr.UomConversion</span><span class="f">ocr.VendorMemory</span></div>
+          </div>
+          <div class="grp">
+            <div class="p">ตารางบันทึก</div>
+            <div class="files"><span class="f">ocr.PostLog</span><span class="f">ocr.AuditLog</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel inf">
+        <div class="panel-h"><span class="rail"></span><h3>รากโปรเจกต์</h3><span class="sub">ไฟล์ที่ไม่ใช่โค้ด</span></div>
+        <div class="tree">
+          <div class="grp">
+            <div class="p">tessdata/</div>
+            <div class="d">โมเดลภาษาของ Tesseract — <code>tha</code> · <code>eng</code> · <code>osd</code> (จำเป็นตอนอ่านเอกสารสแกนไทย)</div>
+          </div>
+          <div class="grp">
+            <div class="p">uploads/ <span class="dim">— gitignored</span></div>
+            <div class="d">ไฟล์ต้นฉบับที่อัปโหลดเข้ามา ตั้งชื่อ <code>YYYYMMDD_HHMMSS_ชื่อเดิม.pdf</code> · มีโฟลเดอร์ย่อย <code>chat/</code></div>
+          </div>
+          <div class="grp">
+            <div class="p">README.md <span class="dim">— 20 KB</span></div>
+            <div class="d">คู่มือฉบับเต็มของโปรเจกต์ (แผนผังเดิมวาดว่ามี <code>docs/</code> 4 โฟลเดอร์ — จริงๆ ยังไม่มี ทุกอย่างรวมอยู่ในไฟล์นี้ไฟล์เดียว)</div>
+          </div>
+          <div class="grp">
+            <div class="p">.vscode/ · .github/ · MgtOcr.slnx</div>
+            <div class="d"><code>.github/workflows/</code> ถูกสร้างไว้แล้วแต่ยังว่าง — ยังไม่มี CI</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="kicker">สรุปความต่าง</div>
+      <h2>แผนผังเดิม → ของจริง</h2>
+    </div>
+    <div class="tbl-wrap">
+      <table>
+        <thead>
+          <tr><th>ในแผนผังเดิม</th><th>ของจริงในดิสก์</th><th>หมายเหตุ</th></tr>
+        </thead>
+        <tbody>
+          <tr><td class="m was">frontend/src/</td><td class="m">webfront/src/</td><td class="n">ชื่อโฟลเดอร์คนละชื่อ</td></tr>
+          <tr><td class="m was">backend/Controllers, Services, DTOs, Models, Repositories, Validation, Mapping, OCR, Integrations, Database</td><td class="m">backend/src/ → 5 .csproj</td><td class="n">แยกเป็นโปรเจกต์จริง ไม่ใช่โฟลเดอร์ในโปรเจกต์เดียว — บังคับทิศทาง dependency ได้ที่ compile time</td></tr>
+          <tr><td class="m was">docs/requirements, api, mapping, flows</td><td class="m">README.md</td><td class="n">ยังไม่มี <code>docs/</code></td></tr>
+          <tr><td class="m was">components/{common,document,invoice,upload}</td><td class="m">components/{document,dashboard,master}</td><td class="n">แยกตามหน้าที่จริง ไม่มี invoice/ กับ upload/</td></tr>
+          <tr><td class="m was">routes/ · layouts/ · services/ · types/</td><td class="m">App.tsx · AppLayout.tsx · api/</td><td class="n">ยุบเข้าไปในไฟล์เดียว/โฟลเดอร์เดียว</td></tr>
+          <tr><td class="m was">—</td><td class="m">sql/ · init_db.bat · tessdata/ · uploads/</td><td class="n">มีอยู่จริงแต่แผนผังเดิมไม่ได้วาดไว้</td></tr>
+          <tr><td class="m was">—</td><td class="m">backend/tests/ × 2</td><td class="n">โครง xUnit พร้อมแล้ว ยังไม่มีเทสต์</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="note">
+      <span class="ni">ควรแก้</span>
+      <div>
+        <p><code>backend/src/MgtOcr.Api/appsettings.json</code> ถูก track อยู่ใน git และมีรหัสผ่าน SQL <code>sa</code> กับ API key ของ Gemini อยู่ในไฟล์จริง (<code>.gitignore</code> กัน <code>.env</code> ไว้ แต่ไม่ได้กัน <code>appsettings.json</code>)</p>
+        <p>ทางแก้ตามลำดับ: ย้ายค่าลับไปเป็น environment variable แบบ <code>Ocr__GeminiApiKey</code> / <code>Database__Password</code> (ASP.NET อ่านทับ appsettings ให้อยู่แล้ว) → เพิ่ม <code>appsettings.json</code> ใน <code>.gitignore</code> พร้อมทิ้ง <code>appsettings.Example.json</code> ไว้เป็นแบบ → เปลี่ยนรหัสผ่านและ rotate API key เพราะค่าเดิมอยู่ใน git history แล้ว</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    อ่านจาก repo เมื่อ 7 กันยายน 2569 · MgtOcr.slnx · backend .NET 10 · webfront React 19 / Vite 8 · ใช้คู่กับ MGTOCRBlueprint.html (คู่มือ “จะเพิ่มงานตรงไหน”)
+  </div>
+</footer>
+
+</body>
+</html>

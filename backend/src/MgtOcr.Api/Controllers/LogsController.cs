@@ -30,7 +30,7 @@ public class LogsController(Db db) : ControllerBase
     public async Task<IActionResult> LogPayload(int logId)
     {
         var r = await db.QueryOneAsync("SELECT PayloadJson FROM ocr.PostLog WHERE LogId=@logId", new { logId });
-        if (r == null) throw new HttpApiException(404, "ไม่พบ log");
+        if (r == null) throw new HttpApiException(404, "Log not found");
         string json = r.PayloadJson ?? "{}";
         return Content(json, "application/json");
     }

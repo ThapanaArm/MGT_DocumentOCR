@@ -1,4 +1,5 @@
 import type { ModuleCode } from './api/types';
+import type { Me } from './api/me';
 
 /* =====================================================================
    Sidebar navigation — mirrors the grouped nav in the old index.html
@@ -25,22 +26,24 @@ export const MODULE_LABEL: Record<ModuleCode, string> = {
   SO: 'Sales Order',
 };
 
-const IMPORT = '⚍'; // ☱
-const LIST = '☰'; // ☰
-const OVERVIEW = '▣'; // ▣
-const MASTER = '⚑'; // ⚑
-const LOG = '☷'; // ☷
-const AUDIT = '⚑'; // ⚑
+const IMPORT = 'fa-solid fa-file-import';
+const LIST = 'fa-solid fa-list';
+const OVERVIEW = 'fa-solid fa-gauge-high';
+const MASTER = 'fa-solid fa-flag';
+const LOG = 'fa-solid fa-clock-rotate-left';
+const AUDIT = 'fa-solid fa-clipboard-check';
 
 export const navSections: NavSection[] = [
   {
     items: [{ label: 'Overview', to: '/', icon: OVERVIEW }],
   },
   {
-    title: 'SUPPLIER INVOICE',
+    // Single Liability-Recording (AP) reading flow. On read, a PO number routes to
+    // Supplier Invoice (MIRO / with PO); no PO routes to Incoming Invoice (FB60 / no PO).
+    title: 'INVOICE (LIABILITY RECORDING)',
     items: [
-      { label: 'Import Supplier Invoice', to: '/import/AP', icon: IMPORT, module: 'AP' },
-      { label: 'Supplier Invoice List', to: '/list/AP', icon: LIST, module: 'AP' },
+      { label: 'Import Invoice', to: '/import/AP', icon: IMPORT, module: 'AP' },
+      { label: 'Invoice List', to: '/list/AP', icon: LIST, module: 'AP' },
     ],
   },
   {
@@ -48,13 +51,6 @@ export const navSections: NavSection[] = [
     items: [
       { label: 'Import PO Down Payment', to: '/import/PODP', icon: IMPORT, module: 'PODP' },
       { label: 'PO Down Payment List', to: '/list/PODP', icon: LIST, module: 'PODP' },
-    ],
-  },
-  {
-    title: 'INCOMING INVOICES',
-    items: [
-      { label: 'Import Incoming Invoice', to: '/import/II', icon: IMPORT, module: 'II' },
-      { label: 'Incoming Invoice List', to: '/list/II', icon: LIST, module: 'II' },
     ],
   },
   {
@@ -76,3 +72,33 @@ export const navSections: NavSection[] = [
     ],
   },
 ];
+
+/* =====================================================================
+   Department-based visibility — mirrors the server policy in
+   DepartmentAccess.cs. The nav keys off the *tab* modules (AP, PODP, SO);
+   II is folded into the AP / Invoice tab, so it needs no nav entry.
+   ===================================================================== */
+
+const DEPARTMENT_MODULES: Record<string, ModuleCode[]> = {
+  finance: ['AP', 'II'],
+  purchase: ['PODP'],
+  csr: ['SO'],
+};
+
+type Access = Pick<Me, 'role' | 'department'>;
+
+// Modules this user may access. Admin => all; a mapped department => its set; anyone else => none.
+export function allowedModules(me: Access): ModuleCode[] {
+  if ((me.role || '').trim().toLowerCase() === 'admin') return ['AP', 'PODP', 'II', 'SO'];
+  return DEPARTMENT_MODULES[(me.department || '').trim().toLowerCase()] ?? [];
+}
+
+// Nav sections this user should see: sections whose items carry a module are kept only when that
+// module is allowed; module-less sections (Overview, Master Data, Log) always show.
+export function visibleNavSections(me: Access | null): NavSection[] {
+  if (!me) return navSections; // still resolving — routes stay API-guarded regardless
+  const allow = new Set<ModuleCode>(allowedModules(me));
+  return navSections
+    .map((s) => ({ ...s, items: s.items.filter((it) => !it.module || allow.has(it.module)) }))
+    .filter((s) => s.items.length > 0);
+}

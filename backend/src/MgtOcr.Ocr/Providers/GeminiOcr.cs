@@ -11,16 +11,18 @@ public static class GeminiOcr
 {
     private static readonly HttpClient Http = new();
 
-    public static async Task<ParsedDocument?> VisionExtractAsync(string path, string module, AppConfig config)
+    public static async Task<(ParsedDocument? Doc, string? Error)> VisionExtractAsync(string path, string module, AppConfig config)
     {
-        if (string.IsNullOrEmpty(config.GeminiApiKey)) return null;
+        if (string.IsNullOrEmpty(config.GeminiApiKey))
+            return (null, "GeminiApiKey is empty in config \u2014 appsettings Ocr:GeminiApiKey was not loaded by the running app (check which appsettings.json/appsettings.{Env}.json the process reads, and that it was restarted)");
         try
         {
             var ext = Path.GetExtension(path).ToLowerInvariant();
             var imgs = ext == ".pdf"
                 ? PdfRasterizer.RenderPagesToPng(path, maxPages: 3, dpi: 200)
                 : [await File.ReadAllBytesAsync(path)];
-            if (imgs.Count == 0) return null;
+            if (imgs.Count == 0)
+                return (null, $"Could not rasterize '{Path.GetFileName(path)}' to images (renderer produced 0 pages \u2014 check the PDF rasterizer on the server)");
 
             var parts = new List<object> { new { text = VisionPrompt.Build(module) } };
             parts.AddRange(imgs.Select(b => (object)new { inline_data = new { mime_type = "image/png", data = Convert.ToBase64String(b) } }));
@@ -38,16 +40,19 @@ public static class GeminiOcr
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(90));
             using var resp = await Http.SendAsync(req, cts.Token);
             var respText = await resp.Content.ReadAsStringAsync(cts.Token);
-            if (!resp.IsSuccessStatusCode) return null;
+            if (!resp.IsSuccessStatusCode)
+                return (null, $"Gemini HTTP {(int)resp.StatusCode} (model={config.GeminiModel}): {Trunc(respText, 400)}");
 
             var raw = ExtractText(respText);
-            return VisionPrompt.ParseResponse(raw, module, "gemini", 0.87, raw);
+            return (VisionPrompt.ParseResponse(raw, module, "gemini", 0.87, raw), null);
         }
-        catch
+        catch (Exception ex)
         {
-            return null;
+            return (null, $"Gemini request failed: {ex.GetType().Name}: {ex.Message}");
         }
     }
+
+    private static string Trunc(string s, int max) => string.IsNullOrEmpty(s) || s.Length <= max ? s : s.Substring(0, max) + "\u2026";
 
     private static string ExtractText(string responseJson)
     {

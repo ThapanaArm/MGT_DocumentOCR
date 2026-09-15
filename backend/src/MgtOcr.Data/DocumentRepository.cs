@@ -135,7 +135,7 @@ public partial class DocumentRepository(Db db, string uploadDir)
         var filled = await ApplyVendorMemoryAsync(module, header);
         if (filled.Count > 0)
         {
-            var note = "เติมข้อมูลจากคู่ค้าเดิมที่เคยยืนยันไว้ (ไม่ได้อ่านจากเอกสารนี้โดยตรง): " + string.Join(", ", filled);
+            var note = "Filled from a previously confirmed partner (not read directly from this document): " + string.Join(", ", filled);
             var existing = ext.GetStr("confidenceNote");
             ext["confidenceNote"] = existing.Length > 0 ? $"{existing} / {note}" : note;
         }
@@ -171,7 +171,7 @@ public partial class DocumentRepository(Db db, string uploadDir)
         });
 
         await SaveLinesAsync(module, docId, (List<Dictionary<string, object?>>)ext["lines"]!);
-        await LogAuditAsync(docId, module, "CREATE", user, detail: "นำเข้าเอกสารใหม่",
+        await LogAuditAsync(docId, module, "CREATE", user, detail: "Imported new document",
             docNo: d.GetStr("DocNo"), fileName: fileName, ocrProvider: ext.GetStr("provider"));
         return docId;
     }
@@ -209,7 +209,7 @@ public partial class DocumentRepository(Db db, string uploadDir)
     {
         var t = DocumentTables.ForId(docId);
         var row = await db.QueryOneAsync($"SELECT * FROM {t.Doc} WHERE DocId=@docId", new { docId });
-        if (row == null) throw new HttpApiException(404, "ไม่พบเอกสาร");
+        if (row == null) throw new HttpApiException(404, "Document not found");
         // Explicit type (not var): `row` is dynamic, and passing a dynamic argument makes the whole
         // call-site expression type `dynamic` too unless the target is annotated — that broke the
         // `is { Length: > 0 }` pattern match further down, which needs a real static string type.
@@ -275,7 +275,8 @@ public partial class DocumentRepository(Db db, string uploadDir)
 
     // Ported from list_documents() (main.py:466-491): SO queries ocr.SalesOrder alone; any other
     // specific module queries ocr.Document filtered by Module; no module unions both tables.
-    public async Task<IEnumerable<dynamic>> ListDocumentsAsync(string module, string status, string apDocCategory, int limit)
+    public async Task<IEnumerable<dynamic>> ListDocumentsAsync(string module, string status, string apDocCategory, int limit,
+        IReadOnlyCollection<string>? allowedModules = null)
     {
         var mod = module.ToUpperInvariant();
         var where = new List<string>();
@@ -287,17 +288,35 @@ public partial class DocumentRepository(Db db, string uploadDir)
         {
             var table = mod == "SO" ? "ocr.SalesOrder" : "ocr.Document";
             var w = new List<string>(where);
-            if (mod != "SO") { w.Insert(0, "Module=@module"); p.Add("module", mod); }
+            // AP = liability-recording umbrella: Supplier Invoice (with PO) + Incoming Invoice
+            // (without PO), both stored in ocr.Document.
+            if (mod == "AP") { w.Insert(0, "Module IN ('AP','II')"); }
+            else if (mod != "SO") { w.Insert(0, "Module=@module"); p.Add("module", mod); }
             var whereSql = w.Count > 0 ? " WHERE " + string.Join(" AND ", w) : "";
             p.Add("limit", limit);
             return await db.QueryAsync($"SELECT TOP (@limit) {DocListCols} FROM {table}{whereSql} ORDER BY DocId DESC", p);
         }
 
+        // No specific tab: union across the tables, restricted to the modules the caller may
+        // see. allowedModules == null means "no restriction" (for callers that do not pass it).
+        IReadOnlyCollection<string> allow = allowedModules ?? ["AP", "II", "PODP", "SO"];
+        var docMods = new[] { "AP", "II", "PODP" }.Where(m => allow.Contains(m)).ToArray();
+        var includeSo = allow.Contains("SO");
+        if (docMods.Length == 0 && !includeSo) return [];
+
         var whereSql1 = where.Count > 0 ? " WHERE " + string.Join(" AND ", where) : "";
+        var parts = new List<string>();
+        if (docMods.Length > 0)
+        {
+            var w = new List<string>(where) { "Module IN @docMods" };
+            p.Add("docMods", docMods);
+            parts.Add($"SELECT {DocListCols} FROM ocr.Document WHERE {string.Join(" AND ", w)}");
+        }
+        if (includeSo)
+            parts.Add($"SELECT {DocListCols} FROM ocr.SalesOrder{whereSql1}");
         p.Add("limit", limit);
         return await db.QueryAsync(
-            $"SELECT TOP (@limit) * FROM (SELECT {DocListCols} FROM ocr.Document{whereSql1} " +
-            $"UNION ALL SELECT {DocListCols} FROM ocr.SalesOrder{whereSql1}) x ORDER BY DocId DESC", p);
+            $"SELECT TOP (@limit) * FROM ({string.Join(" UNION ALL ", parts)}) x ORDER BY DocId DESC", p);
     }
 
     // ---------------------------------------------------------------- chat (AI correction history)

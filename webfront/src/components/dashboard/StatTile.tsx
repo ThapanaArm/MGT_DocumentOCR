@@ -34,7 +34,7 @@ export default function StatTile({
             marginBottom: 12,
           }}
         >
-          {icon}
+          <i className={icon} />
         </div>
         <div className="hint" style={{ marginBottom: 2 }}>
           {label}
@@ -43,7 +43,7 @@ export default function StatTile({
           {intFmt(value)}
         </div>
         <div style={{ fontSize: 12, color: up ? 'var(--green)' : 'var(--red)' }}>
-          {up ? '▲' : '▼'} {Math.abs(pct || 0)}% from last week
+          <i className={up ? 'fa-solid fa-caret-up' : 'fa-solid fa-caret-down'} /> {Math.abs(pct || 0)}% from last week
         </div>
       </div>
     </div>

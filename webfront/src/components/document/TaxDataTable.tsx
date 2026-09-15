@@ -104,7 +104,7 @@ export default function TaxDataTable({
                     <td>
                       {!posted && (
                         <button className="btn sm ghost" onClick={() => onDelete(i)}>
-                          ✕
+                          <i className="fa-solid fa-xmark" />
                         </button>
                       )}
                     </td>

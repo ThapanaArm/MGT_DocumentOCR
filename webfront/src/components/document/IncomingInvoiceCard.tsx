@@ -103,7 +103,7 @@ export default function IncomingInvoiceCard({ values: h, posted, onEdit, glItems
           {(h.addressCity || h.addressStreet) && (
             <div className="hint" style={{ marginTop: 6 }}>{[h.addressStreet, h.addressCity].filter(Boolean).join(' · ')}</div>
           )}
-          {h.vendorEmail && <div className="hint" style={{ marginTop: 6 }}>✉ {h.vendorEmail}</div>}
+          {h.vendorEmail && <div className="hint" style={{ marginTop: 6 }}><i className="fa-solid fa-envelope" /> {h.vendorEmail}</div>}
           {h.bankAccountNo && (
             <>
               <hr style={{ border: 0, borderTop: '1px solid var(--line)', margin: '12px 0' }} />

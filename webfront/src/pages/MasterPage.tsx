@@ -1,28 +1,47 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useOutletContext } from 'react-router-dom';
 import { useAppState } from '../state/AppState';
 import { useMeta } from '../state/MetaContext';
-import { deleteMaster } from '../api/masters';
+import { deleteMaster, getMasters, type MastersData } from '../api/masters';
 import { MASTER_DEF, MASTER_GROUPS, MASTER_NOTE } from '../constants/fields';
 import { num } from '../utils/format';
 import MasterEditModal, { type MasterEditState } from '../components/master/MasterEditModal';
+import type { Me } from '../api/me';
 
 /* Ports renderMaster()/renderMasterLocal()/editRow()/delRow(). */
 export default function MasterPage() {
   const { guard, showToast } = useAppState();
-  const { masters, loadMasters } = useMeta();
+  const { loadMasters } = useMeta();
+  const [masters, setMasters] = useState<MastersData | null>(null);
+  const [loadError, setLoadError] = useState('');
+  const reload = async () => { setMasters(await getMasters(true)); await loadMasters(true); };
+  // Same company split as DocumentPage: MGT -> Zoho CRM, others (Green Leaf) -> SAP, for the
+  // quick-add "Found in ..." lookup inside MasterEditModal.
+  const { me } = useOutletContext<{ me: Me | null }>();
+  const isMgt = me?.primaryCompany?.companyCode === 'MGT';
 
-  const [group, setGroup] = useState('vendor');
-  const [tab, setTab] = useState('vendors');
+  const [group, setGroup] = useState('customer');
+  const [tab, setTab] = useState('customers');
   const [search, setSearch] = useState('');
   const [edit, setEdit] = useState<MasterEditState | null>(null);
 
   useEffect(() => {
-    loadMasters(true);
-  }, [loadMasters]);
+    let cancelled = false;
+    getMasters(true).then((data) => { if (!cancelled) setMasters(data); })
+      .catch((e) => { if (!cancelled) setLoadError(e.message); });
+    return () => { cancelled = true; };
+  }, []);
 
   const grp = MASTER_GROUPS.find((g) => g.key === group) || MASTER_GROUPS[0];
   const activeTab = grp.tabs.includes(tab) ? tab : grp.tabs[0];
   const def = MASTER_DEF[activeTab];
+  const columnLabel = (c: (typeof def.cols)[number]) => {
+    if (activeTab !== 'uoms' || !isMgt) return c.l;
+    if (c.k === 'SapUom') return 'Zoho Unit';
+    if (c.k === 'SapUomIso') return 'ISO code (SAP only)';
+    if (c.k === 'Factor') return 'Factor (1 document unit = ? Zoho units)';
+    return c.l;
+  };
 
   const rows = useMemo(() => {
     if (!masters) return [];
@@ -33,16 +52,17 @@ export default function MasterPage() {
       : all.filter((r) => def.cols.some((c) => String(r[c.k] ?? '').toLowerCase().includes(q)));
   }, [masters, activeTab, search, def]);
 
-  if (!masters) return <div className="card"><div className="empty">Loading…</div></div>;
+  if (!masters) return <div className="card"><div className="empty">{loadError || 'Loading…'}</div></div>;
 
   const count = (k: string) => (masters[k] || []).length;
 
   const cell = (r: Record<string, any>, c: (typeof def.cols)[number]) => {
+    if (c.source === 'system') return Number(r[c.k]) ? 'ใช้งาน' : 'ไม่ใช้งาน';
     if (c.sap)
       return r[c.k] ? (
         <b className="sapcode">{r[c.k]}</b>
       ) : (
-        <span className="badge b-fail">✗ Not specified</span>
+        <span className="badge b-fail"><i className="fa-solid fa-xmark" /> Not specified</span>
       );
     if (activeTab === 'uoms' && c.k === 'MaterialCode' && !r[c.k])
       return <span className="badge b-idle">All materials (global rule)</span>;
@@ -55,7 +75,7 @@ export default function MasterPage() {
     if (!window.confirm('Delete this record?')) return;
     guard(async () => {
       await deleteMaster(activeTab, key);
-      await loadMasters(true);
+      await reload();
       showToast('Record deleted');
     });
   };
@@ -114,8 +134,7 @@ export default function MasterPage() {
         )}
 
         <div className="hint" style={{ marginBottom: 12 }}>
-          🔑 The <b className="sapcode">SAP Code</b> column is the value the system actually posts to S/4HANA —
-          if left blank, Mapping will fail and the document cannot be submitted
+          {def.cols.some((c) => c.source) ? 'ข้อมูลจากเอกสาร → รหัส SAP / Zoho Account Code · รายการที่ไม่ใช้งานจะไม่ถูกนำไปจับคู่เอกสาร' : MASTER_NOTE[activeTab]}
         </div>
 
         <div className="row" style={{ marginBottom: 14 }}>
@@ -140,7 +159,7 @@ export default function MasterPage() {
             <thead>
               <tr>
                 {def.cols.map((c) => (
-                  <th key={c.k}>{c.l}</th>
+                  <th key={c.k}>{columnLabel(c)}{c.source && <small className="master-field-help"><code>{c.k}</code></small>}</th>
                 ))}
                 <th style={{ width: 130 }} />
               </tr>
@@ -182,8 +201,9 @@ export default function MasterPage() {
         masters={masters}
         onClose={() => setEdit(null)}
         afterSave={async () => {
-          await loadMasters(true);
+          await reload();
         }}
+        isMgt={isMgt}
       />
     </div>
   );

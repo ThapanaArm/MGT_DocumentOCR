@@ -30,7 +30,7 @@ public static class HeaderParser
         ? new Dictionary<string, object?>
         {
             ["docType"] = "PURCHASE ORDER", ["poNo"] = "", ["poDate"] = "", ["customerName"] = "", ["customerTaxId"] = "",
-            ["shipToName"] = "", ["shipToAddress"] = "", ["deliveryDate"] = "", ["currency"] = "THB",
+            ["customerAddress"] = "", ["shipToCode"] = "", ["shipToName"] = "", ["shipToAddress"] = "", ["deliveryDate"] = "", ["currency"] = "THB",
             ["paymentTerms"] = "", ["incoterms"] = "", ["subTotal"] = 0.0, ["vatAmount"] = 0.0,
             ["totalAmount"] = 0.0, ["remark"] = "",
         }
@@ -218,6 +218,10 @@ public static class HeaderParser
         {
             var due = lines.Where(l => l.DueDate != "").Select(l => l.DueDate).OrderBy(x => x, StringComparer.Ordinal).ToList();
             var (custName, custPos) = CompanyFinder.FindCompanyWithPos(text, ownCompanyKeywords);
+            // The address printed right under the counterparty's own name — this is the
+            // customer's own (Sold-to/billing) address, distinct from a separately-labeled
+            // "Ship To" delivery address below.
+            var custAddr = custName != "" ? CompanyFinder.AddressAfter(TextHelpers.SplitLines(text), custPos) : "";
             var (shipName, shipAddr) = ShipBlock(blocks, ownCompanyKeywords);
             if (shipName == "" && custName != "")
             {
@@ -225,7 +229,7 @@ public static class HeaderParser
                 // delivery address is usually the same as the address listed under the
                 // counterparty's name at the top of the document.
                 shipName = custName;
-                shipAddr = CompanyFinder.AddressAfter(TextHelpers.SplitLines(text), custPos);
+                shipAddr = custAddr;
             }
             var (poNo2, poDate2) = PoNumberDate(text); // "number / code / date" glued format (e.g. Henkel)
             var poNo = poNo2 != "" ? poNo2 : AmountFinder.FindDocNo(text, [
@@ -240,6 +244,7 @@ public static class HeaderParser
             h["poNo"] = poNo; h["poDate"] = poDate;
             h["customerName"] = custName;
             h["customerTaxId"] = PartnerTax(text, ownTaxId);
+            h["customerAddress"] = custAddr;
             h["shipToName"] = shipName; h["shipToAddress"] = shipAddr;
             h["deliveryDate"] = due.Count > 0 ? due[0] : DateFinder.FindDate(text, [
                 @"DELIVERY\s*DATE", @"DUE\s*DATE", @"REQUIRED\s*DATE", @"วันที่ส่งของ", @"กำหนดส่ง",

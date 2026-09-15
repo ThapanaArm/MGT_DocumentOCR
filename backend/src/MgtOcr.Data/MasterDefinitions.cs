@@ -7,22 +7,21 @@ public static class MasterDefinitions
 {
     public static readonly Dictionary<string, MasterDefinition> All = new()
     {
-        ["customers"] = new("ocr.Customer", "CustomerCode", false,
-            ["CustomerCode", "SapCustomerCode", "NameTh", "NameEn", "TaxId", "Branch",
-             "SalesOrg", "DistChannel", "Division", "Currency", "PaymentTerms"],
-            "CustomerCode"),
+        // "apmaterials" (ocr.Material) removed — the material master is no longer used; material
+        // mapping now lives entirely in ocr.CustomerMaterial. The "materials" list handed to the
+        // mapping engine is derived from CustomerMaterial (see MasterRepository.LoadAllAsync).
+        ["customers"] = new("ocr.Customer", "id", true,
+            ["SalesOrg", "CompanyName", "ComcompyCodeSAP", "CompanyNameSAP", "TaxId", "Branch",
+             "DistChannel", "Division", "Currency", "PaymentTerms", "IsActive"],
+            "SalesOrg, ComcompyCodeSAP, id"),
 
-        ["shiptos"] = new("ocr.ShipTo", "ShipToCode", false,
-            ["ShipToCode", "SapShipToCode", "CustomerCode", "ShipToName", "Address"],
+        ["shiptos"] = new("ocr.ShipTo", "id", true,
+            ["ShipToCode", "SapShipToCode", "CustomerCode", "ShipToName", "ShipToAddress", "IsActive"],
             "CustomerCode, ShipToCode"),
 
-        ["materials"] = new("ocr.Material", "MaterialCode", false,
-            ["MaterialCode", "SapMaterialCode", "Description", "Uom", "Plant", "MatGroup"],
-            "MaterialCode"),
-
         ["custmaterials"] = new("ocr.CustomerMaterial", "Id", true,
-            ["CustomerCode", "ExtCode", "ExtDesc", "MaterialCode"],
-            "CustomerCode, ExtCode"),
+            ["SalesOrg", "CustomerCode", "MaterialCodeCode", "MaterialCodeName", "MaterialCodeSAP", "Isactive"],
+            "SalesOrg, CustomerCode, MaterialCodeCode, Id"),
 
         ["vendors"] = new("ocr.Vendor", "VendorCode", false,
             ["VendorCode", "SapVendorCode", "VendorName", "TaxId", "Branch", "Currency",

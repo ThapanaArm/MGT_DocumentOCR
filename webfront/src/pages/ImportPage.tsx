@@ -11,11 +11,17 @@ import OcrProviderSelect from '../components/OcrProviderSelect';
 
 /* Ports renderWork()'s upload screen (uploadHtml + bindDrop + uploadFile). */
 
-const USER = 'it-digital@megachem.co.th';
+// Deprecated. The backend no longer reads any "user" value sent by the client — it stamps the
+// identity from the validated Entra ID token instead, so whatever is passed here is discarded.
+// Left in place only so the existing call signatures keep compiling; remove it together with the
+// `user` parameters in api/documents.ts.
+const USER = '(ignored by the server)';
 
 export default function ImportPage() {
   const { module } = useParams<{ module: ModuleCode }>();
   const mod = (module ?? 'AP') as ModuleCode;
+  // AP = the single liability-recording (การตั้งหนี้) reading page; it uses the Document Type dropdown.
+  const isInvoice = mod === 'AP';
   const navigate = useNavigate();
   const { guard, showToast } = useAppState();
   const { ocrProviders, loadOcrProviders, apDocCategories, loadApDocCategories } = useMeta();
@@ -25,20 +31,22 @@ export default function ImportPage() {
   const [dragOver, setDragOver] = useState(false);
   const [progress, setProgress] = useState<{ text: string; pct: number } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const [pwPrompt, setPwPrompt] = useState<{ file: File; wrong: boolean } | null>(null);
+  const [pwValue, setPwValue] = useState('');
 
   useEffect(() => {
     loadOcrProviders();
-    if (mod === 'AP') loadApDocCategories();
+    if (isInvoice) loadApDocCategories();
     setCategory('');
   }, [mod, loadOcrProviders, loadApDocCategories]);
 
-  const needCategory = mod === 'AP' && !category;
+  const needCategory = isInvoice && !category;
   const providers = ocrProviders ?? [];
   const active = providers.find((p) => p.id === provider) || providers[0];
 
-  async function handleFile(file: File) {
-    if (mod === 'AP' && !category) {
-      showToast('⚠ Please select a document type first');
+  async function doUpload(file: File, password?: string) {
+    if (isInvoice && !category) {
+      showToast('Please select a document type first');
       return;
     }
     const fd = new FormData();
@@ -47,30 +55,46 @@ export default function ImportPage() {
     fd.append('ocr_', provider);
     fd.append('file', file);
     fd.append('apDocCategory', category || '');
+    if (password) fd.append('password', password);
     setProgress({ text: 'Uploading ' + file.name + ' …', pct: 35 });
-    const doc = await guard(async () => {
+    try {
       setProgress({ text: 'Reading document (' + provider + ') …', pct: 70 });
-      return uploadDocument(fd);
-    });
-    setProgress(null);
-    if (doc) {
+      const doc = await uploadDocument(fd);
+      setProgress(null);
+      setPwPrompt(null);
+      setPwValue('');
       if (doc.provider === 'failed')
-        showToast('⚠ Failed to read document — attach an image in the AI chat on the document page for help filling it in');
-      else showToast('✓ Document read successfully (' + doc.provider + ') — found ' + doc.lines.length + ' items');
+        showToast('Failed to read document — attach an image in the AI chat on the document page for help filling it in');
+      else showToast('Document read successfully (' + doc.provider + ') — found ' + doc.lines.length + ' items');
       navigate('/doc/' + doc.docId);
+    } catch (e) {
+      setProgress(null);
+      const msg = e instanceof Error ? e.message : String(e);
+      // Encrypted PDF: reveal a password field and let the user retry with the open password.
+      if (msg === 'PDF_PASSWORD_REQUIRED' || msg === 'PDF_PASSWORD_WRONG') {
+        setPwPrompt({ file, wrong: msg === 'PDF_PASSWORD_WRONG' });
+        return;
+      }
+      showToast(msg);
     }
   }
 
+  function handleFile(file: File) {
+    setPwPrompt(null);
+    setPwValue('');
+    void doUpload(file);
+  }
+
   async function useSample(i: number) {
-    if (mod === 'AP' && !category) {
-      showToast('⚠ Please select a document type first');
+    if (isInvoice && !category) {
+      showToast('Please select a document type first');
       return;
     }
     const doc = await guard(() =>
       sampleDocument({ module: mod, index: i, user: USER, apDocCategory: category }),
     );
     if (doc) {
-      showToast('✓ Document created in the system (DocId ' + doc.docId + ')');
+      showToast('Document created in the system (DocId ' + doc.docId + ')');
       navigate('/doc/' + doc.docId);
     }
   }
@@ -85,10 +109,10 @@ export default function ImportPage() {
           <span className="hint">Supports PDF / JPG / PNG / TIFF</span>
         </div>
         <div className="card-b">
-          {mod === 'AP' && (
+          {isInvoice && (
             <div className="row" style={{ marginBottom: 16 }}>
               <label className="hint" style={{ fontWeight: 600 }}>
-                📋 Document Type
+                <i className="fa-solid fa-clipboard-list" /> Document Type
               </label>
               <select value={category} onChange={(e) => setCategory(e.target.value)}>
                 <option value="">— Select Document Type —</option>
@@ -102,7 +126,7 @@ export default function ImportPage() {
           )}
           {needCategory && (
             <p className="hint" style={{ margin: '-8px 0 16px' }}>
-              ⚠ Please select a document type first before choosing a reading method / importing a file
+              <i className="fa-solid fa-triangle-exclamation" /> Please select a document type first before choosing a reading method / importing a file
             </p>
           )}
 
@@ -111,7 +135,7 @@ export default function ImportPage() {
             style={{ marginBottom: 16, ...(needCategory ? { opacity: 0.45, pointerEvents: 'none' } : {}) }}
           >
             <label className="hint" style={{ fontWeight: 600 }}>
-              🧠 Reading Method (OCR Engine)
+              <i className="fa-solid fa-brain" /> Reading Method (OCR Engine)
             </label>
             <OcrProviderSelect providers={providers} value={provider} onChange={setProvider} />
           </div>
@@ -138,7 +162,7 @@ export default function ImportPage() {
               if (f) handleFile(f);
             }}
           >
-            <div className="big">📤</div>
+            <div className="big"><i className="fa-solid fa-cloud-arrow-up" /></div>
             <div style={{ margin: '12px 0 4px', fontWeight: 600 }}>Drag and drop a file here, or</div>
             <input
               ref={fileRef}
@@ -154,7 +178,7 @@ export default function ImportPage() {
               Select a Document File
             </button>
             <div className="hint" style={{ marginTop: 12 }}>
-              Current module: <b>{MODULE_LABEL[mod] || moduleLabel(mod)}</b>
+              Current module: <b>{mod === 'AP' ? 'Invoice' : MODULE_LABEL[mod] || moduleLabel(mod)}</b>
             </div>
             {progress && (
               <div style={{ maxWidth: 440, margin: '18px auto 0' }}>
@@ -162,6 +186,35 @@ export default function ImportPage() {
                 <div className="bar">
                   <i style={{ width: progress.pct + '%' }} />
                 </div>
+              </div>
+            )}
+            {pwPrompt && (
+              <div style={{ maxWidth: 440, margin: '18px auto 0', textAlign: 'left' }}>
+                <label className="hint" style={{ fontWeight: 600, display: 'block', marginBottom: 6 }}>
+                  <i className="fa-solid fa-lock" /> This PDF is password-protected — enter the document open password
+                </label>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <input
+                    type="password"
+                    autoFocus
+                    value={pwValue}
+                    onChange={(e) => setPwValue(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && pwValue) void doUpload(pwPrompt.file, pwValue);
+                    }}
+                    placeholder="Document password"
+                    style={{ flex: 1 }}
+                  />
+                  <button className="btn primary" disabled={!pwValue} onClick={() => void doUpload(pwPrompt.file, pwValue)}>
+                    Unlock &amp; read
+                  </button>
+                </div>
+                {pwPrompt.wrong && (
+                  <p className="hint" style={{ color: 'var(--red)', margin: '6px 0 0' }}>
+                    <i className="fa-solid fa-triangle-exclamation" /> Incorrect password — please try again
+                  </p>
+                )}
+                <p className="hint" style={{ margin: '6px 0 0', fontSize: 12 }}>{pwPrompt.file.name}</p>
               </div>
             )}
             <div className="hint" style={{ marginTop: 18 }}>

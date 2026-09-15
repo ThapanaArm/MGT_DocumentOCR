@@ -13,12 +13,12 @@ public static class PdfRasterizer
     public static List<byte[]> RenderPagesToPng(string path, int maxPages, int dpi)
     {
         var bytes = File.ReadAllBytes(path);
-        var pageCount = Conversion.GetPageCount(bytes);
+        var pageCount = Conversion.GetPageCount(bytes, password: PdfPassword.Current);
         var n = Math.Min(maxPages, pageCount);
         var results = new List<byte[]>();
         for (var i = 0; i < n; i++)
         {
-            using var bmp = Conversion.ToImage(bytes, page: i, options: new RenderOptions(Dpi: dpi));
+            using var bmp = Conversion.ToImage(bytes, page: i, password: PdfPassword.Current, options: new RenderOptions(Dpi: dpi));
             using var data = bmp.Encode(SKEncodedImageFormat.Png, 100);
             results.Add(data.ToArray());
         }

@@ -137,8 +137,25 @@ export const getChat = (id: number) =>
 
 export const chatFix = (
   id: number,
-  body: { message: string; image: string | null; user: string; provider: string },
-) => api.post<{ document: DocModel }>('/api/documents/' + id + '/chat-fix', body);
+  body: {
+    message: string;
+    image: string | null;
+    user: string;
+    provider: string;
+    // The currently-selected Zoho Deal's own Ordered Items (isMgt SO documents only, once a Deal is
+    // picked) -- backend has no visibility into which Deal is selected (pure frontend state), so it
+    // rides along here to give the chat real Material options for the Zoho send path too, not just
+    // the SAP CustomerMaterial-based one it already builds server-side.
+    dealItems?: { materialId?: string | null; materialCode?: string | null; materialName?: string | null }[];
+  },
+) =>
+  api.post<{
+    document: DocModel;
+    reply?: string;
+    materialCodes?: Record<string, string>;
+    shipToCode?: string;
+    customerCode?: string;
+  }>('/api/documents/' + id + '/chat-fix', body);
 
 export interface InboxRow {
   DocId: number;

@@ -24,6 +24,7 @@ public static class DemoData
                 {
                     ["docType"] = "PURCHASE ORDER", ["poNo"] = "PO-6801234", ["poDate"] = "2026-08-10",
                     ["customerName"] = "บริษัท สยาม เคมิคอล อินดัสทรี จำกัด", ["customerTaxId"] = "0105533012345",
+                    ["customerAddress"] = "99 ถ.พระราม 9 แขวงห้วยขวาง เขตห้วยขวาง กรุงเทพฯ 10310",
                     ["shipToName"] = "คลังสินค้า บางปู",
                     ["shipToAddress"] = "นิคมอุตสาหกรรมบางปู ซ.7 ต.แพรกษา อ.เมือง สมุทรปราการ 10280",
                     ["deliveryDate"] = "2026-08-25", ["currency"] = "THB", ["paymentTerms"] = "เครดิต 30 วัน",
@@ -42,6 +43,7 @@ public static class DemoData
                 {
                     ["docType"] = "PURCHASE ORDER", ["poNo"] = "TPG-2026-0842", ["poDate"] = "2026-08-12",
                     ["customerName"] = "THAI POLYMER GROUP PCL.", ["customerTaxId"] = "0107536000123",
+                    ["customerAddress"] = "222 Vibhavadi Rangsit Rd, Chatuchak, Bangkok 10900",
                     ["shipToName"] = "โรงงานอยุธยา (โรจนะ)",
                     ["shipToAddress"] = "สวนอุตสาหกรรมโรจนะ ต.คานหาม อ.อุทัย พระนครศรีอยุธยา 13210",
                     ["deliveryDate"] = "2026-08-28", ["currency"] = "THB", ["paymentTerms"] = "เครดิต 60 วัน",
@@ -60,6 +62,7 @@ public static class DemoData
                 {
                     ["docType"] = "PURCHASE ORDER", ["poNo"] = "PO-9931", ["poDate"] = "2026-08-13",
                     ["customerName"] = "บริษัท นิว เวิลด์ เทรดดิ้ง จำกัด", ["customerTaxId"] = "0105566001111",
+                    ["customerAddress"] = "45 ถ.สุขุมวิท แขวงคลองตัน เขตคลองเตย กรุงเทพฯ 10110",
                     ["shipToName"] = "คลังสินค้าลาดกระบัง",
                     ["shipToAddress"] = "ถ.ฉลองกรุง แขวงลำปลาทิว เขตลาดกระบัง กรุงเทพฯ 10520",
                     ["deliveryDate"] = "2026-08-30", ["currency"] = "THB", ["paymentTerms"] = "เงินสด",

@@ -44,16 +44,16 @@ IF NOT EXISTS(SELECT 1 FROM ocr.ShipTo WHERE ShipToCode='0010003-01')
   INSERT ocr.ShipTo(ShipToCode,CustomerCode,ShipToName,Address) VALUES('0010003-01','0010003',N'สำนักงานใหญ่ / คลังบางนา',N'กม.19 ถ.บางนา-ตราด ต.บางโฉลง อ.บางพลี สมุทรปราการ 10540');
 
 /* ---------- Customer material ---------- */
-IF NOT EXISTS(SELECT 1 FROM ocr.CustomerMaterial WHERE CustomerCode='0010001' AND ExtCode='SCI-TIO2-902')
-  INSERT ocr.CustomerMaterial(CustomerCode,ExtCode,ExtDesc,MaterialCode) VALUES('0010001','SCI-TIO2-902',N'TIO2 R902 ถุง 25 กก.','FG-100021');
-IF NOT EXISTS(SELECT 1 FROM ocr.CustomerMaterial WHERE CustomerCode='0010001' AND ExtCode='SCI-CACO3-800')
-  INSERT ocr.CustomerMaterial(CustomerCode,ExtCode,ExtDesc,MaterialCode) VALUES('0010001','SCI-CACO3-800',N'แคลเซียมคาร์บอเนต CC800','FG-100045');
-IF NOT EXISTS(SELECT 1 FROM ocr.CustomerMaterial WHERE CustomerCode='0010002' AND ExtCode='TPG-PP1100')
-  INSERT ocr.CustomerMaterial(CustomerCode,ExtCode,ExtDesc,MaterialCode) VALUES('0010002','TPG-PP1100',N'PP HOMO 1100N','RM-200099');
-IF NOT EXISTS(SELECT 1 FROM ocr.CustomerMaterial WHERE CustomerCode='0010002' AND ExtCode='TPG-MEK')
-  INSERT ocr.CustomerMaterial(CustomerCode,ExtCode,ExtDesc,MaterialCode) VALUES('0010002','TPG-MEK',N'MEK 99.5%','RM-200011');
-IF NOT EXISTS(SELECT 1 FROM ocr.CustomerMaterial WHERE CustomerCode='0010003' AND ExtCode='ACP-EP828')
-  INSERT ocr.CustomerMaterial(CustomerCode,ExtCode,ExtDesc,MaterialCode) VALUES('0010003','ACP-EP828',N'อีพ็อกซี่เรซิน EP-828','FG-100078');
+IF NOT EXISTS(SELECT 1 FROM ocr.CustomerMaterial WHERE CustomerCode='0010001' AND MaterialCodeCode='SCI-TIO2-902')
+  INSERT ocr.CustomerMaterial(SalesOrg,CustomerCode,MaterialCodeCode,MaterialCodeName,MaterialCodeSAP,Isactive) VALUES('1000','0010001','SCI-TIO2-902',N'TIO2 R902 ถุง 25 กก.','000000000000100021',1);
+IF NOT EXISTS(SELECT 1 FROM ocr.CustomerMaterial WHERE CustomerCode='0010001' AND MaterialCodeCode='SCI-CACO3-800')
+  INSERT ocr.CustomerMaterial(SalesOrg,CustomerCode,MaterialCodeCode,MaterialCodeName,MaterialCodeSAP,Isactive) VALUES('1000','0010001','SCI-CACO3-800',N'แคลเซียมคาร์บอเนต CC800','000000000000100045',1);
+IF NOT EXISTS(SELECT 1 FROM ocr.CustomerMaterial WHERE CustomerCode='0010002' AND MaterialCodeCode='TPG-PP1100')
+  INSERT ocr.CustomerMaterial(SalesOrg,CustomerCode,MaterialCodeCode,MaterialCodeName,MaterialCodeSAP,Isactive) VALUES('1000','0010002','TPG-PP1100',N'PP HOMO 1100N','000000000000200099',1);
+IF NOT EXISTS(SELECT 1 FROM ocr.CustomerMaterial WHERE CustomerCode='0010002' AND MaterialCodeCode='TPG-MEK')
+  INSERT ocr.CustomerMaterial(SalesOrg,CustomerCode,MaterialCodeCode,MaterialCodeName,MaterialCodeSAP,Isactive) VALUES('1000','0010002','TPG-MEK',N'MEK 99.5%','000000000000200011',1);
+IF NOT EXISTS(SELECT 1 FROM ocr.CustomerMaterial WHERE CustomerCode='0010003' AND MaterialCodeCode='ACP-EP828')
+  INSERT ocr.CustomerMaterial(SalesOrg,CustomerCode,MaterialCodeCode,MaterialCodeName,MaterialCodeSAP,Isactive) VALUES('1000','0010003','ACP-EP828',N'อีพ็อกซี่เรซิน EP-828','000000000000100078',1);
 
 /* ---------- Vendor ---------- */
 IF NOT EXISTS(SELECT 1 FROM ocr.Vendor WHERE VendorCode='V-500012')
@@ -77,27 +77,27 @@ IF NOT EXISTS(SELECT 1 FROM ocr.VendorMaterial WHERE VendorCode='V-500051' AND E
   INSERT ocr.VendorMaterial(VendorCode,ExtCode,ExtDesc,MaterialCode) VALUES('V-500051','PTG-PP-1100N',N'PP HOMOPOLYMER 1100N','RM-200099');
 
 /* ---------- UoM conversion rules ---------- */
--- กฎกลาง (MaterialCode = NULL)
+-- กฎกลาง (MaterialCodeSAP = NULL, SalesOrg = NULL)
 MERGE ocr.UomConversion AS t
 USING (VALUES
   (N'กก.','KG',1),(N'กิโลกรัม','KG',1),(N'ตัน','KG',1000),('TON','KG',1000),('MT','KG',1000),
   (N'ลิตร','L',1),('LTR','L',1),(N'ชิ้น','EA',1),('PCS','EA',1),('PC','EA',1),(N'งาน','AU',1)
 ) AS s(ExtUom,SapUom,Factor)
-ON (t.MaterialCode IS NULL AND t.ExtUom = s.ExtUom)
+ON (t.SalesOrg IS NULL AND t.MaterialCodeSAP IS NULL AND t.ExtUom = s.ExtUom)
 WHEN NOT MATCHED THEN
-  INSERT(MaterialCode,ExtUom,SapUom,Factor,Note) VALUES(NULL,s.ExtUom,s.SapUom,s.Factor,N'กฎกลาง');
+  INSERT(SalesOrg,MaterialCodeSAP,ExtUom,SapUom,Factor,Note) VALUES(NULL,NULL,s.ExtUom,s.SapUom,s.Factor,N'กฎกลาง');
 
 -- กฎเฉพาะสินค้า (บรรจุภัณฑ์)
 MERGE ocr.UomConversion AS t
 USING (VALUES
-  ('FG-100021','BAG','KG',25),('FG-100021',N'ถุง','KG',25),('FG-100021','PALLET','KG',1000),
-  ('FG-100045','BAG','KG',25),('FG-100045',N'ถุง','KG',25),
-  ('FG-100078','DRUM','KG',200),('FG-100078',N'ถัง','KG',200),
-  ('RM-200011','DRUM','L',200),('RM-200034','DRUM','L',200),('RM-200099','BAG','KG',25)
-) AS s(MaterialCode,ExtUom,SapUom,Factor)
-ON (t.MaterialCode = s.MaterialCode AND t.ExtUom = s.ExtUom)
+  ('000000000000100021','BAG','KG',25),('000000000000100021',N'ถุง','KG',25),('000000000000100021','PALLET','KG',1000),
+  ('000000000000100045','BAG','KG',25),('000000000000100045',N'ถุง','KG',25),
+  ('000000000000100078','DRUM','KG',200),('000000000000100078',N'ถัง','KG',200),
+  ('000000000000200011','DRUM','L',200),('000000000000200034','DRUM','L',200),('000000000000200099','BAG','KG',25)
+) AS s(MaterialCodeSAP,ExtUom,SapUom,Factor)
+ON (t.SalesOrg IS NULL AND t.MaterialCodeSAP = s.MaterialCodeSAP AND t.ExtUom = s.ExtUom)
 WHEN NOT MATCHED THEN
-  INSERT(MaterialCode,ExtUom,SapUom,Factor,Note) VALUES(s.MaterialCode,s.ExtUom,s.SapUom,s.Factor,N'บรรจุภัณฑ์');
+  INSERT(SalesOrg,MaterialCodeSAP,ExtUom,SapUom,Factor,Note) VALUES(NULL,s.MaterialCodeSAP,s.ExtUom,s.SapUom,s.Factor,N'บรรจุภัณฑ์');
 
 /* ---------- SAP codes (เติมเฉพาะแถวที่ยังว่าง) ---------- */
 UPDATE ocr.Customer SET SapCustomerCode='0000100023' WHERE CustomerCode='0010001' AND (SapCustomerCode IS NULL OR SapCustomerCode='');

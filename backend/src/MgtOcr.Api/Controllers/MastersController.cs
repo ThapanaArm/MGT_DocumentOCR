@@ -1,6 +1,7 @@
 using MgtOcr.Core.Json;
 using MgtOcr.Data;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Data.SqlClient;
 
 namespace MgtOcr.Api.Controllers;
 
@@ -10,43 +11,102 @@ namespace MgtOcr.Api.Controllers;
 public class MastersController(MasterRepository repo) : ControllerBase
 {
     [HttpGet]
-    public async Task<IActionResult> GetAll() => Ok(await repo.LoadAllAsync());
+    public async Task<IActionResult> GetAll([FromQuery] bool includeInactive = false) => Ok(await repo.LoadAllAsync(includeInactive));
 
     [HttpGet("{kind}")]
     public async Task<IActionResult> GetList(string kind, [FromQuery] string q = "")
     {
         if (!MasterRepository.TryGetKind(kind, out var m))
-            return NotFound(new { detail = "ไม่รู้จักตาราง master นี้" });
-        return Ok(await repo.ListAsync(m, q));
+            return NotFound(new { detail = "Unknown master table" });
+        try
+        {
+            return Ok(await repo.ListAsync(m, q));
+        }
+        catch (SqlException ex) when (ex.Number == 208)
+        {
+            return MissingTable(m);
+        }
     }
 
     [HttpPost("{kind}")]
     public async Task<IActionResult> Create(string kind, [FromBody] Dictionary<string, object?> body)
     {
         if (!MasterRepository.TryGetKind(kind, out var m))
-            return NotFound(new { detail = "ไม่รู้จักตาราง master นี้" });
-        var ok = await repo.CreateAsync(m, JsonBodyHelpers.Unwrap(body));
-        if (!ok) return BadRequest(new { detail = "ไม่มีข้อมูลที่จะบันทึก" });
-        return Ok(new { ok = true });
+            return NotFound(new { detail = "Unknown master table" });
+        var values = JsonBodyHelpers.Unwrap(body);
+        var error = Validate(kind, values);
+        if (error != null) return BadRequest(new { detail = error });
+        try
+        {
+            var ok = await repo.CreateAsync(m, values);
+            if (!ok) return BadRequest(new { detail = "No data to save" });
+            return Ok(new { ok = true });
+        }
+        catch (SqlException ex) when (ex.Number == 208)
+        {
+            return MissingTable(m);
+        }
     }
 
     [HttpPut("{kind}/{key}")]
     public async Task<IActionResult> Update(string kind, string key, [FromBody] Dictionary<string, object?> body)
     {
         if (!MasterRepository.TryGetKind(kind, out var m))
-            return NotFound(new { detail = "ไม่รู้จักตาราง master นี้" });
-        var ok = await repo.UpdateAsync(m, key, JsonBodyHelpers.Unwrap(body));
-        return Ok(new { ok });
+            return NotFound(new { detail = "Unknown master table" });
+        var values = JsonBodyHelpers.Unwrap(body);
+        var error = Validate(kind, values);
+        if (error != null) return BadRequest(new { detail = error });
+        try
+        {
+            var ok = await repo.UpdateAsync(m, key, values);
+            return ok ? Ok(new { ok }) : NotFound(new { detail = "Record not found or no data to save" });
+        }
+        catch (SqlException ex) when (ex.Number == 208)
+        {
+            return MissingTable(m);
+        }
     }
 
     [HttpDelete("{kind}/{key}")]
     public async Task<IActionResult> Delete(string kind, string key)
     {
         if (!MasterRepository.TryGetKind(kind, out var m))
-            return NotFound(new { detail = "ไม่รู้จักตาราง master นี้" });
-        var (ok, fkError) = await repo.DeleteAsync(m, key);
-        if (fkError != null)
-            return BadRequest(new { detail = $"ลบไม่ได้ เนื่องจากมีข้อมูลอื่นอ้างอิงอยู่ ({fkError})" });
-        return Ok(new { ok });
+            return NotFound(new { detail = "Unknown master table" });
+        try
+        {
+            var (ok, fkError) = await repo.DeleteAsync(m, key);
+            if (fkError != null)
+                return BadRequest(new { detail = $"Cannot delete: other records reference it ({fkError})" });
+            return Ok(new { ok });
+        }
+        catch (SqlException ex) when (ex.Number == 208)
+        {
+            return MissingTable(m);
+        }
+    }
+
+    // SQL error 208 = "Invalid object name": the master's backing table doesn't exist (e.g.
+    // ocr.Material was dropped). Return a clean 409 with a readable message instead of a raw 500,
+    // so the UI can tell the user the feature's table is gone rather than crashing. The AP-material
+    // architecture decision (remove the feature vs. re-create the table) is deferred; this only
+    // stops the crash.
+    private ObjectResult MissingTable(MasterDefinition m) =>
+        Conflict(new { detail = $"ตาราง '{m.Table}' ไม่มีอยู่ในฐานข้อมูล (อาจถูกลบไปแล้ว) — ฟังก์ชันนี้ใช้ไม่ได้ชั่วคราว" });
+
+    private static string? Validate(string kind, Dictionary<string, object?> values)
+    {
+        string[] required = kind switch
+        {
+            "customers" => ["SalesOrg", "CompanyName", "ComcompyCodeSAP"],
+            "shiptos" => ["CustomerCode", "SapShipToCode"],
+            "custmaterials" => ["SalesOrg", "CustomerCode", "MaterialCodeCode", "MaterialCodeSAP"],
+            _ => [],
+        };
+        foreach (var field in required)
+            if (!values.TryGetValue(field, out var value) || string.IsNullOrWhiteSpace(value?.ToString()))
+                return $"Please enter {field}";
+        if (values.TryGetValue("SalesOrg", out var org) && org?.ToString() is not ("1000" or "2000"))
+            return "SalesOrg must be 1000 (MGT) or 2000 (GLC)";
+        return null;
     }
 }

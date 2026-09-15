@@ -42,6 +42,35 @@ public static class SapPayloadBuilder
     private static string F2(double v) => v.ToString("F2", CultureInfo.InvariantCulture);
     private static string F3(double v) => v.ToString("F3", CultureInfo.InvariantCulture);
 
+    private static readonly DateTime UnixEpoch = new(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
+    // SAP OData v2 serializes Edm.DateTime properties (CustomerPurchaseOrderDate,
+    // RequestedDeliveryDate, DocumentDate, PostingDate, ...) as "/Date(<ms since Unix epoch,
+    // UTC>)/". Sending the raw "yyyy-MM-dd" strings we hold in the header triggers
+    // CX_SY_CONVERSION_NO_DATE_TIME, so every date field goes through here. Returns null for a
+    // blank or unparseable value so the property is omitted and SAP can apply its own default
+    // rather than erroring.
+    private static string? ODataDate(object? value)
+    {
+        DateTime dt;
+        if (value is DateTime d)
+        {
+            dt = d.Kind == DateTimeKind.Utc ? d : d.ToUniversalTime();
+        }
+        else
+        {
+            var s = value as string;
+            if (string.IsNullOrWhiteSpace(s)) return null;
+            if (!DateTime.TryParse(s, CultureInfo.InvariantCulture,
+                    DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out dt))
+            {
+                return null;
+            }
+        }
+        var ms = (long)(dt - UnixEpoch).TotalMilliseconds;
+        return $"/Date({ms})/";
+    }
+
     public static Dictionary<string, object?> BuildPayload(AppConfig config, string module, Dictionary<string, object?> header,
         List<Dictionary<string, object?>> lines, Dictionary<string, object?> mapres, Dictionary<string, object?>? partnerMaster,
         Dictionary<string, object?>? source = null)
@@ -55,6 +84,19 @@ public static class SapPayloadBuilder
             var c = partnerMaster ?? new();
             var customer = resHeader.Get("customer") as Dictionary<string, object?>;
             var shipTo = resHeader.Get("shipTo") as Dictionary<string, object?>;
+            var salesOrg = string.IsNullOrEmpty(c.GetStr("SalesOrg")) ? "1000" : c.GetStr("SalesOrg");
+            var currency = string.IsNullOrEmpty(header.GetStr("currency")) ? "THB" : header.GetStr("currency");
+            // Per the "Sales Order Processing" training manual (GLC section): GLC pricing is not
+            // fully derived from condition records the way MGT's is, so GLC lines need a manual
+            // Gross Price condition (VA01 Conditions tab) sent explicitly. Condition type comes
+            // from config (Sap:SalesOrder:PriceConditionType, default "ZPR0") rather than being
+            // hardcoded — confirmed correct against this tenant's own working Excel/Zoho SAP
+            // integration (SalesOrderImportJob.BuildCreateBody uses the same "to_PricingElement"
+            // shape), which also keeps it as a setting rather than a literal for the same reason.
+            // MGT keeps relying on its existing condition records (nothing added for it here).
+            // Compared by SalesOrganization against config.Companies rather than hardcoding
+            // "2000", so this still works if that code ever changes in appsettings.json.
+            var isGlc = config.CompanyForSalesOrg(salesOrg)?.Name == "GLC";
 
             var items = new List<object>();
             for (var i = 0; i < lines.Count; i++)
@@ -78,23 +120,47 @@ public static class SapPayloadBuilder
                     item["_docQuantity"] = $"{FormatGNum(Num(l.Get("qty")))} {l.GetStr("uom")}";
                     item["_uomFactor"] = factor;
                 }
+                // Manual Price Gross (ZPR0) — GLC only, and only when a unit price was actually
+                // read/entered for the line. NOTE: entity/nav-property name
+                // (A_SalesOrderItemPrElement via "to_PricingElement") not yet verified against
+                // this tenant's real $metadata — same caveat as SapBusinessPartnerClient; adjust
+                // if SAP rejects this shape. ZDC0/ZCD1 (item discount) are not wired yet — no
+                // discount field exists on the line today; add one here if/when the UI gets one.
+                var unitPrice = Num(l.Get("price"));
+                if (isGlc && unitPrice > 0 && !string.IsNullOrWhiteSpace(config.SapSalesOrderPriceConditionType))
+                {
+                    item["to_PricingElement"] = new List<object>
+                    {
+                        new Dictionary<string, object?>
+                        {
+                            ["ConditionType"] = config.SapSalesOrderPriceConditionType,
+                            ["ConditionRateValue"] = F2(unitPrice),
+                            ["ConditionCurrency"] = currency,
+                        },
+                    };
+                }
                 items.Add(item);
             }
 
+            // Minimal payload matching the tenant's proven working SO integration
+            // (SapUomSyncService.BuildDeepInsert). IncotermsClassification and CustomerPaymentTerms
+            // are intentionally NOT sent — SAP derives both from the customer master, and sending
+            // the raw document incoterms text ("Delivered Duty Paid CHONBURI") overflowed the
+            // 3-char field (/IWCOR/CX_DS_EDM_FACET_ERROR). CustomerPurchaseOrderDate and the SH
+            // partner (ship-to) ARE kept: the PO date is worth recording and OCR can resolve a
+            // ship-to that differs from the sold-to party.
             return new Dictionary<string, object?>
             {
                 ["_target"] = SoEndpoint,
                 ["SalesOrderType"] = "OR",
-                ["SalesOrganization"] = string.IsNullOrEmpty(c.GetStr("SalesOrg")) ? "1000" : c.GetStr("SalesOrg"),
+                ["SalesOrganization"] = salesOrg,
                 ["DistributionChannel"] = string.IsNullOrEmpty(c.GetStr("DistChannel")) ? "10" : c.GetStr("DistChannel"),
                 ["OrganizationDivision"] = string.IsNullOrEmpty(c.GetStr("Division")) ? "00" : c.GetStr("Division"),
                 ["SoldToParty"] = Key(customer),
                 ["PurchaseOrderByCustomer"] = header.Get("poNo"),
-                ["CustomerPurchaseOrderDate"] = header.Get("poDate"),
-                ["RequestedDeliveryDate"] = header.Get("deliveryDate"),
-                ["TransactionCurrency"] = string.IsNullOrEmpty(header.GetStr("currency")) ? "THB" : header.GetStr("currency"),
-                ["CustomerPaymentTerms"] = c.GetStr("PaymentTerms"),
-                ["IncotermsClassification"] = header.GetStr("incoterms"),
+                ["CustomerPurchaseOrderDate"] = ODataDate(header.Get("poDate")),
+                ["RequestedDeliveryDate"] = ODataDate(header.Get("deliveryDate")),
+                ["TransactionCurrency"] = currency,
                 ["to_Partner"] = new List<object> { new Dictionary<string, object?> { ["PartnerFunction"] = "SH", ["Customer"] = Key(shipTo) } },
                 ["to_Item"] = items,
                 ["_source"] = source,
@@ -137,8 +203,8 @@ public static class SapPayloadBuilder
         {
             ["_target"] = ApEndpoint,
             ["CompanyCode"] = config.SapCompanyCode,
-            ["DocumentDate"] = header.Get("invoiceDate"),
-            ["PostingDate"] = header.Get("postingDate") ?? header.Get("invoiceDate"),
+            ["DocumentDate"] = ODataDate(header.Get("invoiceDate")),
+            ["PostingDate"] = ODataDate(header.Get("postingDate")) ?? ODataDate(header.Get("invoiceDate")),
             ["InvoicingParty"] = Key(vendor),
             ["SupplierInvoiceIDByInvcgParty"] = header.Get("invoiceNo"),
             ["DocumentCurrency"] = string.IsNullOrEmpty(header.GetStr("currency")) ? "THB" : header.GetStr("currency"),

@@ -8,10 +8,15 @@ import { OCR_PROVIDER_SHORT } from '../constants/fields';
 import type { ModuleCode } from '../api/types';
 import Pager, { DateRange, inDateRange, paginate } from '../components/Pager';
 
-const USER = 'it-digital@megachem.co.th';
+// Deprecated. The backend no longer reads any "user" value sent by the client — it stamps the
+// identity from the validated Entra ID token instead, so whatever is passed here is discarded.
+// Left in place only so the existing call signatures keep compiling; remove it together with the
+// `user` parameters in api/documents.ts.
+const USER = '(ignored by the server)';
 
 function inboxTitle(mod?: string | null) {
   if (!mod) return 'All Documents';
+  if (mod === 'AP') return 'Invoice List';
   return (mod === 'II' ? 'Incoming' : moduleLabel(mod)) + ' List';
 }
 
@@ -27,6 +32,9 @@ function docFormat(mod?: string | null): { label: string; cls: string } {
 export default function InboxPage() {
   const { module } = useParams<{ module: ModuleCode }>();
   const mod = module ?? null;
+  // AP = liability-recording list: shows Supplier (with PO) + Incoming (without PO) together;
+  // both use the Document Type (liability) category.
+  const isInvoice = mod === 'AP';
   const navigate = useNavigate();
   const { guard, showToast } = useAppState();
   const { apDocCategories, loadApDocCategories } = useMeta();
@@ -38,6 +46,7 @@ export default function InboxPage() {
   const [to, setTo] = useState('');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
+  const [invTab, setInvTab] = useState<'all' | 'AP' | 'II'>('all'); // Supplier(AP)/Incoming(II) tabs on the merged invoice list
 
   const reload = () => {
     setRows(null);
@@ -45,15 +54,16 @@ export default function InboxPage() {
   };
 
   useEffect(() => {
-    if (mod === 'AP') loadApDocCategories();
+    if (isInvoice) loadApDocCategories();
     setCategory('');
+    setInvTab('all');
     setPage(1);
     setRows(null);
     guard(() => listDocuments(mod, '')).then((r) => setRows(r ?? []));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mod]);
 
-  const filtered = useMemo(() => {
+  const searchDateFiltered = useMemo(() => {
     if (!rows) return [];
     const q = search.trim().toLowerCase();
     let list = !q
@@ -66,6 +76,24 @@ export default function InboxPage() {
     list = list.filter((r) => inDateRange(r.DocDate, from, to));
     return list;
   }, [rows, search, from, to]);
+
+  // Supplier(AP) / Incoming(II) tab filter — only on the merged invoice list.
+  const filtered = useMemo(
+    () =>
+      isInvoice && invTab !== 'all'
+        ? searchDateFiltered.filter((r) => r.Module === invTab)
+        : searchDateFiltered,
+    [searchDateFiltered, isInvoice, invTab],
+  );
+
+  const invCounts = useMemo(
+    () => ({
+      all: searchDateFiltered.length,
+      AP: searchDateFiltered.filter((r) => r.Module === 'AP').length,
+      II: searchDateFiltered.filter((r) => r.Module === 'II').length,
+    }),
+    [searchDateFiltered],
+  );
 
   const pageRows = paginate(filtered, page, pageSize);
   const catLabel = (id: string | null) =>
@@ -81,7 +109,7 @@ export default function InboxPage() {
   };
 
   const invColHead = ['AP', 'II', 'PODP'].includes(mod ?? '') ? 'Invoice Number' : 'PO Number';
-  const colCount = 12 + (!mod ? 1 : 0) + (mod === 'AP' ? 1 : 0);
+  const colCount = 12 + (!mod ? 1 : 0) + (isInvoice ? 1 : 0);
 
   return (
     <div className="card">
@@ -105,7 +133,7 @@ export default function InboxPage() {
         </span>
         <DateRange from={from} to={to} setFrom={setFrom} setTo={setTo} />
         <div style={{ marginRight: 8 }} />
-        {mod === 'AP' && (
+        {isInvoice && (
           <select
             value={category}
             onChange={(e) => {
@@ -125,10 +153,32 @@ export default function InboxPage() {
           </select>
         )}
         <button className="btn sm" onClick={reload}>
-          ↻ Refresh
+          <i className="fa-solid fa-arrow-rotate-right" /> Refresh
         </button>
       </div>
       <div className="card-b">
+        {isInvoice && (
+          <div className="row" style={{ gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
+            {(
+              [
+                ['all', 'All', invCounts.all],
+                ['AP', 'Supplier Invoice \u00b7 With PO', invCounts.AP],
+                ['II', 'Incoming Invoice \u00b7 Without PO', invCounts.II],
+              ] as const
+            ).map(([key, label, count]) => (
+              <button
+                key={key}
+                className={'btn sm' + (invTab === key ? '' : ' ghost')}
+                onClick={() => {
+                  setInvTab(key);
+                  setPage(1);
+                }}
+              >
+                {label} ({count})
+              </button>
+            ))}
+          </div>
+        )}
         <div className="tw">
           <table>
             <thead>
@@ -141,7 +191,7 @@ export default function InboxPage() {
                 <th>PO Date</th>
                 <th>Supplier</th>
                 <th style={{ textAlign: 'right' }}>Total</th>
-                {mod === 'AP' && <th>Document Type</th>}
+                {isInvoice && <th>Document Type</th>}
                 <th>Status</th>
                 <th>Model OCR</th>
                 <th>SAP Doc</th>
@@ -185,7 +235,7 @@ export default function InboxPage() {
                       <td>{r.DocDate || ''}</td>
                       <td>{r.PartnerName || ''}</td>
                       <td style={{ textAlign: 'right' }}>{fmt(r.TotalAmount)}</td>
-                      {mod === 'AP' && (
+                      {isInvoice && (
                         <td>
                           {r.ApDocCategory ? catLabel(r.ApDocCategory) : <span className="hint">—</span>}
                         </td>
@@ -209,7 +259,7 @@ export default function InboxPage() {
                         </button>{' '}
                         {r.Status !== 'POSTED' && (
                           <button className="btn sm ghost" onClick={() => delDoc(r.DocId)}>
-                            ✕
+                            <i className="fa-solid fa-xmark" />
                           </button>
                         )}
                       </td>

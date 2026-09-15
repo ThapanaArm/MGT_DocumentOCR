@@ -19,8 +19,9 @@ export interface FieldGroup {
 
 export const SO_H: FieldDef[] = [
   ['docType', 'Document Type'], ['poNo', 'Customer PO No.'], ['poDate', 'Document Date'],
-  ['customerName', 'Customer Name'], ['customerTaxId', 'Tax ID'], ['shipToName', 'Ship-to Location'],
-  ['shipToAddress', 'Delivery Address'], ['deliveryDate', 'Requested Delivery Date'], ['currency', 'Currency'],
+  ['customerName', 'Customer Name'], ['customerTaxId', 'Tax ID'], ['customerAddress', 'Customer Address (Sold-to)'],
+  ['shipToCode', 'รหัส Ship-to ในเอกสาร'], ['shipToName', 'Ship-to Location'], ['shipToAddress', 'Delivery Address (Ship-to)'],
+  ['deliveryDate', 'Requested Delivery Date'], ['currency', 'Currency'],
   ['paymentTerms', 'Payment Terms'], ['incoterms', 'Incoterms'],
 ];
 export const SO_TOTALS_H: FieldDef[] = [
@@ -275,32 +276,50 @@ export interface MasterCol {
   sap?: boolean;
   ref?: string;
   blank?: boolean;
+  help?: string;
+  source?: 'document' | 'external' | 'system';
+  required?: boolean;
 }
 export interface MasterDef {
   label: string;
   mod: string;
   key: string;
+  matchKey?: string;
   cols: MasterCol[];
 }
 
 export const MASTER_DEF: Record<string, MasterDef> = {
   customers: {
-    label: 'Customer', mod: 'SO', key: 'CustomerCode', cols: [
-      { k: 'CustomerCode', l: 'Customer Code (Internal)' }, { k: 'SapCustomerCode', l: 'SAP Code (Sold-to)', sap: true },
-      { k: 'NameTh', l: 'Name (TH)' }, { k: 'NameEn', l: 'Name (EN)' },
-      { k: 'TaxId', l: 'Tax ID' }, { k: 'Branch', l: 'Branch' }, { k: 'SalesOrg', l: 'Sales Org' },
-      { k: 'DistChannel', l: 'Distr.Ch' }, { k: 'Division', l: 'Div' }, { k: 'Currency', l: 'Currency' },
-      { k: 'PaymentTerms', l: 'Payment Terms' }],
+    label: 'Customer — ลูกค้า', mod: 'SO', key: 'id', matchKey: 'ComcompyCodeSAP', cols: [
+      { k: 'CompanyName', l: 'ชื่อลูกค้าในเอกสาร', source: 'document', required: true, help: 'ชื่อที่อ่านได้จากเอกสาร' },
+      { k: 'TaxId', l: 'เลขประจำตัวผู้เสียภาษี', source: 'document', help: 'Tax ID ของลูกค้า' },
+      { k: 'Branch', l: 'สาขาในเอกสาร', source: 'document', help: 'สาขาที่อ่านได้จากเอกสาร' },
+      { k: 'SalesOrg', l: 'องค์กรขาย', source: 'external', required: true, help: 'MGT = 1000 / GLC = 2000' },
+      { k: 'ComcompyCodeSAP', l: 'รหัสลูกค้า SAP / Zoho Account Code', source: 'external', sap: true, required: true, help: 'ใช้เชื่อม CustomerCode ใน ShipTo และ CustomerMaterial; Zoho ใช้ Account Code' },
+      { k: 'CompanyNameSAP', l: 'ชื่อลูกค้าจาก SAP', source: 'external' },
+      { k: 'DistChannel', l: 'ช่องทางจัดจำหน่าย', source: 'external', help: 'ค่าจาก SAP' },
+      { k: 'Division', l: 'กลุ่มธุรกิจ', source: 'external', help: 'ค่าจาก SAP' },
+      { k: 'Currency', l: 'สกุลเงิน', source: 'external', help: 'ค่าจาก SAP' },
+      { k: 'PaymentTerms', l: 'เงื่อนไขการชำระเงิน', source: 'external', help: 'ค่าจาก SAP' },
+      { k: 'IsActive', l: 'สถานะ', source: 'system' }],
   },
   shiptos: {
-    label: 'Ship-to Location', mod: 'SO', key: 'ShipToCode', cols: [
-      { k: 'CustomerCode', l: 'Customer Code', ref: 'customers' }, { k: 'ShipToCode', l: 'Ship-to Code (Internal)' },
-      { k: 'SapShipToCode', l: 'SAP Code (Ship-to)', sap: true }, { k: 'ShipToName', l: 'Location Name' }, { k: 'Address', l: 'Address' }],
+    label: 'Ship-to — สถานที่จัดส่ง', mod: 'SO', key: 'id', matchKey: 'SapShipToCode', cols: [
+      { k: 'CustomerCode', l: 'รหัสลูกค้า SAP / Zoho Account Code', ref: 'customers', source: 'document', required: true, help: 'อ้างอิง Customer.ComcompyCodeSAP' },
+      { k: 'ShipToCode', l: 'รหัส Ship-to ในเอกสาร', source: 'document', help: 'รหัส Ship-to ที่อ่านจากเอกสาร หากเอกสารไม่ระบุสามารถเว้นว่างได้' },
+      { k: 'ShipToName', l: 'ชื่อสถานที่จัดส่งในเอกสาร', source: 'document' },
+      { k: 'ShipToAddress', l: 'ที่อยู่จัดส่ง', source: 'document', help: 'รายละเอียดที่อยู่จากเอกสาร' },
+      { k: 'SapShipToCode', l: 'ShipToCode', source: 'external', sap: true, required: true, help: 'รหัส Ship-to จาก SAP / Zoho Account Code' },
+      { k: 'IsActive', l: 'สถานะ', source: 'system' }],
   },
   custmaterials: {
-    label: 'Customer Materials', mod: 'SO', key: 'Id', cols: [
-      { k: 'CustomerCode', l: 'Customer Code', ref: 'customers' }, { k: 'ExtCode', l: "Customer's Item Code" },
-      { k: 'ExtDesc', l: "Customer's Item Description" }, { k: 'MaterialCode', l: 'Material (SAP)', ref: 'materials' }],
+    label: 'CustomerMaterial — สินค้าของลูกค้า', mod: 'SO', key: 'Id', matchKey: 'MaterialCodeSAP', cols: [
+      { k: 'SalesOrg', l: 'องค์กรขาย', source: 'document', required: true, help: 'MGT = 1000 / GLC = 2000' },
+      { k: 'CustomerCode', l: 'รหัสลูกค้า SAP / Zoho Account Code', ref: 'customers', source: 'document', required: true, help: 'อ้างอิง Customer.ComcompyCodeSAP' },
+      { k: 'MaterialCodeCode', l: 'รหัสสินค้าในเอกสาร', source: 'document', required: true },
+      { k: 'MaterialCodeName', l: 'ชื่อสินค้าในเอกสาร', source: 'document' },
+      { k: 'MaterialCodeSAP', l: 'รหัสสินค้าจาก SAP', source: 'external', sap: true, required: true },
+      { k: 'Isactive', l: 'สถานะ', source: 'system' }],
   },
   vendors: {
     label: 'Vendor', mod: 'AP', key: 'VendorCode', cols: [
@@ -316,7 +335,7 @@ export const MASTER_DEF: Record<string, MasterDef> = {
   },
   uoms: {
     label: 'Unit Conversion (UoM)', mod: 'ALL', key: 'Id', cols: [
-      { k: 'MaterialCode', l: 'Material (blank = all materials)', ref: 'materials', blank: true },
+      { k: 'MaterialCode', l: 'รหัส Material (เว้นว่าง = ทุกสินค้า)', ref: 'materials', blank: true },
       { k: 'ExtUom', l: 'Document Unit' }, { k: 'SapUom', l: 'SAP Unit' },
       { k: 'SapUomIso', l: 'ISO code', sap: true },
       { k: 'Factor', l: 'Factor (1 document unit = ? SAP units)' }, { k: 'Note', l: 'Note' }],
@@ -336,8 +355,11 @@ export const MASTER_NOTE: Record<string, string> = {
   vendors: 'Used to match Vendor: checks the Tax ID first, then compares the name if not found',
   venmaterials: "Used to convert the vendor's item code/name to a SAP Material",
   materials: 'SAP Material data (should be replicated from S/4HANA)',
-  uoms: 'Converts the partner document unit to a SAP unit, e.g. 1 BAG = 25 KG — the system looks for a material-specific rule first, then falls back to the global rule (rows without a Material)',
+  uoms: 'แปลงหน่วยเอกสารเป็นหน่วย SAP โดยค้นตาม MaterialCode (SAP) + หน่วยเอกสารก่อน แล้วจึงใช้กฎกลางที่ไม่ระบุ Material',
 };
+
+// apmaterials (ocr.Material master) removed — the material master is no longer used; material
+// mapping now lives entirely in ocr.CustomerMaterial (tab "4. CustomerMaterial").
 
 export interface MasterGroup {
   key: string;
@@ -350,11 +372,12 @@ export const MASTER_GROUPS: MasterGroup[] = [
   { key: 'vendor', label: '1. Vendor / Supplier', mod: 'AP', tabs: ['vendors'], note: 'Checks the 13-digit Tax ID first, then compares the vendor name if not found (similarity ≥ 82%)' },
   { key: 'customer', label: '2. Customer', mod: 'SO', tabs: ['customers'], note: 'Checks the 13-digit Tax ID first, then compares the customer name (Thai/English) if not found (similarity ≥ 82%)' },
   { key: 'shipto', label: '3. Ship-to', mod: 'SO', tabs: ['shiptos'], note: 'Compares location name + delivery address, only under a customer that has already been matched (similarity ≥ 70%)' },
-  { key: 'material', label: '4. Material', mod: 'ALL', tabs: ['materials', 'custmaterials', 'venmaterials', 'uoms'], note: "Checks the partner's item code for an exact match first → partner's item name ≥ 85% → Material master ≥ 93%, then converts the unit to match the Material's unit" },
+  { key: 'material', label: '4. CustomerMaterial', mod: 'SO', tabs: ['custmaterials', 'uoms'], note: 'สินค้าใช้ CustomerMaterial: จับคู่รหัสหรือชื่อสินค้าในเอกสารภายใต้ลูกค้าและ SalesOrg เดียวกัน → รหัสสินค้า SAP' },
+  { key: 'apmaterial', label: '5. สินค้าฝั่งจัดซื้อ', mod: 'AP', tabs: ['venmaterials'], note: 'ข้อมูลสินค้าและบริการสำหรับเอกสารฝั่งจัดซื้อ' },
 ];
 
 export const M_LABEL: Record<string, string> = {
-  customers: 'NameTh', vendors: 'VendorName', materials: 'Description', shiptos: 'ShipToName',
+  customers: 'CompanyName', vendors: 'VendorName', materials: 'Description', shiptos: 'ShipToName', custmaterials: 'MaterialCodeName',
 };
 
 export const headerDefFor = (module: string): FieldDef[] =>

@@ -45,7 +45,7 @@ export default function LogPage() {
         <DateRange from={from} to={to} setFrom={setFrom} setTo={setTo} />
         <div style={{ marginRight: 8 }} />
         <button className="btn sm" onClick={reload}>
-          ↻ Refresh
+          <i className="fa-solid fa-arrow-rotate-right" /> Refresh
         </button>
       </div>
       <div className="card-b">
@@ -95,9 +95,9 @@ export default function LogPage() {
                     <td style={{ textAlign: 'center' }}>{l.Lines || 0}</td>
                     <td>
                       {l.Success ? (
-                        <span className="badge b-ok">✓ SAP Connected Successfully</span>
+                        <span className="badge b-ok"><i className="fa-solid fa-check" /> SAP Connected Successfully</span>
                       ) : (
-                        <span className="badge b-fail">✗ Unable to Connect to SAP</span>
+                        <span className="badge b-fail"><i className="fa-solid fa-xmark" /> Unable to Connect to SAP</span>
                       )}
                     </td>
                     <td>

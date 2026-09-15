@@ -12,6 +12,32 @@ public class PdfBlocksResult
 
 public static class PdfExtraction
 {
+    public enum PdfOpenStatus { Ok, PasswordRequired, WrongPassword }
+
+    // Open options carrying the ambient password (empty when none) so encrypted PDFs decrypt.
+    private static ParsingOptions PdfOpenOptions() =>
+        new() { Password = PdfPassword.Current ?? string.Empty };
+
+    // Whether a PDF opens with the given password. Used at upload time to ask the user for the
+    // password (or say it was wrong) instead of silently reading nothing from an encrypted file.
+    public static PdfOpenStatus CheckPassword(string path, string? password)
+    {
+        try
+        {
+            using var doc = PdfDocument.Open(path, new ParsingOptions { Password = password ?? string.Empty });
+            _ = doc.NumberOfPages;
+            return PdfOpenStatus.Ok;
+        }
+        catch (Exception ex) when (ex.GetType().Name.Contains("Encrypt", StringComparison.OrdinalIgnoreCase))
+        {
+            return string.IsNullOrEmpty(password) ? PdfOpenStatus.PasswordRequired : PdfOpenStatus.WrongPassword;
+        }
+        catch
+        {
+            return PdfOpenStatus.Ok; // not an encryption problem (corrupt/scanned) — normal pipeline handles it
+        }
+    }
+
     // pdf_text(): first 20 pages of embedded PDF text, "" on any failure (e.g. a scanned PDF with
     // no text layer, or a corrupt file) — mirrors Python's broad try/except.
     //
@@ -28,7 +54,7 @@ public static class PdfExtraction
     {
         try
         {
-            using var doc = PdfDocument.Open(path);
+            using var doc = PdfDocument.Open(path, PdfOpenOptions());
             var pages = doc.GetPages().Take(20).Select(ReconstructPageText);
             return string.Join("\n", pages);
         }
@@ -121,7 +147,7 @@ public static class PdfExtraction
         double pageWidth;
         try
         {
-            using var doc = PdfDocument.Open(path);
+            using var doc = PdfDocument.Open(path, PdfOpenOptions());
             var page = doc.GetPage(1);
             pageWidth = page.Width;
             // Same letter-level clustering as PdfText — page.GetWords() unreliably splits Thai

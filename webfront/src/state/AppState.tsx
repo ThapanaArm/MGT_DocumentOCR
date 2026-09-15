@@ -115,7 +115,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       try {
         return await fn();
       } catch (e) {
-        showToast('⚠ ' + (e instanceof Error ? e.message : String(e)));
+        showToast(e instanceof Error ? e.message : String(e));
         return undefined;
       } finally {
         setBusyState(false);

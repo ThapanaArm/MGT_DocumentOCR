@@ -39,6 +39,85 @@ public class AppConfig
     public string SapCompanyCode { get; init; } = "1000";
     public string SapDefaultPlant { get; init; } = "1000";
 
+    // Business Partner (customer) master-data lookup — used to match a customer name read off
+    // an OCR'd document (Sales Order first) back to its SAP Business Partner record. Separate
+    // BaseUrl/AuthHeader from the fields above because this is a read-only GET against
+    // API_BUSINESS_PARTNER, which may use a different communication user than the write-side
+    // Sap:User/Sap:Password. AuthHeader, if set, is used as-is (e.g. "Basic <base64>") and wins
+    // over Sap:User/Sap:Password; leave it blank to fall back to those.
+    public string SapBusinessPartnerBaseUrl { get; init; } = "";
+    public string SapBusinessPartnerAuthHeader { get; init; } = "";
+
+    // Sales Order (module "SO") posting can use its own dedicated Dev/Prod service root
+    // (Sap:SalesOrder:BaseUrl_Dev/BaseUrl_Prod + optional AuthHeader) instead of the generic flat
+    // Sap:BaseUrl/Sap:User/Sap:Password — same shape as the Business Partner lookup above. Falls
+    // back to the flat fields (in SapClient) when blank, so this still works before
+    // Sap:SalesOrder is filled in.
+    public string SapSalesOrderBaseUrl { get; init; } = "";
+    public string SapSalesOrderAuthHeader { get; init; } = "";
+    // Manual Gross Price condition type used for GLC lines (Sap:SalesOrder:PriceConditionType).
+    // Not hardcoded: the existing, already-working Excel/Zoho -> SAP Sales Order integration
+    // (SalesOrderImportJob.BuildCreateBody) keeps this in config for exactly the same reason —
+    // the user isn't 100% sure ZPR0 is fixed for every case, so it's a setting, not a literal.
+    public string SapSalesOrderPriceConditionType { get; init; } = "ZPR0";
+
+    // Material (Product) plant-extension lookup — Step 2 of SAP integration for the Sales Order
+    // module (after the Business Partner lookup above): confirms a material has been extended to
+    // the target Plant in SAP before a Sales Order is posted. Same shape/fallback as the other
+    // read-only SAP lookups; blank BaseUrl = not configured yet = the check is skipped.
+    public string SapProductBaseUrl { get; init; } = "";
+    public string SapProductAuthHeader { get; init; } = "";
+
+    // One row per legal entity (Sales Organization + Company Code + Plant) this system posts
+    // Sales Orders for. Per user: Plant is what identifies the company in practice (e.g. 2100 =
+    // GLC/Green Leaf, 1100 = MGT) — CompanyForPlant is keyed on that. Populated from the
+    // "MGT"/"GLC" appsettings.json sections in Program.cs. "Name" is the config section name, not
+    // a SAP field.
+    public CompanyProfile[] Companies { get; init; } = [];
+    public CompanyProfile? CompanyForPlant(string? plant) =>
+        string.IsNullOrWhiteSpace(plant) ? null : Companies.FirstOrDefault(c => c.DefaultPlant == plant);
+    public CompanyProfile? CompanyForSalesOrg(string? salesOrg) =>
+        string.IsNullOrWhiteSpace(salesOrg) ? null : Companies.FirstOrDefault(c => c.SalesOrganization == salesOrg);
+
+    // Zoho CRM (v8 REST API) — used for the MGT-side Sales Order flow: MGT-opened documents
+    // find/send their customer match to Zoho CRM instead of SAP (GLC-opened documents keep
+    // using the SAP Business Partner lookup above). OAuth2 refresh-token flow; ClientId/
+    // ClientSecret/RefreshToken are real secrets and should come from user-secrets / env vars in
+    // any shared environment, same as SapPassword/LocalAuthSigningKey.
+    public string ZohoAccountsUrl { get; init; } = "https://accounts.zoho.com";
+    public string ZohoApiDomain { get; init; } = "https://www.zohoapis.com";
+    public string ZohoClientId { get; init; } = "";
+    public string ZohoClientSecret { get; init; } = "";
+    public string ZohoRefreshToken { get; init; } = "";
+    public bool ZohoConfigured =>
+        !string.IsNullOrWhiteSpace(ZohoClientId) && !string.IsNullOrWhiteSpace(ZohoClientSecret) && !string.IsNullOrWhiteSpace(ZohoRefreshToken);
+
+    // ---- Authentication (Entra ID) ----
+    // A list from day one, not a single tenant: the group's second company is expected to sit in
+    // its own Microsoft tenant and that tenant is not available yet. Entries whose TenantId is
+    // blank are ignored, so the second company is switched on by filling in configuration only.
+    public AuthTenant[] AuthTenants { get; init; } = [];
+    // Optional extra accepted audience; the tenants' ClientIds are accepted automatically.
+    public string AuthAudience { get; init; } = "";
+    // Database holding the shared user master (Ms_User / Ms_UserCompany / Ms_Company). Same SQL
+    // Server instance as the OCR database, reached with a three-part name.
+    public string UserDatabase { get; init; } = "MGT_Datawarehouse";
+    // Development-only: act as this Ms_User while the Entra app registration does not exist yet.
+    // Ignored the moment a tenant is configured, and Program.cs refuses to start without one
+    // outside Development.
+    public string DevFallbackEmail { get; init; } = "";
+
+    public AuthTenant[] ConfiguredTenants =>
+        AuthTenants.Where(t => !string.IsNullOrWhiteSpace(t.TenantId)).ToArray();
+    public bool AuthConfigured => ConfiguredTenants.Length > 0;
+
+    // ---- Username/password login (OCR-issued JWT) ----
+    // SigningKey is a real secret — comes from user-secrets / env var, never appsettings.json.
+    public string LocalAuthSigningKey { get; init; } = "";
+    public string LocalAuthIssuer { get; init; } = "mgtocr";
+    public string LocalAuthAudience { get; init; } = "mgtocr";
+    public int LocalAuthLifetimeMinutes { get; init; } = 480;
+
     public required string UploadDir { get; init; }
 
     // Note: app/config.py builds an ODBC connection string (Driver={ODBC Driver 17...}) for pyodbc.
@@ -54,3 +133,12 @@ public class AppConfig
             : $"Server={DbServer};Database={DbName};User Id={DbUser};Password={DbPassword};" +
               "TrustServerCertificate=True;";
 }
+
+// One Microsoft tenant the system accepts sign-ins from. CompanyId links it back to
+// MGT_Datawarehouse.dbo.Ms_Company so a token can be sanity-checked against the company its
+// tenant is supposed to represent once phase 2 (per-company separation) lands.
+public sealed record AuthTenant(string Name = "", string TenantId = "", string ClientId = "", int CompanyId = 0);
+
+// One legal entity this system can post Sales Orders for. "Name" is the appsettings.json
+// section name ("MGT" / "GLC"), not a SAP field. See AppConfig.Companies / CompanyForPlant.
+public sealed record CompanyProfile(string Name, string SalesOrganization, string CompanyCode, string DefaultPlant);

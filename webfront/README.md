@@ -30,3 +30,16 @@ If you are developing a production application, we recommend enabling type-aware
 ```
 
 See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+
+
+## Third-Party Licenses / Attribution
+
+Icons in this project are provided by **Font Awesome Free** (v7).
+
+- Icons: [CC BY 4.0 License](https://creativecommons.org/licenses/by/4.0/)
+- Fonts: SIL OFL 1.1 License
+- Code: MIT License
+
+Font Awesome Free is free for commercial use. See <https://fontawesome.com/license/free>.
+Attribution: Icons by Font Awesome (<https://fontawesome.com>) — the embedded license
+comments in the package files must not be removed.

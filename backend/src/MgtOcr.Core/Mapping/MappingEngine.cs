@@ -72,7 +72,7 @@ public static class MappingEngine
         if (t.Length >= 10)
         {
             var byTax = rows.FirstOrDefault(r => Digits(r.Get("TaxId")) == t);
-            if (byTax != null) return (byTax, "เลขทะเบียนนิติบุคคล (Tax ID)", 1.0, new List<string>());
+            if (byTax != null) return (byTax, "Tax Registration No (Tax ID)", 1.0, new List<string>());
         }
         Dictionary<string, object?>? best = null; var bs = 0.0;
         foreach (var r in rows)
@@ -81,7 +81,7 @@ public static class MappingEngine
             if (sc > bs) { best = r; bs = sc; }
         }
         if (best != null && bs >= ThAuto)
-            return (best, $"ชื่อ ({(int)Math.Round(bs * 100)}%)", bs, new List<string>());
+            return (best, $"Name ({(int)Math.Round(bs * 100)}%)", bs, new List<string>());
         var scored = rows.Select(r => (Score: nameKeys.Max(k => Sim(name, r.Get(k))), Row: r))
             .OrderByDescending(x => x.Score).ToList();
         var cands = scored.Where(x => x.Score >= ThSuggest).Take(3).Select(x => x.Row.GetStr(codeKey)).ToList();
@@ -97,7 +97,7 @@ public static class MappingEngine
         if (ec.Length > 0)
         {
             var hit = scope.FirstOrDefault(m => m.GetStr("ExtCode").Trim().ToUpperInvariant() == ec);
-            if (hit != null) return (hit.GetStr("MaterialCode"), "รหัสสินค้าของคู่ค้า", new List<string>());
+            if (hit != null) return (hit.GetStr("MaterialCode"), "Partner Material Code", new List<string>());
         }
         Dictionary<string, object?>? best = null; var bs = 0.0;
         foreach (var m in scope)
@@ -106,7 +106,7 @@ public static class MappingEngine
             if (sc > bs) { best = m; bs = sc; }
         }
         if (best != null && bs >= ThMatScope)
-            return (best.GetStr("MaterialCode"), $"ชื่อสินค้าของคู่ค้า ({(int)Math.Round(bs * 100)}%)", new List<string>());
+            return (best.GetStr("MaterialCode"), $"Partner Material Name ({(int)Math.Round(bs * 100)}%)", new List<string>());
 
         Dictionary<string, object?>? b2 = null; var s2 = 0.0;
         foreach (var m in materials)
@@ -134,17 +134,17 @@ public static class MappingEngine
         var du = (docUom?.ToString() ?? "").Trim();
         var q = Num(qty);
 
-        if (du.Length == 0)
-            return new() { ["status"] = "ok", ["sapUom"] = baseUom, ["factor"] = 1.0, ["sapQty"] = q, ["method"] = "ไม่ระบุหน่วยในเอกสาร ใช้หน่วยของ Material" };
+        if (du.Length == 0 && baseUom.Length > 0)
+            return new() { ["status"] = "ok", ["sapUom"] = baseUom, ["factor"] = 1.0, ["sapQty"] = q, ["method"] = "No unit in document; using Material's base unit" };
         if (baseUom.Length > 0 && du.Equals(baseUom, StringComparison.OrdinalIgnoreCase))
-            return new() { ["status"] = "ok", ["sapUom"] = baseUom, ["factor"] = 1.0, ["sapQty"] = q, ["method"] = "หน่วยตรงกับ Material" };
+            return new() { ["status"] = "ok", ["sapUom"] = baseUom, ["factor"] = 1.0, ["sapQty"] = q, ["method"] = "Unit matches Material" };
 
         var rule = uomRules.FirstOrDefault(x => x.GetStr("MaterialCode") == materialCode && x.GetStr("ExtUom").Equals(du, StringComparison.OrdinalIgnoreCase));
-        var scope = "กฎเฉพาะสินค้า";
+        var scope = "product-specific rule";
         if (rule == null)
         {
             rule = uomRules.FirstOrDefault(x => string.IsNullOrEmpty(x.GetStr("MaterialCode")) && x.GetStr("ExtUom").Equals(du, StringComparison.OrdinalIgnoreCase));
-            scope = "กฎกลาง";
+            scope = "general rule";
         }
 
         if (rule != null)
@@ -152,9 +152,9 @@ public static class MappingEngine
             var f = Num(rule.Get("Factor"));
             var sapUom = rule.GetStr("SapUom");
             if (baseUom.Length > 0 && !sapUom.Equals(baseUom, StringComparison.OrdinalIgnoreCase))
-                return new() { ["status"] = "fail", ["sapUom"] = baseUom, ["factor"] = 0, ["sapQty"] = 0, ["method"] = "", ["detail"] = $"กฎแปลงเป็น {sapUom} แต่ Material ใช้หน่วย {baseUom}" };
-            if (f <= 0)
-                return new() { ["status"] = "fail", ["sapUom"] = baseUom, ["factor"] = 0, ["sapQty"] = 0, ["method"] = "", ["detail"] = "ตัวคูณต้องมากกว่า 0" };
+                return new() { ["status"] = "fail", ["sapUom"] = baseUom, ["factor"] = 0, ["sapQty"] = 0, ["method"] = "", ["detail"] = $"Rule converts to {sapUom} but Material uses unit {baseUom}" };
+            if (f <= 0 || string.IsNullOrWhiteSpace(sapUom))
+                return new() { ["status"] = "fail", ["sapUom"] = baseUom, ["factor"] = 0, ["sapQty"] = 0, ["method"] = "", ["detail"] = "Factor must be greater than 0" };
             return new()
             {
                 ["status"] = "convert", ["sapUom"] = sapUom, ["factor"] = f, ["sapQty"] = Math.Round(q * f, 3),
@@ -163,12 +163,18 @@ public static class MappingEngine
             };
         }
 
-        return new() { ["status"] = "fail", ["sapUom"] = baseUom, ["factor"] = 0, ["sapQty"] = 0, ["method"] = "", ["detail"] = "ยังไม่มีกฎแปลงหน่วย" };
+        // CustomerMaterial intentionally has no dependency on the legacy Material table. When
+        // no UoM rule was configured, preserve the document unit and let SAP validate it.
+        if (baseUom.Length == 0 && du.Length > 0)
+            return new() { ["status"] = "ok", ["sapUom"] = du, ["iso"] = UomIso.GetValueOrDefault(du.ToUpperInvariant(), ""), ["factor"] = 1.0, ["sapQty"] = q, ["method"] = "Using document unit" };
+
+        return new() { ["status"] = "fail", ["sapUom"] = baseUom, ["factor"] = 0, ["sapQty"] = 0, ["method"] = "", ["detail"] = "No unit-conversion rule yet" };
     }
 
     public static Dictionary<string, object?> RunMapping(string module, Dictionary<string, object?> header,
         List<Dictionary<string, object?>> lines, MasterData masters, Dictionary<string, object?>? manual)
     {
+        if (module == "SO") masters = MasterSchema.ForSalesOrg(masters, header.GetStr("salesOrg"));
         manual ??= new();
         var mHead = manual.Get("header") as Dictionary<string, object?> ?? new();
         var mLineRaw = manual.Get("lines") as Dictionary<string, object?> ?? new();
@@ -188,7 +194,7 @@ public static class MappingEngine
             if (!string.IsNullOrEmpty(manualCust))
             {
                 var c = masters.Customers.FirstOrDefault(x => x.GetStr("CustomerCode") == manualCust);
-                resHeader["customer"] = c != null ? R("manual", c.GetStr("CustomerCode"), c.GetStr("NameTh"), "เลือกด้วยตนเอง") : R("fail");
+                resHeader["customer"] = c != null ? R("manual", c.GetStr("CustomerCode"), c.GetStr("NameTh"), "manually selected") : R("fail");
             }
             else
             {
@@ -201,8 +207,8 @@ public static class MappingEngine
                     errors.Add(new()
                     {
                         ["field"] = "Customer",
-                        ["msg"] = $"ไม่พบลูกค้าที่ตรงกับเลขทะเบียน {Dash(header.GetStr("customerTaxId"))} หรือชื่อ \"{Dash(header.GetStr("customerName"))}\"",
-                        ["fix"] = "สร้าง/แก้ไขที่ Master Mapping → ลูกค้า (Customer)",
+                        ["msg"] = $"No customer matches Tax No {Dash(header.GetStr("customerTaxId"))} or name \"{Dash(header.GetStr("customerName"))}\"",
+                        ["fix"] = "Create/edit in Master Mapping → Customer",
                     });
                 }
             }
@@ -211,13 +217,13 @@ public static class MappingEngine
             var manualShipTo = mHead.Get("shipTo")?.ToString();
             if (!string.IsNullOrEmpty(manualShipTo))
             {
-                var s = masters.ShipTos.FirstOrDefault(x => x.GetStr("ShipToCode") == manualShipTo);
-                resHeader["shipTo"] = s != null ? R("manual", s.GetStr("ShipToCode"), s.GetStr("ShipToName"), "เลือกด้วยตนเอง") : R("fail");
+                var s = masters.ShipTos.FirstOrDefault(x => x.GetStr("CustomerCode") == cust && x.GetStr("SapShipToCode") == manualShipTo);
+                resHeader["shipTo"] = s != null ? R("manual", s.GetStr("SapShipToCode"), s.GetStr("ShipToName"), "manually selected") : R("fail");
             }
             else if (string.IsNullOrEmpty(cust))
             {
                 resHeader["shipTo"] = R("fail");
-                errors.Add(new() { ["field"] = "Ship-to", ["msg"] = "ยังระบุ Ship-to ไม่ได้ เนื่องจากยังไม่ทราบลูกค้า", ["fix"] = "ระบุลูกค้าให้ถูกต้องก่อน" });
+                errors.Add(new() { ["field"] = "Ship-to", ["msg"] = "Ship-to cannot be determined yet because the customer is unknown", ["fix"] = "Specify the correct customer first" });
             }
             else
             {
@@ -229,19 +235,23 @@ public static class MappingEngine
                     if (sc > bs) { best = x; bs = sc; }
                 }
                 if (best != null && bs >= ThShipTo)
-                    resHeader["shipTo"] = R("ok", best.GetStr("ShipToCode"), best.GetStr("ShipToName"), $"ชื่อ/ที่อยู่ ({(int)Math.Round(bs * 100)}%)");
+                    resHeader["shipTo"] = R("ok", best.GetStr("SapShipToCode"), best.GetStr("ShipToName"), $"Name/Address ({(int)Math.Round(bs * 100)}%)");
                 else
                 {
-                    resHeader["shipTo"] = R("fail", cands: scope.Select(x => x.GetStr("ShipToCode")).Take(3).ToList());
+                    resHeader["shipTo"] = R("fail", cands: scope.Select(x => x.GetStr("SapShipToCode")).Take(3).ToList());
                     errors.Add(new()
                     {
                         ["field"] = "Ship-to",
-                        ["msg"] = $"ไม่พบสถานที่ส่งของ \"{Dash(header.GetStr("shipToName"))}\" ของลูกค้ารายนี้",
-                        ["fix"] = "เพิ่มที่ Master Mapping → Ship-to",
+                        ["msg"] = $"Ship-to location not found \"{Dash(header.GetStr("shipToName"))}\" for this customer",
+                        ["fix"] = "Add in Master Mapping → Ship-to",
                     });
                 }
             }
-            partner = cust; mapRows = masters.CustomerMaterials; keyField = "CustomerCode"; partnerLabel = "ลูกค้า";
+            var selectedCustomer = masters.Customers.FirstOrDefault(x => x.GetStr("CustomerCode") == cust);
+            partner = cust;
+            mapRows = masters.CustomerMaterials.Where(x => x.GetStr("CustomerCode") == cust
+                && x.GetStr("SalesOrg") == selectedCustomer.GetStr("SalesOrg")).ToList();
+            keyField = "CustomerCode"; partnerLabel = "Customer";
         }
         else
         {
@@ -249,7 +259,7 @@ public static class MappingEngine
             if (!string.IsNullOrEmpty(manualVendor))
             {
                 var v = masters.Vendors.FirstOrDefault(x => x.GetStr("VendorCode") == manualVendor);
-                resHeader["vendor"] = v != null ? R("manual", v.GetStr("VendorCode"), v.GetStr("VendorName"), "เลือกด้วยตนเอง") : R("fail");
+                resHeader["vendor"] = v != null ? R("manual", v.GetStr("VendorCode"), v.GetStr("VendorName"), "manually selected") : R("fail");
             }
             else
             {
@@ -262,17 +272,17 @@ public static class MappingEngine
                     errors.Add(new()
                     {
                         ["field"] = "Vendor / Supplier",
-                        ["msg"] = $"ไม่พบผู้ขายที่ตรงกับเลขทะเบียน {Dash(header.GetStr("vendorTaxId"))} หรือชื่อ \"{Dash(header.GetStr("vendorName"))}\"",
-                        ["fix"] = "สร้าง/แก้ไขที่ Master Mapping → ผู้ขาย (Vendor)",
+                        ["msg"] = $"No vendor matches Tax No {Dash(header.GetStr("vendorTaxId"))} or name \"{Dash(header.GetStr("vendorName"))}\"",
+                        ["fix"] = "Create/edit in Master Mapping → Vendor",
                     });
                 }
             }
             partner = ((Dictionary<string, object?>)resHeader["vendor"]!).GetStr("code");
-            mapRows = masters.VendorMaterials; keyField = "VendorCode"; partnerLabel = "ผู้ขาย";
+            mapRows = masters.VendorMaterials; keyField = "VendorCode"; partnerLabel = "Vendor";
 
             var calc = Math.Round(Num(header.Get("subTotal")) * Num(header.Get("vatRate")) / 100, 2);
             if (Math.Abs(calc - Num(header.Get("vatAmount"))) > 1)
-                warns.Add($"VAT ที่อ่านได้ {Money(Num(header.Get("vatAmount")))} ไม่ตรงกับที่คำนวณ {Money(calc)} (ฐาน {Money(Num(header.Get("subTotal")))} x {FormatG(Num(header.Get("vatRate")))}%)");
+                warns.Add($"VAT read {Money(Num(header.Get("vatAmount")))} does not match calculated {Money(calc)} (base {Money(Num(header.Get("subTotal")))} x {FormatG(Num(header.Get("vatRate")))}%)");
         }
 
         var uomRules = masters.Uoms;
@@ -283,7 +293,11 @@ public static class MappingEngine
             Dictionary<string, object?> row;
             if (!string.IsNullOrEmpty(mv))
             {
-                row = R("manual", mv, matDesc.TryGetValue(mv, out var d) ? d?.ToString() ?? mv : mv, "เลือกด้วยตนเอง");
+                row = module == "SO" && !mapRows.Any(x => x.GetStr("MaterialCode") == mv)
+                    ? R("fail")
+                    : R("manual", mv, matDesc.TryGetValue(mv, out var d) ? d?.ToString() ?? mv : mv, "manually selected");
+                if (row.GetStr("status") == "fail")
+                    errors.Add(new() { ["field"] = $"Material line {i + 1}", ["msg"] = "Material is not active for this customer and SalesOrg", ["fix"] = "Select or add CustomerMaterial for this customer" });
             }
             else if (string.IsNullOrEmpty(partner))
             {
@@ -291,14 +305,14 @@ public static class MappingEngine
                 if (i == 0)
                     errors.Add(new()
                     {
-                        ["field"] = "Material (ทุกบรรทัด)",
-                        ["msg"] = $"ยังจับคู่สินค้าไม่ได้ เนื่องจากยังระบุ{partnerLabel}ไม่สำเร็จ",
-                        ["fix"] = $"ระบุ{partnerLabel}ให้ถูกต้องก่อน แล้วกด Mapping อีกครั้ง",
+                        ["field"] = "Material (all lines)",
+                        ["msg"] = $"Products cannot be matched yet because the {partnerLabel} has not been set",
+                        ["fix"] = $"Set the {partnerLabel} correctly first, then run Mapping again",
                     });
             }
             else
             {
-                var (code, method, cands) = MatchMaterial(partner, ln.Get("extCode"), ln.Get("desc"), mapRows, keyField, masters.Materials);
+                var (code, method, cands) = MatchMaterial(partner, ln.Get("extCode"), ln.Get("desc"), mapRows, keyField, module == "SO" ? [] : masters.Materials);
                 if (!string.IsNullOrEmpty(code))
                     row = R("ok", code, matDesc.TryGetValue(code, out var d2) ? d2?.ToString() ?? code : code, method);
                 else
@@ -306,9 +320,9 @@ public static class MappingEngine
                     row = R("fail", cands: cands);
                     errors.Add(new()
                     {
-                        ["field"] = $"Material บรรทัดที่ {i + 1}",
-                        ["msg"] = $"ไม่พบสินค้า {Dash(ln.GetStr("extCode"))} / \"{Dash(ln.GetStr("desc"))}\" ในรายการสินค้าของ{partnerLabel}",
-                        ["fix"] = $"เพิ่มที่ Master Mapping → สินค้าฝั่ง{partnerLabel}",
+                        ["field"] = $"Material line {i + 1}",
+                        ["msg"] = $"Product not found {Dash(ln.GetStr("extCode"))} / \"{Dash(ln.GetStr("desc"))}\" in the product list of {partnerLabel}",
+                        ["fix"] = $"Add in Master Mapping → products for {partnerLabel}",
                     });
                 }
             }
@@ -322,14 +336,14 @@ public static class MappingEngine
                     var mat = masters.Materials.FirstOrDefault(m => m.GetStr("MaterialCode") == row.GetStr("code"));
                     errors.Add(new()
                     {
-                        ["field"] = $"หน่วย บรรทัดที่ {i + 1}",
-                        ["msg"] = $"ไม่พบการแปลงหน่วย \"{Dash(ln.GetStr("uom"))}\" → \"{Dash(mat.GetStr("Uom"))}\" ของสินค้า {row.GetStr("code")} ({u.GetStr("detail")})",
-                        ["fix"] = "เพิ่มกฎที่ Master Mapping → 4. Material → การแปลงหน่วย (UoM)",
+                        ["field"] = $"Unit line {i + 1}",
+                        ["msg"] = $"No unit conversion \"{Dash(ln.GetStr("uom"))}\" → \"{Dash(mat.GetStr("Uom"))}\" for product {row.GetStr("code")} ({u.GetStr("detail")})",
+                        ["fix"] = "Add a rule in Master Mapping → 4. Material → Unit Conversion (UoM)",
                     });
                 }
                 else if (u.GetStr("status") == "convert")
                 {
-                    warns.Add($"บรรทัดที่ {i + 1} แปลงหน่วย {Qty3(Num(ln.Get("qty")))} {ln.GetStr("uom")} → {Qty3(Convert.ToDouble(u.Get("sapQty")))} {u.GetStr("sapUom")} ({u.GetStr("method")})");
+                    warns.Add($"line {i + 1} converts unit {Qty3(Num(ln.Get("qty")))} {ln.GetStr("uom")} → {Qty3(Convert.ToDouble(u.Get("sapQty")))} {u.GetStr("sapUom")} ({u.GetStr("method")})");
                 }
             }
             else
@@ -343,15 +357,15 @@ public static class MappingEngine
         {
             var ln = lines[i];
             if (Num(ln.Get("qty")) <= 0)
-                errors.Add(new() { ["field"] = $"จำนวน บรรทัดที่ {i + 1}", ["msg"] = "จำนวนต้องมากกว่า 0", ["fix"] = "แก้ไขค่าในตาราง Detail" });
+                errors.Add(new() { ["field"] = $"Quantity line {i + 1}", ["msg"] = "Quantity must be greater than 0", ["fix"] = "Edit the value in the Detail table" });
             if (Num(ln.Get("price")) <= 0)
-                warns.Add($"บรรทัดที่ {i + 1} ราคาต่อหน่วยเป็น 0");
+                warns.Add($"line {i + 1} has a unit price of 0");
         }
         var total = lines.Sum(l => Num(l.Get("amount")));
         var baseAmt = Num(header.Get("subTotal"));
         if (baseAmt == 0) baseAmt = Num(header.Get("totalAmount"));
         if (Math.Abs(total - baseAmt) > 1)
-            warns.Add($"ผลรวมรายการ {Money(total)} ไม่ตรงกับยอดในหัวเอกสาร {Money(baseAmt)}");
+            warns.Add($"Line total {Money(total)} does not match the header amount {Money(baseAmt)}");
 
         AttachSapKeys(module, masters, res);
         AttachCompare(module, header, lines, masters, res);
@@ -374,7 +388,7 @@ public static class MappingEngine
                 errors.Add(new()
                 {
                     ["field"] = label,
-                    ["msg"] = $"{noun} \"{(string.IsNullOrEmpty(row.GetStr("text")) ? row.GetStr("code") : row.GetStr("text"))}\" ยังไม่ได้ระบุรหัสของ SAP จึงส่งเข้า SAP ไม่ได้",
+                    ["msg"] = $"{noun} \"{(string.IsNullOrEmpty(row.GetStr("text")) ? row.GetStr("code") : row.GetStr("text"))}\" has no SAP code yet, so it cannot be posted to SAP",
                     ["fix"] = fix,
                 });
         }
@@ -383,23 +397,23 @@ public static class MappingEngine
         {
             var custRow = resHeader.Get("customer") as Dictionary<string, object?>;
             var c = masters.Customers.FirstOrDefault(x => x.GetStr("CustomerCode") == custRow.GetStr("code"));
-            Need(custRow, c, "SapCustomerCode", "รหัส SAP ของลูกค้า", "ลูกค้า", "กรอกช่อง 'รหัสใน SAP (Sold-to)' ที่ Master Mapping → 2. Customer");
+            Need(custRow, c, "SapCustomerCode", "Customer SAP code", "Customer", "Fill 'External Code (Sold-to)' in Master Mapping → 2. Customer");
             var stRow = resHeader.Get("shipTo") as Dictionary<string, object?>;
-            var st = masters.ShipTos.FirstOrDefault(x => x.GetStr("ShipToCode") == stRow.GetStr("code"));
-            Need(stRow, st, "SapShipToCode", "รหัส SAP ของ Ship-to", "สถานที่ส่งของ", "กรอกช่อง 'รหัสใน SAP (Ship-to)' ที่ Master Mapping → 3. Ship-to");
+            var st = masters.ShipTos.FirstOrDefault(x => x.GetStr("CustomerCode") == custRow.GetStr("code") && x.GetStr("SapShipToCode") == stRow.GetStr("code"));
+            Need(stRow, st, "SapShipToCode", "Ship-to SAP code", "Ship-to Location", "Fill 'External Code (Ship-to)' in Master Mapping → 3. Ship-to");
         }
         else
         {
             var venRow = resHeader.Get("vendor") as Dictionary<string, object?>;
             var v = masters.Vendors.FirstOrDefault(x => x.GetStr("VendorCode") == venRow.GetStr("code"));
-            Need(venRow, v, "SapVendorCode", "รหัส SAP ของผู้ขาย", "ผู้ขาย", "กรอกช่อง 'รหัสใน SAP (Supplier)' ที่ Master Mapping → 1. Vendor / Supplier");
+            Need(venRow, v, "SapVendorCode", "Vendor SAP code", "Vendor", "Fill 'SAP Code (Supplier)' in Master Mapping → 1. Vendor / Supplier");
         }
 
         for (var i = 0; i < resLines.Count; i++)
         {
             var row = resLines[i];
             var m = masters.Materials.FirstOrDefault(x => x.GetStr("MaterialCode") == row.GetStr("code"));
-            Need(row, m, "SapMaterialCode", $"รหัส SAP ของสินค้า บรรทัดที่ {i + 1}", $"สินค้า {row.GetStr("code")}", "กรอกช่อง 'รหัสใน SAP (Material)' ที่ Master Mapping → 4. Material");
+            Need(row, m, "SapMaterialCode", $"Material SAP code line {i + 1}", $"product {row.GetStr("code")}", "Fill 'SAP Code (Material)' in Master Mapping → 4. Material");
             var u = row.Get("uom") as Dictionary<string, object?>;
             if (u != null && (u.GetStr("status") == "ok" || u.GetStr("status") == "convert"))
             {
@@ -420,48 +434,51 @@ public static class MappingEngine
         {
             var r = (Dictionary<string, object?>)resHeader["customer"]!;
             var dn = header.Get("customerName"); var dt = header.Get("customerTaxId");
-            r["doc"] = new List<object> { Fld("ชื่อลูกค้า", dn), Fld("เลขทะเบียนนิติบุคคล", dt) };
+            r["doc"] = new List<object> { Fld("Customer Name", dn), Fld("Tax Registration No", dt) };
             var c = masters.Customers.FirstOrDefault(x => x.GetStr("CustomerCode") == r.GetStr("code"));
+            // "SAP Code (Sold-to)" and "Customer Code (internal)" dropped from this list per
+            // Megachem's request -- both are already redundant with the "SAP: ..." badge in the
+            // card header (AttachSapKeys below), and the internal code isn't meaningful to a
+            // person visually comparing document vs Zoho/SAP data.
             r["sap"] = c == null ? new List<object>() : new List<object>
             {
-                Fld("รหัสใน SAP (Sold-to)", string.IsNullOrEmpty(c.GetStr("SapCustomerCode")) ? "— ยังไม่ระบุ —" : c.GetStr("SapCustomerCode"), !string.IsNullOrEmpty(c.GetStr("SapCustomerCode"))),
-                Fld("รหัสลูกค้า (ภายใน)", c.GetStr("CustomerCode")),
-                Fld("ชื่อใน SAP", c.GetStr("NameTh"), Like(dn, c.GetStr("NameTh")) ?? Like(dn, c.Get("NameEn"))),
-                Fld("เลขทะเบียนนิติบุคคล", c.Get("TaxId"), SameTax(dt, c.Get("TaxId"))),
+                Fld("Name from SAP / Zoho", c.GetStr("CompanyNameSAP"), Like(dn, c.Get("CompanyNameSAP"))),
+                Fld("Tax Registration No", c.Get("TaxId"), SameTax(dt, c.Get("TaxId"))),
                 Fld("Sales Org / Channel / Div", $"{Dash(c.GetStr("SalesOrg"))} / {Dash(c.GetStr("DistChannel"))} / {Dash(c.GetStr("Division"))}"),
                 Fld("Payment Terms", c.Get("PaymentTerms")),
-                Fld("สกุลเงิน", c.Get("Currency")),
+                Fld("Currency", c.Get("Currency")),
             };
 
             r = (Dictionary<string, object?>)resHeader["shipTo"]!;
             var sn = header.Get("shipToName"); var sa = header.Get("shipToAddress");
-            r["doc"] = new List<object> { Fld("สถานที่ส่งของ", sn), Fld("ที่อยู่จัดส่ง", sa) };
-            var st = masters.ShipTos.FirstOrDefault(x => x.GetStr("ShipToCode") == r.GetStr("code"));
+            r["doc"] = new List<object> { Fld("Ship-to Location", sn), Fld("Delivery Address", sa) };
+            var customerCode = (resHeader.Get("customer") as Dictionary<string, object?>).GetStr("code");
+            var st = masters.ShipTos.FirstOrDefault(x => x.GetStr("CustomerCode") == customerCode && x.GetStr("SapShipToCode") == r.GetStr("code"));
+            // "SAP Code (Ship-to)" and "Under Customer" dropped for the same reason as the
+            // Customer section above.
             r["sap"] = st == null ? new List<object>() : new List<object>
             {
-                Fld("รหัสใน SAP (Ship-to)", string.IsNullOrEmpty(st.GetStr("SapShipToCode")) ? "— ยังไม่ระบุ —" : st.GetStr("SapShipToCode"), !string.IsNullOrEmpty(st.GetStr("SapShipToCode"))),
-                Fld("รหัส Ship-to (ภายใน)", st.GetStr("ShipToCode")),
-                Fld("ชื่อสถานที่", st.GetStr("ShipToName"), Like(sn, st.GetStr("ShipToName"))),
-                Fld("ที่อยู่", st.Get("Address"), Like(sa, st.Get("Address"))),
-                Fld("อยู่ใต้ลูกค้า", st.Get("CustomerCode")),
+                Fld("ShipToCode", st.GetStr("SapShipToCode")),
+                Fld("Location Name", st.GetStr("ShipToName"), Like(sn, st.GetStr("ShipToName"))),
+                Fld("Address", st.Get("Address"), Like(sa, st.Get("Address"))),
             };
         }
         else
         {
             var r = (Dictionary<string, object?>)resHeader["vendor"]!;
             var dn = header.Get("vendorName"); var dt = header.Get("vendorTaxId");
-            r["doc"] = new List<object> { Fld("ชื่อผู้ขาย", dn), Fld("เลขทะเบียนนิติบุคคล", dt), Fld("สาขา", header.Get("branch")) };
+            r["doc"] = new List<object> { Fld("Vendor Name", dn), Fld("Tax Registration No", dt), Fld("Branch", header.Get("branch")) };
             var v = masters.Vendors.FirstOrDefault(x => x.GetStr("VendorCode") == r.GetStr("code"));
             r["sap"] = v == null ? new List<object>() : new List<object>
             {
-                Fld("รหัสใน SAP (Supplier)", string.IsNullOrEmpty(v.GetStr("SapVendorCode")) ? "— ยังไม่ระบุ —" : v.GetStr("SapVendorCode"), !string.IsNullOrEmpty(v.GetStr("SapVendorCode"))),
-                Fld("รหัสผู้ขาย (ภายใน)", v.GetStr("VendorCode")),
-                Fld("ชื่อใน SAP", v.GetStr("VendorName"), Like(dn, v.GetStr("VendorName"))),
-                Fld("เลขทะเบียนนิติบุคคล", v.Get("TaxId"), SameTax(dt, v.Get("TaxId"))),
-                Fld("สาขา", v.Get("Branch")),
+                Fld("SAP Code (Supplier)", string.IsNullOrEmpty(v.GetStr("SapVendorCode")) ? "— not set —" : v.GetStr("SapVendorCode"), !string.IsNullOrEmpty(v.GetStr("SapVendorCode"))),
+                Fld("Vendor Code (internal)", v.GetStr("VendorCode")),
+                Fld("Name in SAP", v.GetStr("VendorName"), Like(dn, v.GetStr("VendorName"))),
+                Fld("Tax Registration No", v.Get("TaxId"), SameTax(dt, v.Get("TaxId"))),
+                Fld("Branch", v.Get("Branch")),
                 Fld("Payment Terms", v.Get("PaymentTerms")),
                 Fld("Recon. Account", v.Get("ReconAcct")),
-                Fld("ภาษีหัก ณ ที่จ่าย", v.Get("WhtCode")),
+                Fld("Withholding Tax", v.Get("WhtCode")),
             };
         }
 
@@ -472,36 +489,36 @@ public static class MappingEngine
             var dq = Num(ln.Get("qty")); var du = ln.GetStr("uom");
             r["doc"] = new List<object>
             {
-                Fld("รหัสสินค้าของคู่ค้า", ln.Get("extCode")),
-                Fld("ชื่อสินค้าตามเอกสาร", ln.Get("desc")),
-                Fld("จำนวน", Qty3(dq)),
-                Fld("หน่วยตามเอกสาร", du),
-                Fld("ราคา/หน่วย", Money(Num(ln.Get("price")))),
-                Fld("จำนวนเงิน", Money(Num(ln.Get("amount")))),
+                Fld("Partner Material Code", ln.Get("extCode")),
+                Fld("Material Name (from document)", ln.Get("desc")),
+                Fld("Quantity", Qty3(dq)),
+                Fld("Unit (from document)", du),
+                Fld("Price/Unit", Money(Num(ln.Get("price")))),
+                Fld("Amount", Money(Num(ln.Get("amount")))),
             };
             var m = masters.Materials.FirstOrDefault(x => x.GetStr("MaterialCode") == r.GetStr("code"));
             var u = r.Get("uom") as Dictionary<string, object?> ?? new();
             r["sap"] = m == null ? new List<object>() : new List<object>
             {
-                Fld("รหัสใน SAP (Material)", string.IsNullOrEmpty(m.GetStr("SapMaterialCode")) ? "— ยังไม่ระบุ —" : m.GetStr("SapMaterialCode"), !string.IsNullOrEmpty(m.GetStr("SapMaterialCode"))),
-                Fld("รหัส Material (ภายใน)", m.GetStr("MaterialCode")),
-                Fld("รายละเอียด", m.Get("Description"), Like(ln.Get("desc"), m.Get("Description"))),
-                Fld("หน่วยฐานใน SAP", m.Get("Uom"), Same(du, m.GetStr("Uom")) ? true : (string.IsNullOrEmpty(du) ? (bool?)null : false)),
-                Fld("จำนวนที่ส่งเข้า SAP", $"{Qty3(Num(u.Get("sapQty")))} {u.GetStr("sapUom")}", u.GetStr("status") is "ok" or "convert"),
+                Fld("SAP Code (Material)", string.IsNullOrEmpty(m.GetStr("SapMaterialCode")) ? "— not set —" : m.GetStr("SapMaterialCode"), !string.IsNullOrEmpty(m.GetStr("SapMaterialCode"))),
+                Fld("Material Code (internal)", m.GetStr("MaterialCode")),
+                Fld("Description", m.Get("Description"), Like(ln.Get("desc"), m.Get("Description"))),
+                Fld("Base Unit in SAP", m.Get("Uom"), Same(du, m.GetStr("Uom")) ? true : (string.IsNullOrEmpty(du) ? (bool?)null : false)),
+                Fld("Quantity to SAP", $"{Qty3(Num(u.Get("sapQty")))} {u.GetStr("sapUom")}", u.GetStr("status") is "ok" or "convert"),
                 Fld("Plant", m.Get("Plant")),
                 Fld("Material Group", m.Get("MatGroup")),
             };
             r["unit"] = new Dictionary<string, object?>
             {
                 ["status"] = u.GetStr("status").Length > 0 ? u.GetStr("status") : "idle",
-                ["doc"] = new List<object> { Fld("จำนวนตามเอกสาร", Qty3(dq)), Fld("หน่วยตามเอกสาร", string.IsNullOrEmpty(du) ? "-" : du) },
+                ["doc"] = new List<object> { Fld("Quantity (from document)", Qty3(dq)), Fld("Unit (from document)", string.IsNullOrEmpty(du) ? "-" : du) },
                 ["sap"] = new List<object>
                 {
-                    Fld("จำนวนใน SAP", u.GetStr("status") is "ok" or "convert" ? Qty3(Num(u.Get("sapQty"))) : "-"),
-                    Fld("หน่วยใน SAP", string.IsNullOrEmpty(u.GetStr("sapUom")) ? "-" : u.GetStr("sapUom")),
-                    Fld("ตัวคูณ", Num(u.Get("factor")) != 0 ? $"x {FormatG(Num(u.Get("factor")))}" : "-"),
+                    Fld("Quantity in SAP", u.GetStr("status") is "ok" or "convert" ? Qty3(Num(u.Get("sapQty"))) : "-"),
+                    Fld("Unit in SAP", string.IsNullOrEmpty(u.GetStr("sapUom")) ? "-" : u.GetStr("sapUom")),
+                    Fld("Factor", Num(u.Get("factor")) != 0 ? $"x {FormatG(Num(u.Get("factor")))}" : "-"),
                     Fld("ISO code", string.IsNullOrEmpty(u.GetStr("iso")) ? "-" : u.GetStr("iso")),
-                    Fld("ที่มาของกฎ", !string.IsNullOrEmpty(u.GetStr("method")) ? u.GetStr("method") : (!string.IsNullOrEmpty(u.GetStr("detail")) ? u.GetStr("detail") : "-")),
+                    Fld("Rule source", !string.IsNullOrEmpty(u.GetStr("method")) ? u.GetStr("method") : (!string.IsNullOrEmpty(u.GetStr("detail")) ? u.GetStr("detail") : "-")),
                 },
             };
         }

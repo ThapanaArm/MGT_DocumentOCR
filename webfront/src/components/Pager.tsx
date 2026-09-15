@@ -38,7 +38,7 @@ export default function Pager({
       </div>
       <div className="row" style={{ gap: 6, alignItems: 'center' }}>
         <button className="btn sm ghost" onClick={() => setPage(Math.max(1, cur - 1))} disabled={cur <= 1}>
-          ‹ Previous
+          <i className="fa-solid fa-angle-left" /> Previous
         </button>
         <span className="hint">
           Page {cur} / {totalPages}
@@ -48,7 +48,7 @@ export default function Pager({
           onClick={() => setPage(Math.min(totalPages, cur + 1))}
           disabled={cur >= totalPages}
         >
-          Next ›
+          Next <i className="fa-solid fa-angle-right" />
         </button>
       </div>
     </div>
@@ -88,7 +88,7 @@ export function DateRange({
           }}
           title="Clear date range"
         >
-          ✕
+          <i className="fa-solid fa-xmark" />
         </button>
       )}
     </>

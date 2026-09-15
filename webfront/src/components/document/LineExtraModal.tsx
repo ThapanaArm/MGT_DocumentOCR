@@ -18,7 +18,7 @@ export default function LineExtraModal({
   return (
     <Modal open onClose={onClose} wide>
       <ModalHeader
-        title={`📋 Additional PO Details — Item ${line.itemNo} (${line.desc || ''})`}
+        title={`<i className="fa-solid fa-clipboard-list" /> Additional PO Details — Item ${line.itemNo} (${line.desc || ''})`}
         onClose={onClose}
       />
       <div className="card-b">
@@ -26,7 +26,7 @@ export default function LineExtraModal({
           className="hint"
           style={{ margin: '-4px 0 16px', padding: '8px 12px', background: 'var(--line-soft)', borderRadius: 'var(--r2)' }}
         >
-          💡 {guide.hint}
+          <i className="fa-solid fa-lightbulb" /> {guide.hint}
         </p>
         <div className="grid">
           {PO_LINE_EXTRA_FIELDS.map((f) => {
@@ -40,7 +40,7 @@ export default function LineExtraModal({
               >
                 <label>
                   {label}
-                  {isRelevant && <span style={{ color: 'var(--brand)' }}> ★ Recommended</span>}
+                  {isRelevant && <span style={{ color: 'var(--brand)' }}> <i className="fa-solid fa-star" /> Recommended</span>}
                 </label>
                 {type === 'select' ? (
                   <select value={ex[k] || ''} onChange={(e) => onEdit(k, e.target.value)}>

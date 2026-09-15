@@ -3,6 +3,7 @@ import { qtyTxt } from './MappingCards';
 import type { DocLine, DocModel, MapResult } from '../../api/documents';
 import type { MastersData } from '../../api/masters';
 import { PO_LINE_EXTRA_FIELDS } from '../../constants/fields';
+import MaterialSearchSelect from './MaterialSearchSelect';
 
 /* Ports the DETAIL lines table from docHtml() incl. uomCell()/lineExtraCount(). */
 
@@ -29,7 +30,7 @@ function UomCell({
   if (u.status === 'fail')
     return (
       <>
-        <span className="badge b-fail">✗ No unit conversion rule</span>
+        <span className="badge b-fail"><i className="fa-solid fa-xmark" /> No unit conversion rule</span>
         {!posted && (
           <div style={{ marginTop: 6 }}>
             <button className="btn sm" onClick={() => onAddUomRule(i)}>
@@ -46,7 +47,7 @@ function UomCell({
           {qtyTxt(u.sapQty)} {u.sapUom}
         </b>
         <div className="sub">
-          <span className="badge b-warn">⇄ ×{u.factor}</span>
+          <span className="badge b-warn"><i className="fa-solid fa-right-left" /> ×{u.factor}</span>
         </div>
         <div className="hint" style={{ marginTop: 2 }}>
           {u.method}
@@ -77,6 +78,13 @@ interface Props {
   onShowLineExtra: (i: number) => void;
   onAddUomRule: (i: number) => void;
   bare?: boolean; // render without the outer .card wrapper (for use inside a tabbed card)
+  /** F01: this table checks OCR lines against shared Master Data (materials/UoM rules) — for the
+   *  SAP/GLC path that master data IS the SAP material master, but for MGT the actual Sales Order
+   *  is matched and sent separately in Step 3 (Zoho CRM), so labeling these columns "(SAP)" here
+   *  implies a destination this check doesn't decide. Defaults to the SAP wording (unchanged for
+   *  GLC and for the AP/PO Reference tab, which do post to SAP) — pass true only for the MGT/Zoho
+   *  document view. */
+  isMgt?: boolean;
 }
 
 export default function DetailTable({
@@ -93,11 +101,38 @@ export default function DetailTable({
   onShowLineExtra,
   onAddUomRule,
   bare,
+  isMgt,
 }: Props) {
-  const matOpts = masters.materials.map((m) => ({
-    v: m.MaterialCode,
-    t: m.MaterialCode + ' — ' + m.Description,
-  }));
+  // SO documents match Material through ocr.CustomerMaterial, not the (deprecated for SO) generic
+  // ocr.Material master -- same source, same cross-customer-borrow ordering and label format the
+  // "Material — Row N" card in MappingCards.tsx uses. Before this fix, this table pulled its
+  // options from masters.materials while MappingCards pulled from masters.custmaterials -- the
+  // same underlying SAP code could carry a different (often stale/wrong) description in each
+  // master, so picking a code here and looking at "Material — Row N" above could show two
+  // different product names for what's actually the same selection. AP/II keep the original
+  // generic Material master unchanged (no CustomerMaterial concept there).
+  const currentCustomerCode = map?.header.customer?.code;
+  const matOpts = doc.module === 'SO'
+    ? masters.custmaterials
+        .filter((cm) => String(cm.SalesOrg) === (doc.header.salesOrg || (isMgt ? '1000' : '2000')))
+        .sort((a, b) => {
+          const aMine = a.CustomerCode === currentCustomerCode ? 0 : 1;
+          const bMine = b.CustomerCode === currentCustomerCode ? 0 : 1;
+          if (aMine !== bMine) return aMine - bMine;
+          return String(a.MaterialCodeName || '').localeCompare(String(b.MaterialCodeName || ''));
+        })
+        .map((m) => ({
+          value: m.MaterialCodeSAP,
+          description: m.MaterialCodeName || '',
+          label: m.CustomerCode === currentCustomerCode
+            ? `${m.MaterialCodeSAP} — ${m.MaterialCodeName || ''} (CustomerMaterial)`
+            : `${m.MaterialCodeSAP} — ${m.MaterialCodeName || ''} (CustomerMaterial · ${m.CustomerCode})`,
+        }))
+    : masters.materials.map((m) => ({
+        value: m.MaterialCode,
+        description: m.Description || '',
+        label: m.MaterialCode + ' — ' + m.Description,
+      }));
   const showPoExtra = doc.module === 'AP';
   const showSoExtra = doc.module === 'SO';
   const extraCols = (showPoExtra ? 1 : 0) + (showSoExtra ? 2 : 0);
@@ -147,8 +182,8 @@ export default function DetailTable({
                 <th style={{ width: 74 }}>Unit</th>
                 <th style={{ minWidth: 130 }}>Unit Price</th>
                 <th style={{ minWidth: 140 }}>Amount</th>
-                <th style={{ minWidth: 270 }}>Material (SAP)</th>
-                <th style={{ minWidth: 170 }}>Unit → SAP</th>
+                <th style={{ minWidth: 270 }}>{isMgt ? 'Material (Master Data)' : 'Material (SAP)'}</th>
+                <th style={{ minWidth: 170 }}>{isMgt ? 'Unit → Master Data' : 'Unit → SAP'}</th>
                 <th>Status</th>
                 {showPoExtra && <th style={{ width: 120 }}>PO Detail</th>}
                 {showSoExtra && (
@@ -199,18 +234,12 @@ export default function DetailTable({
                         {!map ? (
                           <span className="badge b-idle">Pending Mapping</span>
                         ) : (
-                          <select
+                          <MaterialSearchSelect
+                            options={matOpts}
                             value={r?.code || ''}
                             disabled={posted}
-                            onChange={(e) => onManualLine(i, e.target.value)}
-                          >
-                            <option value="">-- Not found / Please select --</option>
-                            {matOpts.map((o) => (
-                              <option key={o.v} value={o.v}>
-                                {o.t}
-                              </option>
-                            ))}
-                          </select>
+                            onChange={(value) => onManualLine(i, value)}
+                          />
                         )}
                       </td>
                       <td
@@ -222,11 +251,11 @@ export default function DetailTable({
                       <td style={{ whiteSpace: 'nowrap' }}>
                         {r &&
                           (r.status === 'fail' ? (
-                            <span className="badge b-fail">✗ Not found</span>
+                            <span className="badge b-fail"><i className="fa-solid fa-xmark" /> Not found</span>
                           ) : r.status === 'manual' ? (
-                            <span className="badge b-warn">✎ Manual</span>
+                            <span className="badge b-warn"><i className="fa-solid fa-pen" /> Manual</span>
                           ) : (
-                            <span className="badge b-ok">✓ {r.method}</span>
+                            <span className="badge b-ok"><i className="fa-solid fa-check" /> {r.method}</span>
                           ))}
                         {r && r.status === 'manual' && r.code && !posted && (
                           <button
@@ -244,7 +273,7 @@ export default function DetailTable({
                             className={'btn sm ' + (lineExtraCount(l) ? '' : 'ghost')}
                             onClick={() => onShowLineExtra(i)}
                           >
-                            📋 PO{' '}
+                            <i className="fa-solid fa-clipboard-list" /> PO{' '}
                             {lineExtraCount(l)
                               ? `(${lineExtraCount(l)}/${PO_LINE_EXTRA_FIELDS.length})`
                               : ''}
@@ -272,7 +301,7 @@ export default function DetailTable({
                       <td>
                         {!posted && (
                           <button className="btn sm ghost" onClick={() => onDelLine(i)}>
-                            ✕
+                            <i className="fa-solid fa-xmark" />
                           </button>
                         )}
                       </td>

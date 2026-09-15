@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- ZohoClient uses ILogger<T>; unlike MgtOcr.Api (Sdk="Microsoft.NET.Sdk.Web", which
+         brings this in via the ASP.NET Core shared framework), this is a plain class library
+         and needs it referenced explicitly. -->
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MgtOcr.Core\MgtOcr.Core.csproj" />
+  </ItemGroup>
+
+</Project>

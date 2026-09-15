@@ -79,9 +79,9 @@ const inbox = [
 
 const masters = {
   customers: [
-    { CustomerCode: '0010001', SapCustomerCode: '0000100023', NameTh: 'Siam Chemical Industry Co., Ltd.', NameEn: 'Siam Chemical Industry Co., Ltd.', TaxId: '0105533012345', Branch: '00000', SalesOrg: '1000', DistChannel: '10', Division: '00', Currency: 'THB', PaymentTerms: 'N030' },
-    { CustomerCode: '0010002', SapCustomerCode: '0000100047', NameTh: 'Thai Polymer Group PCL.', NameEn: 'Thai Polymer Group PCL.', TaxId: '0107536000123', Branch: '00000', SalesOrg: '1000', DistChannel: '10', Division: '00', Currency: 'THB', PaymentTerms: 'N060' },
-    { CustomerCode: '0010003', SapCustomerCode: '', NameTh: 'Asia Coating & Plastic Co., Ltd.', NameEn: 'Asia Coating & Plastic Co., Ltd.', TaxId: '0125548009876', Branch: '00000', SalesOrg: '1000', DistChannel: '10', Division: '00', Currency: 'THB', PaymentTerms: 'N030' },
+    { id: 1, CustomerCode: '0010001', SapCustomerCode: '0010001', NameTh: 'Siam Chemical Industry Co., Ltd.', NameEn: 'Siam Chemical Industry Co., Ltd.', ComcompyCodeSAP: '0010001', CompanyName: 'Siam Chemical Industry Co., Ltd.', CompanyNameSAP: 'Siam Chemical Industry Co., Ltd.', TaxId: '0105533012345', Branch: '00000', SalesOrg: '1000', DistChannel: '10', Division: '00', Currency: 'THB', PaymentTerms: 'N030', IsActive: 1 },
+    { id: 2, CustomerCode: '0010002', SapCustomerCode: '0010002', NameTh: 'Thai Polymer Group PCL.', NameEn: 'Thai Polymer Group PCL.', ComcompyCodeSAP: '0010002', CompanyName: 'Thai Polymer Group PCL.', CompanyNameSAP: 'Thai Polymer Group PCL.', TaxId: '0107536000123', Branch: '00000', SalesOrg: '1000', DistChannel: '10', Division: '00', Currency: 'THB', PaymentTerms: 'N060', IsActive: 1 },
+    { id: 3, CustomerCode: '0010003', SapCustomerCode: '0010003', NameTh: 'Asia Coating & Plastic Co., Ltd.', NameEn: 'Asia Coating & Plastic Co., Ltd.', ComcompyCodeSAP: '0010003', CompanyName: 'Asia Coating & Plastic Co., Ltd.', CompanyNameSAP: 'Asia Coating & Plastic Co., Ltd.', TaxId: '0125548009876', Branch: '00000', SalesOrg: '1000', DistChannel: '10', Division: '00', Currency: 'THB', PaymentTerms: 'N030', IsActive: 1 },
   ],
   vendors: [
     { VendorCode: 'V-500012', SapVendorCode: '0000200015', VendorName: 'Universal Chemical Supply Co., Ltd.', TaxId: '0105546007788', Branch: '00000', Currency: 'THB', PaymentTerms: 'N030', ReconAcct: '2110100', WhtCode: '-' },
@@ -95,14 +95,14 @@ const masters = {
     { MaterialCode: 'SV-900001', SapMaterialCode: '', Description: 'Freight Charge', Uom: 'AU', Plant: '1000', MatGroup: 'SRV01' },
   ],
   shiptos: [
-    { ShipToCode: '0010001-01', CustomerCode: '0010001', SapShipToCode: '0000100024', ShipToName: 'Bang Pu Warehouse', Address: 'Bang Pu Industrial Estate, Soi 7, Phraeksa, Mueang, Samut Prakan 10280' },
-    { ShipToCode: '0010002-01', CustomerCode: '0010002', SapShipToCode: '0000100048', ShipToName: 'Ayutthaya Plant (Rojana)', Address: 'Rojana Industrial Park, Khan Ham, Uthai, Phra Nakhon Si Ayutthaya 13210' },
+    { id: 1, ShipToCode: '0010001-01', CustomerCode: '0010001', SapShipToCode: '0000100024', ShipToName: 'Bang Pu Warehouse', ShipToAddress: 'Bang Pu Industrial Estate, Soi 7, Phraeksa, Mueang, Samut Prakan 10280', Address: 'Bang Pu Industrial Estate, Soi 7, Phraeksa, Mueang, Samut Prakan 10280', IsActive: 1 },
+    { id: 2, ShipToCode: '0010002-01', CustomerCode: '0010002', SapShipToCode: '0000100048', ShipToName: 'Ayutthaya Plant (Rojana)', ShipToAddress: 'Rojana Industrial Park, Khan Ham, Uthai, Phra Nakhon Si Ayutthaya 13210', Address: 'Rojana Industrial Park, Khan Ham, Uthai, Phra Nakhon Si Ayutthaya 13210', IsActive: 1 },
   ],
-  custmaterials: [{ Id: 1, CustomerCode: '0010001', ExtCode: 'SCI-TIO2-902', ExtDesc: 'TIO2 R902 25 kg bag', MaterialCode: 'FG-100021' }],
+  custmaterials: [{ Id: 1, SalesOrg: '1000', CustomerCode: '0010001', MaterialCodeCode: 'SCI-TIO2-902', MaterialCodeName: 'TIO2 R902 25 kg bag', MaterialCodeSAP: 'FG-100021', ExtCode: 'SCI-TIO2-902', ExtDesc: 'TIO2 R902 25 kg bag', MaterialCode: 'FG-100021', Isactive: 1 }],
   venmaterials: [{ Id: 1, VendorCode: 'V-500012', ExtCode: 'UC-MEK-995', ExtDesc: 'MEK 99.5 PCT', MaterialCode: 'RM-200011' }],
   uoms: [
-    { Id: 1, MaterialCode: '', ExtUom: 'kg', SapUom: 'KG', SapUomIso: 'KGM', Factor: 1, Note: 'Global rule' },
-    { Id: 2, MaterialCode: 'FG-100021', ExtUom: 'BAG', SapUom: 'KG', SapUomIso: 'KGM', Factor: 25, Note: 'Packed 25 kg/bag' },
+    { Id: 1, SalesOrg: '', MaterialCodeSAP: '', MaterialCode: '', ExtUom: 'kg', SapUom: 'KG', SapUomIso: 'KGM', Factor: 1, Note: 'Global rule' },
+    { Id: 2, SalesOrg: '1000', MaterialCodeSAP: 'FG-100021', MaterialCode: 'FG-100021', ExtUom: 'BAG', SapUom: 'KG', SapUomIso: 'KGM', Factor: 25, Note: 'Packed 25 kg/bag' },
   ],
 };
 
@@ -132,7 +132,8 @@ function buildDoc(module: string, id: number, fileName: string): any {
     base.partnerCode = '0010001';
     base.header = {
       docType: 'Purchase Order', poNo: 'PO-778120', poDate: '2026-08-29', customerName: 'Siam Chemical Industry Co., Ltd.',
-      customerTaxId: '0105533012345', shipToName: 'Bang Pu Warehouse', shipToAddress: 'Bang Pu Industrial Estate, Phraeksa, Samut Prakan',
+      customerTaxId: '0105533012345', customerAddress: '99 Rama IX Rd, Huai Khwang, Bangkok 10310',
+      shipToName: 'Bang Pu Warehouse', shipToAddress: 'Bang Pu Industrial Estate, Phraeksa, Samut Prakan',
       deliveryDate: '2026-09-10', currency: 'THB', paymentTerms: 'N030', incoterms: 'DAP',
       subTotal: 60000, vatAmount: 4200, totalAmount: 64200, remark: '',
     };
@@ -290,7 +291,10 @@ export function getMock(method: string, url: string, body?: unknown): unknown {
   }
   if (method === 'GET' && clean === '/api/documents') {
     const m = url.match(/[?&]module=([A-Za-z]+)/);
-    return m ? inbox.filter((r) => r.Module === m[1]) : inbox;
+    if (!m) return inbox;
+    // AP = liability-recording list: Supplier (with PO) + Incoming (without PO).
+    if (m[1] === 'AP') return inbox.filter((r) => r.Module === 'AP' || r.Module === 'II');
+    return inbox.filter((r) => r.Module === m[1]);
   }
   if (method === 'GET' && /^\/api\/documents\/\d+$/.test(clean)) return getDoc(idOf(clean));
   if (method === 'GET' && /^\/api\/documents\/\d+\/chat$/.test(clean)) return [];

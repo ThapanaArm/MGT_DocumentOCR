@@ -40,7 +40,7 @@ export function ModalHeader({ title, onClose }: { title: ReactNode; onClose: () 
       <h2>{title}</h2>
       <div className="sp" />
       <button className="btn sm" onClick={onClose}>
-        ✕
+        <i className="fa-solid fa-xmark" />
       </button>
     </div>
   );

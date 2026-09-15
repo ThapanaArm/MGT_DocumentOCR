@@ -66,11 +66,11 @@ export default function HomePage() {
   const tr = data.trend;
 
   const tiles = [
-    { icon: '📄', bg: 'var(--info-bg)', fg: 'var(--info)', label: 'Total Documents', value: total, pct: tr.total },
-    { icon: '⏳', bg: 'var(--orange-bg)', fg: 'var(--orange)', label: 'Pending Review', value: pendingReview, pct: tr.NEW },
-    { icon: '❌', bg: 'var(--red-bg)', fg: 'var(--red)', label: 'Mapping Failed', value: mappingFailed, pct: tr.INCOMPLETE },
-    { icon: '📤', bg: 'var(--info-bg)', fg: 'var(--info)', label: 'Ready to Send to SAP', value: readyToSend, pct: tr.MAPPED },
-    { icon: '✅', bg: 'var(--green-bg)', fg: 'var(--green)', label: 'Sent to SAP Successfully', value: sentOk, pct: tr.POSTED },
+    { icon: 'fa-solid fa-file-lines', bg: 'var(--info-bg)', fg: 'var(--info)', label: 'Total Documents', value: total, pct: tr.total },
+    { icon: 'fa-solid fa-hourglass-half', bg: 'var(--orange-bg)', fg: 'var(--orange)', label: 'Pending Review', value: pendingReview, pct: tr.NEW },
+    { icon: 'fa-solid fa-circle-xmark', bg: 'var(--red-bg)', fg: 'var(--red)', label: 'Mapping Failed', value: mappingFailed, pct: tr.INCOMPLETE },
+    { icon: 'fa-solid fa-paper-plane', bg: 'var(--info-bg)', fg: 'var(--info)', label: 'Ready to Send to SAP', value: readyToSend, pct: tr.MAPPED },
+    { icon: 'fa-solid fa-circle-check', bg: 'var(--green-bg)', fg: 'var(--green)', label: 'Sent to SAP Successfully', value: sentOk, pct: tr.POSTED },
   ];
 
   const donutSegs: DonutSeg[] = (
@@ -94,9 +94,9 @@ export default function HomePage() {
   );
 
   const tasks = [
-    { icon: '📋', title: 'Review OCR Data', sub: 'Documents pending review', n: pendingReview },
-    { icon: '⚙', title: 'Fix Master Mapping', sub: 'Items needing correction', n: mappingFailed },
-    { icon: '☁', title: 'Send Data to SAP', sub: 'Documents ready to send', n: readyToSend },
+    { icon: 'fa-solid fa-clipboard-list', title: 'Review OCR Data', sub: 'Documents pending review', n: pendingReview },
+    { icon: 'fa-solid fa-gear', title: 'Fix Master Mapping', sub: 'Items needing correction', n: mappingFailed },
+    { icon: 'fa-solid fa-cloud', title: 'Send Data to SAP', sub: 'Documents ready to send', n: readyToSend },
   ];
 
   const viewAllInbox = () => navigate('/list');
@@ -287,7 +287,7 @@ export default function HomePage() {
             <OcrGauge pct={data.ocrPerf.avgConfidencePct ?? 0} label="OCR Accuracy" />
             <div style={{ marginTop: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
               <div className="row" style={{ gap: 10 }}>
-                <span>⏱</span>
+                <span><i className="fa-solid fa-clock" /></span>
                 <div>
                   <div className="hint">Average per Document</div>
                   <b>
@@ -298,14 +298,14 @@ export default function HomePage() {
                 </div>
               </div>
               <div className="row" style={{ gap: 10 }}>
-                <span>👤</span>
+                <span><i className="fa-solid fa-user" /></span>
                 <div>
                   <div className="hint">Edited by User</div>
                   <b>{data.ocrPerf.pctEditedByUser}%</b>
                 </div>
               </div>
               <div className="row" style={{ gap: 10 }}>
-                <span>📋</span>
+                <span><i className="fa-solid fa-clipboard-list" /></span>
                 <div>
                   <div className="hint">Tokens Today</div>
                   <b>{intFmt(data.ocrPerf.tokensToday)}</b>
@@ -333,7 +333,7 @@ export default function HomePage() {
                 onClick={viewAllInbox}
               >
                 <div className="row" style={{ gap: 10 }}>
-                  <span style={{ fontSize: 18 }}>{t.icon}</span>
+                  <span style={{ fontSize: 18 }}><i className={t.icon} /></span>
                   <div>
                     <div style={{ fontWeight: 600 }}>{t.title}</div>
                     <div className="hint">{t.sub}</div>
@@ -341,7 +341,7 @@ export default function HomePage() {
                 </div>
                 <div className="row" style={{ gap: 8 }}>
                   <span className="badge b-warn">{t.n}</span>
-                  <span className="hint">›</span>
+                  <span className="hint"><i className="fa-solid fa-angle-right" /></span>
                 </div>
               </div>
             ))}

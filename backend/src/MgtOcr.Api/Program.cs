@@ -1,3 +1,5 @@
+using MgtOcr.Api.Auth;
+using MgtOcr.Core.Auth;
 using MgtOcr.Core.Json;
 using MgtOcr.Core.Config;
 using MgtOcr.Data;
@@ -13,6 +15,18 @@ var cfg = builder.Configuration;
 var repoRoot = Path.GetFullPath(Path.Combine(builder.Environment.ContentRootPath, "..", "..", ".."));
 
 string Get(string key, string fallback = "") => (cfg[key] ?? fallback).Trim();
+// "dev" -> "Dev", "prod" -> "Prod" — matches the BaseUrl_Dev/BaseUrl_Prod key casing regardless
+// of how the environment name is cased in config.
+string Cap(string s) => s.Length == 0 ? s : char.ToUpperInvariant(s[0]) + s[1..].ToLowerInvariant();
+
+// AddMgtOcrAuth() has to report what it enabled (or loudly warn that it did not) before the host
+// exists, so it gets its own short-lived logger rather than writing to Console directly.
+using var startupLoggerFactory = LoggerFactory.Create(b => b.AddConsole());
+var startupLog = startupLoggerFactory.CreateLogger("MgtOcr.Startup");
+
+// Blank TenantId entries are kept rather than filtered here — AppConfig.ConfiguredTenants does the
+// filtering, so appsettings.json can carry a placeholder row for the company that is not live yet.
+var authTenants = cfg.GetSection("AzureAd:Tenants").Get<AuthTenant[]>() ?? [];
 
 // Auto-detection: if Ocr:TesseractCmd / Ocr:TessdataPrefix aren't set explicitly, fall back to
 // the well-known local install path this project already ships with.
@@ -22,6 +36,15 @@ if (tesseractCmd == "" && File.Exists(defaultTesseractCmd)) tesseractCmd = defau
 var defaultTessdata = Path.Combine(repoRoot, "tessdata");
 var tessdataPrefix = Get("Ocr:TessdataPrefix");
 if (tessdataPrefix == "" && Directory.Exists(defaultTessdata)) tessdataPrefix = defaultTessdata;
+
+// Sap:BusinessPartner, Sap:SalesOrder, Sap:Product and ZohoConfig each carry a "dev"/"prod"
+// (Sap) or "sandbox"/"prod" (Zoho) pair of value sets plus their own switch key, so flipping ONE
+// value in appsettings.json (or an env-var override, e.g. Sap__ActiveEnvironment=prod) moves
+// every SAP integration's target environment together without editing URLs/secrets in place.
+var sapBpEnv = Get("Sap:ActiveEnvironment", "dev");
+var zohoEnv = Get("ZohoConfig:ActiveEnvironment", "sandbox");
+startupLog.LogInformation("[CONFIG] Sap active environment (BusinessPartner/SalesOrder/Product) = {Env}", sapBpEnv);
+startupLog.LogInformation("[CONFIG] ZohoConfig active environment = {Env}", zohoEnv);
 
 var appConfig = new AppConfig
 {
@@ -55,6 +78,36 @@ var appConfig = new AppConfig
     SapClient = Get("Sap:Client", "100"),
     SapCompanyCode = Get("Sap:CompanyCode", "1000"),
     SapDefaultPlant = Get("Sap:DefaultPlant", "1000"),
+    // "BaseUrl_Dev"/"BaseUrl_Prod" per sapBpEnv above, falling back to the old flat "BaseUrl"
+    // key so an appsettings.json that hasn't been split into Dev/Prod yet still works.
+    SapBusinessPartnerBaseUrl = Get($"Sap:BusinessPartner:BaseUrl_{Cap(sapBpEnv)}", Get("Sap:BusinessPartner:BaseUrl")),
+    SapBusinessPartnerAuthHeader = Get("Sap:BusinessPartner:AuthHeader"),
+    SapSalesOrderBaseUrl = Get($"Sap:SalesOrder:BaseUrl_{Cap(sapBpEnv)}", Get("Sap:SalesOrder:BaseUrl")),
+    SapSalesOrderAuthHeader = Get("Sap:SalesOrder:AuthHeader"),
+    SapSalesOrderPriceConditionType = Get("Sap:SalesOrder:PriceConditionType", "ZPR0"),
+    SapProductBaseUrl = Get($"Sap:Product:BaseUrl_{Cap(sapBpEnv)}", Get("Sap:Product:BaseUrl")),
+    SapProductAuthHeader = Get("Sap:Product:AuthHeader"),
+    // MGT/GLC: SalesOrganization/CompanyCode/DefaultPlant per company (see CompanyProfile).
+    // Defaults match what was already hardcoded per-module before this existed, so an
+    // appsettings.json without these sections still behaves exactly as before.
+    Companies =
+    [
+        new CompanyProfile("MGT", Get("MGT:SalesOrganization", "1000"), Get("MGT:CompanyCode", "1000"), Get("MGT:DefaultPlant", "1100")),
+        new CompanyProfile("GLC", Get("GLC:SalesOrganization", "2000"), Get("GLC:CompanyCode", "2000"), Get("GLC:DefaultPlant", "2100")),
+    ],
+    ZohoAccountsUrl = Get($"ZohoConfig:{zohoEnv}:AccountsUrl", "https://accounts.zoho.com"),
+    ZohoApiDomain = Get($"ZohoConfig:{zohoEnv}:ApiDomain", "https://www.zohoapis.com"),
+    ZohoClientId = Get($"ZohoConfig:{zohoEnv}:ClientId"),
+    ZohoClientSecret = cfg[$"ZohoConfig:{zohoEnv}:ClientSecret"] ?? "", // not trimmed — a secret may (rarely) matter byte-for-byte
+    ZohoRefreshToken = Get($"ZohoConfig:{zohoEnv}:RefreshToken"),
+    AuthTenants = authTenants,
+    AuthAudience = Get("AzureAd:Audience"),
+    UserDatabase = Get("AzureAd:UserDatabase", "MGT_Datawarehouse"),
+    DevFallbackEmail = Get("AzureAd:DevFallbackEmail"),
+    LocalAuthSigningKey = Get("Auth:JwtSigningKey"),
+    LocalAuthIssuer = Get("Auth:Issuer", "mgtocr"),
+    LocalAuthAudience = Get("Auth:Audience", "mgtocr"),
+    LocalAuthLifetimeMinutes = int.TryParse(Get("Auth:LifetimeMinutes", "480"), out var lm) ? lm : 480,
     UploadDir = Path.Combine(repoRoot, "uploads"),
 };
 Directory.CreateDirectory(appConfig.UploadDir);
@@ -65,7 +118,18 @@ builder.Services.AddSingleton<Db>();
 builder.Services.AddSingleton<MasterRepository>();
 builder.Services.AddSingleton<OcrEngine>();
 builder.Services.AddSingleton(sp => new DocumentRepository(sp.GetRequiredService<Db>(), appConfig.UploadDir));
+builder.Services.AddScoped<MgtOcr.Api.Auth.DepartmentAccessFilter>();
 builder.Services.AddHttpClient<MgtOcr.Sap.SapClient>();
+builder.Services.AddHttpClient<MgtOcr.Sap.SapBusinessPartnerClient>();
+builder.Services.AddHttpClient<MgtOcr.Sap.SapProductClient>();
+// Singleton (not AddHttpClient<T>, unlike the SAP clients above) so its in-memory OAuth
+// access-token cache is shared across requests instead of being torn down each call.
+builder.Services.AddSingleton<MgtOcr.Zoho.ZohoClient>();
+builder.Services.AddSingleton<MgtOcr.Zoho.ZohoAccountClient>();
+builder.Services.AddSingleton<MgtOcr.Zoho.ZohoDealClient>();
+builder.Services.AddSingleton<MgtOcr.Zoho.ZohoSalesOrderClient>();
+
+builder.Services.AddMgtOcrAuth(appConfig, builder.Environment, startupLog);
 
 builder.Services.AddControllers().AddJsonOptions(o =>
 {
@@ -147,6 +211,7 @@ if (Directory.Exists(publicDir))
 }
 
 app.UseCors("frontend");
+app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
 
@@ -155,7 +220,10 @@ app.MapControllers();
 // Lowest priority — never intercepts /api/* (matched by controllers) or static assets.
 if (spaFiles != null)
 {
-    app.MapFallbackToFile("index.html", new StaticFileOptions { FileProvider = spaFiles });
+    // Anonymous on purpose: this returns index.html, and the browser has no token until the app
+    // inside index.html has run and signed the user in. The API endpoints stay protected.
+    app.MapFallbackToFile("index.html", new StaticFileOptions { FileProvider = spaFiles })
+       .AllowAnonymous();
 }
 
 app.Run();

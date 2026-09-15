@@ -53,7 +53,7 @@ export default function AuditLogPage() {
         <DateRange from={from} to={to} setFrom={setFrom} setTo={setTo} />
         <div style={{ marginRight: 8 }} />
         <button className="btn sm" onClick={reload}>
-          ↻ Refresh
+          <i className="fa-solid fa-arrow-rotate-right" /> Refresh
         </button>
       </div>
       <div className="card-b">

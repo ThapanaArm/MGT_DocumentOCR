@@ -15,33 +15,33 @@ public class OcrEngine(AppConfig config)
     // The selectable engine list shown in the UI — id must match a branch in ExtractAsync().
     public List<OcrProviderInfo> Providers =>
     [
-        new("auto", "อัตโนมัติ (แนะนำ)",
-            "อ่านข้อความในไฟล์ก่อน ถ้าเป็นไฟล์สแกนจะใช้ Tesseract OCR ให้อัตโนมัติ — ไม่มีค่าใช้จ่าย", true),
-        new("text", "ข้อความในไฟล์เท่านั้น", "เร็วที่สุด แต่ใช้ไม่ได้กับไฟล์สแกน/รูปภาพ", true),
-        new("tesseract", "Tesseract OCR (ในเครื่อง)",
-            "บังคับอ่านด้วย OCR แม้ไฟล์จะมีชั้นข้อความอยู่แล้ว — ไม่มีค่าใช้จ่าย", !string.IsNullOrEmpty(config.TesseractCmd)),
-        new("typhoon", "Typhoon OCR (ไทยโดยเฉพาะ)",
-            "โมเดล OCR ไทย/อังกฤษของ SCB 10X แม่นกว่า Tesseract มากสำหรับเอกสารไทย ลายมือ/ตารางซับซ้อน — " +
-            "ต้องตั้งค่า TYPHOON_API_KEY ใน .env (มีค่าใช้จ่ายต่อหน้า ดูราคาที่ opentyphoon.ai)",
+        new("auto", "Automatic (recommended)",
+            "Reads the file's text layer first; for scanned files it falls back to Tesseract OCR automatically — no cost.", true),
+        new("text", "File text only", "Fastest, but does not work with scanned files / images.", true),
+        new("tesseract", "Tesseract OCR (local)",
+            "Forces OCR even when the file already has a text layer — no cost.", !string.IsNullOrEmpty(config.TesseractCmd)),
+        new("typhoon", "Typhoon OCR (Thai-specialized)",
+            "SCB 10X's Thai/English OCR model — far more accurate than Tesseract for Thai documents, handwriting and complex tables — " +
+            "requires TYPHOON_API_KEY in .env (billed per page, see pricing at opentyphoon.ai)",
             !string.IsNullOrEmpty(config.TyphoonApiKey)),
         new("azure", "Azure Document Intelligence",
-            "แม่นกว่ามากสำหรับฟอร์ม/ตาราง — ต้องตั้งค่า AZURE_DI_ENDPOINT/AZURE_DI_KEY ใน .env (มีค่าใช้จ่ายต่อหน้า)",
+            "Much more accurate for forms / tables — requires AZURE_DI_ENDPOINT/AZURE_DI_KEY in .env (billed per page)",
             !string.IsNullOrEmpty(config.AzureDiEndpoint) && !string.IsNullOrEmpty(config.AzureDiKey)),
-        new("claude_text", "OCR + Claude จัดโครงสร้าง (ประหยัด)",
-            "อ่านข้อความด้วย Tesseract/pdfplumber ก่อน (ฟรี) แล้วส่งข้อความให้ Claude จัดเป็น JSON — " +
-            "ถูกกว่า Claude Vision มาก เหมาะกับเอกสารซ้ำ ๆ (PO/Invoice) ที่ OCR อ่านตัวอักษรออกมาได้ระดับหนึ่ง " +
-            "ต้องตั้งค่า ANTHROPIC_API_KEY ใน .env (มีค่าใช้จ่ายต่อครั้ง แต่ถูกกว่า Claude Vision)",
+        new("claude_text", "OCR + Claude structuring (economical)",
+            "Reads text with Tesseract/pdfplumber first (free) then sends the text to Claude to structure as JSON — " +
+            "much cheaper than Claude Vision, good for repetitive documents (PO/Invoice) whose characters OCR can read reasonably well — " +
+            "requires ANTHROPIC_API_KEY in .env (billed per call, but cheaper than Claude Vision)",
             !string.IsNullOrEmpty(config.AnthropicApiKey)),
         new("claude", "Claude Vision (AI)",
-            "แม่นที่สุดสำหรับเอกสารยุ่งเหยิง/ตารางซับซ้อน เข้าใจบริบทได้ — ต้องตั้งค่า ANTHROPIC_API_KEY ใน .env (มีค่าใช้จ่ายต่อครั้ง)",
+            "Most accurate for messy documents / complex tables, understands context — requires ANTHROPIC_API_KEY in .env (billed per call)",
             !string.IsNullOrEmpty(config.AnthropicApiKey)),
         new("gemini", "Gemini Vision (AI)",
-            "โมเดล Vision ของ Google อ่านภาพเอกสารโดยตรง เข้าใจบริบทได้ — ต้องตั้งค่า GEMINI_API_KEY ใน .env (มีค่าใช้จ่ายต่อครั้ง)",
+            "Google's Vision model reads the document image directly and understands context — requires GEMINI_API_KEY in .env (billed per call)",
             !string.IsNullOrEmpty(config.GeminiApiKey)),
         new("openai", "ChatGPT Vision (AI)",
-            "โมเดล GPT-4o/GPT-5 ของ OpenAI อ่านภาพเอกสารโดยตรง เข้าใจบริบทได้ — ต้องตั้งค่า OPENAI_API_KEY ใน .env (มีค่าใช้จ่ายต่อครั้ง)",
+            "OpenAI's GPT-4o/GPT-5 reads the document image directly and understands context — requires OPENAI_API_KEY in .env (billed per call)",
             !string.IsNullOrEmpty(config.OpenAiApiKey)),
-        new("demo", "ข้อมูลตัวอย่าง (ทดสอบ)", "ไม่อ่านไฟล์จริง ใช้สำหรับทดสอบขั้นตอน Mapping/ส่ง SAP เท่านั้น", true),
+        new("demo", "Sample data (test)", "Does not read a real file; for testing the Mapping / SAP submission steps only.", true),
     ];
 
     private ParsedDocument DemoFallback(string path, string module, string note)
@@ -54,24 +54,24 @@ public class OcrEngine(AppConfig config)
 
     private static readonly Dictionary<string, string> ProviderCaveat = new()
     {
-        ["ocr"] = "อ่านด้วย Tesseract OCR จากไฟล์สแกน ซึ่งแม่นยำต่ำกว่าอ่านข้อความจากไฟล์ต้นฉบับโดยตรง",
-        ["typhoon"] = "อ่านด้วย Typhoon OCR จากภาพเอกสาร อาจมีข้อผิดพลาดจากคุณภาพภาพ/ลายมือ",
-        ["azure"] = "อ่านด้วย Azure Document Intelligence จากภาพเอกสาร",
-        ["claude"] = "อ่านด้วย Claude Vision จากภาพเอกสาร อาจตีความคลาดเคลื่อนได้ในบางจุด",
-        ["claude_text"] = "ใช้ OCR อ่านข้อความก่อนแล้วให้ Claude จัดโครงสร้าง ความแม่นยำขึ้นกับคุณภาพข้อความจาก OCR รอบแรก",
-        ["gemini"] = "อ่านด้วย Gemini Vision จากภาพเอกสาร อาจตีความคลาดเคลื่อนได้ในบางจุด",
-        ["openai"] = "อ่านด้วย ChatGPT Vision จากภาพเอกสาร อาจตีความคลาดเคลื่อนได้ในบางจุด",
+        ["ocr"] = "Read with Tesseract OCR from a scanned file, which is less accurate than reading the text layer directly from the source file",
+        ["typhoon"] = "Read with Typhoon OCR from the document image; may contain errors from image quality / handwriting",
+        ["azure"] = "Read with Azure Document Intelligence from the document image",
+        ["claude"] = "Read with Claude Vision from the document image; may misinterpret in some places",
+        ["claude_text"] = "OCR reads the text first then Claude structures it; accuracy depends on the text quality from the first OCR pass",
+        ["gemini"] = "Read with Gemini Vision from the document image; may misinterpret in some places",
+        ["openai"] = "Read with ChatGPT Vision from the document image; may misinterpret in some places",
     };
 
     private static readonly Dictionary<string, string> ApImportant = new()
     {
-        ["invoiceNo"] = "เลขที่ใบกำกับภาษี/ใบแจ้งหนี้", ["invoiceDate"] = "วันที่เอกสาร",
-        ["vendorName"] = "ชื่อผู้ขาย", ["vendorTaxId"] = "เลขทะเบียนผู้เสียภาษีของผู้ขาย", ["totalAmount"] = "ยอดรวมทั้งสิ้น",
+        ["invoiceNo"] = "Tax Invoice / Invoice No.", ["invoiceDate"] = "Document Date",
+        ["vendorName"] = "Vendor Name", ["vendorTaxId"] = "Vendor Tax ID", ["totalAmount"] = "Grand Total",
     };
     private static readonly Dictionary<string, string> SoImportant = new()
     {
-        ["poNo"] = "เลขที่ใบสั่งซื้อ", ["poDate"] = "วันที่เอกสาร", ["customerName"] = "ชื่อลูกค้า",
-        ["customerTaxId"] = "เลขทะเบียนผู้เสียภาษีของลูกค้า", ["totalAmount"] = "ยอดรวมทั้งสิ้น",
+        ["poNo"] = "Purchase Order No.", ["poDate"] = "Document Date", ["customerName"] = "Customer Name",
+        ["customerTaxId"] = "Customer Tax ID", ["totalAmount"] = "Grand Total",
     };
 
     // Ported from ocr_engine.py's _confidence_note() (lines 1589-1603).
@@ -84,8 +84,8 @@ public class OcrEngine(AppConfig config)
             return s is "" or "0" or "0.0";
         }).Select(kv => kv.Value).ToList();
         var reasons = new List<string>();
-        if (missing.Count > 0) reasons.Add("ไม่พบข้อมูล: " + string.Join(", ", missing));
-        if (lines.Count == 0) reasons.Add("ไม่พบรายการสินค้า/บริการ (Item Detail)");
+        if (missing.Count > 0) reasons.Add("Missing data: " + string.Join(", ", missing));
+        if (lines.Count == 0) reasons.Add("No line items found (Item Detail)");
         if (ProviderCaveat.TryGetValue(provider, out var caveat)) reasons.Add(caveat);
         return string.Join(" / ", reasons);
     }
@@ -100,13 +100,14 @@ public class OcrEngine(AppConfig config)
     // extract(): wraps ExtractDispatchAsync to add confidenceNote + estimated cost uniformly for
     // every provider, mirroring ocr_engine.py's extract() (lines 1627-1644) without duplicating
     // this logic into every dispatch branch's return statement.
-    public async Task<ParsedDocument> ExtractAsync(string path, string module, string? providerOverride = null)
+    public async Task<ParsedDocument> ExtractAsync(string path, string module, string? providerOverride = null, string? password = null)
     {
+        PdfPassword.Current = password;
         var doc = await ExtractDispatchAsync(path, module, providerOverride);
         doc.Note = doc.Provider switch
         {
-            "demo" => string.IsNullOrEmpty(doc.Note) ? "ใช้ข้อมูลตัวอย่าง (demo) ไม่ได้อ่านจากไฟล์จริง" : doc.Note,
-            "failed" => string.IsNullOrEmpty(doc.Note) ? "อ่านเอกสารไม่สำเร็จ" : doc.Note,
+            "demo" => string.IsNullOrEmpty(doc.Note) ? "Using sample data (demo) — did not read a real file" : doc.Note,
+            "failed" => string.IsNullOrEmpty(doc.Note) ? "Failed to read the document" : doc.Note,
             _ => doc.Note,
         };
         // confidenceNote is distinct from Note ("_note" — a fallback/failure explanation): it
@@ -135,25 +136,25 @@ public class OcrEngine(AppConfig config)
         {
             var data = await AzureOcr.ExtractAsync(path, config);
             if (data != null) return AzureOcr.FromAzure(data, module);
-            return DemoFallback(path, module, "เชื่อมต่อ Azure Document Intelligence ไม่สำเร็จ หรือยังไม่ได้ตั้งค่า AZURE_DI_ENDPOINT/AZURE_DI_KEY ใน .env");
+            return DemoFallback(path, module, "Could not connect to Azure Document Intelligence, or AZURE_DI_ENDPOINT/AZURE_DI_KEY is not set in .env");
         }
         if (provider == "claude")
         {
             var outDoc = await ClaudeOcr.VisionExtractAsync(path, module, config);
             if (outDoc != null) return outDoc;
-            return DemoFallback(path, module, "เชื่อมต่อ Claude Vision ไม่สำเร็จ หรือยังไม่ได้ตั้งค่า ANTHROPIC_API_KEY ใน .env");
+            return DemoFallback(path, module, "Could not connect to Claude Vision, or ANTHROPIC_API_KEY is not set in .env");
         }
         if (provider == "gemini")
         {
-            var outDoc = await GeminiOcr.VisionExtractAsync(path, module, config);
+            var (outDoc, gErr) = await GeminiOcr.VisionExtractAsync(path, module, config);
             if (outDoc != null) return outDoc;
-            return DemoFallback(path, module, "เชื่อมต่อ Google Gemini Vision ไม่สำเร็จ หรือยังไม่ได้ตั้งค่า GEMINI_API_KEY ใน .env");
+            return DemoFallback(path, module, gErr ?? "Could not connect to Google Gemini Vision");
         }
         if (provider == "openai")
         {
-            var outDoc = await OpenAiOcr.VisionExtractAsync(path, module, config);
+            var (outDoc, oErr) = await OpenAiOcr.VisionExtractAsync(path, module, config);
             if (outDoc != null) return outDoc;
-            return DemoFallback(path, module, "เชื่อมต่อ OpenAI Vision ไม่สำเร็จ หรือยังไม่ได้ตั้งค่า OPENAI_API_KEY ใน .env");
+            return DemoFallback(path, module, oErr ?? "Could not connect to OpenAI Vision");
         }
         if (provider == "claude_text")
         {
@@ -161,16 +162,16 @@ public class OcrEngine(AppConfig config)
             if (string.IsNullOrWhiteSpace(preText) && (ImageExt.Contains(ext) || ext == ".pdf"))
                 preText = await TesseractOcr.ExtractTextAsync(path, config);
             if (string.IsNullOrWhiteSpace(preText))
-                return DemoFallback(path, module, "OCR อ่านข้อความจากไฟล์ไม่ได้ จึงส่งให้ Claude จัดโครงสร้างไม่ได้ (ลองใช้ Claude Vision แทน)");
+                return DemoFallback(path, module, "OCR could not read text from the file, so it could not be sent to Claude for structuring (try Claude Vision instead)");
             var outDoc = await ClaudeOcr.TextExtractAsync(module, preText, config);
             if (outDoc != null) return outDoc;
-            return DemoFallback(path, module, "เชื่อมต่อ Claude (จัดโครงสร้างจากข้อความ) ไม่สำเร็จ หรือยังไม่ได้ตั้งค่า ANTHROPIC_API_KEY ใน .env");
+            return DemoFallback(path, module, "Could not connect to Claude (structuring from text), or ANTHROPIC_API_KEY is not set in .env");
         }
         if (provider == "typhoon")
         {
             var (text, err) = await TyphoonOcr.ExtractTextAsync(path, config);
             if (string.IsNullOrWhiteSpace(text))
-                return DemoFallback(path, module, err != "" ? err : "Typhoon OCR ไม่คืนข้อความใด ๆ กลับมา");
+                return DemoFallback(path, module, err != "" ? err : "Typhoon OCR returned no text");
             var blocks = ext == ".pdf" ? PdfExtraction.PdfBlocks(path) : null;
             var outDoc = HeaderParser.ParseText(text, module, blocks, "typhoon", config.OwnCompanyKeywords, config.OwnTaxId);
             if (outDoc.Lines.Count > 0 || HasValue(outDoc.Header, "vendorTaxId") || HasValue(outDoc.Header, "customerTaxId"))
@@ -198,7 +199,7 @@ public class OcrEngine(AppConfig config)
             return outDoc;
         }
 
-        return DemoFallback(path, module, "อ่านข้อความจากไฟล์ไม่ได้ (ไฟล์สแกน/ยังไม่ได้ตั้งค่า OCR engine)");
+        return DemoFallback(path, module, "Could not read text from the file (scanned file / no OCR engine configured)");
     }
 
     private static bool HasValue(Dictionary<string, object?> header, string key) =>

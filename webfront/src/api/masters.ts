@@ -16,7 +16,7 @@ export interface MastersData {
   [k: string]: MasterRow[];
 }
 
-export const getMasters = () => api.get<MastersData>('/api/masters');
+export const getMasters = (includeInactive = false) => api.get<MastersData>('/api/masters' + (includeInactive ? '?includeInactive=true' : ''));
 
 export const createMaster = (tab: string, row: MasterRow) =>
   api.post('/api/masters/' + tab, row);
