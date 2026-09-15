@@ -16,9 +16,14 @@ public class HealthController(Db db, AppConfig config) : ControllerBase
     [HttpGet]
     public async Task<IActionResult> Get()
     {
+        // TEMP DIAGNOSTIC: capture PingAsync() before the count queries so a failure below
+        // still reports exactly which server/database/login this request actually connected
+        // as, instead of only the bare SQL exception message.
+        object? pingInfo = null;
         try
         {
             var (dbName, usr, srv) = await db.PingAsync();
+            pingInfo = new { db = dbName, usr, srv };
             int customers = (int)(await db.QueryOneAsync("SELECT COUNT(*) AS n FROM ocr.Customer"))!.n;
             int vendors = (int)(await db.QueryOneAsync("SELECT COUNT(*) AS n FROM ocr.Vendor"))!.n;
             int materials = (int)(await db.QueryOneAsync("SELECT COUNT(*) AS n FROM ocr.CustomerMaterial"))!.n;
@@ -29,7 +34,7 @@ public class HealthController(Db db, AppConfig config) : ControllerBase
             return Ok(new
             {
                 ok = true,
-                db = new { db = dbName, usr, srv },
+                db = pingInfo,
                 counts = new { customers, vendors, materials, documents },
                 ocrProvider = config.OcrProvider,
                 sapMode = string.IsNullOrEmpty(config.SapBaseUrl) ? "simulate" : "live",
@@ -37,7 +42,7 @@ public class HealthController(Db db, AppConfig config) : ControllerBase
         }
         catch (Exception ex)
         {
-            return StatusCode(500, new { ok = false, error = ex.Message });
+            return StatusCode(500, new { ok = false, error = ex.Message, db = pingInfo });
         }
     }
 }

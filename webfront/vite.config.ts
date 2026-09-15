@@ -10,7 +10,7 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': {
-        target: 'http://localhost:8091',
+            target: 'https://apiocr.megachem.co.th/',
         changeOrigin: true,
       },
     },
