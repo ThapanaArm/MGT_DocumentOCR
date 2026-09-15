@@ -124,9 +124,13 @@ export default function DetailTable({
         .map((m) => ({
           value: m.MaterialCodeSAP,
           description: m.MaterialCodeName || '',
+          searchText: `${m.MaterialCodeCode ?? ''} ${m.MaterialCodeName ?? ''}`,
+          // Always show the Customer Code, own customer included -- see MappingCards.tsx's matOpts
+          // for the same rule (keep both in sync: this table and the "Material — Row N" card must
+          // show the same label for the same underlying code, per the note above).
           label: m.CustomerCode === currentCustomerCode
-            ? `${m.MaterialCodeSAP} — ${m.MaterialCodeName || ''} (CustomerMaterial)`
-            : `${m.MaterialCodeSAP} — ${m.MaterialCodeName || ''} (CustomerMaterial · ${m.CustomerCode})`,
+            ? `${m.MaterialCodeSAP} — ${m.MaterialCodeName || ''} (CustomerMaterial · ${m.CustomerCode})`
+            : `${m.MaterialCodeSAP} — ${m.MaterialCodeName || ''} (CustomerMaterial · ${m.CustomerCode}, other customer)`,
         }))
     : masters.materials.map((m) => ({
         value: m.MaterialCode,
@@ -182,7 +186,7 @@ export default function DetailTable({
                 <th style={{ width: 74 }}>Unit</th>
                 <th style={{ minWidth: 130 }}>Unit Price</th>
                 <th style={{ minWidth: 140 }}>Amount</th>
-                <th style={{ minWidth: 270 }}>{isMgt ? 'Material (Master Data)' : 'Material (SAP)'}</th>
+                <th style={{ minWidth: 340 }}>{isMgt ? 'Material (Master Data)' : 'Material (SAP)'}</th>
                 <th style={{ minWidth: 170 }}>{isMgt ? 'Unit → Master Data' : 'Unit → SAP'}</th>
                 <th>Status</th>
                 {showPoExtra && <th style={{ width: 120 }}>PO Detail</th>}
@@ -229,7 +233,7 @@ export default function DetailTable({
                       <td className="num">{numInput(l.amount, (v) => onEditLine(i, 'amount', v))}</td>
                       <td
                         className={r && r.status === 'fail' ? 'cell-fail' : ''}
-                        style={{ minWidth: 270 }}
+                        style={{ minWidth: 340 }}
                       >
                         {!map ? (
                           <span className="badge b-idle">Pending Mapping</span>

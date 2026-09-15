@@ -369,6 +369,17 @@ public static class MappingEngine
 
         AttachSapKeys(module, masters, res);
         AttachCompare(module, header, lines, masters, res);
+        // Incoming Invoice (FB60) and PO Down Payment do not post document lines as Materials.
+        // Keep their mapping pass/fail scoped to the relevant header partner; material/UoM errors
+        // produced by the shared legacy line mapper must not block these module-specific flows.
+        if (module is "II" or "PODP")
+            errors.RemoveAll(e =>
+            {
+                var field = e.GetStr("field");
+                return field.StartsWith("Material", StringComparison.OrdinalIgnoreCase)
+                    || field.StartsWith("Unit", StringComparison.OrdinalIgnoreCase)
+                    || field.StartsWith("Quantity line", StringComparison.OrdinalIgnoreCase);
+            });
         res["pass"] = errors.Count == 0;
         return res;
     }

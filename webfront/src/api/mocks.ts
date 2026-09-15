@@ -269,6 +269,27 @@ function buildMap(doc: any): any {
   return { document: doc, pass: true, errors: [], warns: [], header, lines };
 }
 
+// Who the backend would say the signed-in person is. In mock mode AuthGate skips sign-in, so this
+// stands in for /api/me — Admin at Megachem (MGT) with GLC as a second company, so the whole nav is
+// visible and the MGT/GLC company switch works. companyCode 'MGT' drives the Zoho-vs-SAP branch and
+// the SO material dropdown's SalesOrg default (1000), matching the custmaterials mock above.
+const me = {
+  userId: 'mock-user',
+  username: 'mockuser',
+  email: 'it-digital@megachem.co.th',
+  fullName: 'Mock User (UI mockup)',
+  role: 'Admin',
+  department: 'IT',
+  position: 'Developer',
+  salesOrganization: '1000',
+  division: '00',
+  companies: [
+    { companyId: 1, companyCode: 'MGT', companyName: 'Megachem (MGT)', isPrimary: true },
+    { companyId: 2, companyCode: 'GLC', companyName: 'Green Leaf (GLC)', isPrimary: false },
+  ],
+  primaryCompany: { companyId: 1, companyCode: 'MGT', companyName: 'Megachem (MGT)' },
+};
+
 const MOCKS: Record<string, unknown> = {
   'GET /api/ocr/providers': providers,
   'GET /api/ap-doc-categories': apDocCategories,
@@ -276,6 +297,7 @@ const MOCKS: Record<string, unknown> = {
   'GET /api/masters': masters,
   'GET /api/logs': logs,
   'GET /api/audit-logs': auditLogs,
+  'GET /api/me': me,
 };
 
 /** Return mock data for a request, or undefined if none is defined. */

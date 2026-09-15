@@ -246,10 +246,10 @@ export default function AppLayout() {
           title={navCollapsed ? 'Expand menu' : 'Collapse menu'}
           aria-label={navCollapsed ? 'Expand menu' : 'Collapse menu'}
         >
-          <span className="chev">
-            <i className="fa-solid fa-angles-left" style={{ fontSize: 16 }} />
-          </span>
           <span className="lbl">{navCollapsed ? 'Expand' : 'Collapse'}</span>
+          <span className="chev">
+            <i className={`fa-solid ${navCollapsed ? 'fa-chevron-right' : 'fa-chevron-left'}`} style={{ fontSize: 14 }} />
+          </span>
         </button>
 
         <SidebarFoot me={effectiveMe} denied={denied} />

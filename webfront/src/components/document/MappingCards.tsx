@@ -576,6 +576,7 @@ function ZohoMaterialPanel({
   disabled?: boolean;
   onUse: (item: ZohoDealItem) => void;
 }) {
+  const [query, setQuery] = useState('');
   const hint = (text: string) => <div className="hint" style={{ padding: '6px 0' }}>{text}</div>;
   if (!dealItems || dealItems.length === 0)
     return hint('เลือก Deal ก่อน เพื่อดึงรายการสินค้า (Ordered Items) จาก Zoho');
@@ -590,6 +591,13 @@ function ZohoMaterialPanel({
       return { it, score };
     })
     .sort((a, b) => b.score - a.score);
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const visible = normalizedQuery
+    ? sorted.filter(({ it }) =>
+        [it.materialCode, it.materialName, it.materialDescription, it.materialGroup]
+          .some((value) => (value || '').toLocaleLowerCase().includes(normalizedQuery)),
+      )
+    : sorted;
 
   return (
     <>
@@ -598,7 +606,7 @@ function ZohoMaterialPanel({
       </div>
       <table className="cmp">
         <tbody>
-          {sorted.map(({ it }, idx) => {
+          {visible.map(({ it }, idx) => {
             const label = it.materialName || it.materialDescription || '';
             return (
               <tr key={(it.materialCode || it.materialId || 'row') + ':' + idx}>
@@ -620,6 +628,21 @@ function ZohoMaterialPanel({
           })}
         </tbody>
       </table>
+      <div className="hint" style={{ padding: '6px 0' }}>
+        <div>ไม่ใช่รายการที่ต้องการ? พิมพ์ชื่อหรือรหัส Material เพื่อกรองผลลัพธ์ได้</div>
+        <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <input
+            type="search"
+            className="txt"
+            style={{ minWidth: 220 }}
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="ชื่อหรือรหัส Material…"
+            aria-label="ค้นหา Material ใน Deal"
+          />
+          {normalizedQuery && <span>พบ {visible.length} รายการ</span>}
+        </div>
+      </div>
     </>
   );
 }
@@ -658,8 +681,13 @@ function ZohoCustomerPanel({
   // eyeball which candidate is right without opening the full chat compare.
   const [addresses, setAddresses] = useState<Record<string, ZohoShipToInfo | null>>({});
 
-  const name = (customerName || '').trim();
+  const docName = (customerName || '').trim();
   const tax = (taxId || '').trim();
+
+  const [manualQuery, setManualQuery] = useState('');
+  const [appliedQuery, setAppliedQuery] = useState<string | null>(null);
+  useEffect(() => { setManualQuery(''); setAppliedQuery(null); }, [docName]);
+  const name = appliedQuery ?? docName;
 
   useEffect(() => {
     if (!name && !tax) {
@@ -673,7 +701,7 @@ function ZohoCustomerPanel({
     setLoading(true);
     setError(null);
     setAddresses({});
-    searchZohoAccount({ name, taxId: tax })
+    searchZohoAccount({ name, taxId: appliedQuery ? undefined : tax })
       .then((r) => {
         if (cancelled) return;
         // Same defensive check as SapCustomerPanel above — never trust the response shape blindly.
@@ -738,7 +766,29 @@ function ZohoCustomerPanel({
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [name, tax]);
+  }, [name, tax, appliedQuery]);
+
+  const runManualSearch = () => {
+    const query = manualQuery.trim();
+    if (query) setAppliedQuery(query);
+  };
+  const renderManualSearchBox = () => (
+    <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+      <input
+        type="search"
+        className="txt"
+        style={{ minWidth: 240 }}
+        value={manualQuery}
+        onChange={(e) => setManualQuery(e.target.value)}
+        onKeyDown={(e) => { if (e.key === 'Enter') runManualSearch(); }}
+        placeholder="ใส่ชื่อลูกค้าหรือคำค้นหา"
+        aria-label="คำค้นหาลูกค้า"
+      />
+      <button className="btn sm" onClick={runManualSearch} disabled={!manualQuery.trim() || loading}>
+        <i className="fa-solid fa-magnifying-glass" /> ค้นหา
+      </button>
+    </div>
+  );
 
   const hint = (text: string) => <div className="hint" style={{ padding: '6px 0' }}>{text}</div>;
   const { ocrProviders } = useMeta();
@@ -755,11 +805,13 @@ function ZohoCustomerPanel({
     raw: acc,
   }));
 
-  if (!name && !tax) return hint('No data from Zoho CRM yet');
+  if (!name && !tax)
+    return <div className="hint" style={{ padding: '6px 0' }}><div>กรอกคำค้นหาเพื่อค้นหาลูกค้าใน Zoho CRM</div>{renderManualSearchBox()}</div>;
   if (loading) return hint('Searching Zoho CRM…');
-  if (error) return hint('Could not search Zoho CRM: ' + error);
+  if (error)
+    return <div className="hint" style={{ padding: '6px 0' }}><div>ค้นหา Zoho CRM ไม่สำเร็จ: {error}</div>{renderManualSearchBox()}</div>;
   if (searched && results.length === 0)
-    return hint('No match found in Zoho CRM — use "+ Add New Customer" to enter it manually');
+    return <div className="hint" style={{ padding: '6px 0' }}><div>No match found in Zoho CRM — use "+ Add New Customer" to enter it manually</div>{renderManualSearchBox()}</div>;
 
   return (
     <>
@@ -799,6 +851,10 @@ function ZohoCustomerPanel({
           ))}
         </tbody>
       </table>
+      <div className="hint" style={{ padding: '6px 0' }}>
+        <div>ไม่ใช่รายที่ต้องการ? ใส่คำค้นหาอื่นได้เลย</div>
+        {renderManualSearchBox()}
+      </div>
       <CompareModal<ZohoAccount>
         open={aiOpen}
         onClose={() => setAiOpen(false)}
@@ -861,13 +917,14 @@ function AddressFieldRows({ info }: { info: ZohoShipToInfo }) {
    card), Ship-to shouldn't need a fresh name search as its PRIMARY method -- SAP already knows
    which Ship-tos are linked to that Sold-to via A_CustSalesPartnerFunc (PartnerFunction "SH"), so
    this looks those up directly by the matched Sold-to's SAP code first.
-   Fallback added 2026-09-10, per Megachem, scoped deliberately as a *secondary* option only (not
-   a replacement for the code-based lookup above): a Ship-to can exist in SAP as its own Business
-   Partner without yet being linked to this particular Sold-to via a partner function (a data-entry
-   gap on SAP's side, not a search-phrasing problem) -- so when the primary lookup comes up empty,
-   this offers a manual name search,
+   Fallback added 2026-09-10, per Megachem: a Ship-to can exist in SAP as its own Business Partner
+   without yet being linked to this particular Sold-to via a partner function (a data-entry gap on
+   SAP's side, not a search-phrasing problem) -- this offers a manual name search for that case,
    reusing the exact same /api/sap/business-partner?name= search (Ship-tos are Business Partners
-   too) rather than inventing a separate Ship-to-specific search. */
+   too) rather than inventing a separate Ship-to-specific search.
+   Now shown UNCONDITIONALLY (2026-09-15 fix), not only when the primary lookup is empty: the
+   auto-linked partner-function result can itself be stale or simply wrong, and the person needs a
+   way to search fresh and override it -- not just when nothing was linked at all. */
 function SapShipToPanel({
   soldToSapCode,
   docShipToName,
@@ -957,7 +1014,7 @@ function SapShipToPanel({
   const renderNameSearchFallback = () => (
     <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--line-soft)' }}>
       <div className="hint">
-        หรือค้นหา Ship-to จากชื่อโดยตรง (กรณีมีอยู่ใน SAP แล้วแต่ยังไม่ได้ผูกกับ Sold-to นี้):
+        ค้นหา Ship-to จากชื่อโดยตรง — ใช้แทนผลลัพธ์ด้านบนได้ถ้าไม่ถูกต้อง หรือกรณีมีอยู่ใน SAP แล้วแต่ยังไม่ได้ผูกกับ Sold-to นี้:
       </div>
       <div style={{ marginTop: 6, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
         <input
@@ -1015,38 +1072,47 @@ function SapShipToPanel({
 
   if (!soldToSapCode) return hint('A matched customer (with a SAP code) is required first');
   if (loading) return hint('Searching SAP…');
-  if (error) return hint('Could not search SAP: ' + error);
-  if (searched && results.length === 0)
-    return (
-      <div className="hint" style={{ padding: '6px 0' }}>
-        <div>No Ship-to found in SAP for this customer — use "+ Add New Ship-to" to enter it manually</div>
-        {renderNameSearchFallback()}
-      </div>
-    );
 
+  // The name-search fallback below is now ALWAYS rendered, not only when the automatic
+  // partner-function lookup comes up empty. Before this fix, a single (possibly stale or wrong)
+  // linked Ship-to hid the search box entirely -- SAP's A_CustSalesPartnerFunc link for this
+  // Sold-to can be outdated or simply wrong, and the person had no way to search for a different
+  // one short of "+ Add New Ship-to" (a brand-new manual entry, not a re-match). Showing the
+  // search box unconditionally lets them override an auto-found match at any time.
   return (
-    <table className="cmp">
-      <tbody>
-        {results.map((link) => (
-          <tr key={link.partnerCustomer}>
-            <td>
-              <b>{link.partnerCustomer}</b>
-              {link.partner && ' — ' + (link.partner.businessPartnerFullName || link.partner.businessPartnerName)}
-              {(link.partner?.addressCity || link.partner?.addressStreet) && (
-                <div className="hint">
-                  {[link.partner?.addressStreet, link.partner?.addressCity].filter(Boolean).join(', ')}
-                </div>
-              )}
-            </td>
-            <td>
-              <button className="btn sm primary" disabled={disabled} onClick={() => onUse(link)}>
-                Use &amp; Save
-              </button>
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
+    <div>
+      {error && hint('Could not search SAP: ' + error)}
+      {!error && searched && results.length === 0 && (
+        <div className="hint" style={{ padding: '6px 0' }}>
+          No Ship-to found in SAP for this customer — use "+ Add New Ship-to" to enter it manually
+        </div>
+      )}
+      {results.length > 0 && (
+        <table className="cmp">
+          <tbody>
+            {results.map((link) => (
+              <tr key={link.partnerCustomer}>
+                <td>
+                  <b>{link.partnerCustomer}</b>
+                  {link.partner && ' — ' + (link.partner.businessPartnerFullName || link.partner.businessPartnerName)}
+                  {(link.partner?.addressCity || link.partner?.addressStreet) && (
+                    <div className="hint">
+                      {[link.partner?.addressStreet, link.partner?.addressCity].filter(Boolean).join(', ')}
+                    </div>
+                  )}
+                </td>
+                <td>
+                  <button className="btn sm primary" disabled={disabled} onClick={() => onUse(link)}>
+                    Use &amp; Save
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {renderNameSearchFallback()}
+    </div>
   );
 }
 
@@ -1807,11 +1873,9 @@ export default function MappingCards({
 }: Props) {
   const { ocrProviders } = useMeta();
   const [vendorAiOpen, setVendorAiOpen] = useState(false);
-  // Live SAP/Zoho search panels for Customer and Ship-to normally only appear automatically when
-  // the local match failed (c.status/sh.status === 'fail') -- but a person may want to re-search
-  // live even after an auto-match succeeded, e.g. to double-check it or pull an address SAP has
-  // that the local master doesn't yet. These two just toggle the same panels open on demand for
-  // the already-matched case; the fail case keeps showing them unconditionally as before.
+  // External searches are opened explicitly by the person, regardless of mapping status. This
+  // keeps Customer, Ship-to and Material consistent: first click Search, then inspect the initial
+  // result and optionally type another query inside the opened panel.
   const [customerSapOpen, setCustomerSapOpen] = useState(false);
   const [shipToSapOpen, setShipToSapOpen] = useState(false);
   // Same idea per Material line: the live SAP/Zoho material search panel normally only shows for a
@@ -1844,31 +1908,48 @@ export default function MappingCards({
   })();
 
   const headerSel = (kind: string, key: string, code?: string) => {
-    let opts: { v: string; t: string }[] = [];
-    if (kind === 'customers')
-      opts = masters.customers.filter((c) => String(c.SalesOrg) === (doc.header.salesOrg || (isMgt ? '1000' : '2000'))).map((c) => ({ v: c.ComcompyCodeSAP, t: c.ComcompyCodeSAP + ' — ' + c.CompanyName }));
-    else if (kind === 'vendors')
-      opts = masters.vendors.map((c) => ({ v: c.VendorCode, t: c.VendorCode + ' — ' + c.VendorName }));
+    let opts: { v: string; name: string; t: string }[] = [];
+    if (kind === 'customers') {
+      const seen = new Set<string>();
+      opts = masters.customers
+        .filter((c) => String(c.SalesOrg) === (doc.header.salesOrg || (isMgt ? '1000' : '2000')))
+        .map((c) => {
+          const v = String(c.ComcompyCodeSAP ?? '').trim();
+          const displayName = String(c.CompanyName ?? c.CompanyNameSAP ?? '').trim();
+          const searchable = [displayName, c.CompanyNameSAP, c.TaxId, c.Branch, v]
+            .map((x) => String(x ?? '').trim()).filter(Boolean).join(' ');
+          return { v, name: searchable, t: displayName ? `${v} — ${displayName}` : v };
+        })
+        // A row without a master key cannot be selected. Duplicate keys would also make React and
+        // manual mapping pick an arbitrary row, so expose each usable customer code only once.
+        .filter((o) => !!o.v && !seen.has(o.v) && !!seen.add(o.v));
+    } else if (kind === 'vendors')
+      opts = masters.vendors.map((c) => ({ v: String(c.VendorCode ?? '').trim(), name: String(c.VendorName ?? ''), t: `${c.VendorCode ?? ''} — ${c.VendorName ?? ''}` })).filter((o) => !!o.v);
     else if (kind === 'shiptos') {
       const cc = map.header.customer?.code || '';
+      const seen = new Set<string>();
       opts = masters.shiptos
         .filter((s) => !cc || s.CustomerCode === cc)
-        .map((s) => ({ v: s.SapShipToCode, t: s.SapShipToCode + ' — ' + s.ShipToName }));
+        .map((s) => {
+          const v = String(s.SapShipToCode ?? '').trim();
+          const displayName = String(s.ShipToName ?? '').trim();
+          const searchable = [displayName, s.Address, s.City, s.PostCode, s.CustomerCode, v]
+            .map((x) => String(x ?? '').trim()).filter(Boolean).join(' ');
+          return { v, name: searchable, t: displayName ? `${v} — ${displayName}` : v };
+        })
+        .filter((o) => !!o.v && !seen.has(o.v) && !!seen.add(o.v));
     }
     return (
-      <select
-        className="cmp-pick"
+      <MaterialSearchSelect
+        options={opts.map((o) => ({ value: o.v, description: o.name, label: o.t, source: 'local' as const }))}
         value={code || ''}
         disabled={posted}
-        onChange={(e) => onManualHeader(key, e.target.value)}
-      >
-        <option value="">-- Select manually --</option>
-        {opts.map((o) => (
-          <option key={o.v} value={o.v}>
-            {o.t}
-          </option>
-        ))}
-      </select>
+        emptyLabel="-- Select manually --"
+        searchPlaceholder="พิมพ์ชื่อหรือรหัสเพื่อค้นหา…"
+        ariaLabel={`ค้นหาและเลือก ${kind}`}
+        minWidth={260}
+        onChange={(value) => onManualHeader(key, value)}
+      />
     );
   };
 
@@ -1896,9 +1977,12 @@ export default function MappingCards({
     ? availableCustomerMaterials.map((m) => ({
         value: m.MaterialCodeSAP,
         description: m.MaterialCodeName || '',
+        searchText: `${m.MaterialCodeCode ?? ''} ${m.MaterialCodeName ?? ''}`,
+        // Always show the Customer Code, own customer included -- not just for a cross-customer
+        // "borrow", so the code is visible (and searchable) for every row, not a special case.
         label: m.CustomerCode === currentCustomerCode
-          ? `${m.MaterialCodeSAP} — ${m.MaterialCodeName || ''} (CustomerMaterial)`
-          : `${m.MaterialCodeSAP} — ${m.MaterialCodeName || ''} (CustomerMaterial · ${m.CustomerCode})`,
+          ? `${m.MaterialCodeSAP} — ${m.MaterialCodeName || ''} (Customer · ${m.CustomerCode})`
+          : `${m.MaterialCodeSAP} — ${m.MaterialCodeName || ''} (Customer · ${m.CustomerCode}, other customer)`,
         source: 'local' as const,
       }))
     : (masters.apmaterials || []).map((m) => ({
@@ -1944,7 +2028,7 @@ export default function MappingCards({
           <>
             {headerSel('customers', 'customer', c.code)}
             {c.status === 'fail' && addBtn('Add New Customer', onQuickAddCustomer)}
-            {c.status !== 'fail' && !posted && (
+            {!posted && (
               <button
                 className={'btn sm' + (customerSapOpen ? ' primary' : '')}
                 style={{ marginLeft: 6 }}
@@ -1958,14 +2042,17 @@ export default function MappingCards({
         }
         sourceLabel={isMgt ? 'Data from Zoho CRM' : undefined}
         sapSlot={
-          c.status === 'fail' || customerSapOpen ? (
+          customerSapOpen ? (
             isMgt ? (
               <ZohoCustomerPanel
                 customerName={doc.header.customerName}
                 taxId={doc.header.customerTaxId}
                 address={doc.header.customerAddress}
                 disabled={posted}
-                onUse={onUseZohoAccount}
+                onUse={(account) => {
+                  onUseZohoAccount(account);
+                  setCustomerSapOpen(false);
+                }}
                 onProposeMatch={onProposeMatch}
                 onClearMatch={onClearMatch}
               />
@@ -1975,7 +2062,10 @@ export default function MappingCards({
                 taxId={doc.header.customerTaxId}
                 address={doc.header.customerAddress}
                 disabled={posted}
-                onUse={onUseSapCustomer}
+                onUse={(customer) => {
+                  onUseSapCustomer(customer);
+                  setCustomerSapOpen(false);
+                }}
                 onProposeMatch={onProposeMatch}
                 onClearMatch={onClearMatch}
               />
@@ -2012,7 +2102,7 @@ export default function MappingCards({
                   A customer must be specified first
                 </span>
               ))}
-            {sh.status !== 'fail' && !posted && c.code && (isMgt ? onUseZohoShipTo : onUseSapShipTo) && (
+            {!posted && c.code && (isMgt ? onUseZohoShipTo : onUseSapShipTo) && (
               <button
                 className={'btn sm' + (shipToSapOpen ? ' primary' : '')}
                 style={{ marginLeft: 6 }}
@@ -2029,21 +2119,27 @@ export default function MappingCards({
             </div>
             <div className="cmp-arrow">→</div>
             <div className="cmp-col sap">
-              {(sh.status === 'fail' || shipToSapOpen) && isMgt && onUseZohoShipTo ? (
+              {shipToSapOpen && isMgt && onUseZohoShipTo ? (
                 <ZohoShipToPanel
                   customerCode={c.code}
                   masters={masters}
                   disabled={posted}
-                  onUse={onUseZohoShipTo}
+                  onUse={(info, accountId) => {
+                    onUseZohoShipTo(info, accountId);
+                    setShipToSapOpen(false);
+                  }}
                   docShipToName={doc.header.shipToName}
                   docShipToAddress={doc.header.shipToAddress}
                 />
-              ) : (sh.status === 'fail' || shipToSapOpen) && !isMgt && onUseSapShipTo ? (
+              ) : shipToSapOpen && !isMgt && onUseSapShipTo ? (
                 <SapShipToPanel
                   soldToSapCode={c.sapCode}
                   docShipToName={doc.header.shipToName}
                   disabled={posted}
-                  onUse={onUseSapShipTo}
+                  onUse={(shipTo) => {
+                    onUseSapShipTo(shipTo);
+                    setShipToSapOpen(false);
+                  }}
                 />
               ) : (
                 <SideList items={sh.sap} side="sap" />
@@ -2155,7 +2251,7 @@ export default function MappingCards({
               }}
             />
             {r.status === 'fail' && addBtn('Add New Material', () => onQuickAddMaterial(i))}
-            {r.status !== 'fail' && !posted && (
+            {!posted && (
               <button
                 className={'btn sm' + (matSapOpen[i] ? ' primary' : '')}
                 style={{ marginLeft: 6 }}
@@ -2168,21 +2264,27 @@ export default function MappingCards({
           </>
         }
         sapSlot={
-          r.status !== 'fail' && !matSapOpen[i] ? undefined
+          !matSapOpen[i] ? undefined
             : isMgt ? (
               <ZohoMaterialPanel
                 dealItems={dealItems || []}
                 docDescription={l.desc}
                 docCode={l.extCode}
                 disabled={posted}
-                onUse={(it) => onUseZohoMaterial?.(i, it)}
+                onUse={(it) => {
+                  onUseZohoMaterial?.(i, it);
+                  setMatSapOpen((prev) => ({ ...prev, [i]: false }));
+                }}
               />
             ) : (
               <SapMaterialPanel
                 docDescription={l.desc}
                 docCode={l.extCode}
                 disabled={posted}
-                onUse={(m) => onUseSapMaterial(i, m)}
+                onUse={(m) => {
+                  onUseSapMaterial(i, m);
+                  setMatSapOpen((prev) => ({ ...prev, [i]: false }));
+                }}
               />
             )
         }
@@ -2237,17 +2339,17 @@ export default function MappingCards({
       </div>
       <div className="card-b">
         {headerCards}
-        {/* MGT/Zoho now also shows the per-line Material cards — candidates come from the matched
-            Deal's Ordered Items (see ZohoMaterialPanel), and picking one saves a CustomerMaterial
-            mapping. The inline Sales Order editor below still handles Zoho SO creation. */}
-        <>
+        {/* Material/UoM mapping belongs to Sales Orders and PO-based Supplier Invoices. An
+            Incoming Invoice (II/FB60) posts G/L account items instead, so OCR lines there must not
+            be presented as Sales-Order-style materials. */}
+        {(doc.module === 'SO' || doc.module === 'AP') && <>
           <p className="sec-title" style={{ marginTop: 20 }}>
             {isMgt
               ? `${nMat}. MATERIAL (per line)`
               : `${nMat}. MATERIAL & ${nMat + 1}. RELATE UNIT (per line)`}
           </p>
           {matCards}
-        </>
+        </>}
         {detailContent && (
           <>
             <p className="sec-title" style={{ marginTop: 20 }}>

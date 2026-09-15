@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { AUTH_ENABLED as MS_ENABLED, attemptSilentSignIn, getAccount, initAuth, signIn } from './msal';
 import { hasLocalSession, loginWithPassword } from '../api/auth';
+import { MOCK_ALWAYS } from '../api/mocks';
 
 /* =====================================================================
    Sign-in screen. Two panels: a branded illustration on the left (brand,
@@ -88,7 +89,9 @@ function LoginIllustration() {
 }
 
 export default function AuthGate({ children }: { children: React.ReactNode }) {
-  const [phase, setPhase] = useState<Phase>('starting');
+  // UI mockup mode (VITE_USE_MOCK=1): there is no backend to sign in against, so skip the gate
+  // entirely and render the app. Strictly dev-only — this flag is 0/absent in production.
+  const [phase, setPhase] = useState<Phase>(MOCK_ALWAYS ? 'ready' : 'starting');
 
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -98,6 +101,7 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
   const [formError, setFormError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (MOCK_ALWAYS) return; // mock mode: already 'ready', no auth to initialise
     let alive = true;
     (async () => {
       try { await initAuth(); } catch { /* fall through to the sign-in screen */ }
