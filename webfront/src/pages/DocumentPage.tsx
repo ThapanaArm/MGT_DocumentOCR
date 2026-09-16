@@ -734,7 +734,10 @@ export default function DocumentPage() {
         SalesOrg: salesOrg,
         Branch: h.branch || '',
         IsActive: 1,
-        TaxId: h.customerTaxId || '',
+        // SAP's own Tax ID wins when it has one — same rationale as useZohoCustomer below: SAP is
+        // the source of truth here, and should show up even when the document had no Tax ID (or a
+        // stale/wrong one) of its own to go on.
+        TaxId: bp.taxId || h.customerTaxId || '',
       });
       await loadMasters(true);
       setManualHeader('customer', code);

@@ -105,9 +105,14 @@
   .sidebar.collapsed .nav-toggle{margin:10px auto;padding:9px;width:40px;justify-content:center}
 
   .main{flex:1;min-width:0;display:flex;flex-direction:column}
-  .topbar{background:var(--card);border-bottom:1px solid var(--line);padding:14px 28px;display:flex;align-items:center;gap:14px;position:sticky;top:0;z-index:20}
+  /* flex-wrap: the page title + company switcher + "Start New Document" button used to sit on one
+     unwrapping row — fine at full desktop width, but narrow the window (a half-split screen, a
+     13" laptop) and there is nowhere for that content to go: no wrap, no scroll, no shrink, so it
+     just overflows the topbar and the whole page grows a horizontal scrollbar. Wrapping to a
+     second line instead keeps everything reachable at any width. */
+  .topbar{background:var(--card);border-bottom:1px solid var(--line);padding:14px 28px;display:flex;align-items:center;gap:10px 14px;flex-wrap:wrap;position:sticky;top:0;z-index:20}
   .topbar h1{font-size:22px;margin:0;font-weight:600;line-height:32px}
-  .topbar .sp{flex:1}
+  .topbar .sp{flex:1 0 auto;min-width:0}
   .modtag{display:inline-flex;align-items:center;gap:6px;background:var(--brand-soft);color:var(--brand);
           padding:5px 14px;border-radius:var(--pill);font-size:13px;font-weight:600}
   .sidebar-toggle{display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;padding:0;
@@ -313,7 +318,12 @@
      SAME row (e.g. the Deal card) instead of two independent stacked lists -- the dot in
      the middle column carries the match/mismatch status per field, and a mismatched row
      is tinted end-to-end so it reads at a glance rather than needing every value read. */
-  table.rowmap{width:100%;border-collapse:collapse;font-size:13.5px}
+  /* min-width:0 overrides the global table{min-width:780px} below -- this table is meant to be
+     fluid (width:100%, cell text wraps via word-break) like table.cmp already is, but was missing
+     the same override, so it was silently forced to 780px wide and clipped by its card's
+     overflow:hidden whenever the card was narrower than that (any window under roughly
+     sidebar-width + 780px + padding). */
+  table.rowmap{width:100%;min-width:0;border-collapse:collapse;font-size:13.5px}
   table.rowmap thead th{text-align:left;font-size:11px;font-weight:700;letter-spacing:.05em;
                          text-transform:uppercase;color:var(--muted);padding:8px 10px 8px 0;
                          border-bottom:1px solid var(--line)}
@@ -514,6 +524,75 @@
   .card-h>.btn,.card-h>select{width:100%}
   .btn{min-height:46px}
   .grid{grid-template-columns:1fr!important}
+}
+
+/* Mobile navigation is a dismissible drawer; the desktop Collapse preference stays unchanged. */
+.mobile-nav-trigger,.mobile-nav-close,.mobile-nav-backdrop{display:none}
+@media (max-width:760px){
+  .app{display:block}
+  .main{min-width:0;width:100%}
+  .sidebar,.sidebar.collapsed{position:fixed;left:0;top:0;z-index:51;width:min(320px,86vw);height:100dvh;
+    transform:translateX(-100%);transition:transform .2s ease;box-shadow:var(--sh3)}
+  .sidebar.mobile-open,.sidebar.collapsed.mobile-open{transform:translateX(0)}
+  .sidebar .lbl,.sidebar.collapsed .lbl{display:inline}
+  .sidebar .brand,.sidebar.collapsed .brand{padding:16px 20px 12px;text-align:center}
+  .sidebar .brand-logo,.sidebar.collapsed .brand-logo{width:62px;margin:0 auto 10px}
+  .sidebar .brand b,.sidebar.collapsed .brand b{display:block}
+  .sidebar .brand span,.sidebar.collapsed .brand span{display:block}
+  .sidebar .nav,.sidebar.collapsed .nav{padding:4px 12px;overflow-y:auto;min-height:0}
+  .sidebar .nav a,.sidebar.collapsed .nav a{justify-content:flex-start;padding:10px 14px}
+  .sidebar .nav-title,.sidebar.collapsed .nav-title{display:block}
+  .sidebar .nav-toggle,.sidebar.collapsed .nav-toggle{display:none}
+  .sidebar .sidebar-foot,.sidebar.collapsed .sidebar-foot{padding:10px 12px}
+  .sidebar .status-line,.sidebar.collapsed .status-line{display:block}
+  .sidebar .theme-row,.sidebar.collapsed .theme-row{justify-content:space-between;padding:4px 0 10px}
+  .sidebar .user-card,.sidebar.collapsed .user-card{justify-content:flex-start;padding:6px}
+  .mobile-nav-trigger,.mobile-nav-close{display:inline-flex;align-items:center;justify-content:center;
+    width:40px;height:40px;flex:0 0 40px;border:1px solid var(--line);border-radius:var(--r3);
+    background:var(--card);color:var(--text);cursor:pointer}
+  .mobile-nav-close{position:absolute;right:12px;top:12px;z-index:1}
+  .mobile-nav-backdrop{display:block;position:fixed;inset:0;z-index:50;border:0;background:rgba(0,0,0,.45);cursor:pointer}
+  .topbar{padding:12px 14px;gap:8px}
+  .topbar h1{min-width:0;flex:1;font-size:17px;line-height:24px}
+  .topbar .sp{display:none}
+  .company-switch{order:3;width:100%;margin-right:0!important;justify-content:flex-start;flex-wrap:wrap}
+  .start-document{order:2}
+  .content{max-width:none;overflow-x:visible;padding:16px 14px 60px}
+  .tw{max-width:100%;overflow-x:auto}
+}
+@media (max-width:520px){
+  .content{padding:12px 10px 64px}
+  .topbar h1{font-size:16px}
+  .start-document{font-size:0;min-width:42px;padding:8px 12px}
+  .start-document i{font-size:15px}
+  .company-switch .hint{display:none}
+  .company-switch .btn{flex:1;justify-content:center}
+}
+
+/* Consistent card geometry across the dashboard and document comparison panels. */
+.overview-stat-grid{align-items:stretch}
+.overview-stat-tile{height:100%}
+.overview-stat-tile .card-b{height:100%;display:flex;flex-direction:column}
+.overview-stat-label{min-height:42px;display:flex;align-items:flex-start}
+.overview-card-grid{align-items:stretch}
+.overview-card-grid>.card{min-width:0;height:100%;display:flex;flex-direction:column}
+.overview-card-grid>.card>.card-h{min-height:72px}
+.overview-card-grid>.card>.card-b{min-width:0;flex:1}
+.overview-card-grid .tw{max-width:100%;overflow-x:auto}
+.overview-card-grid .tw table{min-width:640px}
+.cmp-card,.result{border-radius:18px;box-shadow:0 8px 28px rgba(25,55,42,.07)}
+.cmp-head{min-height:66px;padding:18px 24px}
+.cmp-body{padding:20px 24px}
+.cmp-sub{padding:18px 24px}
+.cmp-sub .cmp-head{min-height:0;padding:0 0 10px}
+@media (max-width:900px){
+  .overview-card-grid>.card{height:auto}
+  .overview-card-grid>.card>.card-h{min-height:0}
+  .cmp-card,.result{border-radius:15px}
+  .cmp-head{padding:15px 17px}
+  .cmp-body{padding:17px}
+  .cmp-sub{padding:15px 17px}
+  .cmp-sub .cmp-body{padding:0}
 }
 
 /* =====================================================================

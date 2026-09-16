@@ -157,7 +157,8 @@ public static class SapPayloadBuilder
                 ["DistributionChannel"] = string.IsNullOrEmpty(c.GetStr("DistChannel")) ? "10" : c.GetStr("DistChannel"),
                 ["OrganizationDivision"] = string.IsNullOrEmpty(c.GetStr("Division")) ? "00" : c.GetStr("Division"),
                 ["SoldToParty"] = Key(customer),
-                ["PurchaseOrderByCustomer"] = header.Get("poNo"),
+                // "-" when the document has no PO number, rather than sending blank/null to SAP.
+                ["PurchaseOrderByCustomer"] = string.IsNullOrWhiteSpace(header.GetStr("poNo")) ? "-" : header.GetStr("poNo"),
                 ["CustomerPurchaseOrderDate"] = ODataDate(header.Get("poDate")),
                 ["RequestedDeliveryDate"] = ODataDate(header.Get("deliveryDate")),
                 ["TransactionCurrency"] = currency,

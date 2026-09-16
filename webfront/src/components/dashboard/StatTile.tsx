@@ -18,7 +18,7 @@ export default function StatTile({
 }) {
   const up = (pct || 0) >= 0;
   return (
-    <div className="card" style={{ marginBottom: 0 }}>
+    <div className="card overview-stat-tile" style={{ marginBottom: 0 }}>
       <div className="card-b" style={{ padding: 18 }}>
         <div
           style={{
@@ -36,7 +36,7 @@ export default function StatTile({
         >
           <i className={icon} />
         </div>
-        <div className="hint" style={{ marginBottom: 2 }}>
+        <div className="hint overview-stat-label" style={{ marginBottom: 2 }}>
           {label}
         </div>
         <div style={{ fontSize: 26, fontWeight: 700, lineHeight: '34px', marginBottom: 6 }}>

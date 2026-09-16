@@ -154,6 +154,17 @@ function SidebarFoot({ me, denied }: { me: Me | null; denied: string | null }) {
 export default function AppLayout() {
   const { navCollapsed, toggleNav } = useAppState();
   const location = useLocation();
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+
+  useEffect(() => { setMobileNavOpen(false); }, [location.pathname]);
+  useEffect(() => {
+    if (!mobileNavOpen) return;
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setMobileNavOpen(false);
+    };
+    window.addEventListener('keydown', onEscape);
+    return () => window.removeEventListener('keydown', onEscape);
+  }, [mobileNavOpen]);
 
   // Resolve the signed-in user once for the whole shell: the sidebar identity card and the
   // department-based nav both read it, so it should not be fetched twice.
@@ -217,7 +228,13 @@ export default function AppLayout() {
 
   return (
     <div className="app">
-      <aside className={'sidebar' + (navCollapsed ? ' collapsed' : '')} id="sidebar">
+      {mobileNavOpen && (
+        <button className="mobile-nav-backdrop" type="button" aria-label="Close menu" onClick={() => setMobileNavOpen(false)} />
+      )}
+      <aside className={'sidebar' + (navCollapsed ? ' collapsed' : '') + (mobileNavOpen ? ' mobile-open' : '')} id="sidebar">
+        <button className="mobile-nav-close" type="button" aria-label="Close menu" onClick={() => setMobileNavOpen(false)}>
+          <i className="fa-solid fa-xmark" />
+        </button>
         <div className="brand">
           <Link to="/" style={{ textDecoration: 'none' }}>
             <img src="/assets/logo.png" alt="MGT" className="brand-logo" />
@@ -257,10 +274,21 @@ export default function AppLayout() {
 
       <div className="main">
         <div className="topbar">
+          <button
+            className="mobile-nav-trigger"
+            type="button"
+            aria-label="Open menu"
+            aria-expanded={mobileNavOpen}
+            aria-controls="sidebar"
+            onClick={() => setMobileNavOpen(true)}
+          >
+            <i className="fa-solid fa-bars" />
+          </button>
           <h1 id="pageTitle">{pageTitle(location.pathname)}</h1>
           <div className="sp" />
           {me && (
             <div
+              className="company-switch"
               style={{ display: 'flex', gap: 4, marginRight: 8, alignItems: 'center' }}
               title="Switch company context — MGT sends Sales Orders to Zoho CRM, GLC matches against SAP. No sign-out needed."
             >
@@ -281,7 +309,7 @@ export default function AppLayout() {
               </button>
             </div>
           )}
-          <Link className="btn sm" to="/">
+          <Link className="btn sm start-document" to="/">
             <i className="fa-solid fa-arrow-rotate-right" /> Start New Document
           </Link>
         </div>

@@ -107,6 +107,7 @@ export default function HomePage() {
     <>
       {/* Stat tiles */}
       <div
+        className="overview-stat-grid"
         style={{
           display: 'grid',
           gridTemplateColumns: 'repeat(auto-fit,minmax(190px,1fr))',
@@ -121,8 +122,8 @@ export default function HomePage() {
 
       {/* Trend + status donut */}
       <div
-        style={{ display: 'grid', gridTemplateColumns: '1.6fr 1fr', gap: 20, alignItems: 'start' }}
-        className="dash-row"
+        style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1.6fr) minmax(0,1fr)', gap: 20 }}
+        className="dash-row overview-card-grid"
       >
         <div className="card" style={{ marginBottom: 0 }}>
           <div className="card-h">
@@ -207,12 +208,11 @@ export default function HomePage() {
       <div
         style={{
           display: 'grid',
-          gridTemplateColumns: '1fr 1fr 1fr',
+          gridTemplateColumns: 'repeat(3,minmax(0,1fr))',
           gap: 20,
-          alignItems: 'start',
           marginTop: 20,
         }}
-        className="dash-row"
+        className="dash-row overview-card-grid"
       >
         <div className="card" style={{ marginBottom: 0 }}>
           <div className="card-h">

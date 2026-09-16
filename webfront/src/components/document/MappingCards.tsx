@@ -225,6 +225,7 @@ function SapCustomerPanel({
               label: bp.businessPartnerId,
               fields: [
                 { label: 'Name', value: bp.businessPartnerFullName || bp.businessPartnerName },
+                { label: 'Tax ID', value: bp.taxId },
                 { label: 'Blocked', value: bp.businessPartnerIsBlocked ? 'Yes' : 'No' },
                 { label: 'City', value: bp.addressCity },
                 { label: 'Street', value: bp.addressStreet },
@@ -298,6 +299,7 @@ function SapCustomerPanel({
     label: bp.businessPartnerId,
     fields: [
       { label: 'Name', value: bp.businessPartnerFullName || bp.businessPartnerName },
+      { label: 'Tax ID', value: bp.taxId },
       { label: 'Blocked', value: bp.businessPartnerIsBlocked ? 'Yes' : 'No' },
       { label: 'City', value: bp.addressCity },
       { label: 'Street', value: bp.addressStreet },
@@ -324,6 +326,9 @@ function SapCustomerPanel({
                 {bp.businessPartnerIsBlocked && (
                   <span className="badge b-fail" style={{ marginLeft: 4 }}>Blocked</span>
                 )}
+                {/* Always shown when SAP has one on file — even if the document itself had no Tax ID
+                    to search with, this is what SAP says the customer's Tax ID actually is. */}
+                {bp.taxId && <div className="hint">Tax ID: {bp.taxId}</div>}
                 {(bp.addressCity || bp.addressStreet) && (
                   <div className="hint">{[bp.addressStreet, bp.addressCity].filter(Boolean).join(', ')}</div>
                 )}

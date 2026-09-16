@@ -6,7 +6,11 @@ using MgtOcr.Core.Config;
 namespace MgtOcr.Sap;
 
 // One row from A_BusinessPartner — only the fields this lookup currently needs.
-public record BusinessPartner(string BusinessPartnerId, string BusinessPartnerName, string? BusinessPartnerFullName = null, bool BusinessPartnerIsBlocked = false, string? AddressCity = null, string? AddressStreet = null);
+// TaxId is filled in afterwards (a separate entity, A_BusinessPartnerTaxNumber) —
+// always the tax number SAP itself has on file for this partner, regardless of whether the
+// search was keyed by tax ID or by name, so the UI can show SAP's real value even when the
+// document being matched had no Tax ID of its own (or a different one) to search with.
+public record BusinessPartner(string BusinessPartnerId, string BusinessPartnerName, string? BusinessPartnerFullName = null, bool BusinessPartnerIsBlocked = false, string? AddressCity = null, string? AddressStreet = null, string? TaxId = null);
 
 // One row from A_CustSalesPartnerFunc (a Sold-to's sales-area partner-function assignments).
 // PartnerFunction "SH" = Ship-to, "SP" = Sold-to (per Megachem — matches the "SH"/PartnerFunction
@@ -50,7 +54,20 @@ public class SapBusinessPartnerClient(AppConfig config, HttpClient httpClient)
         if (partnerIds.Count == 0) return [];
 
         var results = await FetchByIdsAsync(partnerIds, top);
-        return await WithAddressAsync(results);
+        var addrByBp = await FetchAddressMapAsync(results);
+        // The Tax ID is already known here — it's literally the value we just filtered
+        // A_BusinessPartnerTaxNumber by — so there is no need for EnrichAsync's separate Tax ID
+        // round trip on this path. Saves a whole extra SAP call on the common case (Tax ID search
+        // is tried first specifically because it's the exact, cheap match).
+        return results
+            .Select(r =>
+            {
+                var withAddr = addrByBp.TryGetValue(r.BusinessPartnerId, out var a)
+                    ? r with { AddressCity = a.city, AddressStreet = a.street }
+                    : r;
+                return withAddr with { TaxId = clean };
+            })
+            .ToList();
     }
 
     /// <summary>
@@ -94,7 +111,7 @@ public class SapBusinessPartnerClient(AppConfig config, HttpClient httpClient)
         var partnerIds = links.Select(l => l.PartnerCustomer).Where(id => !string.IsNullOrEmpty(id)).Distinct().ToList();
         if (partnerIds.Count == 0) return links;
 
-        var partners = await WithAddressAsync(await FetchByIdsAsync(partnerIds, partnerIds.Count));
+        var partners = await EnrichAsync(await FetchByIdsAsync(partnerIds, partnerIds.Count));
         var byId = partners.ToDictionary(p => p.BusinessPartnerId);
         return links
             .Select(l => byId.TryGetValue(l.PartnerCustomer, out var bp) ? l with { Partner = bp } : l)
@@ -160,20 +177,20 @@ public class SapBusinessPartnerClient(AppConfig config, HttpClient httpClient)
         if (words.Count == 0)
         {
             // nothing survived the stop-word filter — fall back to the raw string rather than searching for nothing
-            return await WithAddressAsync(await FetchByFilterAsync(baseUrl, SubstringFilter(nameContains), top));
+            return await EnrichAsync(await FetchByFilterAsync(baseUrl, SubstringFilter(nameContains), top));
         }
 
         if (words.Count > 1)
         {
             var andFilter = string.Join(" and ", words.Select(SubstringFilter));
             var andResults = await FetchByFilterAsync(baseUrl, andFilter, top);
-            if (andResults.Count > 0) return await WithAddressAsync(andResults);
+            if (andResults.Count > 0) return await EnrichAsync(andResults);
         }
 
         // Single significant word, or the AND of all of them found nothing — OR is the broadest net.
         var orFilter = string.Join(" or ", words.Select(SubstringFilter));
         var orResults = await FetchByFilterAsync(baseUrl, orFilter, top);
-        return await WithAddressAsync(orResults);
+        return await EnrichAsync(orResults);
     }
 
     /// <summary>substringof() check against BusinessPartnerName, upper-casing the search word
@@ -241,6 +258,35 @@ public class SapBusinessPartnerClient(AppConfig config, HttpClient httpClient)
         return words;
     }
 
+    // Runs every search result (by name, or the Ship-to/Sold-to links — FindByTaxIdAsync fills in
+    // its own Tax ID directly and skips this) through the same enrichment so the UI always has
+    // address + Tax ID to show, no matter which path found the partner. Address and Tax ID live on
+    // separate OData entities with no way to join them into one request, but neither depends on
+    // the other, so the two round trips run CONCURRENTLY (Task.WhenAll) rather than one after
+    // another — this costs the same wall-clock time as the address-only lookup it replaced, not
+    // double, which matters since every extra SAP round trip is felt directly as UI search latency.
+    private async Task<List<BusinessPartner>> EnrichAsync(List<BusinessPartner> results)
+    {
+        if (results.Count == 0) return results;
+        var addressTask = FetchAddressMapAsync(results);
+        var taxIdTask = FetchTaxIdMapAsync(results);
+        await Task.WhenAll(addressTask, taxIdTask);
+        var addrByBp = addressTask.Result;
+        var taxByBp = taxIdTask.Result;
+
+        return results
+            .Select(r =>
+            {
+                var withAddr = addrByBp.TryGetValue(r.BusinessPartnerId, out var a)
+                    ? r with { AddressCity = a.city, AddressStreet = a.street }
+                    : r;
+                return taxByBp.TryGetValue(r.BusinessPartnerId, out var t) && !string.IsNullOrWhiteSpace(t)
+                    ? withAddr with { TaxId = t }
+                    : withAddr;
+            })
+            .ToList();
+    }
+
     /// <summary>
     /// TH3 (branch-code tax number) turned out to be identical across this tenant's duplicate
     /// Business Partners, so it can't tell them apart — dropped. Address is the fallback: head
@@ -249,31 +295,22 @@ public class SapBusinessPartnerClient(AppConfig config, HttpClient httpClient)
     /// Field names confirmed (2026-09-10) against a real A_BusinessPartnerAddress OData response
     /// from this tenant — CityName/StreetName below are exactly right, no guess.
     /// </summary>
-    private async Task<List<BusinessPartner>> WithAddressAsync(List<BusinessPartner> results)
+    private async Task<Dictionary<string, (string? city, string? street)>> FetchAddressMapAsync(List<BusinessPartner> results)
     {
-        if (results.Count == 0) return results;
         var baseUrl = config.SapBusinessPartnerBaseUrl;
         var ids = results.Select(r => r.BusinessPartnerId).Distinct().ToList();
         var idFilter = string.Join(" or ", ids.Select(id => $"BusinessPartner eq '{EscapeODataLiteral(id)}'"));
         var url = $"{baseUrl.TrimEnd('/')}/A_BusinessPartnerAddress?$filter={Uri.EscapeDataString(idFilter)}" +
                   $"&$select=BusinessPartner,CityName,StreetName&$top={ids.Count}";
-
-        Dictionary<string, (string? city, string? street)> addrByBp;
         try
         {
             var text = await GetJsonAsync(url);
-            addrByBp = ParseAddressMap(text);
+            return ParseAddressMap(text);
         }
         catch
         {
-            return results; // address is a nice-to-have — never fail the main lookup over it
+            return new(); // address is a nice-to-have — never fail the main lookup over it
         }
-
-        return results
-            .Select(r => addrByBp.TryGetValue(r.BusinessPartnerId, out var a)
-                ? r with { AddressCity = a.city, AddressStreet = a.street }
-                : r)
-            .ToList();
     }
 
     private static Dictionary<string, (string? city, string? street)> ParseAddressMap(string json)
@@ -284,6 +321,45 @@ public class SapBusinessPartnerClient(AppConfig config, HttpClient httpClient)
             var bp = GetString(item, "BusinessPartner");
             if (string.IsNullOrEmpty(bp)) continue;
             map[bp] = (GetString(item, "CityName"), GetString(item, "StreetName"));
+        }
+        return map;
+    }
+
+    /// <summary>
+    /// Looks up each result's real SAP Tax ID from A_BusinessPartnerTaxNumber (BPTaxNumber) — the
+    /// same entity FindByTaxIdAsync searches, but here read back the other direction: given a
+    /// partner code, what Tax ID does SAP have on file for it. A partner can carry more than one
+    /// tax-number row (different BPTaxType); the first one returned is kept, same "good enough"
+    /// tradeoff as the address lookup above. One batched call regardless of result count (same
+    /// pattern as FetchAddressMapAsync), not one call per row.
+    /// </summary>
+    private async Task<Dictionary<string, string?>> FetchTaxIdMapAsync(List<BusinessPartner> results)
+    {
+        var baseUrl = config.SapBusinessPartnerBaseUrl;
+        var ids = results.Select(r => r.BusinessPartnerId).Distinct().ToList();
+        var idFilter = string.Join(" or ", ids.Select(id => $"BusinessPartner eq '{EscapeODataLiteral(id)}'"));
+        var url = $"{baseUrl.TrimEnd('/')}/A_BusinessPartnerTaxNumber?$filter={Uri.EscapeDataString(idFilter)}" +
+                  $"&$select=BusinessPartner,BPTaxNumber&$top={Math.Max(ids.Count * 4, ids.Count)}";
+        try
+        {
+            var text = await GetJsonAsync(url);
+            return ParseTaxIdMap(text);
+        }
+        catch
+        {
+            return new(); // Tax ID is a nice-to-have here — never fail the main lookup over it
+        }
+    }
+
+    private static Dictionary<string, string?> ParseTaxIdMap(string json)
+    {
+        var map = new Dictionary<string, string?>();
+        foreach (var item in EnumerateResults(json))
+        {
+            var bp = GetString(item, "BusinessPartner");
+            if (string.IsNullOrEmpty(bp) || map.ContainsKey(bp)) continue; // keep the first tax-number row per partner
+            var tax = GetString(item, "BPTaxNumber");
+            if (!string.IsNullOrWhiteSpace(tax)) map[bp] = tax;
         }
         return map;
     }
@@ -353,7 +429,7 @@ public class SapBusinessPartnerClient(AppConfig config, HttpClient httpClient)
                 BusinessPartnerName: GetString(item, "BusinessPartnerName") ?? "",
                 BusinessPartnerFullName: GetString(item, "BusinessPartnerFullName"),
                 BusinessPartnerIsBlocked: GetBool(item, "BusinessPartnerIsBlocked")
-                // AddressCity/AddressStreet filled in afterwards by WithAddressAsync (separate entity)
+                // AddressCity/AddressStreet/TaxId filled in afterwards by EnrichAsync/FetchAddressMapAsync (separate entities)
             ));
         }
         return list;

@@ -17,6 +17,10 @@ export interface SapBusinessPartner {
    *  physical locations. Not yet confirmed reliable, may be null. */
   addressCity?: string | null;
   addressStreet?: string | null;
+  /** SAP's own Tax ID on file for this partner (A_BusinessPartnerTaxNumber, BPTaxNumber) — always
+   *  filled in when SAP has one, regardless of whether the search was by Tax ID or by name, so it
+   *  can be shown/used even when the document being matched had none of its own. */
+  taxId?: string | null;
 }
 
 export interface SapBusinessPartnerSearchResult {
