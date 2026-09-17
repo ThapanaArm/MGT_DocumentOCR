@@ -21,6 +21,22 @@ public record BusinessPartner(string BusinessPartnerId, string BusinessPartnerNa
 // BPCustomerNumber (see FindPartnerFunctionsAsync) — only the JSON parsing needed to change.
 public record PartnerFunctionLink(string Customer, string PartnerFunction, string PartnerCustomer, BusinessPartner? Partner = null);
 
+// The customer's Payment Terms as SAP has it on the customer master. Source says which level the
+// value came from -- "company" (A_CustomerCompany.PaymentTerms) or "salesArea"
+// (A_CustomerSalesArea.CustomerPaymentTerms), same two places (and same company-first priority) the
+// proven ZohoAccountPushJob account sync reads them from. CompanyCode/SalesOrganization echo which
+// row the value was taken from. PaymentTerms is null when SAP has none on file for this customer.
+public record SapCustomerPaymentTerms(string Customer, string? PaymentTerms, string? Source = null, string? CompanyCode = null, string? SalesOrganization = null);
+
+// One of the customer's sales areas from the SAP customer master (A_CustomerSalesArea). A customer
+// can have several (differing by DistributionChannel/Division within a sales org); each carries its
+// own SalesGroup / payment terms / etc. The GLC Customer card uses this to let the person pick which
+// area to use when there's more than one.
+public record SapCustomerSalesArea(
+    string SalesOrganization, string DistributionChannel, string Division,
+    string? SalesGroup = null, string? SalesOffice = null,
+    string? CustomerPaymentTerms = null, string? Currency = null);
+
 // Step 1 of SAP integration for the Sales Order module: read-only OData V2 GET client for SAP
 // Business Partner (Customer) master data. Used to match a customer read off an OCR'd document
 // to its SAP Business Partner record — by Tax ID first (exact, one company = one Tax ID) and by
@@ -36,7 +52,7 @@ public class SapBusinessPartnerClient(AppConfig config, HttpClient httpClient)
     /// NOTE: not yet verified against this tenant's actual $metadata — if this 404s or the
     /// filter is rejected, the field/entity name may differ on this system and needs adjusting.
     /// </summary>
-    public async Task<List<BusinessPartner>> FindByTaxIdAsync(string taxId, int top = 20)
+    public async Task<List<BusinessPartner>> FindByTaxIdAsync(string taxId, string? authorizationGroup = null, int top = 20)
     {
         var baseUrl = config.SapBusinessPartnerBaseUrl;
         if (string.IsNullOrWhiteSpace(baseUrl))
@@ -53,13 +69,13 @@ public class SapBusinessPartnerClient(AppConfig config, HttpClient httpClient)
         var partnerIds = ParseBusinessPartnerIds(text).Distinct().ToList();
         if (partnerIds.Count == 0) return [];
 
-        var results = await FetchByIdsAsync(partnerIds, top);
+        var results = await FetchByIdsAsync(partnerIds, top, authorizationGroup);
         var addrByBp = await FetchAddressMapAsync(results);
         // The Tax ID is already known here — it's literally the value we just filtered
         // A_BusinessPartnerTaxNumber by — so there is no need for EnrichAsync's separate Tax ID
         // round trip on this path. Saves a whole extra SAP call on the common case (Tax ID search
         // is tried first specifically because it's the exact, cheap match).
-        return results
+        var enriched = results
             .Select(r =>
             {
                 var withAddr = addrByBp.TryGetValue(r.BusinessPartnerId, out var a)
@@ -68,6 +84,7 @@ public class SapBusinessPartnerClient(AppConfig config, HttpClient httpClient)
                 return withAddr with { TaxId = clean };
             })
             .ToList();
+        return enriched;
     }
 
     /// <summary>
@@ -87,7 +104,7 @@ public class SapBusinessPartnerClient(AppConfig config, HttpClient httpClient)
     /// confirm a real response looks right before trusting this in the UI, same caveat as
     /// FindByTaxIdAsync above.
     /// </summary>
-    public async Task<List<PartnerFunctionLink>> FindPartnerFunctionsAsync(string soldToCustomerId, string? function = null, int top = 50)
+    public async Task<List<PartnerFunctionLink>> FindPartnerFunctionsAsync(string soldToCustomerId, string? function = null, string? salesOrganization = null, int top = 50)
     {
         var baseUrl = config.SapBusinessPartnerBaseUrl;
         if (string.IsNullOrWhiteSpace(baseUrl))
@@ -97,6 +114,8 @@ public class SapBusinessPartnerClient(AppConfig config, HttpClient httpClient)
         if (clean.Length == 0) return [];
 
         var filter = $"Customer eq '{EscapeODataLiteral(clean)}'";
+        if (!string.IsNullOrWhiteSpace(salesOrganization))
+            filter += $" and SalesOrganization eq '{EscapeODataLiteral(salesOrganization.Trim())}'";
         var url = $"{baseUrl.TrimEnd('/')}/A_CustSalesPartnerFunc" +
                   $"?$filter={Uri.EscapeDataString(filter)}" +
                   "&$select=Customer,PartnerFunction,BPCustomerNumber,SalesOrganization,DistributionChannel,Division" +
@@ -167,7 +186,7 @@ public class SapBusinessPartnerClient(AppConfig config, HttpClient httpClient)
     /// out mixed/lower-case after all), but it's what this tenant's data actually looks like and
     /// it's what the service can actually execute.
     /// </summary>
-    public async Task<List<BusinessPartner>> FindByNameAsync(string nameContains, int top = 20)
+    public async Task<List<BusinessPartner>> FindByNameAsync(string nameContains, string? authorizationGroup = null, int top = 20)
     {
         var baseUrl = config.SapBusinessPartnerBaseUrl;
         if (string.IsNullOrWhiteSpace(baseUrl))
@@ -177,21 +196,30 @@ public class SapBusinessPartnerClient(AppConfig config, HttpClient httpClient)
         if (words.Count == 0)
         {
             // nothing survived the stop-word filter — fall back to the raw string rather than searching for nothing
-            return await EnrichAsync(await FetchByFilterAsync(baseUrl, SubstringFilter(nameContains), top));
+            return await EnrichAsync(await FetchByFilterAsync(
+                baseUrl, WithAuthorizationGroup(SubstringFilter(nameContains), authorizationGroup), top));
         }
 
         if (words.Count > 1)
         {
             var andFilter = string.Join(" and ", words.Select(SubstringFilter));
-            var andResults = await FetchByFilterAsync(baseUrl, andFilter, top);
-            if (andResults.Count > 0) return await EnrichAsync(andResults);
+            var andResults = await FetchByFilterAsync(
+                baseUrl, WithAuthorizationGroup(andFilter, authorizationGroup), top);
+            if (andResults.Count > 0)
+                return await EnrichAsync(andResults);
         }
 
         // Single significant word, or the AND of all of them found nothing — OR is the broadest net.
         var orFilter = string.Join(" or ", words.Select(SubstringFilter));
-        var orResults = await FetchByFilterAsync(baseUrl, orFilter, top);
+        var orResults = await FetchByFilterAsync(
+            baseUrl, WithAuthorizationGroup(orFilter, authorizationGroup), top);
         return await EnrichAsync(orResults);
     }
+
+    private static string WithAuthorizationGroup(string filter, string? authorizationGroup) =>
+        string.IsNullOrWhiteSpace(authorizationGroup)
+            ? filter
+            : $"({filter}) and AuthorizationGroup eq '{EscapeODataLiteral(authorizationGroup.Trim())}'";
 
     /// <summary>substringof() check against BusinessPartnerName, upper-casing the search word
     /// first since this tenant's SAP data is always stored upper-case and this OData service
@@ -216,6 +244,153 @@ public class SapBusinessPartnerClient(AppConfig config, HttpClient httpClient)
         var clean = businessPartnerId.Trim();
         var url = $"{baseUrl.TrimEnd('/')}/A_BusinessPartner('{Uri.EscapeDataString(clean)}')?$format=json";
         return await GetJsonAsync(url);
+    }
+
+    /// <summary>
+    /// Read the customer's Payment Terms straight off the SAP customer master, mirroring exactly
+    /// what the proven ZohoAccountPushJob account sync does: prefer the company-code level
+    /// (A_CustomerCompany.PaymentTerms) and fall back to the sales-area level
+    /// (A_CustomerSalesArea.CustomerPaymentTerms) only when the company row has none. Both are
+    /// reached through A_BusinessPartner -> to_Customer -> to_CustomerCompany / to_CustomerSalesArea
+    /// (the same navigation that sync $expands). companyCode / salesOrganization scope which
+    /// company's / sales area's terms to read (GLC = 2000 / 2000); when no matching row carries a
+    /// value, the first row that does is used, so "always show something SAP has" still holds.
+    /// Best-effort like the other lookups here: returns null when SAP isn't configured or the call
+    /// fails, and a record with PaymentTerms=null when SAP simply has none for this customer.
+    /// </summary>
+    public async Task<SapCustomerPaymentTerms?> GetPaymentTermsAsync(
+        string customerCode, string? salesOrganization = null, string? companyCode = null)
+    {
+        var baseUrl = config.SapBusinessPartnerBaseUrl;
+        var customer = customerCode?.Trim() ?? "";
+        if (string.IsNullOrWhiteSpace(baseUrl) || customer.Length == 0)
+            return null; // simulation mode / nothing to look up -- best-effort, never blocks
+
+        try
+        {
+            // One round trip: fetch the BP by key and expand both customer sub-entities that carry
+            // payment terms, same as the account sync's $expand.
+            const string expand = "to_Customer/to_CustomerCompany,to_Customer/to_CustomerSalesArea";
+            var url = $"{baseUrl.TrimEnd('/')}/A_BusinessPartner('{Uri.EscapeDataString(customer)}')" +
+                      $"?$expand={Uri.EscapeDataString(expand)}&$format=json";
+
+            var text = await GetJsonAsync(url);
+            using var docu = JsonDocument.Parse(string.IsNullOrWhiteSpace(text) ? "{}" : text);
+            if (!docu.RootElement.TryGetProperty("d", out var d)
+                || !d.TryGetProperty("to_Customer", out var cust) || cust.ValueKind != JsonValueKind.Object)
+                return new SapCustomerPaymentTerms(customer, null);
+
+            var compRows = NestedResults(cust, "to_CustomerCompany").ToList();
+            var saRows = NestedResults(cust, "to_CustomerSalesArea").ToList();
+
+            // 1) Company code level -- preferred (exactly the account sync's priority).
+            var (compTerms, compCc) = PickPreferred(compRows, "CompanyCode", companyCode, "PaymentTerms");
+            if (!string.IsNullOrWhiteSpace(compTerms))
+                return new SapCustomerPaymentTerms(customer, compTerms.Trim(), "company", compCc, null);
+
+            // 2) Sales area level -- fallback.
+            var (saTerms, saSo) = PickPreferred(saRows, "SalesOrganization", salesOrganization, "CustomerPaymentTerms");
+            if (!string.IsNullOrWhiteSpace(saTerms))
+                return new SapCustomerPaymentTerms(customer, saTerms.Trim(), "salesArea", null, saSo);
+
+            return new SapCustomerPaymentTerms(customer, null); // SAP has none on file for this customer
+        }
+        catch
+        {
+            return null; // best-effort -- never blocks the caller
+        }
+    }
+
+    /// <summary>
+    /// List the customer's sales areas for a sales org (or all, when salesOrganization is null),
+    /// read from the SAP customer master via A_BusinessPartner -> to_Customer -> to_CustomerSalesArea.
+    /// Each area carries its own DistributionChannel / Division / SalesGroup / SalesOffice /
+    /// CustomerPaymentTerms / Currency. Used by the GLC Customer card to let the person pick which
+    /// sales area to use when a customer has more than one (which decides Channel/Division/Sales Group
+    /// sent/shown); when there's exactly one it's used automatically. Best-effort: returns [] when SAP
+    /// isn't configured or the lookup fails.
+    /// </summary>
+    public async Task<List<SapCustomerSalesArea>> GetSalesAreasAsync(string customerCode, string? salesOrganization = null)
+    {
+        var baseUrl = config.SapBusinessPartnerBaseUrl;
+        var customer = customerCode?.Trim() ?? "";
+        if (string.IsNullOrWhiteSpace(baseUrl) || customer.Length == 0)
+            return [];
+
+        try
+        {
+            const string expand = "to_Customer/to_CustomerSalesArea";
+            var url = $"{baseUrl.TrimEnd('/')}/A_BusinessPartner('{Uri.EscapeDataString(customer)}')" +
+                      $"?$expand={Uri.EscapeDataString(expand)}&$format=json";
+
+            var text = await GetJsonAsync(url);
+            using var docu = JsonDocument.Parse(string.IsNullOrWhiteSpace(text) ? "{}" : text);
+            if (!docu.RootElement.TryGetProperty("d", out var d)
+                || !d.TryGetProperty("to_Customer", out var cust) || cust.ValueKind != JsonValueKind.Object)
+                return [];
+
+            var wantSo = salesOrganization?.Trim();
+            var list = new List<SapCustomerSalesArea>();
+            foreach (var sa in NestedResults(cust, "to_CustomerSalesArea"))
+            {
+                var so = GetString(sa, "SalesOrganization") ?? "";
+                if (!string.IsNullOrWhiteSpace(wantSo) && !string.Equals(so, wantSo, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                list.Add(new SapCustomerSalesArea(
+                    so,
+                    GetString(sa, "DistributionChannel") ?? "",
+                    GetString(sa, "Division") ?? "",
+                    GetString(sa, "SalesGroup"),
+                    GetString(sa, "SalesOffice"),
+                    GetString(sa, "CustomerPaymentTerms"),
+                    GetString(sa, "Currency")));
+            }
+            return list;
+        }
+        catch
+        {
+            return [];
+        }
+    }
+
+    /// <summary>Picks a value out of a set of expanded OData rows: first a row whose key field
+    /// matches <paramref name="wantedKey"/> AND carries a non-empty value, otherwise the first row
+    /// with any non-empty value (so a customer set up under a different company/sales org than the
+    /// one asked for still yields the payment terms SAP does have).</summary>
+    private static (string? value, string? key) PickPreferred(
+        List<JsonElement> rows, string keyField, string? wantedKey, string valueField)
+    {
+        if (!string.IsNullOrWhiteSpace(wantedKey))
+        {
+            var want = wantedKey.Trim();
+            foreach (var r in rows)
+            {
+                var v = GetString(r, valueField);
+                if (!string.IsNullOrWhiteSpace(v) && string.Equals(GetString(r, keyField), want, StringComparison.OrdinalIgnoreCase))
+                    return (v, GetString(r, keyField));
+            }
+        }
+        foreach (var r in rows)
+        {
+            var v = GetString(r, valueField);
+            if (!string.IsNullOrWhiteSpace(v)) return (v, GetString(r, keyField));
+        }
+        return (null, null);
+    }
+
+    /// <summary>Walks an OData V2 $expand'd nav property on <paramref name="parent"/> that holds a
+    /// collection ("to_CustomerCompany" -> { "results": [...] }) and yields its rows; tolerates a
+    /// bare array or a single object too.</summary>
+    private static IEnumerable<JsonElement> NestedResults(JsonElement parent, string navProp)
+    {
+        if (parent.ValueKind != JsonValueKind.Object || !parent.TryGetProperty(navProp, out var nav))
+            yield break;
+        if (nav.ValueKind == JsonValueKind.Object && nav.TryGetProperty("results", out var arr) && arr.ValueKind == JsonValueKind.Array)
+            foreach (var x in arr.EnumerateArray()) yield return x;
+        else if (nav.ValueKind == JsonValueKind.Array)
+            foreach (var x in nav.EnumerateArray()) yield return x;
+        else if (nav.ValueKind == JsonValueKind.Object)
+            yield return nav;
     }
 
     private async Task<List<BusinessPartner>> FetchByFilterAsync(string baseUrl, string filter, int top)
@@ -365,12 +540,15 @@ public class SapBusinessPartnerClient(AppConfig config, HttpClient httpClient)
     }
 
     /// <summary>Re-fetch full Business Partner rows (name etc.) for a small, known set of codes.</summary>
-    private async Task<List<BusinessPartner>> FetchByIdsAsync(List<string> businessPartnerIds, int top)
+    private async Task<List<BusinessPartner>> FetchByIdsAsync(
+        List<string> businessPartnerIds, int top, string? authorizationGroup = null)
     {
         var baseUrl = config.SapBusinessPartnerBaseUrl;
         // OR'd into one $filter so this is a single extra round trip regardless of how many
         // tax-number rows matched (normally at most one distinct BP per Tax ID anyway).
-        var filter = string.Join(" or ", businessPartnerIds.Select(id => $"BusinessPartner eq '{EscapeODataLiteral(id)}'"));
+        var filter = WithAuthorizationGroup(
+            string.Join(" or ", businessPartnerIds.Select(id => $"BusinessPartner eq '{EscapeODataLiteral(id)}'")),
+            authorizationGroup);
         var url = $"{baseUrl.TrimEnd('/')}/A_BusinessPartner?$filter={Uri.EscapeDataString(filter)}&$top={Math.Max(top, businessPartnerIds.Count)}";
 
         var text = await GetJsonAsync(url);

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useOutletContext, useParams } from 'react-router-dom';
 import { useAppState } from '../state/AppState';
 import { useMeta } from '../state/MetaContext';
@@ -10,14 +10,12 @@ import {
   getPayload,
   getRawText,
   learnMaterial,
-  mapDocument,
   postToSap,
   reocrDocument,
   setDocCategory,
   splitDocument,
   type ChatMessage,
   type DocModel,
-  type MapResult,
 } from '../api/documents';
 import {
   AP_TOTALS_H,
@@ -28,7 +26,7 @@ import {
   SO_TOTALS_H,
 } from '../constants/fields';
 import { SEND_DISABLED } from '../constants/flags';
-import { dt, fmt, fmtCost, intFmt, moduleLabel, num, statusBadge } from '../utils/format';
+import { dt, fmt, fmtCost, intFmt, moduleLabel, statusBadge } from '../utils/format';
 import { findDupes } from '../utils/dupes';
 import Steps from '../components/Steps';
 import Modal, { ModalHeader } from '../components/Modal';
@@ -43,38 +41,33 @@ import IncomingInvoiceCard from '../components/document/IncomingInvoiceCard';
 import MappingCards from '../components/document/MappingCards';
 import ChatFixCard from '../components/document/ChatFixCard';
 import SplitModal from '../components/document/SplitModal';
-import SapSalesOrderEditor from '../components/document/SapSalesOrderEditor';
 import LineExtraModal from '../components/document/LineExtraModal';
 import MasterEditModal, {
   type MasterEditState,
 } from '../components/master/MasterEditModal';
 import { createMaster } from '../api/masters';
-import type { SapBusinessPartner, SapMaterial, SapMaterialDetail, SapPartnerFunctionLink } from '../api/sap';
-import { getSapMaterialDetail } from '../api/sap';
-import { createZohoSalesOrder, getZohoSalesOrderPreview, getZohoSalesOrderPayload } from '../api/zoho';
+import type { SapBusinessPartner, SapLastPrice, SapMaterial, SapMaterialDetail, SapPartnerFunctionLink } from '../api/sap';
+import { getSapLastPrice, getSapMaterialDetail } from '../api/sap';
 import type {
   ZohoAccount,
   ZohoShipToInfo,
   ZohoDeal,
   ZohoDealItem,
-  ZohoSalesOrderEdits,
-  ZohoSalesOrderPreview,
-  ZohoSalesOrderResult,
 } from '../api/zoho';
-import ZohoSalesOrderEditor from '../components/document/ZohoSalesOrderEditor';
 import { compareCandidates, type CompareField, type CompareResult } from '../api/compare';
 import type { CustomerMatchProposal } from '../components/document/MappingCards';
+import { resolveDocTarget } from '../utils/salesTarget';
+import { useDocumentEditor } from '../components/document/shell/useDocumentEditor';
+import SapSalesOrderStep, {
+  type SalesOrderStepHandle,
+} from '../components/document/steps/SapSalesOrderStep';
+import ZohoSalesOrderStep from '../components/document/steps/ZohoSalesOrderStep';
 
 // Deprecated. The backend no longer reads any "user" value sent by the client — it stamps the
 // identity from the validated Entra ID token instead, so whatever is passed here is discarded.
 // Left in place only so the existing call signatures keep compiling; remove it together with the
 // `user` parameters in api/documents.ts.
 const USER = '(ignored by the server)';
-const REOCR_INIT: Record<string, string> = {
-  ocr: 'tesseract', text: 'text', azure: 'azure', claude: 'claude',
-  claude_text: 'claude_text', typhoon: 'typhoon', gemini: 'gemini', openai: 'openai',
-};
-
 // SAP-like withholding-tax prefill: on a Supplier Invoice / liability-recording
 // document (module AP/II), if OCR captured a WHT amount but no WHT rows exist yet,
 // seed one row the way SAP's Create Supplier Invoice / Journal Entry WHT tab does —
@@ -116,71 +109,7 @@ function seedTaxItems(d: DocModel): DocModel {
 // cards and the Send-to-Zoho confirm modal show it as matched immediately, without waiting on a
 // re-fetch. Never changes what's actually sent to Zoho by itself -- that only happens once the
 // same override is included as a line's materialId in the POST .../create request (see
-// confirmPostZoho), which the backend independently re-validates against the Deal's own Items.
-function applyMaterialOverrides(
-  preview: ZohoSalesOrderPreview | null,
-  overrides: Record<string, ZohoDealItem>,
-  docLines: DocModel['lines'],
-  uomRules: Record<string, any>[],
-  salesOrg: string,
-): ZohoSalesOrderPreview | null {
-  if (!preview || !Object.keys(overrides).length) return preview;
-  const lines = [...preview.lines];
-  const skipped: typeof preview.skipped = [];
-  for (const sk of preview.skipped) {
-    const key = String(sk.itemNo);
-    const ov = overrides[key];
-    if (ov && ov.materialId) {
-      const docLine = docLines.find((l) => String(l.itemNo) === key);
-      const converted = docLine ? zohoConvertedValues(docLine, ov, uomRules, salesOrg) : null;
-      lines.push({
-        itemNo: sk.itemNo,
-        desc: docLine?.desc ?? sk.desc ?? null,
-        extCode: docLine?.extCode ?? sk.extCode ?? null,
-        materialName: ov.materialName ?? null,
-        materialCode: ov.materialCode ?? null,
-        quantity: converted?.quantity ?? 0,
-        unitPrice: converted?.unitPrice ?? null,
-        unit: converted?.unit ?? ov.unit ?? null,
-      });
-    } else {
-      skipped.push(sk);
-    }
-  }
-  return { ...preview, lines, skipped };
-}
-
-function zohoConvertedValues(
-  line: DocModel['lines'][number], item: ZohoDealItem,
-  rules: Record<string, any>[], salesOrg: string,
-) {
-  const docUnit = (line.uom || '').trim();
-  const targetUnit = (item.unit || '').trim();
-  const qty = Number(line.qty) || 0;
-  const rawPrice = line.price !== '' && line.price != null ? Number(line.price) : NaN;
-  if (!docUnit || !targetUnit || docUnit.toLowerCase() === targetUnit.toLowerCase())
-    return { quantity: qty, unitPrice: Number.isFinite(rawPrice) ? rawPrice : null, unit: targetUnit || docUnit };
-
-  const materialCode = (item.materialCode || '').trim();
-  const rule = rules
-    .filter((u) => !u.SalesOrg || String(u.SalesOrg) === salesOrg)
-    .sort((a, b) => Number(String(b.SalesOrg) === salesOrg) - Number(String(a.SalesOrg) === salesOrg))
-    .find((u) => String(u.MaterialCode ?? u.MaterialCodeSAP ?? '') === materialCode
-      && String(u.ExtUom || '').trim().toLowerCase() === docUnit.toLowerCase()
-      && String(u.SapUom || '').trim().toLowerCase() === targetUnit.toLowerCase());
-  const ratio = Number(item.conversionRatio);
-  // Zoho's Conversion_Ratio means sub-units contained in one Zoho selling unit
-  // (e.g. 10 KG per BAG). Our stored factor is the reverse direction because mapping computes
-  // document quantity * factor, therefore the default is 1/10 BAG per KG.
-  const factor = rule && Number(rule.Factor) > 0 ? Number(rule.Factor)
-    : ratio > 0 ? 1 / ratio : 1;
-  return {
-    quantity: Math.round(qty * factor * 1000) / 1000,
-    unitPrice: Number.isFinite(rawPrice) ? Math.round((rawPrice / factor) * 1e6) / 1e6 : null,
-    unit: targetUnit,
-  };
-}
-
+// the Zoho step), which the backend independently re-validates against the Deal's own Items.
 export default function DocumentPage() {
   const { docId } = useParams<{ docId: string }>();
   const id = Number(docId);
@@ -188,24 +117,42 @@ export default function DocumentPage() {
   const { guard, showToast } = useAppState();
   const { ocrProviders, loadOcrProviders, apDocCategories, loadApDocCategories, masters, loadMasters } =
     useMeta();
-  // Which company opened this document decides where Sales Order Customer matching looks:
-  // MGT -> Zoho CRM, Green Leaf (and anyone else) -> SAP, per AppLayout's Outlet context.
   const { me } = useOutletContext<{ me: Me | null }>();
-  const isMgt = me?.primaryCompany?.companyCode === 'MGT';
 
-  const [doc, setDoc] = useState<DocModel | null>(null);
-  const currentSalesOrg = doc?.header.salesOrg || me?.salesOrganization || (isMgt ? '1000' : '2000');
-  const [map, setMap] = useState<MapResult | null>(null);
-  const [failed, setFailed] = useState(false);
-  const manual = useRef<{ header: Record<string, string>; lines: Record<number, string> }>({
-    header: {},
-    lines: {},
-  });
-
+  // Provider-agnostic document core (working doc, mapping result, and every edit that is the
+  // same regardless of SAP vs Zoho). Everything else on this page -- loading, re-OCR, chat,
+  // split, master-edit, and the SAP/Zoho-specific steps -- consumes these.
+  const {
+    doc, setDoc, map, setMap, failed, setFailed, manual, runMap,
+    editHeader, editLine, editLineExtra, addLine, delLine,
+    editGlItem, addGlItem, delGlItem,
+    editTaxItem, addTaxItem, delTaxItem,
+    editWhtItem, addWhtItem, delWhtItem,
+    setManualLine,
+  } = useDocumentEditor(USER);
+  // Where this document is posted, decided by company x module: an MGT Sales Order goes to
+  // Zoho CRM, everything else (liability modules, and Sales Orders under any other company)
+  // goes to SAP -- see resolveDocTarget. `isMgt` is kept as the in-file alias for "the Zoho
+  // target" so the existing branches keep working during the flow split; unlike the old
+  // company-only flag it is now module-aware, so an MGT user opening a non-SO document (e.g.
+  // an Incoming Invoice) correctly routes to SAP. New code should call resolveDocTarget.
+  const isMgt = resolveDocTarget(doc, me) === 'zoho';
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
   const [chatImage, setChatImage] = useState<string | null>(null);
-  const [chatProvider, setChatProvider] = useState('claude');
-  const [reocrEngine, setReocrEngine] = useState('auto');
+  const [chatProvider, setChatProvider] = useState('gemini');
+  const [reocrEngine, setReocrEngine] = useState('gemini');
+
+  // Keep the working document's salesOrg in step with the active company view. The /map, /payload
+  // and /post requests all send doc.header, and the backend resolves the company from
+  // header.salesOrg — so for a Sales Order it must carry the CURRENT view's salesOrg (isMgt tracks
+  // the "View as" dev toggle via effectiveMe), not a stale stored value or the signed-in user's own
+  // company. Without this, simulating GLC still mapped/posted as the real MGT login. SO only.
+  useEffect(() => {
+    if (!doc || doc.module !== 'SO') return;
+    const want = isMgt ? '1000' : '2000';
+    if (doc.header.salesOrg !== want) editHeader('salesOrg', want);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doc?.module, doc?.header?.salesOrg, isMgt]);
 
   // A Customer search that comes back ambiguous (>1 candidate) gets resolved by chatting about
   // it right in the Chat to Fix Data box below, instead of a separate popup — see
@@ -228,182 +175,15 @@ export default function DocumentPage() {
   const [lineExtraIdx, setLineExtraIdx] = useState<number | null>(null);
   const [postOpen, setPostOpen] = useState(false);
   const [posting, setPosting] = useState(false);
-  // MGT/Zoho Step 3: the Sales Order editor stays hidden until the person presses the Step 3
-  // button (mirroring how Step 2 reveals the mapping results), then this stays true.
-  const [showZohoEditor, setShowZohoEditor] = useState(false);
-  const zohoEditorRef = useRef<HTMLDivElement | null>(null);
-  // SAP Step 3 (SO module only) -- same reveal pattern as showZohoEditor/zohoEditorRef above, so
-  // the "check before you send" screen looks and behaves the same on both platforms. AP/II
-  // documents keep the old postOpen confirm popup (Zoho has no equivalent to compare against).
-  const [showSapEditor, setShowSapEditor] = useState(false);
-  const sapEditorRef = useRef<HTMLDivElement | null>(null);
-  // MGT/Zoho only -- which Deal is picked on the Deal card (lifted up from ZohoDealCard) and the
-  // in-flight state for creating the Zoho Sales Order from the inline editor. Kept entirely
-  // separate from postOpen/posting/confirmPost above, the SAP-only path for non-MGT documents.
+  const sapStepRef = useRef<SalesOrderStepHandle | null>(null);
+  const zohoStepRef = useRef<SalesOrderStepHandle | null>(null);
+  // Mapping owns the selected Deal/Ship-to seam; the Zoho Step owns preview, editable payload,
+  // posting state, result, and its payload modal.
   const [selectedDealId, setSelectedDealId] = useState('');
-  // The full resolved Deal (with its Deal Items), lifted up from MappingCards' Deal card -- the
-  // candidate pool for the inline Sales Order editor's AI-suggested-match tool.
   const [resolvedDeal, setResolvedDeal] = useState<ZohoDeal | null>(null);
-  const [zohoPosting, setZohoPosting] = useState(false);
-  const [zohoResult, setZohoResult] = useState<ZohoSalesOrderResult | null>(null);
   const [selectedZohoShipTo, setSelectedZohoShipTo] = useState<ZohoShipToInfo | null>(null);
-  const [zohoHeader, setZohoHeader] = useState({
-    subject: '',
-    customerRef: '',
-    deliveryDate: '',
-    paymentTerms: '',
-    paymentCurrency: '',
-    incoterms: '',
-    taxId: '',
-  });
-  const [zohoLineEdits, setZohoLineEdits] = useState<
-    Record<string, { quantity: string; unitPrice: string; unit: string; description: string; materialId?: string }>
-  >({});
-  const editZohoLine = (
-    itemNo: unknown,
-    patch: Partial<{ quantity: string; unitPrice: string; unit: string; description: string; materialId?: string }>,
-  ) =>
-    setZohoLineEdits((prev) => {
-      const key = String(itemNo);
-      const current = prev[key] || { quantity: '', unitPrice: '', unit: '', description: '' };
-      return { ...prev, [key]: { ...current, ...patch } };
-    });
-
-  // Fetches the Sales Order preview (GET .../preview) as soon as a Deal is picked, so the inline
-  // Sales Order editor is populated and visible without the person pressing Send first. Silent on
-  // failure (e.g. the Deal has no linked Account yet) -- this runs automatically on every Deal
-  // switch, so it must not pop an error toast the way a person-initiated action would; the editor
-  // shows the reason inline via zohoMaterialError instead.
-  const [zohoMaterialPreview, setZohoMaterialPreview] = useState<ZohoSalesOrderPreview | null>(null);
-  const [zohoMaterialLoading, setZohoMaterialLoading] = useState(false);
-  const [zohoMaterialError, setZohoMaterialError] = useState<string | null>(null);
-  // Deal Items a person has confirmed via the AI-suggested-match tool on a "Material — Row N"
-  // card, keyed by the document line's itemNo -- Deal-specific, so it's dropped whenever the
-  // selected Deal (or the document) changes rather than silently carrying a stale match over.
-  const [zohoMaterialOverrides, setZohoMaterialOverrides] = useState<Record<string, ZohoDealItem>>({});
-  // A confirmed AI match is tied to one Deal on one document -- drop it (not on every doc
-  // content edit, only when either of those actually changes) rather than silently carry a
-  // stale choice over to a different Deal or document.
-  useEffect(() => {
-    setZohoMaterialOverrides({});
-  }, [doc?.docId, selectedDealId]);
-  useEffect(() => {
-    if (!doc || !isMgt || !selectedDealId) {
-      setZohoMaterialPreview(null);
-      setZohoMaterialError(null);
-      return;
-    }
-    let cancelled = false;
-    setZohoMaterialLoading(true);
-    setZohoMaterialError(null);
-    getZohoSalesOrderPreview(doc.docId, selectedDealId)
-      .then((p) => {
-        if (cancelled) return;
-        setZohoMaterialPreview(p);
-      })
-      .catch((err) => {
-        if (cancelled) return;
-        setZohoMaterialPreview(null);
-        setZohoMaterialError(err instanceof Error ? err.message : 'Could not check this Deal against Zoho CRM');
-      })
-      .finally(() => {
-        if (!cancelled) setZohoMaterialLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [doc, isMgt, selectedDealId]);
-
-  // What the inline Sales Order editor shows -- the backend's own preview with any AI-confirmed
-  // matches folded in client-side, so applying one updates the page immediately without a re-fetch.
-  const zohoMaterialPreviewMerged = useMemo(
-    () => applyMaterialOverrides(zohoMaterialPreview, zohoMaterialOverrides, doc?.lines || [], masters?.uoms || [], currentSalesOrg),
-    [zohoMaterialPreview, zohoMaterialOverrides, doc, masters?.uoms, currentSalesOrg],
-  );
-
-  // Seed the editable header + per-line fields from a freshly loaded preview. Keyed on the raw
-  // preview object identity, which only changes on an actual re-fetch (new Deal / document), so
-  // it never clobbers what the person has typed, nor the AI-match edits seeded below.
-  useEffect(() => {
-    const p = zohoMaterialPreview;
-    if (!p) return;
-    setZohoHeader({
-      subject: p.subject || '',
-      customerRef: p.customerRef || '',
-      deliveryDate: p.deliveryDate || '',
-      paymentTerms: p.paymentTerms || '',
-      paymentCurrency: p.paymentCurrency || '',
-      incoterms: p.incoterms || '',
-      taxId: p.taxId || '',
-    });
-    const le: Record<string, { quantity: string; unitPrice: string; unit: string; description: string; materialId?: string }> = {};
-    p.lines.forEach((l) => {
-      le[String(l.itemNo)] = {
-        quantity: l.quantity != null ? String(l.quantity) : '',
-        unitPrice: l.unitPrice != null ? String(l.unitPrice) : '',
-        unit: l.unit || '',
-        description: l.desc || '',
-      };
-    });
-    setZohoLineEdits(le);
-  }, [zohoMaterialPreview]);
-
-  // Called from the inline Sales Order editor's "Ask AI to match" tool once the person clicks
-  // "Use this record" on a suggested Deal Item -- keyed by the document line's itemNo. Records the
-  // override (so the merged preview shows the line as matched) and seeds that line's editable
-  // fields incl. its materialId, which is what gets sent (and backend-revalidated) on create.
-  const useAiMaterialMatch = async (itemNo: unknown, item: ZohoDealItem) => {
-    if (!doc || !item.materialId) return;
-    const key = String(itemNo);
-    const lineIndex = doc.lines.findIndex((l) => String(l.itemNo) === key);
-    if (lineIndex < 0) return;
-
-    // Persist the same CustomerMaterial mapping as the normal Zoho "Use & Save" action.
-    // Previously AI matching only added a one-off MaterialId override to this Sales Order, so
-    // the next document had to be matched again, unlike the SAP flow.
-    await useZohoMaterial(lineIndex, item);
-    setZohoMaterialOverrides((prev) => ({ ...prev, [key]: item }));
-    const dl = doc.lines[lineIndex];
-    const converted = zohoConvertedValues(dl, item, masters?.uoms || [], currentSalesOrg);
-    editZohoLine(key, {
-      materialId: item.materialId,
-      quantity: String(converted.quantity),
-      unitPrice: converted.unitPrice != null ? String(converted.unitPrice) : '',
-      unit: converted.unit,
-      description: dl?.desc || '',
-    });
-    showToast('บันทึก CustomerMaterial จาก Zoho แล้ว และจะใช้กับ Sales Order นี้');
-  };
 
   const [masterEdit, setMasterEdit] = useState<MasterEditState | null>(null);
-
-  const runMap = useCallback(
-    async (silent: boolean, forDoc?: DocModel) => {
-      const d = forDoc || doc;
-      if (!d) return;
-      const res = await guard(() =>
-        mapDocument(d.docId, {
-          header: d.header,
-          lines: d.lines,
-          manual: manual.current,
-          user: USER,
-        }),
-      );
-      if (res) {
-        setDoc(res.document);
-        setMap(res);
-        if (!silent) {
-          showToast(
-            res.pass
-              ? 'จับคู่ข้อมูลสำเร็จและบันทึกแล้ว'
-              : 'ยังจับคู่ไม่ครบ ' + res.errors.length + ' รายการ กรุณาตรวจและเลือกข้อมูล',
-          );
-          window.scrollTo({ top: 0, behavior: 'smooth' });
-        }
-      }
-    },
-    [doc, guard, showToast],
-  );
 
   // Load document on mount / id change.
   useEffect(() => {
@@ -411,7 +191,6 @@ export default function DocumentPage() {
     setDoc(null);
     setMap(null);
     setFailed(false);
-    setShowZohoEditor(false);
     setPendingMatch(null);
     setMatchChatLog([]);
     manual.current = { header: {}, lines: {} };
@@ -424,7 +203,9 @@ export default function DocumentPage() {
         setFailed(true);
         return;
       }
-      setReocrEngine(REOCR_INIT[d.provider || ''] || 'auto');
+      // Locked to Gemini (per Megachem) — the re-OCR engine is always Gemini regardless of which
+      // engine last read the document.
+      setReocrEngine('gemini');
       setDoc(seedTaxItems(seedWhtItems(d)));
       if (d.module === 'AP') loadApDocCategories();
       try {
@@ -445,7 +226,15 @@ export default function DocumentPage() {
   if (!doc || !masters) return <div className="card"><div className="empty">Loading…</div></div>;
 
   const h = doc.header;
-  const salesOrg = h.salesOrg || me?.salesOrganization || (isMgt ? '1000' : '2000');
+  // For a Sales Order the company context follows the CURRENT view — `isMgt` already tracks the
+  // "View as" dev toggle through effectiveMe (AppLayout), so an admin simulating GLC actually
+  // maps/posts as GLC (salesOrg 2000), not as their own signed-in company or a stale stored
+  // salesOrg. A real GLC user's SO resolves the same way. Non-SO modules keep the original
+  // resolution (stored value → the user's own SalesOrg → the isMgt fallback).
+  const salesOrg = doc.module === 'SO'
+    ? (isMgt ? '1000' : '2000')
+    : (h.salesOrg || me?.salesOrganization || (isMgt ? '1000' : '2000'));
+  const companyCode = doc.module === 'SO' ? salesOrg : (me?.sapCompanyCode || salesOrg);
   const posted = doc.status === 'POSTED';
   const isSplit = doc.status === 'SPLIT';
   const canSplit =
@@ -454,115 +243,35 @@ export default function DocumentPage() {
   const showDetail = doc.module !== 'II' && doc.module !== 'PODP';
   const showGlItems = doc.module === 'AP' || doc.module === 'II';
 
-  // ---- editing handlers ----
-  const patchDoc = (fn: (d: DocModel) => DocModel) => {
-    setDoc((prev) => (prev ? fn(prev) : prev));
-    setMap(null);
-  };
-  const editHeader = (k: string, v: string) =>
-    patchDoc((d) => ({ ...d, header: { ...d.header, [k]: v } }));
-  const editLine = (i: number, k: string, v: string) =>
-    patchDoc((d) => {
-      const lines = d.lines.slice();
-      const l = { ...lines[i], [k]: v };
-      if (k === 'qty' || k === 'price') l.amount = (num(l.qty) * num(l.price)).toFixed(2);
-      lines[i] = l;
-      return { ...d, lines };
-    });
-  const editLineExtra = (i: number, k: string, v: string) =>
-    setDoc((d) => {
-      if (!d) return d;
-      const lines = d.lines.slice();
-      lines[i] = { ...lines[i], extra: { ...(lines[i].extra || {}), [k]: v } };
-      return { ...d, lines };
-    });
-  const addLine = () =>
-    patchDoc((d) => ({
-      ...d,
-      lines: [
-        ...d.lines,
-        { itemNo: (d.lines.length + 1) * 10, extCode: '', desc: '', qty: 0, uom: 'EA', price: 0, amount: 0, materialCode: '' },
-      ],
-    }));
-  const delLine = (i: number) =>
-    patchDoc((d) => ({ ...d, lines: d.lines.filter((_l, j) => j !== i) }));
-
-  const editGlItem = (i: number, k: string, v: string) =>
-    setDoc((d) => {
-      if (!d) return d;
-      const items = (d.header.glItems || []).slice();
-      items[i] = { ...items[i], [k]: v };
-      return { ...d, header: { ...d.header, glItems: items } };
-    });
-  const addGlItem = () =>
-    setDoc((d) => {
-      if (!d) return d;
-      const items = (d.header.glItems || []).slice();
-      items.push({ glAccount: '', drCr: '', amount: 0, taxCode: '', assignment: '', itemText: '', costCenter: '' });
-      return { ...d, header: { ...d.header, glItems: items } };
-    });
-  const delGlItem = (i: number) =>
-    setDoc((d) => {
-      if (!d) return d;
-      const items = (d.header.glItems || []).filter((_g: unknown, j: number) => j !== i);
-      return { ...d, header: { ...d.header, glItems: items } };
-    });
-
-  const editTaxItem = (i: number, k: string, v: string) =>
-    setDoc((d) => {
-      if (!d) return d;
-      const items = (d.header.taxItems || []).slice();
-      items[i] = { ...items[i], [k]: v };
-      return { ...d, header: { ...d.header, taxItems: items } };
-    });
-  const addTaxItem = () =>
-    setDoc((d) => {
-      if (!d) return d;
-      const items = (d.header.taxItems || []).slice();
-      items.push({ drCr: 'S', docCurrencyAmt: 0, taxCode: '', validFrom: '', taxRate: '' });
-      return { ...d, header: { ...d.header, taxItems: items } };
-    });
-  const delTaxItem = (i: number) =>
-    setDoc((d) => {
-      if (!d) return d;
-      const items = (d.header.taxItems || []).filter((_t: unknown, j: number) => j !== i);
-      return { ...d, header: { ...d.header, taxItems: items } };
-    });
-
-  const editWhtItem = (i: number, k: string, v: string) =>
-    setDoc((d) => {
-      if (!d) return d;
-      const items = (d.header.whtItems || []).slice();
-      items[i] = { ...items[i], [k]: v };
-      return { ...d, header: { ...d.header, whtItems: items } };
-    });
-  const addWhtItem = () =>
-    setDoc((d) => {
-      if (!d) return d;
-      const items = (d.header.whtItems || []).slice();
-      items.push({ wtType: '', whtCode: '', baseFc: Number(d.header.subTotal) || 0, amtFc: 0 });
-      return { ...d, header: { ...d.header, whtItems: items } };
-    });
-  const delWhtItem = (i: number) =>
-    setDoc((d) => {
-      if (!d) return d;
-      const items = (d.header.whtItems || []).filter((_w: unknown, j: number) => j !== i);
-      return { ...d, header: { ...d.header, whtItems: items } };
-    });
+  // Document-editing handlers (patchDoc / header / line / GL / Tax / WHT + setManualLine) now
+  // live in useDocumentEditor and are destructured above.
 
   const setManualHeader = (k: string, v: string) => {
     manual.current.header[k] = v;
     if (k === 'customer') {
       manual.current.header.shipTo = '';
+      // a different customer invalidates any prior "no ship-to" fallback choice (GLC)
+      manual.current.header.shipToFallback = '';
       setSelectedZohoShipTo(null);
     }
-    if (k === 'shipTo') setSelectedZohoShipTo(null);
+    // picking a real ship-to supersedes the "use sold-to / omit" fallback choice (GLC)
+    if (k === 'shipTo') {
+      if (v) manual.current.header.shipToFallback = '';
+      setSelectedZohoShipTo(null);
+    }
     runMap(true);
   };
-  const setManualLine = (i: number, v: string) => {
-    manual.current.lines[i] = v;
-    runMap(true);
-  };
+
+  // GLC: apply the SAP sales area the person picked (or the single one auto-used) on the Customer
+  // card — persists DistributionChannel / Division / Sales Group onto the document header (so the
+  // SAP payload uses them) and re-maps. Values live on the header, not as a manual match override,
+  // because the payload is rebuilt from the stored header (see PayloadForAsync / HeaderJson).
+  const setSalesArea = (fields: { distChannel?: string; division?: string; salesGroup?: string }) =>
+    guard(async () => {
+      const updated = { ...doc, header: { ...doc.header, ...fields } };
+      setDoc(updated);
+      await runMap(true, updated);
+    });
 
   const learn = (i: number) =>
     guard(async () => {
@@ -625,67 +334,6 @@ export default function DocumentPage() {
       }
     });
 
-  // Creates the Zoho Sales Order straight from the inline editor's current values -- no confirm
-  // popup (the editable table on the page IS the confirmation). The result, success or failure,
-  // is shown inline in the editor via zohoResult.
-  // The request body sent to both create and payload -- built from the inline editor's current
-  // header + line edits, so "View Payload" shows exactly what "Send" would submit.
-  const buildZohoEdits = (): ZohoSalesOrderEdits => {
-    // A previously saved master-row selection has no structured Zoho fields in component state;
-    // still send its saved code/address instead of silently omitting Ship-to altogether.
-    const mappedShipTo = (masters.shiptos || []).find(
-      (x) => String(x.SapShipToCode ?? '') === String(map?.header.shipTo.code ?? ''),
-    );
-    const shipTo = selectedZohoShipTo || (mappedShipTo ? {
-      code: String(mappedShipTo.ShipToCode ?? mappedShipTo.SapShipToCode ?? ''),
-      address: String(mappedShipTo.ShipToAddress ?? mappedShipTo.Address ?? ''),
-    } : undefined);
-    return {
-      subject: zohoHeader.subject || undefined,
-      customerRef: zohoHeader.customerRef || undefined,
-      deliveryDate: zohoHeader.deliveryDate || undefined,
-      paymentTerms: zohoHeader.paymentTerms || undefined,
-      paymentCurrency: zohoHeader.paymentCurrency || undefined,
-      incoterms: zohoHeader.incoterms || undefined,
-      taxId: zohoHeader.taxId || undefined,
-      shipTo,
-      lines: Object.entries(zohoLineEdits).map(([itemNo, e]) => ({
-        itemNo,
-        quantity: e.quantity !== '' ? Number(e.quantity) : undefined,
-        unitPrice: e.unitPrice !== '' ? Number(e.unitPrice) : undefined,
-        unit: e.unit || undefined,
-        description: e.description || undefined,
-        materialId: e.materialId || undefined,
-      })),
-    };
-  };
-
-  const confirmPostZoho = () =>
-    guard(async () => {
-      if (!selectedDealId) return;
-      setZohoPosting(true);
-      setZohoResult(null);
-      try {
-        const r = await createZohoSalesOrder(doc.docId, selectedDealId, buildZohoEdits());
-        setZohoResult(r);
-        if (r.success) {
-          showToast(`Created Sales Order in Zoho CRM successfully — linked to Deal "${r.dealName}" (${r.linesSent} line(s) sent)`);
-          window.scrollTo({ top: 0, behavior: 'smooth' });
-        }
-      } finally {
-        setZohoPosting(false);
-      }
-    });
-
-  // "View Payload" for Zoho -- fetches the exact JSON that Send would POST (from the current
-  // edits) and shows it in the same payload modal the SAP path uses.
-  const viewZohoPayload = () =>
-    guard(async () => {
-      if (!selectedDealId) return;
-      const p = await getZohoSalesOrderPayload(doc.docId, selectedDealId, buildZohoEdits());
-      setPayload(p as Record<string, any>);
-    });
-
   const doSplit = (assign: Record<string, number>) =>
     guard(async () => {
       const res = await splitDocument(doc.docId, assign, USER);
@@ -715,8 +363,8 @@ export default function DocumentPage() {
     setMasterEdit({
       tab: 'customers',
       rowKey: null,
-      prefill: { CompanyName: h.customerName || '', TaxId: h.customerTaxId || '', Branch: h.branch || '', SalesOrg: salesOrg },
-      dupes: findDupes(masters, 'customers', h.customerName, h.customerTaxId, (x) => String(x.SalesOrg) === salesOrg),
+      prefill: { CompanyName: h.customerName || '', TaxId: h.customerTaxId || '', Branch: h.branch || '', SalesOrg: companyCode },
+      dupes: findDupes(masters, 'customers', h.customerName, h.customerTaxId, (x) => String(x.SalesOrg) === companyCode),
       onSaved: async (code) => setManualHeader('customer', code),
       onUseDupe: (code) => setManualHeader('customer', code),
     });
@@ -731,7 +379,7 @@ export default function DocumentPage() {
         ComcompyCodeSAP: code,
         CompanyName: h.customerName || '',
         CompanyNameSAP: bp.businessPartnerFullName || bp.businessPartnerName || '',
-        SalesOrg: salesOrg,
+        SalesOrg: companyCode,
         Branch: h.branch || '',
         IsActive: 1,
         // SAP's own Tax ID wins when it has one — same rationale as useZohoCustomer below: SAP is
@@ -757,7 +405,7 @@ export default function DocumentPage() {
         ComcompyCodeSAP: code,
         CompanyName: h.customerName || '',
         CompanyNameSAP: acc.accountName || '',
-        SalesOrg: salesOrg,
+        SalesOrg: companyCode,
         IsActive: 1,
         TaxId: acc.taxId || h.customerTaxId || '',
         Branch: h.branch || '',
@@ -783,7 +431,7 @@ export default function DocumentPage() {
       }
       setMasterEdit({
         tab: 'shiptos', rowKey: null,
-        prefill: { ShipToCode: info.code || h.shipToCode || '', CustomerCode: custCode,
+        prefill: { SalesOrg: companyCode, ShipToCode: info.code || h.shipToCode || '', CustomerCode: custCode,
           SapShipToCode: info.code || custCode, ShipToName: h.shipToName || '',
           ShipToAddress: info.address || h.shipToAddress || '' },
         onSaved: async (code) => {
@@ -805,7 +453,7 @@ export default function DocumentPage() {
       const code = link.partnerCustomer;
       setMasterEdit({
         tab: 'shiptos', rowKey: null,
-        prefill: { ShipToCode: h.shipToCode || '', CustomerCode: custCode, SapShipToCode: code,
+        prefill: { SalesOrg: companyCode, ShipToCode: h.shipToCode || '', CustomerCode: custCode, SapShipToCode: code,
           ShipToName: h.shipToName || '', ShipToAddress: h.shipToAddress || '' },
         onSaved: async (savedCode) => setManualHeader('shipTo', savedCode),
       });
@@ -819,8 +467,8 @@ export default function DocumentPage() {
     setMasterEdit({
       tab: 'shiptos',
       rowKey: null,
-      prefill: { CustomerCode: custCode, ShipToCode: h.shipToCode || '', ShipToName: h.shipToName || '', ShipToAddress: h.shipToAddress || '' },
-      dupes: findDupes(masters, 'shiptos', h.shipToName, null, (x) => x.CustomerCode === custCode),
+      prefill: { SalesOrg: companyCode, CustomerCode: custCode, ShipToCode: h.shipToCode || '', ShipToName: h.shipToName || '', ShipToAddress: h.shipToAddress || '' },
+      dupes: findDupes(masters, 'shiptos', h.shipToName, null, (x) => x.CustomerCode === custCode && String(x.SalesOrg) === companyCode),
       onSaved: async (code) => setManualHeader('shipTo', code),
       onUseDupe: (code) => setManualHeader('shipTo', code),
     });
@@ -833,8 +481,8 @@ export default function DocumentPage() {
     setMasterEdit({
       tab: so ? 'custmaterials' : 'apmaterials',
       rowKey: null,
-      prefill: so ? { SalesOrg: salesOrg, CustomerCode: customerCode, MaterialCodeCode: l.extCode || '', MaterialCodeName: l.desc || '' } : { Description: l.desc || '', Uom: l.uom || '', Plant: '1000' },
-      dupes: so ? findDupes(masters, 'custmaterials', l.desc, null, (x) => x.CustomerCode === customerCode && String(x.SalesOrg) === salesOrg) : findDupes(masters, 'apmaterials', l.desc, null),
+      prefill: so ? { SalesOrg: companyCode, CustomerCode: customerCode, MaterialCodeCode: l.extCode || '', MaterialCodeName: l.desc || '' } : { Description: l.desc || '', Uom: l.uom || '', Plant: '1000' },
+      dupes: so ? findDupes(masters, 'custmaterials', l.desc, null, (x) => x.CustomerCode === customerCode && String(x.SalesOrg) === companyCode) : findDupes(masters, 'apmaterials', l.desc, null),
       onSaved: async (code) => {
         manual.current.lines[i] = code;
         if (!so) await learnMaterial(doc.docId, { partnerCode: doc.partnerCode, extCode: l.extCode, extDesc: l.desc, materialCode: code });
@@ -853,13 +501,17 @@ export default function DocumentPage() {
     const t = (s || '').trim().toLowerCase().replace(/s$/, '');
     const map: Record<string, string> = {
       kilogram: 'KG', kilo: 'KG', kg: 'KG',
-      gram: 'G', g: 'G',
-      ton: 'TON', tonne: 'TON', metricton: 'TON',
-      liter: 'L', litre: 'L', l: 'L',
-      milliliter: 'ML', millilitre: 'ML', ml: 'ML',
-      meter: 'M', metre: 'M', m: 'M',
-      piece: 'EA', pc: 'EA', each: 'EA', ea: 'EA',
+      // Thai spellings — GLC documents write units in Thai ("กิโลกรัม", "กรัม"), which must still
+      // resolve to the SAP unit code, otherwise the raw Thai word ends up as the SAP unit.
+      'กิโลกรัม': 'KG', 'กิโล': 'KG', 'กก': 'KG', 'กก.': 'KG',
+      gram: 'G', g: 'G', 'กรัม': 'G', 'ก.': 'G',
+      ton: 'TON', tonne: 'TON', metricton: 'TON', 'ตัน': 'TON',
+      liter: 'L', litre: 'L', l: 'L', 'ลิตร': 'L',
+      milliliter: 'ML', millilitre: 'ML', ml: 'ML', 'มิลลิลิตร': 'ML',
+      meter: 'M', metre: 'M', m: 'M', 'เมตร': 'M',
+      piece: 'EA', pc: 'EA', each: 'EA', ea: 'EA', 'ชิ้น': 'EA',
       box: 'BOX', bag: 'BAG', drum: 'DRUM',
+      'กล่อง': 'BOX', 'ถุง': 'BAG', 'ถัง': 'DRUM',
     };
     return map[t] || t.toUpperCase();
   };
@@ -908,32 +560,40 @@ export default function DocumentPage() {
           await finishLine();
           return;
         }
-        // If the document's unit corresponds by name to a SAP unit (e.g. "Kilogram" -> "KG"), send
-        // the order in that unit with factor 1 and let SAP convert to its base unit internally.
-        // Only a unit SAP doesn't recognise needs a real pack-size factor to the base unit.
-        const docCode = normUom(docUnit);
-        const matchedAlt = alts.find((a) => normUom(a.unit) === docCode);
-        const matchesBaseByName = baseUnit.length > 0 && normUom(baseUnit) === docCode;
-        const alt = alts[0];
-        const isDirect = !!matchedAlt || matchesBaseByName;
-        const sapUom = matchedAlt ? matchedAlt.unit : matchesBaseByName ? baseUnit : (baseUnit || alt?.unit || '');
-        const factor = isDirect
-          ? 1
-          : (alt && alt.numerator > 0 ? Math.round((alt.denominator / alt.numerator) * 1e6) / 1e6 : 1);
+
+        // GLC only (this whole useSapMaterial path is GLC/SAP-only — see the MGT/Zoho counterpart
+        // below): NO unit conversion. Per the user, GLC sells in the document's own unit — almost
+        // always KG, occasionally G — even when the material is physically packaged as a BAG/DRUM,
+        // so the SAP unit must be the DOCUMENT's unit normalized to a SAP code (กิโลกรัม -> KG),
+        // NOT the material's SAP base unit (which for a "...-BG-..." material comes back as BAG and
+        // would wrongly turn "40 KG" into "40 BAG"). Factor is always 1 — this row is a pure
+        // KG->KG normalization, not a pack-size conversion. Picking the actual unit is a human
+        // decision (CS asks Sales) made outside the software; the popup just lets them confirm/
+        // correct the defaulted unit. Last Price (best-effort, live from SAP — see getSapLastPrice)
+        // is shown alongside purely as reference, never written to the saved row.
+        // Prefer the matched customer's SAP code (SoldToParty) for the billing lookup; for GLC it
+        // equals customerCode (both are ComcompyCodeSAP), but sapCode is the authoritative SAP key.
+        const lastPriceCustomer = map?.header.customer?.sapCode || customerCode;
+        let lastPrice: SapLastPrice | null = null;
+        try {
+          lastPrice = (await getSapLastPrice(lastPriceCustomer, material.materialCode)).price;
+        } catch {
+          lastPrice = null; // best-effort only — never blocks confirming the unit
+        }
+
         setMasterEdit({
           tab: 'uoms',
           rowKey: null,
           prefill: {
             MaterialCode: material.materialCode,
             ExtUom: docUnit,
-            SapUom: sapUom,
-            Factor: factor,
-            Note: isDirect
-              ? `Document unit "${docUnit}" = SAP unit ${sapUom} (from SAP, document #${doc.docId})`
-              : alt
-                ? `Converted to base unit ${sapUom} using SAP pack size — please verify Factor (document #${doc.docId})`
-                : `SAP did not return a pack size — please check SAP Unit and Factor before saving (document #${doc.docId})`,
+            // The document's own unit normalized to a SAP code (KG/G), NOT the material's SAP base
+            // unit — GLC never converts to the pack unit (BAG/DRUM). Falls back to the raw doc unit
+            // only if normalization can't map it, so the person can fix it in the popup.
+            SapUom: normUom(docUnit) || docUnit,
+            Factor: 1,
           },
+          lastPrice,
           onSaved: async () => {
             await loadMasters(true);
             await finishLine();
@@ -945,11 +605,11 @@ export default function DocumentPage() {
         const existingCm = masters.custmaterials.find((m) =>
           m.MaterialCodeSAP === material.materialCode
             && m.CustomerCode === customerCode
-            && String(m.SalesOrg) === salesOrg,
+            && String(m.SalesOrg) === companyCode,
         );
         if (!existingCm) {
           await createMaster('custmaterials', {
-            SalesOrg: salesOrg,
+            SalesOrg: companyCode,
             CustomerCode: customerCode,
             MaterialCodeCode: line.extCode || material.materialCode,
             // Prefer the SAP (English) description so CustomerMaterial names stay English; the OCR
@@ -972,7 +632,7 @@ export default function DocumentPage() {
   // Items, so there is nothing to look up in SAP — save a CustomerMaterial mapping straight away
   // and, when the document unit differs from the Deal item's selling unit, save the conversion
   // rule too. Example: Deal unit BAG, Sub Unit KG, ratio 25 => 1 KG = 0.04 BAG.
-  const useZohoMaterial = (i: number, item: ZohoDealItem) =>
+  const saveZohoMaterial = (i: number, item: ZohoDealItem) =>
     guard(async () => {
       const customerCode = map?.header.customer?.code || doc.partnerCode;
       if (!customerCode) {
@@ -988,11 +648,11 @@ export default function DocumentPage() {
       const existingCm = masters.custmaterials.find((m) =>
         m.MaterialCodeSAP === matCode
           && m.CustomerCode === customerCode
-          && String(m.SalesOrg) === salesOrg,
+          && String(m.SalesOrg) === companyCode,
       );
       if (!existingCm) {
         await createMaster('custmaterials', {
-          SalesOrg: salesOrg,
+          SalesOrg: companyCode,
           CustomerCode: customerCode,
           MaterialCodeCode: line.extCode || matCode,
           MaterialCodeName: item.materialName || item.materialDescription || line.desc,
@@ -1007,7 +667,7 @@ export default function DocumentPage() {
       const existingRule = masters.uoms.find((u) =>
         String(u.MaterialCode ?? u.MaterialCodeSAP ?? '') === matCode
           && String(u.ExtUom || '').trim().toLowerCase() === docUnit.toLowerCase()
-          && (!u.SalesOrg || String(u.SalesOrg) === salesOrg),
+          && (!u.SalesOrg || String(u.SalesOrg) === companyCode),
       );
       const ratio = Number(item.conversionRatio);
       const zohoDefaultFactor = Number.isFinite(ratio) && ratio > 0 ? 1 / ratio : 1;
@@ -1241,16 +901,7 @@ export default function DocumentPage() {
             // (and so the actual Zoho POST) read from, unlike Step 2's map.lines[i].code below.
             const dealItem = isMgt && dl ? resolvedDeal?.items.find((it) => it.materialCode === code) : undefined;
             if (dealItem && dl) {
-              const key = String(dl.itemNo);
-              setZohoMaterialOverrides((prev) => ({ ...prev, [key]: dealItem }));
-              const converted = zohoConvertedValues(dl, dealItem, masters?.uoms || [], currentSalesOrg);
-              editZohoLine(key, {
-                materialId: dealItem.materialId || undefined,
-                quantity: String(converted.quantity),
-                unitPrice: converted.unitPrice != null ? String(converted.unitPrice) : '',
-                unit: converted.unit || '',
-                description: dl.desc || '',
-              });
+              zohoStepRef.current?.stageMaterialMatch?.(idx, dealItem);
               continue;
             }
             // SAP path (or a Zoho code that only matched a CustomerMaterial row, not a Deal Item):
@@ -1299,7 +950,12 @@ export default function DocumentPage() {
     ) : null;
 
   const sb = statusBadge(doc.status);
-  const providers = ocrProviders ?? [];
+  // Locked to Gemini everywhere (per Megachem): every AI/engine dropdown fed by `providers`
+  // (re-OCR engine, Chat-fix AI, Zoho step) shows only Gemini. Falls back to the full list only if
+  // no Gemini engine is present, so a control is never empty.
+  const allProviders = ocrProviders ?? [];
+  const geminiProviders = allProviders.filter((p) => p.id.toLowerCase().includes('gemini'));
+  const providers = geminiProviders.length ? geminiProviders : allProviders;
 
   // Shared props for the item tables (used standalone for SO/II and inside the AP item tabs).
   const detailProps = {
@@ -1504,8 +1160,11 @@ export default function DocumentPage() {
           doc={doc}
           map={map}
           masters={masters}
+          companyCode={companyCode}
+          plant={me?.defaultPlant || ''}
           posted={posted}
           onManualHeader={setManualHeader}
+          onSetSalesArea={setSalesArea}
           onManualLine={setManualLine}
           onQuickAddVendor={quickAddVendor}
           onQuickAddCustomer={quickAddCustomer}
@@ -1524,7 +1183,7 @@ export default function DocumentPage() {
           onSelectDeal={setSelectedDealId}
           onDealResolved={setResolvedDeal}
           dealItems={resolvedDeal?.items ?? []}
-          onUseZohoMaterial={useZohoMaterial}
+          onUseZohoMaterial={saveZohoMaterial}
           detailContent={isMgt && showDetail ? <DetailTable {...detailProps} bare isMgt /> : undefined}
         />
       )}
@@ -1592,52 +1251,35 @@ export default function DocumentPage() {
         />
       )}
 
-      {/* MGT/Zoho — Step 3: the Sales Order lifted whole onto the page as one editable table,
-          placed here at the send step (it replaces the per-line Material cards and the old confirm
-          popup). Shown once mapping has run (so the Customer/Deal cards exist); deliberately NOT
-          gated on map.pass, because that reflects the SAP material-master check an MGT document
-          doesn't use -- Zoho material matching happens in this editor. The person edits inline and
-          sends from the button inside it. */}
-      {isMgt && showZohoEditor && map && !isSplit && (
-        <div ref={zohoEditorRef}>
-        <ZohoSalesOrderEditor
-          preview={zohoMaterialPreviewMerged}
-          loading={zohoMaterialLoading}
-          error={zohoMaterialError}
+      {isMgt && map && !isSplit && (
+        <ZohoSalesOrderStep
+          ref={zohoStepRef}
+          doc={doc}
+          map={map}
           selectedDealId={selectedDealId}
-          docLines={doc.lines}
           resolvedDeal={resolvedDeal}
+          selectedShipTo={selectedZohoShipTo}
           providers={providers}
-          header={zohoHeader}
-          onHeaderChange={(patch) => setZohoHeader((p) => ({ ...p, ...patch }))}
-          lineEdits={zohoLineEdits}
-          onLineChange={editZohoLine}
-          onUseAiMatch={useAiMaterialMatch}
-          sending={zohoPosting}
-          result={zohoResult}
-          onSend={confirmPostZoho}
-          onViewPayload={viewZohoPayload}
+          uomRules={masters?.uoms || []}
+          shipTos={masters?.shiptos || []}
+          salesOrg={salesOrg}
           posted={posted}
+          onUseMaterial={async (lineIndex, item) => {
+            await saveZohoMaterial(lineIndex, item);
+            showToast('บันทึก CustomerMaterial จาก Zoho แล้ว และจะใช้กับ Sales Order นี้');
+          }}
         />
-        </div>
       )}
 
-      {/* SAP Step 3 (SO module only) -- the read-only counterpart of the Zoho editor above, so
-          both "check before you send" screens share the same card layout. AP/II keep the old
-          postOpen popup below (Zoho has no AP/II equivalent to match against). */}
-      {!isMgt && doc.module === 'SO' && showSapEditor && map && !isSplit && (
-        <div ref={sapEditorRef}>
-          <SapSalesOrderEditor
-            doc={doc}
-            map={map}
-            header={h}
-            salesOrg={salesOrg}
-            sending={posting}
-            posted={posted}
-            onSend={confirmPost}
-            onViewPayload={openPayload}
-          />
-        </div>
+      {!isMgt && doc.module === 'SO' && map && !isSplit && (
+        <SapSalesOrderStep
+          ref={sapStepRef}
+          doc={doc}
+          map={map}
+          salesOrg={salesOrg}
+          posted={posted}
+          onPosted={setDoc}
+        />
       )}
 
       {/* Action bar */}
@@ -1651,10 +1293,7 @@ export default function DocumentPage() {
           {isMgt && (
             <button
               className="btn success"
-              onClick={() => {
-                setShowZohoEditor(true);
-                setTimeout(() => zohoEditorRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 60);
-              }}
+              onClick={() => zohoStepRef.current?.open()}
               disabled={!(map && !posted && !isSplit)}
             >
               ⎋ ขั้นตอน 3 · ตรวจ Sales Order
@@ -1666,10 +1305,7 @@ export default function DocumentPage() {
           {!isMgt && doc.module === 'SO' && (
             <button
               className="btn success"
-              onClick={() => {
-                setShowSapEditor(true);
-                setTimeout(() => sapEditorRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 60);
-              }}
+              onClick={() => sapStepRef.current?.open()}
               disabled={!(map && map.pass && !posted && !isSplit)}
             >
               ⎋ ขั้นตอน 3 · ตรวจและส่ง SAP
@@ -1700,17 +1336,13 @@ export default function DocumentPage() {
                 : isMgt
                   ? map
                     ? selectedDealId
-                      ? showZohoEditor
-                        ? 'Review the Sales Order above and press Send to Zoho CRM'
-                        : 'Press Step 3 to build the Sales Order'
+                      ? 'Press Step 3 to review and send the Sales Order'
                       : 'Match the customer and pick a Deal, then press Step 3'
                     : 'Click Mapping first (Step 2), then pick a Deal and press Step 3'
                   : map
                     ? map.pass
                       ? doc.module === 'SO'
-                        ? showSapEditor
-                          ? 'Review the Sales Order above and press Send to SAP'
-                          : 'Press Step 3 to review the Sales Order'
+                        ? 'Press Step 3 to review and send the Sales Order'
                         : 'Ready to send to SAP'
                       : 'Fix the items that failed before sending'
                     : 'Click Mapping to validate against Master Data'}

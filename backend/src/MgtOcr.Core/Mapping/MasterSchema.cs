@@ -5,7 +5,7 @@ namespace MgtOcr.Core.Mapping;
 /// <summary>Read adapter for the document mapping contract. SQL writes use only real columns.</summary>
 public static class MasterSchema
 {
-    public static MasterData ForSalesOrg(MasterData data, string salesOrg)
+    public static MasterData ForSalesOrg(MasterData data, string companyCode)
     {
         static bool Active(Dictionary<string, object?> row) =>
             !row.TryGetValue("IsActive", out var value) && !row.TryGetValue("Isactive", out value)
@@ -17,11 +17,12 @@ public static class MasterSchema
                 if (row.TryGetValue(actual, out var value)) copy[alias] = value;
             return copy;
         }
-        bool InOrg(Dictionary<string, object?> row) => string.IsNullOrEmpty(salesOrg) || row.GetStr("SalesOrg") == salesOrg;
-        var customers = data.Customers.Where(Active).Where(InOrg).Select(r => Alias(r,
+        bool InCompany(Dictionary<string, object?> row) =>
+            string.IsNullOrEmpty(companyCode) || row.GetStr("SalesOrg") == companyCode;
+        var customers = data.Customers.Where(Active).Where(InCompany).Select(r => Alias(r,
             ("ComcompyCodeSAP", "CustomerCode"), ("ComcompyCodeSAP", "SapCustomerCode"),
             ("CompanyName", "NameTh"), ("CompanyNameSAP", "NameEn"))).ToList();
-        var customerMaterials = data.CustomerMaterials.Where(Active).Where(InOrg).Select(r => Alias(r,
+        var customerMaterials = data.CustomerMaterials.Where(Active).Where(InCompany).Select(r => Alias(r,
             ("MaterialCodeCode", "ExtCode"), ("MaterialCodeName", "ExtDesc"), ("MaterialCodeSAP", "MaterialCode"))).ToList();
         var materials = customerMaterials.Where(r => r.GetStr("MaterialCode").Length > 0)
             .GroupBy(r => r.GetStr("MaterialCode")).Select(g => new Dictionary<string, object?>
@@ -32,11 +33,14 @@ public static class MasterSchema
         return new MasterData
         {
             Customers = customers,
-            ShipTos = data.ShipTos.Where(Active).Select(r => Alias(r, ("ShipToAddress", "Address"))).ToList(),
+            // For SO masters, SalesOrg is the local company partition key and stores the
+            // CompanyCode configured in appsettings (Customer, ShipTo, and CustomerMaterial).
+            ShipTos = data.ShipTos.Where(Active).Where(InCompany)
+                .Select(r => Alias(r, ("ShipToAddress", "Address"))).ToList(),
             CustomerMaterials = customerMaterials, Materials = materials,
             Vendors = data.Vendors, VendorMaterials = data.VendorMaterials,
             Uoms = data.Uoms
-                .Where(r => string.IsNullOrEmpty(r.GetStr("SalesOrg")) || InOrg(r))
+                .Where(r => string.IsNullOrEmpty(r.GetStr("SalesOrg")) || InCompany(r))
                 .OrderByDescending(r => !string.IsNullOrEmpty(r.GetStr("SalesOrg")))
                 .ToList(),
         };

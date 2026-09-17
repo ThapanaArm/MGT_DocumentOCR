@@ -16,6 +16,10 @@ export default function OcrProviderSelect({
   className?: string;
   disabled?: boolean;
 }) {
+  // Locked to Gemini: only the Gemini engine is offered in the dropdown (per Megachem). Falls back
+  // to the full list only if no Gemini engine is present, so the control is never empty.
+  const geminiOnly = providers.filter((p) => p.id.toLowerCase().includes('gemini'));
+  const opts = geminiOnly.length ? geminiOnly : providers;
   return (
     <select
       id={id}
@@ -24,7 +28,7 @@ export default function OcrProviderSelect({
       disabled={disabled}
       onChange={(e) => onChange(e.target.value)}
     >
-      {providers.map((p) => (
+      {opts.map((p) => (
         <option key={p.id} value={p.id} title={p.desc}>
           {p.label}
           {p.ready ? '' : ' (Not configured)'}

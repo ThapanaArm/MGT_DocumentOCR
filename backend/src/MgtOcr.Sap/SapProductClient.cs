@@ -27,7 +27,7 @@ public record SapMaterialDetail(string MaterialCode, string BaseUnit, string? Ma
 public class SapProductClient(AppConfig config, HttpClient httpClient)
 {
     /// <summary>Search SAP material descriptions through API_PRODUCT_SRV/A_ProductDescription.</summary>
-    public async Task<List<SapMaterial>> SearchByDescriptionAsync(string keyword, int top = 30)
+    public async Task<List<SapMaterial>> SearchByDescriptionAsync(string keyword, string? plant = null, int top = 30)
     {
         var baseUrl = config.SapProductBaseUrl;
         var clean = keyword.Trim();
@@ -46,17 +46,33 @@ public class SapProductClient(AppConfig config, HttpClient httpClient)
                   $"?$filter={Uri.EscapeDataString(filter)}" +
                   $"&$top={Math.Clamp(top, 1, 100)}&$format=json";
         var text = await GetJsonAsync(url);
-        return EnumerateResults(text)
+        var results = EnumerateResults(text)
             .Select(el => new SapMaterial(
                 GetString(el, "Product") ?? "",
                 GetString(el, "ProductDescription") ?? "",
                 GetString(el, "Language")))
             .Where(x => x.MaterialCode.Length > 0)
+            // Per user: materials coded "SMRM..." (samples, not sellable stock) should never be
+            // offered as a match when picking a material for a Sales Order line.
+            .Where(x => !x.MaterialCode.StartsWith("SMRM", StringComparison.OrdinalIgnoreCase))
             .GroupBy(x => x.MaterialCode, StringComparer.OrdinalIgnoreCase)
             // Prefer the English row when a Product has several language descriptions.
             .Select(g => g.OrderByDescending(m =>
                 string.Equals(m.Language, "EN", StringComparison.OrdinalIgnoreCase)).First())
             .ToList();
+        if (string.IsNullOrWhiteSpace(plant) || results.Count == 0) return results;
+
+        var productFilter = string.Join(" or ", results.Select(m =>
+            $"Product eq '{EscapeODataLiteral(m.MaterialCode)}'"));
+        var plantFilter = $"({productFilter}) and Plant eq '{EscapeODataLiteral(plant.Trim())}'";
+        var plantUrl = $"{baseUrl.TrimEnd('/')}/A_ProductPlant" +
+                       $"?$filter={Uri.EscapeDataString(plantFilter)}&$select=Product,Plant&$top={results.Count}";
+        var plantText = await GetJsonAsync(plantUrl);
+        var allowed = EnumerateResults(plantText)
+            .Select(el => GetString(el, "Product"))
+            .Where(code => !string.IsNullOrEmpty(code))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return results.Where(m => allowed.Contains(m.MaterialCode)).ToList();
     }
 
     /// <summary>

@@ -41,6 +41,19 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         return user.PrimaryCompany?.CompanyCode == "MGT" ? "1000" : "2000";
     }
 
+    private string CompanyCodeForSalesOrg(string salesOrg) =>
+        config.CompanyForSalesOrg(salesOrg)?.CompanyCode ?? salesOrg;
+
+    // GLC treats the ship-to as optional (see MappingEngine.RunMapping's shipToOptional): many GLC
+    // orders have no separate ship-to and don't need one sent to SAP. Resolved from the document's
+    // SalesOrg, which for a Sales Order follows the active company (incl. the admin "View as" dev
+    // toggle — see DocumentPage), so simulating GLC correctly makes the ship-to optional.
+    private bool IsGlcSalesOrg(string salesOrg) =>
+        string.Equals(config.CompanyForSalesOrg(salesOrg)?.Name, "GLC", StringComparison.OrdinalIgnoreCase);
+
+    private string AuthorizationGroupForSalesOrg(string salesOrg) =>
+        config.CompanyForSalesOrg(salesOrg)?.AuthorizationGroup ?? "";
+
     // Department gate for endpoints whose module is not a plain action argument (e.g. it
     // arrives inside the JSON body). DepartmentAccessFilter covers the rest of the controller.
     private async Task RequireModuleAccessAsync(string module, CancellationToken ct = default)
@@ -136,7 +149,10 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         }
 
         var t0 = DateTime.UtcNow;
-        var pd = await ocr.ExtractAsync(stored, mod, string.IsNullOrEmpty(ocr_) ? "auto" : ocr_, password);
+        // Locked to Gemini (per Megachem): the empty / "auto" engine path always uses Gemini. An
+        // explicit non-auto engine is still honored, but the gemini-only UI never sends one.
+        var uploadEngine = string.IsNullOrEmpty(ocr_) || ocr_ == "auto" ? "gemini" : ocr_;
+        var pd = await ocr.ExtractAsync(stored, mod, uploadEngine, password);
         var durationMs = (int)(DateTime.UtcNow - t0).TotalMilliseconds;
         if (detect)
             mod = (pd.Header.GetStr("poRef")).Trim().Length > 0 ? "AP" : "II";
@@ -233,7 +249,9 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             if (pdfStatus != PdfExtraction.PdfOpenStatus.Ok)
                 throw new HttpApiException(400, pdfStatus == PdfExtraction.PdfOpenStatus.PasswordRequired ? "PDF_PASSWORD_REQUIRED" : "PDF_PASSWORD_WRONG");
         }
-        var pd = await ocr.ExtractAsync(storedPath, module, body.GetStr("ocr") is { Length: > 0 } o ? o : "auto", reocrPw);
+        // Locked to Gemini (per Megachem): empty / "auto" re-OCR uses Gemini (the UI sends "gemini").
+        var reocrEngine = body.GetStr("ocr") is { Length: > 0 } o && o != "auto" ? o : "gemini";
+        var pd = await ocr.ExtractAsync(storedPath, module, reocrEngine, reocrPw);
         var durationMs = (int)(DateTime.UtcNow - t0).TotalMilliseconds;
         var filled = await repo.ApplyVendorMemoryAsync(module, pd.Header);
         if (filled.Count > 0)
@@ -328,15 +346,17 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         if (module == "SO")
         {
             var salesOrg = await SalesOrgAsync(header);
+            var companyCode = CompanyCodeForSalesOrg(salesOrg);
+            var authorizationGroup = AuthorizationGroupForSalesOrg(salesOrg);
             var partnerCode = doc.GetStr("partnerCode");
-            var masterData = await masters.LoadForMappingAsync(module);
+            var masterData = MasterSchema.ForSalesOrg(await masters.LoadForMappingAsync(module, companyCode), companyCode);
             var currentUserInfo = await currentUser.RequireAsync();
             var isGlc = currentUserInfo.PrimaryCompany?.CompanyCode != "MGT";
 
             // Own CustomerMaterial rows first, then other customers' (same cross-customer set the
             // Material dropdown searches) -- covers the SAP send path (map.lines[i].code) directly.
             materialOptions = masterData.CustomerMaterials
-                .Where(cm => cm.GetStr("SalesOrg") == salesOrg && cm.GetStr("MaterialCodeSAP").Length > 0)
+                .Where(cm => cm.GetStr("SalesOrg") == companyCode && cm.GetStr("MaterialCodeSAP").Length > 0)
                 .OrderBy(cm => cm.GetStr("CustomerCode") == partnerCode ? 0 : 1)
                 .ThenBy(cm => cm.GetStr("MaterialCodeName"))
                 .Take(400)
@@ -390,7 +410,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
                 {
                     try
                     {
-                        var links = await sapBp.FindPartnerFunctionsAsync(soldToSapCode, "SH", 50);
+                        var links = await sapBp.FindPartnerFunctionsAsync(soldToSapCode, "SH", salesOrg, 50);
                         var seenShip = new HashSet<string>(shipToOptions.Select(o => o.Code), StringComparer.OrdinalIgnoreCase);
                         foreach (var link in links)
                         {
@@ -424,9 +444,9 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
                 {
                     try
                     {
-                        var bpResults = custTaxId.Length > 0 ? await sapBp.FindByTaxIdAsync(custTaxId, 10) : [];
+                        var bpResults = custTaxId.Length > 0 ? await sapBp.FindByTaxIdAsync(custTaxId, authorizationGroup, 10) : [];
                         if (bpResults.Count == 0 && custName.Length > 0)
-                            bpResults = await sapBp.FindByNameAsync(custName, 10);
+                            bpResults = await sapBp.FindByNameAsync(custName, authorizationGroup, 10);
                         accountOptions = bpResults
                             .Select(bp => (
                                 bp.BusinessPartnerId,
@@ -513,13 +533,15 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             lines = (List<Dictionary<string, object?>>)(await repo.GetDocumentAsync(docId))["lines"]!;
         }
 
-        var masterData = await masters.LoadForMappingAsync(module);
         if (module == "SO")
         {
             header["salesOrg"] = await SalesOrgAsync(header);
             await repo.UpdateHeaderAsync(docId, module, header);
         }
-        var res = MappingEngine.RunMapping(module, header, lines, masterData, manual);
+        var companyCode = module == "SO" ? CompanyCodeForSalesOrg(header.GetStr("salesOrg")) : null;
+        var masterData = await masters.LoadForMappingAsync(module, companyCode);
+        var res = MappingEngine.RunMapping(module, header, lines, masterData, manual, companyCode,
+            module == "SO" && IsGlcSalesOrg(header.GetStr("salesOrg")));
         var resLines = (List<Dictionary<string, object?>>)res["lines"]!;
         var resHeader = (Dictionary<string, object?>)res["header"]!;
 
@@ -583,7 +605,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         await using var conn = await GetDbAsync();
         if (doc.GetStr("module") == "SO")
         {
-            var salesOrg = await SalesOrgAsync((Dictionary<string, object?>)doc["header"]!);
+            var salesOrg = CompanyCodeForSalesOrg(await SalesOrgAsync((Dictionary<string, object?>)doc["header"]!));
             await conn.ExecuteAsync("""
                 IF EXISTS(SELECT 1 FROM ocr.CustomerMaterial WHERE SalesOrg=@salesOrg AND CustomerCode=@partner AND MaterialCodeCode=@extCode)
                   UPDATE ocr.CustomerMaterial SET MaterialCodeName=@extDesc, MaterialCodeSAP=@mat, Isactive=1, UpdatedAt=SYSDATETIME()
@@ -672,15 +694,19 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     private async Task<(Dictionary<string, object?> Payload, Dictionary<string, object?> Res)> PayloadForAsync(Dictionary<string, object?> doc, Dictionary<string, object?>? manual = null)
     {
         var module = doc.GetStr("module");
-        var masterData = await masters.LoadForMappingAsync(module);
         var header = (Dictionary<string, object?>)doc["header"]!;
+        var companyCode = module == "SO"
+            ? CompanyCodeForSalesOrg(await SalesOrgAsync(header))
+            : null;
+        var masterData = await masters.LoadForMappingAsync(module, companyCode);
         var lines = (List<Dictionary<string, object?>>)doc["lines"]!;
         if (module == "SO")
         {
             header["salesOrg"] = await SalesOrgAsync(header);
-            masterData = MasterSchema.ForSalesOrg(masterData, header.GetStr("salesOrg"));
+            masterData = MasterSchema.ForSalesOrg(masterData, CompanyCodeForSalesOrg(header.GetStr("salesOrg")));
         }
-        var res = MappingEngine.RunMapping(module, header, lines, masterData, manual ?? StoredManual(doc));
+        var res = MappingEngine.RunMapping(module, header, lines, masterData, manual ?? StoredManual(doc), companyCode,
+            module == "SO" && IsGlcSalesOrg(header.GetStr("salesOrg")));
         var resHeader = (Dictionary<string, object?>)res["header"]!;
         Dictionary<string, object?>? pm;
         if (module == "SO")

@@ -1,5 +1,18 @@
+import { useState } from 'react';
 import type { DocHeader, DocLine, DocModel, MapResult } from '../../api/documents';
 import { SEND_DISABLED } from '../../constants/flags';
+import { fmt, num } from '../../utils/format';
+
+// GLC only (this whole editor is the SAP-side, GLC-only "check before you send" screen -- see the
+// module doc comment below): the Subtotal/VAT/Grand Total block below is purely an OCR-review
+// DISPLAY -- it does not change what gets POSTed to SAP (the payload/pricing logic is untouched;
+// see onViewPayload for the actual request body). 7% is Thailand's standard VAT rate, same rate
+// this codebase already assumes elsewhere (see the AP tax code list's "V1 - Input VAT 7%"/"D1 -
+// Input Deferred Tax 7%" in constants/fields.ts) -- not currently configurable since nothing else
+// in this feature needs it to be; if that changes, this should move into AppConfig the same way
+// SapSalesOrderPriceConditionType did.
+const GLC_VAT_RATE = 0.07;
+const round2 = (n: number) => Math.round(n * 100) / 100;
 
 /* The SAP Sales Order review step, lifted onto the page as one card -- the SAP-side counterpart
    of ZohoSalesOrderEditor, built so the two "check before you send" screens look and behave the
@@ -33,6 +46,62 @@ export default function SapSalesOrderEditor({
   const lineStatus = (i: number) => map?.lines?.[i]?.status;
   const willSendCount = map ? lines.filter((_, i) => lineStatus(i) !== 'fail').length : 0;
   const notMatchedCount = map ? lines.filter((_, i) => lineStatus(i) === 'fail').length : 0;
+
+  // The VAT amount the document ITSELF stated (OCR'd header — the "Totals" card's VAT field). When
+  // the customer already broke VAT out on their document, this is filled and we should just show
+  // their figures rather than re-deriving anything.
+  const docVat = num(header.vatAmount);
+  const docHasVat = docVat > 0;
+
+  // Export orders billed in USD are not subject to Thai VAT, so no VAT is calculated or shown at all
+  // (the VAT-mode selector is hidden for these) — Subtotal = Grand Total, VAT = 0. Display-only, same
+  // as the VAT modes below; it never touches the SAP payload.
+  const isUsd = (header.currency || '').trim().toUpperCase() === 'USD';
+
+  // How to read the document's line prices for the VAT breakdown below. Three real cases:
+  //  - 'document': the customer's document already separates VAT (VAT field filled) -> show the
+  //    document's own Subtotal / VAT / Grand Total as-is, no re-computation. Default when the doc
+  //    has a VAT figure.
+  //  - 'exclude': prices don't include VAT yet -> add 7% on top (the common GLC quote). Default
+  //    when the doc has no VAT figure.
+  //  - 'include': the customer's document has VAT baked into the price but didn't break it out
+  //    (e.g. only "Grand Total 19,140" with Tax 0.00) -> back the 7% out so the same money is shown
+  //    split into Subtotal + VAT instead of adding a second 7% on top.
+  // This is a per-document human decision (the CS can tell from the customer's document which it is)
+  // and is DISPLAY-ONLY — it never changes the SAP payload, only this breakdown.
+  const [vatMode, setVatMode] = useState<'document' | 'exclude' | 'include'>(docHasVat ? 'document' : 'exclude');
+
+  // Sum of the lines that will actually be sent (unmatched lines aren't part of the SO SAP sees).
+  const lineTotal = lines.reduce(
+    (sum, l, i) => (map && lineStatus(i) !== 'fail' ? sum + num(l.qty) * num(l.price) : sum),
+    0,
+  );
+  let subtotal: number;
+  let vatAmount: number;
+  let grandTotal: number;
+  if (isUsd) {
+    // USD (export): no Thai VAT — Subtotal = Grand Total, VAT = 0.
+    subtotal = round2(lineTotal);
+    vatAmount = 0;
+    grandTotal = round2(lineTotal);
+  } else if (vatMode === 'document') {
+    // Use the document's own OCR'd figures. Fall back to computing the missing piece if OCR only
+    // captured some of the three (Subtotal/VAT/Grand should reconcile, but OCR isn't perfect).
+    subtotal = round2(num(header.subTotal) || (num(header.totalAmount) - docVat));
+    vatAmount = round2(docVat);
+    grandTotal = round2(num(header.totalAmount) || (subtotal + vatAmount));
+  } else if (vatMode === 'include') {
+    // lineTotal already contains VAT -> Subtotal = lineTotal / 1.07, VAT = remainder (so the two
+    // always add back to lineTotal exactly), Grand = lineTotal.
+    subtotal = round2(lineTotal / (1 + GLC_VAT_RATE));
+    vatAmount = round2(lineTotal - subtotal);
+    grandTotal = round2(lineTotal);
+  } else {
+    // 'exclude': Subtotal = lineTotal, VAT added on top.
+    subtotal = round2(lineTotal);
+    vatAmount = round2(subtotal * GLC_VAT_RATE);
+    grandTotal = round2(subtotal + vatAmount);
+  }
 
   const body = () => {
     if (!map) return <p className="hint">Run Step 2 — Data Mapping first — the Sales Order to send will appear here.</p>;
@@ -133,6 +202,45 @@ export default function SapSalesOrderEditor({
               })}
             </tbody>
           </table>
+        </div>
+
+        <div className="row" style={{ justifyContent: 'flex-end', marginTop: 10 }}>
+          <div className="grid" style={{ maxWidth: 340, width: '100%' }}>
+            {isUsd ? (
+              <div className="f">
+                <label>ราคาสินค้าในเอกสาร (VAT)</label>
+                <input type="text" value="สกุลเงิน USD — ไม่คิด VAT" disabled readOnly />
+                <small className="master-field-help">
+                  รายการสกุลเงิน USD (ส่งออก) ไม่คิด VAT — แสดงผลอย่างเดียว ไม่กระทบราคาที่ส่ง SAP
+                </small>
+              </div>
+            ) : (
+              <div className="f">
+                <label>ราคาสินค้าในเอกสาร (VAT)</label>
+                <select value={vatMode} onChange={(e) => setVatMode(e.target.value as 'document' | 'exclude' | 'include')}>
+                  {docHasVat && <option value="document">เอกสารแยก VAT มาแล้ว — ใช้ค่าตามเอกสาร</option>}
+                  <option value="exclude">ยังไม่รวม VAT — บวก 7% เพิ่ม</option>
+                  <option value="include">รวม VAT แล้ว — ถอด 7% ออกมาแสดง</option>
+                </select>
+                <small className="master-field-help">
+                  เลือกให้ตรงกับเอกสารลูกค้า — แสดงผลอย่างเดียว ไม่กระทบราคาที่ส่ง SAP
+                  {docHasVat && ' · เอกสารนี้มี VAT มาแล้ว จึงตั้งค่าเริ่มต้นเป็น “ใช้ค่าตามเอกสาร”'}
+                </small>
+              </div>
+            )}
+            <div className="f">
+              <label>Subtotal (Excl. VAT)</label>
+              <input type="text" value={fmt(subtotal)} disabled readOnly />
+            </div>
+            <div className="f">
+              <label>{isUsd ? 'VAT (ไม่คิด)' : `VAT (${(GLC_VAT_RATE * 100).toFixed(0)}%)`}</label>
+              <input type="text" value={fmt(vatAmount)} disabled readOnly />
+            </div>
+            <div className="f">
+              <label><b>Grand Total</b></label>
+              <input type="text" value={fmt(grandTotal)} disabled readOnly style={{ fontWeight: 'bold' }} />
+            </div>
+          </div>
         </div>
 
         {notMatchedCount > 0 && (

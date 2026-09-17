@@ -16,8 +16,8 @@ public static class MasterDefinitions
             "SalesOrg, ComcompyCodeSAP, id"),
 
         ["shiptos"] = new("ocr.ShipTo", "id", true,
-            ["ShipToCode", "SapShipToCode", "CustomerCode", "ShipToName", "ShipToAddress", "IsActive"],
-            "CustomerCode, ShipToCode"),
+            ["SalesOrg", "ShipToCode", "SapShipToCode", "CustomerCode", "ShipToName", "ShipToAddress", "IsActive"],
+            "SalesOrg, CustomerCode, ShipToCode"),
 
         ["custmaterials"] = new("ocr.CustomerMaterial", "Id", true,
             ["SalesOrg", "CustomerCode", "MaterialCodeCode", "MaterialCodeName", "MaterialCodeSAP", "Isactive"],
@@ -35,5 +35,11 @@ public static class MasterDefinitions
         ["uoms"] = new("ocr.UomConversion", "Id", true,
             ["MaterialCode", "ExtUom", "SapUom", "SapUomIso", "Factor", "Note"],
             "CASE WHEN MaterialCode IS NULL THEN 0 ELSE 1 END, MaterialCode, ExtUom"),
+
+        // NOTE: Payment-terms code->text mapping is intentionally NOT an editable master here. It
+        // lives in the shared dbo.SysDataMapping table (Subject='Payment_Terms'), which is
+        // maintained centrally (also used by the Zoho account sync), so the OCR app only READS it
+        // for display (see MasterRepository.LoadAllAsync's "paymentterms" entry) and does not expose
+        // generic CRUD over that shared table.
     };
 }

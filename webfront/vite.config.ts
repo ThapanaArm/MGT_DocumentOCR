@@ -9,8 +9,12 @@ export default defineConfig({
     // so the React app can call same-origin relative paths ("/api/...") in both dev and prod.
     port: 5173,
     proxy: {
+      // Dev: point /api at the LOCAL backend (MgtOcr.Api runs on http://localhost:8091, see
+      // App:Port in appsettings.json / UseUrls in Program.cs) so the dev server tests the code
+      // running on this machine. Switch back to the deployed server
+      // (https://apiocr.megachem.co.th/) only to test against production.
       '/api': {
-            target: 'https://apiocr.megachem.co.th/',
+        target: 'http://localhost:8091',
         changeOrigin: true,
       },
     },

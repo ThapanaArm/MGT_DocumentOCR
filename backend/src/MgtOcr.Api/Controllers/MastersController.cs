@@ -1,3 +1,5 @@
+using MgtOcr.Core.Auth;
+using MgtOcr.Core.Config;
 using MgtOcr.Core.Json;
 using MgtOcr.Data;
 using Microsoft.AspNetCore.Mvc;
@@ -8,10 +10,15 @@ namespace MgtOcr.Api.Controllers;
 // Ported from the /api/masters* routes in app/main.py (lines 193-245).
 [ApiController]
 [Route("api/masters")]
-public class MastersController(MasterRepository repo) : ControllerBase
+public class MastersController(MasterRepository repo, ICurrentUserAccessor currentUser, AppConfig config) : ControllerBase
 {
     [HttpGet]
-    public async Task<IActionResult> GetAll([FromQuery] bool includeInactive = false) => Ok(await repo.LoadAllAsync(includeInactive));
+    public async Task<IActionResult> GetAll([FromQuery] bool includeInactive = false)
+    {
+        var user = await currentUser.RequireAsync();
+        var profile = config.CompanyForUser(user.PrimaryCompany?.CompanyCode, user.SalesOrganization);
+        return Ok(await repo.LoadAllAsync(includeInactive, profile?.CompanyCode));
+    }
 
     [HttpGet("{kind}")]
     public async Task<IActionResult> GetList(string kind, [FromQuery] string q = "")
@@ -98,15 +105,15 @@ public class MastersController(MasterRepository repo) : ControllerBase
         string[] required = kind switch
         {
             "customers" => ["SalesOrg", "CompanyName", "ComcompyCodeSAP"],
-            "shiptos" => ["CustomerCode", "SapShipToCode"],
+            "shiptos" => ["SalesOrg", "CustomerCode", "SapShipToCode"],
             "custmaterials" => ["SalesOrg", "CustomerCode", "MaterialCodeCode", "MaterialCodeSAP"],
             _ => [],
         };
         foreach (var field in required)
             if (!values.TryGetValue(field, out var value) || string.IsNullOrWhiteSpace(value?.ToString()))
                 return $"Please enter {field}";
-        if (values.TryGetValue("SalesOrg", out var org) && org?.ToString() is not ("1000" or "2000"))
-            return "SalesOrg must be 1000 (MGT) or 2000 (GLC)";
+        if (values.TryGetValue("SalesOrg", out var org) && string.IsNullOrWhiteSpace(org?.ToString()))
+            return "Please enter SalesOrg (CompanyCode)";
         return null;
     }
 }

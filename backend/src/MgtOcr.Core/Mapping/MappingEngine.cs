@@ -172,9 +172,11 @@ public static class MappingEngine
     }
 
     public static Dictionary<string, object?> RunMapping(string module, Dictionary<string, object?> header,
-        List<Dictionary<string, object?>> lines, MasterData masters, Dictionary<string, object?>? manual)
+        List<Dictionary<string, object?>> lines, MasterData masters, Dictionary<string, object?>? manual,
+        string? companyCode = null, bool shipToOptional = false)
     {
-        if (module == "SO") masters = MasterSchema.ForSalesOrg(masters, header.GetStr("salesOrg"));
+        if (module == "SO") masters = MasterSchema.ForSalesOrg(
+            masters, string.IsNullOrEmpty(companyCode) ? header.GetStr("salesOrg") : companyCode);
         manual ??= new();
         var mHead = manual.Get("header") as Dictionary<string, object?> ?? new();
         var mLineRaw = manual.Get("lines") as Dictionary<string, object?> ?? new();
@@ -236,6 +238,37 @@ public static class MappingEngine
                 }
                 if (best != null && bs >= ThShipTo)
                     resHeader["shipTo"] = R("ok", best.GetStr("SapShipToCode"), best.GetStr("ShipToName"), $"Name/Address ({(int)Math.Round(bs * 100)}%)");
+                else if (shipToOptional)
+                {
+                    // GLC: a ship-to is optional, but the choice must be EXPLICIT (per Megachem). When
+                    // no ship-to is matched, the person must actively pick one of two fallbacks via
+                    // mHead["shipToFallback"] (or select/search a real ship-to instead). BOTH fallbacks
+                    // send the SAME payload -- no SH partner, so SAP fills ship-to = sold-to (a SAP SO
+                    // always needs a ship-to; the API just doesn't have to supply it). They differ
+                    // only in the label. Until a choice is made this is a BLOCKING "needchoice" (an
+                    // error), so no order is ever sent without a deliberate ship-to decision.
+                    var fallback = (mHead.Get("shipToFallback")?.ToString() ?? "").Trim().ToLowerInvariant();
+                    if (fallback == "soldto")
+                    {
+                        resHeader["shipTo"] = R("skip", "", "", "ใช้ Sold-to เป็นผู้รับ");
+                        warns.Add("Ship-to: user chose to use the sold-to party as the receiver (no SH sent; SAP defaults to sold-to).");
+                    }
+                    else if (fallback is "omit" or "none")
+                    {
+                        resHeader["shipTo"] = R("skip", "", "", "ไม่ระบุ Ship-to (ไม่ส่งไป SAP)");
+                        warns.Add("Ship-to: user chose to omit the ship-to (no SH sent; SAP defaults to sold-to).");
+                    }
+                    else
+                    {
+                        resHeader["shipTo"] = R("needchoice", cands: scope.Select(x => x.GetStr("SapShipToCode")).Take(3).ToList());
+                        errors.Add(new()
+                        {
+                            ["field"] = "Ship-to",
+                            ["msg"] = "ยังไม่ได้เลือกวิธีจัดการ Ship-to — เลือก/ระบุ Ship-to, กด \"ใช้ Sold-to เป็นผู้รับ\" หรือ \"ไม่ระบุ Ship-to\"",
+                            ["fix"] = "เลือก Ship-to จากรายการ/ค้นหาจาก SAP หรือกดปุ่มเลือกวิธีจัดการ Ship-to",
+                        });
+                    }
+                }
                 else
                 {
                     resHeader["shipTo"] = R("fail", cands: scope.Select(x => x.GetStr("SapShipToCode")).Take(3).ToList());

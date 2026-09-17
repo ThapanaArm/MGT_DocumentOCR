@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import Modal, { ModalHeader } from '../Modal';
 import { MASTER_DEF, M_LABEL } from '../../constants/fields';
 import { createMaster, updateMaster, type MasterRow, type MastersData } from '../../api/masters';
-import { searchSapBusinessPartner, type SapBusinessPartner } from '../../api/sap';
+import { searchSapBusinessPartner, type SapBusinessPartner, type SapLastPrice } from '../../api/sap';
 import { searchZohoAccount, type ZohoAccount } from '../../api/zoho';
 import { useAppState } from '../../state/AppState';
 import type { Dupe } from '../../utils/dupes';
@@ -19,6 +19,12 @@ export interface MasterEditState {
   onSaved?: (savedKey: string) => void | Promise<void>;
   /** called when the user picks an existing duplicate instead */
   onUseDupe?: (code: string) => void;
+  /** GLC material-confirm popup only (tab 'uoms', opened from DocumentPage's useSapMaterial): the
+   *  last actual price SAP billed THIS customer for THIS material, fetched live (see
+   *  getSapLastPrice). Shown as read-only reference context right beside the Material field —
+   *  never written to the saved UomConversion row (that table has no customer/price columns).
+   *  undefined = not applicable; null = looked up but SAP had no prior billing line for this pair. */
+  lastPrice?: SapLastPrice | null;
 }
 
 export default function MasterEditModal({
@@ -68,6 +74,7 @@ export default function MasterEditModal({
       ? {
           name: (state.prefill?.CompanyName || '').toString().trim(),
           taxId: (state.prefill?.TaxId || '').toString().trim(),
+          companyCode: (state.prefill?.SalesOrg || '').toString().trim(),
         }
       : null;
   const customerLookupKey = customerLookup ? customerLookup.taxId + '|' + customerLookup.name : '';
@@ -158,13 +165,23 @@ export default function MasterEditModal({
 
   const setField = (k: string, v: string) => setForm((f) => ({ ...f, [k]: v }));
 
+  // Whether a column is actually required in THIS context. Static `required` from MASTER_DEF, with
+  // one company-specific relaxation: for a GLC (non-MGT) Ship-to, the SAP Ship-to code is optional
+  // — some GLC delivery locations aren't mapped to / sent to SAP at all, so a Ship-to master can be
+  // saved without one. MGT keeps it required.
+  const isColRequired = (c: (typeof def.cols)[number]) => {
+    if (!c.required) return false;
+    if (state.tab === 'shiptos' && !isMgt && c.k === 'SapShipToCode') return false;
+    return true;
+  };
+
   async function save() {
     if (saving) return;
     const o: MasterRow = {};
     def.cols.forEach((c) => {
       o[c.k] = c.source === 'system' ? Number(form[c.k] ?? 1) : (form[c.k] ?? '').toString().trim();
     });
-    const missing = def.cols.find((c) => c.required && !o[c.k]);
+    const missing = def.cols.find((c) => isColRequired(c) && !o[c.k]);
     if (missing) { showToast('กรุณาระบุ ' + missing.l); return; }
     if (state!.rowKey == null && !['Id', 'id'].includes(def.key) && !o[def.key]) {
       showToast('Please enter ' + def.cols.find((c) => c.k === def.key)?.l);
@@ -356,10 +373,11 @@ export default function MasterEditModal({
           {source !== 'all' && <h3>{source === 'document' ? 'ลูกค้าและข้อมูลจากเอกสาร' : source === 'external' ? 'ข้อมูล SAP / Zoho' : 'สถานะและข้อมูลระบบ'}</h3>}
           <div className="grid">
           {visibleCols.filter((c) => source === 'all' || c.source === source).map((c) => (
-            <div className="f" key={c.k}>
-              <label htmlFor={'master-' + c.k}>{fieldLabel(c)}{c.required ? ' *' : ''}</label>
+            <Fragment key={c.k}>
+            <div className="f">
+              <label htmlFor={'master-' + c.k}>{fieldLabel(c)}{isColRequired(c) ? ' *' : ''}</label>
               {c.k === 'SalesOrg' ? (
-                <select id={'master-' + c.k} value={form[c.k] ?? ''} onChange={(e) => { setField(c.k, e.target.value); if (state.tab === 'custmaterials') setField('CustomerCode', ''); }}>
+                <select id={'master-' + c.k} value={form[c.k] ?? ''} onChange={(e) => { setField(c.k, e.target.value); if (state.tab === 'custmaterials' || state.tab === 'shiptos') setField('CustomerCode', ''); }}>
                   <option value="1000">1000 — MGT</option><option value="2000">2000 — GLC</option>
                 </select>
               ) : c.source === 'system' ? (
@@ -368,7 +386,7 @@ export default function MasterEditModal({
                 <select id={'master-' + c.k} value={form[c.k] ?? ''} onChange={(e) => setField(c.k, e.target.value)}>
                   {!c.blank && <option value="">— เลือก —</option>}
                   {c.blank && <option value="">— All materials (global rule) —</option>}
-                  {(masters[c.ref] || []).filter((o) => (o.IsActive == null || !!Number(o.IsActive)) && (c.ref !== 'customers' || !form.SalesOrg || state.tab !== 'custmaterials' || String(o.SalesOrg) === String(form.SalesOrg))).map((o, index) => {
+                  {(masters[c.ref] || []).filter((o) => (o.IsActive == null || !!Number(o.IsActive)) && (c.ref !== 'customers' || !form.SalesOrg || (state.tab !== 'custmaterials' && state.tab !== 'shiptos') || String(o.SalesOrg) === String(form.SalesOrg))).map((o, index) => {
                     const vk = MASTER_DEF[c.ref!].matchKey || MASTER_DEF[c.ref!].key;
                     const lk = M_LABEL[c.ref!];
                     return (
@@ -383,6 +401,26 @@ export default function MasterEditModal({
               )}
               {c.source && <small className="master-field-help"><code>{c.k}</code>{c.help ? ' · ' + c.help : ''}</small>}
             </div>
+            {/* Sits right beside the Material field per user request, rather than as a separate
+                banner above the whole form — GLC material-confirm popup only (see DocumentPage's
+                useSapMaterial / getSapLastPrice). Reference context only, never saved. */}
+            {c.k === 'MaterialCode' && state.tab === 'uoms' && state.lastPrice !== undefined && (
+              <div className="f">
+                <label><i className="fa-solid fa-tag" /> Last Price</label>
+                {state.lastPrice ? (
+                  <input
+                    type="text"
+                    disabled
+                    readOnly
+                    value={`${state.lastPrice.pricePerUnit.toLocaleString()} / ${state.lastPrice.unit || 'unit'}${state.lastPrice.creationDate ? ` (billed ${state.lastPrice.creationDate})` : ''}`}
+                  />
+                ) : (
+                  <input type="text" disabled readOnly value="No prior SAP billing found" />
+                )}
+                <small className="master-field-help">for reference only, confirm the unit with what Sales told CS to use</small>
+              </div>
+            )}
+            </Fragment>
           ))}
           </div>
           {source === 'system' && editing && <div className="hint">{def.key}: {existing[def.key]} · CreatedAt: {existing.CreatedAt || '—'} · UpdatedAt: {existing.UpdatedAt || '—'}</div>}

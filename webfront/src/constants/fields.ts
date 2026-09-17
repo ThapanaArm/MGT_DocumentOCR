@@ -305,6 +305,7 @@ export const MASTER_DEF: Record<string, MasterDef> = {
   },
   shiptos: {
     label: 'Ship-to — สถานที่จัดส่ง', mod: 'SO', key: 'id', matchKey: 'SapShipToCode', cols: [
+      { k: 'SalesOrg', l: 'องค์กรขาย', source: 'document', required: true, help: 'MGT = 1000 / GLC = 2000' },
       { k: 'CustomerCode', l: 'รหัสลูกค้า SAP / Zoho Account Code', ref: 'customers', source: 'document', required: true, help: 'อ้างอิง Customer.ComcompyCodeSAP' },
       { k: 'ShipToCode', l: 'รหัส Ship-to ในเอกสาร', source: 'document', help: 'รหัส Ship-to ที่อ่านจากเอกสาร หากเอกสารไม่ระบุสามารถเว้นว่างได้' },
       { k: 'ShipToName', l: 'ชื่อสถานที่จัดส่งในเอกสาร', source: 'document' },

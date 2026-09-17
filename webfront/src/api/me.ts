@@ -25,6 +25,12 @@ export interface Me {
   department: string;
   position: string;
   salesOrganization: string;
+  /** SO company partition key from appsettings (MGT/GLC CompanyCode). */
+  sapCompanyCode: string;
+  /** Plant from the same appsettings company profile, used to scope SAP material searches. */
+  defaultPlant: string;
+  /** SAP A_BusinessPartner.AuthorizationGroup used to scope live customer searches. */
+  authorizationGroup: string;
   division: string;
   companies: MeCompany[];
   primaryCompany: Omit<MeCompany, 'isPrimary'> | null;

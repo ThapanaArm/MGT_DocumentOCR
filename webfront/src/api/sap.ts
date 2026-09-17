@@ -34,6 +34,9 @@ export interface SapBusinessPartnerSearchParams {
   top?: number;
 }
 
+// companyCode is NOT sent here on purpose: the backend derives the AuthorizationGroup scope from
+// the signed-in user's own company (see SapBusinessPartnerController.Find), not from anything the
+// client passes, so a caller can't ask for another company's data by changing a query param.
 export const searchSapBusinessPartner = ({ name, taxId, top = 10 }: SapBusinessPartnerSearchParams) => {
   const qs = new URLSearchParams();
   if (taxId) qs.set('taxId', taxId);
@@ -62,9 +65,10 @@ export interface SapPartnerFunctionSearchResult {
   results: SapPartnerFunctionLink[];
 }
 
-export const findSapPartnerFunctions = (soldToSapCode: string, partnerFunction?: string, top = 50) => {
+export const findSapPartnerFunctions = (soldToSapCode: string, salesOrganization: string, partnerFunction?: string, top = 50) => {
   const qs = new URLSearchParams();
   if (partnerFunction) qs.set('function', partnerFunction);
+  qs.set('salesOrganization', salesOrganization);
   qs.set('top', String(top));
   return api.get<SapPartnerFunctionSearchResult>(
     `/api/sap/business-partner/${encodeURIComponent(soldToSapCode)}/partners?` + qs.toString(),
@@ -77,8 +81,8 @@ export interface SapMaterial {
   language?: string | null;
 }
 
-export const searchSapMaterials = (description: string, top = 30) => {
-  const qs = new URLSearchParams({ description, top: String(top) });
+export const searchSapMaterials = (description: string, plant: string, top = 30) => {
+  const qs = new URLSearchParams({ description, plant, top: String(top) });
   return api.get<{ count: number; results: SapMaterial[] }>('/api/sap/materials?' + qs.toString());
 };
 
@@ -107,3 +111,92 @@ export const getSapMaterialDetail = (materialCode: string) =>
   api.get<{ detail: SapMaterialDetail | null }>(
     '/api/sap/material-detail?product=' + encodeURIComponent(materialCode),
   );
+
+/* Last Price — GLC Sales Order flow only: the last actual price SAP billed THIS customer for THIS
+   material, shown when a Material Code is confirmed in the material-confirm popup so the person
+   picking a unit has a live reference price (never used to fill in / override the line's own
+   price). Always best-effort: `price` comes back null when SAP Billing isn't configured, there's
+   no prior billing line for this exact customer+material pair, or the lookup fails — callers must
+   treat it as optional context, never a blocker to confirming the material.
+   Plant/company scope is derived server-side from the signed-in user, same as the Business
+   Partner search above — customer/material are the only inputs this endpoint needs.
+   Backend: GET /api/sap/last-price (MgtOcr.Sap.SapBillingClient.GetLastPriceAsync). */
+
+export interface SapLastPrice {
+  pricePerUnit: number;
+  unit: string;
+  billingDocument?: string | null;
+  creationDate?: string | null;
+}
+
+export const getSapLastPrice = (customerCode: string, materialCode: string) => {
+  const qs = new URLSearchParams({ customer: customerCode, material: materialCode });
+  return api.get<{ customer: string; material: string; price: SapLastPrice | null }>(
+    '/api/sap/last-price?' + qs.toString(),
+  );
+};
+
+/* Customer Payment Terms — GLC Sales Order flow: the payment terms SAP has on the customer master
+   for the already-matched Sold-to, shown live in the Customer card so the person always sees SAP's
+   own value instead of a blank "—". Source/priority mirrors the ZohoAccountPushJob account sync:
+   company-code level (A_CustomerCompany.PaymentTerms) first, sales-area level
+   (A_CustomerSalesArea.CustomerPaymentTerms) as fallback. Always best-effort: `paymentTerms` (and
+   its `.paymentTerms` code) come back null when SAP isn't configured, has none on file, or the
+   lookup fails — callers must treat it as optional context.
+   salesOrganization/companyCode scope which company's/sales area's terms to read (GLC = 2000/2000)
+   and are the document's own sales org (which follows the company being worked as), not derived
+   server-side, so an admin simulating GLC reads GLC's terms.
+   Backend: GET /api/sap/business-partner/{id}/payment-terms
+   (MgtOcr.Sap.SapBusinessPartnerClient.GetPaymentTermsAsync). */
+
+export interface SapCustomerPaymentTerms {
+  customer: string;
+  /** SAP's payment-terms code (e.g. "NT30", "0001"), or null when SAP has none on file. */
+  paymentTerms?: string | null;
+  /** Which master level the value came from: "company" or "salesArea". */
+  source?: string | null;
+  companyCode?: string | null;
+  salesOrganization?: string | null;
+}
+
+export const getSapCustomerPaymentTerms = (
+  soldToSapCode: string,
+  salesOrganization?: string,
+  companyCode?: string,
+) => {
+  const qs = new URLSearchParams();
+  if (salesOrganization) qs.set('salesOrganization', salesOrganization);
+  if (companyCode) qs.set('companyCode', companyCode);
+  const suffix = qs.toString();
+  return api.get<{ customerId: string; paymentTerms: SapCustomerPaymentTerms | null }>(
+    `/api/sap/business-partner/${encodeURIComponent(soldToSapCode)}/payment-terms` + (suffix ? '?' + suffix : ''),
+  );
+};
+
+/* Customer Sales Areas — GLC Sales Order flow: the customer's sales areas from the SAP customer
+   master (A_CustomerSalesArea) for a sales org. A customer can have several (differing by
+   DistributionChannel/Division), each with its own Sales Group / payment terms. The Customer card
+   uses the single area automatically, or lets the person pick when there are more than one — and the
+   chosen area's Channel/Division/Sales Group are what get sent to SAP. Always best-effort: `areas`
+   comes back empty when SAP isn't configured, the customer has none, or the lookup fails.
+   Backend: GET /api/sap/business-partner/{id}/sales-areas
+   (MgtOcr.Sap.SapBusinessPartnerClient.GetSalesAreasAsync). */
+
+export interface SapCustomerSalesArea {
+  salesOrganization: string;
+  distributionChannel: string;
+  division: string;
+  salesGroup?: string | null;
+  salesOffice?: string | null;
+  customerPaymentTerms?: string | null;
+  currency?: string | null;
+}
+
+export const getSapCustomerSalesAreas = (soldToSapCode: string, salesOrganization?: string) => {
+  const qs = new URLSearchParams();
+  if (salesOrganization) qs.set('salesOrganization', salesOrganization);
+  const suffix = qs.toString();
+  return api.get<{ customerId: string; count: number; areas: SapCustomerSalesArea[] }>(
+    `/api/sap/business-partner/${encodeURIComponent(soldToSapCode)}/sales-areas` + (suffix ? '?' + suffix : ''),
+  );
+};

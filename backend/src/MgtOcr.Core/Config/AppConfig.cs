@@ -68,6 +68,14 @@ public class AppConfig
     public string SapProductBaseUrl { get; init; } = "";
     public string SapProductAuthHeader { get; init; } = "";
 
+    // Billing Document (invoice) lookup — used for the "Last Price" shown when confirming a
+    // material match in the GLC Sales Order flow: the last actual selling price SAP billed this
+    // customer for this material (see SapBillingClient). Same shape/fallback as the other
+    // read-only SAP lookups; blank BaseUrl = not configured yet = the lookup is skipped (returns
+    // null, never blocks the save flow). Point this at API_BILLING_DOCUMENT_SRV.
+    public string SapBillingBaseUrl { get; init; } = "";
+    public string SapBillingAuthHeader { get; init; } = "";
+
     // One row per legal entity (Sales Organization + Company Code + Plant) this system posts
     // Sales Orders for. Per user: Plant is what identifies the company in practice (e.g. 2100 =
     // GLC/Green Leaf, 1100 = MGT) — CompanyForPlant is keyed on that. Populated from the
@@ -78,6 +86,25 @@ public class AppConfig
         string.IsNullOrWhiteSpace(plant) ? null : Companies.FirstOrDefault(c => c.DefaultPlant == plant);
     public CompanyProfile? CompanyForSalesOrg(string? salesOrg) =>
         string.IsNullOrWhiteSpace(salesOrg) ? null : Companies.FirstOrDefault(c => c.SalesOrganization == salesOrg);
+
+    // Resolves the appsettings company profile ("MGT"/"GLC") for a signed-in user, given the
+    // company fields off CurrentUser/UserCompany. NOT a plain name match: Ms_Company.CompanyCode
+    // (MGT_Datawarehouse) stores "MGT" for the first company but "Green Leaf" -- not "GLC" -- for
+    // the second, confirmed live via /api/me, so comparing it straight against CompanyProfile.Name
+    // only ever resolves MGT and silently returns null for every GLC user (which is exactly the bug
+    // that let a company-scoping query run unscoped). The frontend already works around this the
+    // same way (AppLayout.tsx keys off "is it MGT?" rather than comparing to the literal "GLC"), so
+    // this mirrors that: SalesOrganization is tried first (forward-compatible if Ms_User ever
+    // carries it reliably), then "MGT" is matched by name and anything else maps to "GLC" -- safe
+    // as long as there are exactly two companies.
+    public CompanyProfile? CompanyForUser(string? companyCode, string? salesOrganization)
+    {
+        var bySalesOrg = CompanyForSalesOrg(salesOrganization);
+        if (bySalesOrg is not null) return bySalesOrg;
+        if (string.IsNullOrWhiteSpace(companyCode)) return null;
+        var name = string.Equals(companyCode, "MGT", StringComparison.OrdinalIgnoreCase) ? "MGT" : "GLC";
+        return Companies.FirstOrDefault(c => string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase));
+    }
 
     // Zoho CRM (v8 REST API) — used for the MGT-side Sales Order flow: MGT-opened documents
     // find/send their customer match to Zoho CRM instead of SAP (GLC-opened documents keep
@@ -141,4 +168,9 @@ public sealed record AuthTenant(string Name = "", string TenantId = "", string C
 
 // One legal entity this system can post Sales Orders for. "Name" is the appsettings.json
 // section name ("MGT" / "GLC"), not a SAP field. See AppConfig.Companies / CompanyForPlant.
-public sealed record CompanyProfile(string Name, string SalesOrganization, string CompanyCode, string DefaultPlant);
+public sealed record CompanyProfile(
+    string Name,
+    string SalesOrganization,
+    string CompanyCode,
+    string DefaultPlant,
+    string AuthorizationGroup);

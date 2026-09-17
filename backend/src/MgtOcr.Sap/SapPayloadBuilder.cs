@@ -98,6 +98,11 @@ public static class SapPayloadBuilder
             // "2000", so this still works if that code ever changes in appsettings.json.
             var isGlc = config.CompanyForSalesOrg(salesOrg)?.Name == "GLC";
 
+            // First non-empty of the three (header override -> master -> default), used for the
+            // sales-area fields the GLC Customer card can override (Channel/Division).
+            static string Pick(string? a, string? b, string def) =>
+                !string.IsNullOrEmpty(a) ? a! : (!string.IsNullOrEmpty(b) ? b! : def);
+
             var items = new List<object>();
             for (var i = 0; i < lines.Count; i++)
             {
@@ -146,26 +151,43 @@ public static class SapPayloadBuilder
             // (SapUomSyncService.BuildDeepInsert). IncotermsClassification and CustomerPaymentTerms
             // are intentionally NOT sent — SAP derives both from the customer master, and sending
             // the raw document incoterms text ("Delivered Duty Paid CHONBURI") overflowed the
-            // 3-char field (/IWCOR/CX_DS_EDM_FACET_ERROR). CustomerPurchaseOrderDate and the SH
-            // partner (ship-to) ARE kept: the PO date is worth recording and OCR can resolve a
-            // ship-to that differs from the sold-to party.
-            return new Dictionary<string, object?>
+            // 3-char field (/IWCOR/CX_DS_EDM_FACET_ERROR). CustomerPurchaseOrderDate is kept (worth
+            // recording).
+            var soPayload = new Dictionary<string, object?>
             {
                 ["_target"] = SoEndpoint,
                 ["SalesOrderType"] = "OR",
                 ["SalesOrganization"] = salesOrg,
-                ["DistributionChannel"] = string.IsNullOrEmpty(c.GetStr("DistChannel")) ? "10" : c.GetStr("DistChannel"),
-                ["OrganizationDivision"] = string.IsNullOrEmpty(c.GetStr("Division")) ? "00" : c.GetStr("Division"),
+                // Distribution Channel / Division: prefer the sales area the person picked on the GLC
+                // Customer card (persisted on the header as distChannel/division), then the local
+                // customer master, then the tenant defaults. This is how a customer with more than one
+                // SAP sales area gets the RIGHT channel/division onto the order.
+                ["DistributionChannel"] = Pick(header.GetStr("distChannel"), c.GetStr("DistChannel"), "10"),
+                ["OrganizationDivision"] = Pick(header.GetStr("division"), c.GetStr("Division"), "00"),
                 ["SoldToParty"] = Key(customer),
                 // "-" when the document has no PO number, rather than sending blank/null to SAP.
                 ["PurchaseOrderByCustomer"] = string.IsNullOrWhiteSpace(header.GetStr("poNo")) ? "-" : header.GetStr("poNo"),
                 ["CustomerPurchaseOrderDate"] = ODataDate(header.Get("poDate")),
                 ["RequestedDeliveryDate"] = ODataDate(header.Get("deliveryDate")),
                 ["TransactionCurrency"] = currency,
-                ["to_Partner"] = new List<object> { new Dictionary<string, object?> { ["PartnerFunction"] = "SH", ["Customer"] = Key(shipTo) } },
                 ["to_Item"] = items,
                 ["_source"] = source,
             };
+            // The SH (ship-to) partner is sent ONLY when a ship-to was actually resolved. Per the
+            // user, many GLC orders have no separate ship-to and don't need one sent — and posting a
+            // partner with an empty Customer makes SAP reject the order. Omitting to_Partner lets SAP
+            // default the ship-to to the Sold-to party, which is exactly what's wanted here. When OCR
+            // did resolve a ship-to that differs from the sold-to, it's sent as before.
+            var shipToKey = Key(shipTo);
+            if (!string.IsNullOrWhiteSpace(shipToKey))
+                soPayload["to_Partner"] = new List<object> { new Dictionary<string, object?> { ["PartnerFunction"] = "SH", ["Customer"] = shipToKey } };
+            // Sales Group: sent only when the person picked a sales area on the GLC Customer card
+            // (persisted on the header as salesGroup). A_SalesOrder.SalesGroup is a standard field;
+            // omitted when blank so SAP derives it from the customer master as before.
+            var salesGroup = header.GetStr("salesGroup");
+            if (!string.IsNullOrWhiteSpace(salesGroup))
+                soPayload["SalesGroup"] = salesGroup;
+            return soPayload;
         }
 
         var v = partnerMaster ?? new();

@@ -16,14 +16,22 @@ public class MasterRepository(Db db)
         MasterDefinitions.All.TryGetValue(kind, out def!);
 
     // load_masters(): active-only for the 4 tables that have IsActive; unfiltered for the rest.
-    public async Task<Dictionary<string, IEnumerable<dynamic>>> LoadAllAsync(bool includeInactive = false)
+    public async Task<Dictionary<string, IEnumerable<dynamic>>> LoadAllAsync(
+        bool includeInactive = false, string? companyCode = null)
     {
         var result = new Dictionary<string, IEnumerable<dynamic>>();
         // Compatibility aliases are read-only: CRUD always uses the real schema columns and row id.
         var active = includeInactive ? "" : " WHERE IsActive=1";
-        result["customers"] = await db.QueryAsync("SELECT *, ComcompyCodeSAP AS CustomerCode, ComcompyCodeSAP AS SapCustomerCode, CompanyName AS NameTh, CompanyNameSAP AS NameEn FROM ocr.Customer" + active + " ORDER BY SalesOrg, ComcompyCodeSAP, id");
-        result["shiptos"] = await db.QueryAsync("SELECT *, ShipToAddress AS Address FROM ocr.ShipTo" + active + " ORDER BY CustomerCode, ShipToCode, id");
-        result["custmaterials"] = await db.QueryAsync("SELECT *, MaterialCodeCode AS ExtCode, MaterialCodeName AS ExtDesc, MaterialCodeSAP AS MaterialCode FROM ocr.CustomerMaterial" + (includeInactive ? "" : " WHERE Isactive=1") + " ORDER BY SalesOrg, CustomerCode, MaterialCodeCode, Id");
+        var scopedActive = string.IsNullOrWhiteSpace(companyCode)
+            ? active
+            : includeInactive ? " WHERE SalesOrg=@companyCode" : " WHERE IsActive=1 AND SalesOrg=@companyCode";
+        var scopedCm = string.IsNullOrWhiteSpace(companyCode)
+            ? includeInactive ? "" : " WHERE Isactive=1"
+            : includeInactive ? " WHERE SalesOrg=@companyCode" : " WHERE Isactive=1 AND SalesOrg=@companyCode";
+        var scopeParam = new { companyCode };
+        result["customers"] = await db.QueryAsync("SELECT *, ComcompyCodeSAP AS CustomerCode, ComcompyCodeSAP AS SapCustomerCode, CompanyName AS NameTh, CompanyNameSAP AS NameEn FROM ocr.Customer" + scopedActive + " ORDER BY SalesOrg, ComcompyCodeSAP, id", scopeParam);
+        result["shiptos"] = await db.QueryAsync("SELECT *, ShipToAddress AS Address FROM ocr.ShipTo" + scopedActive + " ORDER BY SalesOrg, CustomerCode, ShipToCode, id", scopeParam);
+        result["custmaterials"] = await db.QueryAsync("SELECT *, MaterialCodeCode AS ExtCode, MaterialCodeName AS ExtDesc, MaterialCodeSAP AS MaterialCode FROM ocr.CustomerMaterial" + scopedCm + " ORDER BY SalesOrg, CustomerCode, MaterialCodeCode, Id", scopeParam);
         // Materials for the SO mapping come straight from CustomerMaterial. ocr.Material has been
         // dropped (unused), so Base Unit / Plant / Material Group are returned as NULL — the columns
         // are kept only so downstream code that reads them still finds the keys. With no base unit,
@@ -50,14 +58,26 @@ public class MasterRepository(Db db)
         result["venmaterials"] = await db.QueryAsync("SELECT * FROM ocr.VendorMaterial ORDER BY VendorCode, ExtCode");
         result["uoms"] = await db.QueryAsync(
             "SELECT * FROM ocr.UomConversion ORDER BY CASE WHEN MaterialCode IS NULL THEN 0 ELSE 1 END, MaterialCode, ExtUom");
+        // Payment-terms code -> display-text mapping. SAP returns only the code (e.g. "5009") on the
+        // customer master and has no text service on this tenant, so it's mapped to a description
+        // from the shared dbo.SysDataMapping table (Subject='Payment_Terms', Code, Text) -- the same
+        // table the Zoho account sync uses for MapRev("Payment_Terms", ...). Read-only here (IT
+        // maintains that table centrally). OBJECT_ID-guarded so the app keeps working even if the
+        // table is absent -- it just returns an empty set. The doubled '' inside EXEC is a literal
+        // single quote around the Subject value.
+        result["paymentterms"] = await db.QueryAsync(
+            "IF OBJECT_ID('dbo.SysDataMapping','U') IS NOT NULL " +
+            "EXEC('SELECT Code, [Text] FROM dbo.SysDataMapping WHERE Subject=''Payment_Terms'' ORDER BY Code') " +
+            "ELSE " +
+            "EXEC('SELECT CAST(NULL AS nvarchar(50)) AS Code, CAST(NULL AS nvarchar(400)) AS [Text] WHERE 1=0')");
         return result;
     }
 
     // Same data as LoadAllAsync(), reshaped into plain dicts for the mapping engine / SAP payload
     // builder (which need dict.get()-style field access, not raw dynamic Dapper rows).
-    public async Task<MasterData> LoadForMappingAsync(string module = "SO")
+    public async Task<MasterData> LoadForMappingAsync(string module = "SO", string? companyCode = null)
     {
-        var all = await LoadAllAsync();
+        var all = await LoadAllAsync(companyCode: module == "SO" ? companyCode : null);
         return new MasterData
         {
             Customers = DynamicRow.ToDictList(all["customers"]),

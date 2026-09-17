@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { num } from '../../utils/format';
-import type { DocModel, MapEntry, MapField, MapResult } from '../../api/documents';
+import type { DocHeader, DocModel, MapEntry, MapField, MapResult } from '../../api/documents';
 import type { MastersData } from '../../api/masters';
 import {
   searchSapBusinessPartner,
@@ -8,7 +8,13 @@ import {
   type SapBusinessPartner,
   type SapPartnerFunctionLink,
   searchSapMaterials,
+  getSapLastPrice,
+  getSapCustomerPaymentTerms,
+  getSapCustomerSalesAreas,
   type SapMaterial,
+  type SapLastPrice,
+  type SapCustomerPaymentTerms,
+  type SapCustomerSalesArea,
 } from '../../api/sap';
 import {
   searchZohoAccount,
@@ -67,6 +73,12 @@ function SideList({ items, side }: { items?: MapField[]; side: 'doc' | 'sap' }) 
 
 function StatusChip({ st }: { st: string }) {
   if (st === 'ok') return <span className="badge b-ok"><i className="fa-solid fa-check" /> Auto-matched</span>;
+  // GLC ship-to optional: the person explicitly chose a "no ship-to" fallback (use sold-to / omit) —
+  // a neutral chip, never the green "Auto-matched", so "matched" only ever shows a real match.
+  if (st === 'skip') return <span className="badge b-idle"><i className="fa-solid fa-check" /> ยืนยันแล้ว</span>;
+  // GLC ship-to optional and not yet decided: the person must pick a real ship-to or a fallback
+  // before sending. A warn chip (blocking) rather than a scary red "Not found".
+  if (st === 'needchoice') return <span className="badge b-warn"><i className="fa-solid fa-hand-pointer" /> ต้องเลือก Ship-to</span>;
   if (st === 'manual') return <span className="badge b-warn"><i className="fa-solid fa-pen" /> Manually selected</span>;
   if (st === 'convert') return <span className="badge b-ok"><i className="fa-solid fa-right-left" /> Unit converted</span>;
   if (st === 'fail') return <span className="badge b-fail"><i className="fa-solid fa-xmark" /> Not found</span>;
@@ -158,6 +170,7 @@ function SapCustomerPanel({
   customerName,
   taxId,
   address,
+  companyCode,
   disabled,
   onUse,
   onProposeMatch,
@@ -170,6 +183,7 @@ function SapCustomerPanel({
    *  address. Included as a disambiguation hint when two candidates otherwise look identical
    *  (e.g. same name/tax ID, different branch). */
   address?: string;
+  companyCode: string;
   disabled?: boolean;
   onUse: (bp: SapBusinessPartner) => void;
   onProposeMatch?: (proposal: CustomerMatchProposal) => void;
@@ -256,7 +270,7 @@ function SapCustomerPanel({
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [name, tax]);
+  }, [name, tax, companyCode]);
 
   const hint = (text: string) => <div className="hint" style={{ padding: '6px 0' }}>{text}</div>;
   const { ocrProviders } = useMeta();
@@ -407,6 +421,8 @@ function suggestedMaterialKeyword(desc: string): string {
 function SapMaterialPanel({
   docDescription,
   docCode,
+  plant,
+  customer,
   disabled,
   onUse,
 }: {
@@ -414,6 +430,11 @@ function SapMaterialPanel({
   /** The customer's own material code on the document line (line.extCode), shown to the AI as an
    *  extra matching signal alongside the description. */
   docCode?: string;
+  plant: string;
+  /** The matched customer's SAP code (SoldToParty). When present, each search result shows that
+   *  customer's Last Price for that material (fetched live) so the price is visible BEFORE picking
+   *  — GLC only; blank/absent = the Last Price column is simply omitted. */
+  customer?: string;
   disabled?: boolean;
   onUse: (m: SapMaterial) => void;
 }) {
@@ -423,6 +444,48 @@ function SapMaterialPanel({
   const [searched, setSearched] = useState(false);
   const { ocrProviders } = useMeta();
   const [aiOpen, setAiOpen] = useState(false);
+  // Last Price per result material for THIS customer. undefined = not fetched yet, null = looked up
+  // but SAP had no prior billing, object = found. Best-effort: a failed lookup just shows nothing.
+  const [lastPrices, setLastPrices] = useState<Record<string, SapLastPrice | null>>({});
+
+  // Fetch each candidate's Last Price once the SAP results (and the customer) are known, so the
+  // price shows in the list before the person picks a row. One call per result material — usually
+  // only a handful — run in parallel; each resolves independently and best-effort.
+  useEffect(() => {
+    const cust = (customer || '').trim();
+    if (!cust || results.length === 0) { setLastPrices({}); return; }
+    let cancelled = false;
+    setLastPrices({});
+    Promise.all(results.map(async (m) => {
+      try {
+        const r = await getSapLastPrice(cust, m.materialCode);
+        return [m.materialCode, r.price] as const;
+      } catch {
+        return [m.materialCode, null] as const;
+      }
+    })).then((pairs) => {
+      if (cancelled) return;
+      const next: Record<string, SapLastPrice | null> = {};
+      for (const [mc, p] of pairs) next[mc] = p;
+      setLastPrices(next);
+    });
+    return () => { cancelled = true; };
+  }, [results, customer]);
+
+  const renderLastPrice = (materialCode: string) => {
+    if (!customer) return null;
+    const lp = lastPrices[materialCode];
+    return (
+      <div className="hint" style={{ marginTop: 3 }}>
+        <i className="fa-solid fa-tag" />{' '}
+        {lp === undefined
+          ? 'Last Price: กำลังโหลด…'
+          : lp
+            ? `Last Price: ${lp.pricePerUnit.toLocaleString()} / ${lp.unit || 'unit'}${lp.creationDate ? ` (${lp.creationDate})` : ''}`
+            : 'Last Price: ไม่มีประวัติการขายกับลูกค้ารายนี้'}
+      </div>
+    );
+  };
 
   const docDesc = (docDescription || '').trim();
   const seed = suggestedMaterialKeyword(docDesc);
@@ -443,7 +506,7 @@ function SapMaterialPanel({
     let cancelled = false;
     setLoading(true);
     setError(null);
-    searchSapMaterials(query)
+    searchSapMaterials(query, plant)
       .then((r) => {
         if (cancelled) return;
         if (!Array.isArray(r?.results)) {
@@ -466,7 +529,7 @@ function SapMaterialPanel({
         }
       });
     return () => { cancelled = true; };
-  }, [query]);
+  }, [query, plant]);
 
   const runManualSearch = () => {
     const q = manualQuery.trim();
@@ -530,6 +593,7 @@ function SapMaterialPanel({
             <tr key={m.materialCode}>
               <td>
                 <b>{m.materialCode}</b> — {m.materialDescription}
+                {renderLastPrice(m.materialCode)}
               </td>
               <td>
                 <button className="btn sm primary" disabled={disabled} onClick={() => onUse(m)}>
@@ -933,6 +997,7 @@ function AddressFieldRows({ info }: { info: ZohoShipToInfo }) {
 function SapShipToPanel({
   soldToSapCode,
   docShipToName,
+  salesOrganization,
   disabled,
   onUse,
 }: {
@@ -943,6 +1008,7 @@ function SapShipToPanel({
   /** The document's own Ship-to name, if read off it -- prefills the fallback name-search box
    *  below so the person doesn't have to retype what the document already says. */
   docShipToName?: string;
+  salesOrganization: string;
   disabled?: boolean;
   onUse: (link: SapPartnerFunctionLink) => void;
 }) {
@@ -960,7 +1026,7 @@ function SapShipToPanel({
     let cancelled = false;
     setLoading(true);
     setError(null);
-    findSapPartnerFunctions(soldToSapCode, 'SH')
+    findSapPartnerFunctions(soldToSapCode, salesOrganization, 'SH')
       .then((r) => {
         if (cancelled) return;
         if (!Array.isArray(r?.results)) {
@@ -985,7 +1051,7 @@ function SapShipToPanel({
     return () => {
       cancelled = true;
     };
-  }, [soldToSapCode]);
+  }, [soldToSapCode, salesOrganization]);
 
   // Fallback name search — see the doc comment above the component. Independent of the primary
   // code-based lookup above; only ever shown once that comes up empty.
@@ -1464,6 +1530,190 @@ function ZohoCreditInfoPanel({ customerCode, masters }: { customerCode?: string;
   );
 }
 
+// GLC (SAP) Customer card, right-hand "Data from SAP" column. Renders the SAP customer fields, but
+// fills them LIVE from the SAP customer master and lets the person pick a SALES AREA:
+//  - A customer can have several sales areas (differing by Distribution Channel / Division), each
+//    with its own Sales Group / Payment Terms. When there's exactly ONE it's used automatically;
+//    when there are MORE than one, a small picker appears (so the person chooses which one) — and the
+//    chosen area's Channel / Division / Sales Group get persisted onto the header (onSetSalesArea)
+//    so the SAP payload uses the RIGHT ones, not "the first area found".
+//  - "Sales Org / Channel / Div" and "Sales Group" rows reflect the selected area.
+//  - "Payment Terms" shows the selected area's CustomerPaymentTerms, falling back to the company-level
+//    lookup; the code (e.g. "5009") is mapped to text via dbo.SysDataMapping (masters.paymentterms).
+// All best-effort and inline (no separate card): any failure/empty just shows a hint or "—", never
+// blocks. salesOrg follows the company being worked as (GLC = 2000).
+function SapCustomerSapSide({
+  r,
+  salesOrg,
+  companyCode,
+  masters,
+  header,
+  posted,
+  onSetSalesArea,
+}: {
+  r: MapEntry;
+  salesOrg?: string;
+  companyCode?: string;
+  masters: MastersData;
+  header: DocHeader;
+  posted: boolean;
+  onSetSalesArea: (fields: { distChannel?: string; division?: string; salesGroup?: string }) => void;
+}) {
+  const soldToSapCode = r.sapCode;
+  const [pt, setPt] = useState<SapCustomerPaymentTerms | null>(null);
+  const [ptStatus, setPtStatus] = useState<'idle' | 'loading' | 'error'>('idle');
+  const [areas, setAreas] = useState<SapCustomerSalesArea[]>([]);
+  const [areaStatus, setAreaStatus] = useState<'idle' | 'loading' | 'error'>('idle');
+  const [selectedKey, setSelectedKey] = useState('');
+  const lastAppliedRef = useRef<string | null>(null);
+
+  const areaKey = (a: SapCustomerSalesArea) => `${a.distributionChannel}|${a.division}`;
+
+  // Company-level payment terms (fallback for areas that carry none of their own).
+  useEffect(() => {
+    if (!soldToSapCode) {
+      setPt(null);
+      setPtStatus('idle');
+      return;
+    }
+    let cancelled = false;
+    setPtStatus('loading');
+    getSapCustomerPaymentTerms(soldToSapCode, salesOrg, companyCode)
+      .then((res) => {
+        if (!cancelled) {
+          setPt(res.paymentTerms);
+          setPtStatus('idle');
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setPtStatus('error');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [soldToSapCode, salesOrg, companyCode]);
+
+  // The customer's sales areas for this sales org.
+  useEffect(() => {
+    if (!soldToSapCode) {
+      setAreas([]);
+      setAreaStatus('idle');
+      return;
+    }
+    let cancelled = false;
+    setAreaStatus('loading');
+    getSapCustomerSalesAreas(soldToSapCode, salesOrg)
+      .then((res) => {
+        if (!cancelled) {
+          setAreas(res.areas || []);
+          setAreaStatus('idle');
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setAreaStatus('error');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [soldToSapCode, salesOrg]);
+
+  // Initial selection: the area matching what's already on the header, else the first. Keeps a valid
+  // user selection across re-renders. (Only re-computes when the area list itself changes.)
+  useEffect(() => {
+    if (!areas.length) return;
+    setSelectedKey((prev) => {
+      if (prev && areas.some((a) => areaKey(a) === prev)) return prev;
+      const match = areas.find(
+        (a) =>
+          a.distributionChannel === ((header?.distChannel as string) ?? '') &&
+          a.division === ((header?.division as string) ?? ''),
+      );
+      return areaKey(match || areas[0]);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [areas]);
+
+  const selectedArea = areas.find((a) => areaKey(a) === selectedKey) || areas[0] || null;
+
+  // Persist the selected area's Channel / Division / Sales Group onto the header (so the payload uses
+  // them), but only when they differ from what's already there — and remember the last requested
+  // signature so we don't fire again while the re-map is in flight.
+  useEffect(() => {
+    if (posted || !selectedArea) return;
+    const sig = `${selectedArea.distributionChannel}|${selectedArea.division}|${selectedArea.salesGroup || ''}`;
+    const cur = `${(header?.distChannel as string) ?? ''}|${(header?.division as string) ?? ''}|${(header?.salesGroup as string) ?? ''}`;
+    if (cur === sig) {
+      lastAppliedRef.current = sig;
+      return;
+    }
+    if (lastAppliedRef.current === sig) return;
+    lastAppliedRef.current = sig;
+    onSetSalesArea({
+      distChannel: selectedArea.distributionChannel,
+      division: selectedArea.division,
+      salesGroup: selectedArea.salesGroup || '',
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedKey, areas, posted, header?.distChannel, header?.division, header?.salesGroup]);
+
+  // Payment terms to show: the selected area's own, else the company-level lookup. Map code -> text.
+  const ptCode = (selectedArea?.customerPaymentTerms?.trim() || pt?.paymentTerms?.trim()) || undefined;
+  const ptDesc = ptCode
+    ? ((masters.paymentterms || []).find(
+        (m) =>
+          String(m.Code ?? '').trim() === ptCode &&
+          (m.IsActive === undefined || m.IsActive === null || m.IsActive === true || m.IsActive === 1),
+      )?.Text as string | undefined)
+    : undefined;
+  const ptValue =
+    !soldToSapCode ? ''
+    : ptStatus === 'loading' && !ptCode ? 'กำลังอ่านจาก SAP…'
+    : ptStatus === 'error' && !ptCode ? 'อ่านจาก SAP ไม่ได้'
+    : ptCode ? (ptDesc || `${ptCode} (ยังไม่ได้ตั้งคำอธิบาย)`)
+    : '';
+
+  const sgValue = selectedArea?.salesGroup || '';
+  const socdValue = selectedArea
+    ? `${salesOrg || '—'} / ${selectedArea.distributionChannel || '—'} / ${selectedArea.division || '—'}`
+    : undefined;
+
+  // Build the SAP field list: reflect the selected area in Sales Org/Channel/Div + Payment Terms, and
+  // add a Sales Group row.
+  let items = (r.sap || []).map((f) => {
+    if (f.label === 'Sales Org / Channel / Div' && socdValue) return { ...f, value: socdValue };
+    if (f.label === 'Payment Terms') return { ...f, value: ptValue };
+    return f;
+  });
+  if (ptValue && !items.some((f) => f.label === 'Payment Terms'))
+    items = [...items, { label: 'Payment Terms', value: ptValue } as MapField];
+  if (items.some((f) => f.label === 'Sales Group'))
+    items = items.map((f) => (f.label === 'Sales Group' ? { ...f, value: sgValue } : f));
+  else items = [...items, { label: 'Sales Group', value: sgValue } as MapField];
+
+  return (
+    <>
+      {areas.length > 1 && (
+        <div className="f" style={{ marginBottom: 8 }}>
+          <label>เลือก Sales Area (ลูกค้ารายนี้มี {areas.length} area)</label>
+          <select value={selectedKey} onChange={(e) => setSelectedKey(e.target.value)} disabled={posted}>
+            {areas.map((a) => (
+              <option key={areaKey(a)} value={areaKey(a)}>
+                Channel {a.distributionChannel || '—'} / Division {a.division || '—'}
+                {a.salesGroup ? ` · Sales Group ${a.salesGroup}` : ''}
+              </option>
+            ))}
+          </select>
+          <small className="master-field-help">
+            ลูกค้ามีหลาย sales area — เลือกให้ตรงกับที่ต้องการ ระบบจะใช้ Channel/Division/Sales Group ของ area นี้ส่งไป SAP
+          </small>
+        </div>
+      )}
+      {areaStatus === 'loading' && <div className="hint" style={{ padding: '2px 0' }}>กำลังอ่าน Sales Area จาก SAP…</div>}
+      <SideList items={items} side="sap" />
+    </>
+  );
+}
+
 // Every open (not Closed Won/Lost) Deal linked to this Zoho Account, with its Deal Items
 // subform -- read-only listing. Megachem's call: show every candidate rather than the system
 // narrowing to "the" match, so the person (optionally aided by the OCR AI-compare tool) picks
@@ -1790,8 +2040,13 @@ interface Props {
   doc: DocModel;
   map: MapResult;
   masters: MastersData;
+  companyCode: string;
+  plant: string;
   posted: boolean;
   onManualHeader: (key: string, value: string) => void;
+  /** GLC: apply the chosen (or single auto-used) SAP sales area — persists DistributionChannel /
+   *  Division / Sales Group onto the document header so the SAP payload uses them, then re-maps. */
+  onSetSalesArea: (fields: { distChannel?: string; division?: string; salesGroup?: string }) => void;
   onManualLine: (i: number, value: string) => void;
   onQuickAddVendor: () => void;
   onQuickAddCustomer: () => void;
@@ -1852,8 +2107,11 @@ export default function MappingCards({
   doc,
   map,
   masters,
+  companyCode,
+  plant,
   posted,
   onManualHeader,
+  onSetSalesArea,
   onManualLine,
   onQuickAddVendor,
   onQuickAddCustomer,
@@ -1917,7 +2175,7 @@ export default function MappingCards({
     if (kind === 'customers') {
       const seen = new Set<string>();
       opts = masters.customers
-        .filter((c) => String(c.SalesOrg) === (doc.header.salesOrg || (isMgt ? '1000' : '2000')))
+        .filter((c) => String(c.SalesOrg) === companyCode)
         .map((c) => {
           const v = String(c.ComcompyCodeSAP ?? '').trim();
           const displayName = String(c.CompanyName ?? c.CompanyNameSAP ?? '').trim();
@@ -1934,7 +2192,7 @@ export default function MappingCards({
       const cc = map.header.customer?.code || '';
       const seen = new Set<string>();
       opts = masters.shiptos
-        .filter((s) => !cc || s.CustomerCode === cc)
+        .filter((s) => String(s.SalesOrg) === companyCode && (!cc || s.CustomerCode === cc))
         .map((s) => {
           const v = String(s.SapShipToCode ?? '').trim();
           const displayName = String(s.ShipToName ?? '').trim();
@@ -1949,7 +2207,7 @@ export default function MappingCards({
         options={opts.map((o) => ({ value: o.v, description: o.name, label: o.t, source: 'local' as const }))}
         value={code || ''}
         disabled={posted}
-        emptyLabel="-- Select manually --"
+        emptyLabel="-- Select master mapping --"
         searchPlaceholder="พิมพ์ชื่อหรือรหัสเพื่อค้นหา…"
         ariaLabel={`ค้นหาและเลือก ${kind}`}
         minWidth={260}
@@ -1971,7 +2229,7 @@ export default function MappingCards({
   // and an empty result for a brand-new customer was the whole reason search "found nothing".
   const currentCustomerCode = map.header.customer?.code;
   const availableCustomerMaterials = masters.custmaterials
-    .filter((cm) => String(cm.SalesOrg) === (doc.header.salesOrg || (isMgt ? '1000' : '2000')))
+    .filter((cm) => String(cm.SalesOrg) === companyCode)
     .sort((a, b) => {
       const aMine = a.CustomerCode === currentCustomerCode ? 0 : 1;
       const bMine = b.CustomerCode === currentCustomerCode ? 0 : 1;
@@ -2066,6 +2324,7 @@ export default function MappingCards({
                 customerName={doc.header.customerName}
                 taxId={doc.header.customerTaxId}
                 address={doc.header.customerAddress}
+                companyCode={companyCode}
                 disabled={posted}
                 onUse={(customer) => {
                   onUseSapCustomer(customer);
@@ -2085,13 +2344,25 @@ export default function MappingCards({
               items={(c.sap || []).filter((f) => !['Sales Org / Channel / Div', 'Payment Terms', 'Currency'].includes(f.label))}
               side="sap"
             />
-          ) : undefined
+          ) : (
+            // GLC (SAP): same SAP field list, but the "Payment Terms" row is filled live from the
+            // SAP customer master (mapped code -> text), inline with the rest of the customer data.
+            <SapCustomerSapSide
+              r={c}
+              salesOrg={doc.header.salesOrg || undefined}
+              companyCode={companyCode || undefined}
+              masters={masters}
+              header={doc.header}
+              posted={posted}
+              onSetSalesArea={onSetSalesArea}
+            />
+          )
         }
       >
         {/* Ship-to lives inside the Customer card as a sub-section instead of its own numbered
             section -- it's meaningless without a matched customer anyway, so keeping the two
             together reads more like "one company record" than two unrelated steps. */}
-        <div className={'cmp-sub ' + (sh.status === 'fail' ? 'bad' : '')}>
+        <div className={'cmp-sub ' + (sh.status === 'fail' || sh.status === 'needchoice' ? 'bad' : '')}>
           <div className="cmp-head">
             <span className="cmp-no sub">{`${n}.1`}</span>
             <b>Ship-to</b>
@@ -2107,6 +2378,40 @@ export default function MappingCards({
                   A customer must be specified first
                 </span>
               ))}
+            {/* GLC: ship-to is optional but the choice must be explicit -- when nothing is matched
+                the person picks a real ship-to (select/search above) OR one of these two "no ship-to"
+                fallbacks. Both send the same payload (no SH -> SAP uses sold-to); until one is chosen
+                the mapping blocks Send ("needchoice"). */}
+            {!posted && !isMgt && c.code && sh.status === 'needchoice' && (
+              <>
+                <button
+                  className="btn sm"
+                  style={{ marginLeft: 6 }}
+                  onClick={() => onManualHeader('shipToFallback', 'soldto')}
+                  title="ส่งโดยไม่ใส่ Ship-to — SAP จะใช้ Sold-to เป็นผู้รับให้"
+                >
+                  ใช้ Sold-to เป็นผู้รับ
+                </button>
+                <button
+                  className="btn sm"
+                  style={{ marginLeft: 6 }}
+                  onClick={() => onManualHeader('shipToFallback', 'omit')}
+                  title="ไม่ส่งค่า Ship-to ไป SAP (SAP จะเติม Sold-to ให้อัตโนมัติ)"
+                >
+                  ไม่ระบุ Ship-to
+                </button>
+              </>
+            )}
+            {!posted && !isMgt && c.code && sh.status === 'skip' && (
+              <button
+                className="btn sm"
+                style={{ marginLeft: 6 }}
+                onClick={() => onManualHeader('shipToFallback', '')}
+                title="ยกเลิกตัวเลือกนี้ แล้วเลือก Ship-to ใหม่"
+              >
+                เปลี่ยน
+              </button>
+            )}
             {!posted && c.code && (isMgt ? onUseZohoShipTo : onUseSapShipTo) && (
               <button
                 className={'btn sm' + (shipToSapOpen ? ' primary' : '')}
@@ -2140,6 +2445,7 @@ export default function MappingCards({
                 <SapShipToPanel
                   soldToSapCode={c.sapCode}
                   docShipToName={doc.header.shipToName}
+                  salesOrganization={doc.header.salesOrg || ''}
                   disabled={posted}
                   onUse={(shipTo) => {
                     onUseSapShipTo(shipTo);
@@ -2246,7 +2552,7 @@ export default function MappingCards({
               options={matOpts}
               value={r.code || ''}
               disabled={posted}
-              emptyLabel="-- Select manually --"
+              emptyLabel="-- Select master mapping --"
               onChange={(value, option) => {
                 if (!isMgt && option) {
                   onUseSapMaterial(i, { materialCode: option.value, materialDescription: option.description });
@@ -2285,6 +2591,8 @@ export default function MappingCards({
               <SapMaterialPanel
                 docDescription={l.desc}
                 docCode={l.extCode}
+                plant={plant}
+                customer={map.header.customer?.sapCode || map.header.customer?.code}
                 disabled={posted}
                 onUse={(m) => {
                   onUseSapMaterial(i, m);

@@ -1,4 +1,5 @@
 using MgtOcr.Core.Auth;
+using MgtOcr.Core.Config;
 using Microsoft.AspNetCore.Mvc;
 
 namespace MgtOcr.Api.Controllers;
@@ -6,7 +7,7 @@ namespace MgtOcr.Api.Controllers;
 // Who am I? The SPA calls this once after sign-in: the Microsoft token says which account signed
 // in, this endpoint says what that account is allowed to be inside this system.
 [ApiController]
-public class MeController(ICurrentUserAccessor current) : ControllerBase
+public class MeController(ICurrentUserAccessor current, AppConfig config) : ControllerBase
 {
     // Full path in the verb attribute, matching DocumentsController etc. — the routing style this
     // project already uses. (A class [Route] + a bare [HttpGet] did not register here.)
@@ -14,6 +15,7 @@ public class MeController(ICurrentUserAccessor current) : ControllerBase
     public async Task<IActionResult> Me(CancellationToken ct)
     {
         var u = await current.RequireAsync(ct);
+        var profile = config.CompanyForUser(u.PrimaryCompany?.CompanyCode, u.SalesOrganization);
         return Ok(new
         {
             userId = u.UserId,
@@ -24,6 +26,9 @@ public class MeController(ICurrentUserAccessor current) : ControllerBase
             department = u.Department,
             position = u.Position,
             salesOrganization = u.SalesOrganization,
+            sapCompanyCode = profile?.CompanyCode ?? "",
+            defaultPlant = profile?.DefaultPlant ?? "",
+            authorizationGroup = profile?.AuthorizationGroup ?? "",
             division = u.Division,
             companies = u.Companies.Select(c => new
             {

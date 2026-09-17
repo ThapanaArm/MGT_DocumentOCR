@@ -1,6 +1,7 @@
 using MgtOcr.Api.Auth;
 using MgtOcr.Core;
 using MgtOcr.Core.Auth;
+using MgtOcr.Core.Config;
 using MgtOcr.Data;
 using MgtOcr.Zoho;
 using Microsoft.AspNetCore.Mvc;
@@ -32,6 +33,7 @@ public class ZohoSalesOrderController(
     ZohoSalesOrderClient soClient,
     ZohoDealClient dealClient,
     ZohoAccountClient accountClient,
+    AppConfig config,
     ICurrentUserAccessor currentUser) : ControllerBase
 {
     // MaterialId, when present, is a person confirming (via the AI-assisted "suggest a match"
@@ -160,8 +162,9 @@ public class ZohoSalesOrderController(
 
         var header = (Dictionary<string, object?>)doc["header"]!;
         var salesOrg = header.GetStr("salesOrg");
+        var companyCode = config.CompanyForSalesOrg(salesOrg)?.CompanyCode ?? salesOrg;
         var masterData = MgtOcr.Core.Mapping.MasterSchema.ForSalesOrg(
-            await masterRepo.LoadForMappingAsync("SO"), salesOrg);
+            await masterRepo.LoadForMappingAsync("SO", companyCode), companyCode);
 
         var lines = (List<Dictionary<string, object?>>)doc["lines"]!;
         var matched = new List<MatchedLine>();

@@ -43,7 +43,7 @@ if (tessdataPrefix == "" && Directory.Exists(defaultTessdata)) tessdataPrefix = 
 // every SAP integration's target environment together without editing URLs/secrets in place.
 var sapBpEnv = Get("Sap:ActiveEnvironment", "dev");
 var zohoEnv = Get("ZohoConfig:ActiveEnvironment", "sandbox");
-startupLog.LogInformation("[CONFIG] Sap active environment (BusinessPartner/SalesOrder/Product) = {Env}", sapBpEnv);
+startupLog.LogInformation("[CONFIG] Sap active environment (BusinessPartner/SalesOrder/Product/Billing) = {Env}", sapBpEnv);
 startupLog.LogInformation("[CONFIG] ZohoConfig active environment = {Env}", zohoEnv);
 
 var appConfig = new AppConfig
@@ -87,13 +87,15 @@ var appConfig = new AppConfig
     SapSalesOrderPriceConditionType = Get("Sap:SalesOrder:PriceConditionType", "ZPR0"),
     SapProductBaseUrl = Get($"Sap:Product:BaseUrl_{Cap(sapBpEnv)}", Get("Sap:Product:BaseUrl")),
     SapProductAuthHeader = Get("Sap:Product:AuthHeader"),
+    SapBillingBaseUrl = Get($"Sap:Billing:BaseUrl_{Cap(sapBpEnv)}", Get("Sap:Billing:BaseUrl")),
+    SapBillingAuthHeader = Get("Sap:Billing:AuthHeader"),
     // MGT/GLC: SalesOrganization/CompanyCode/DefaultPlant per company (see CompanyProfile).
     // Defaults match what was already hardcoded per-module before this existed, so an
     // appsettings.json without these sections still behaves exactly as before.
     Companies =
     [
-        new CompanyProfile("MGT", Get("MGT:SalesOrganization", "1000"), Get("MGT:CompanyCode", "1000"), Get("MGT:DefaultPlant", "1100")),
-        new CompanyProfile("GLC", Get("GLC:SalesOrganization", "2000"), Get("GLC:CompanyCode", "2000"), Get("GLC:DefaultPlant", "2100")),
+        new CompanyProfile("MGT", Get("MGT:SalesOrganization", "1000"), Get("MGT:CompanyCode", "1000"), Get("MGT:DefaultPlant", "1100"), Get("MGT:AuthorizationGroup", "0001")),
+        new CompanyProfile("GLC", Get("GLC:SalesOrganization", "2000"), Get("GLC:CompanyCode", "2000"), Get("GLC:DefaultPlant", "2100"), Get("GLC:AuthorizationGroup", "0002")),
     ],
     ZohoAccountsUrl = Get($"ZohoConfig:{zohoEnv}:AccountsUrl", "https://accounts.zoho.com"),
     ZohoApiDomain = Get($"ZohoConfig:{zohoEnv}:ApiDomain", "https://www.zohoapis.com"),
@@ -122,6 +124,7 @@ builder.Services.AddScoped<MgtOcr.Api.Auth.DepartmentAccessFilter>();
 builder.Services.AddHttpClient<MgtOcr.Sap.SapClient>();
 builder.Services.AddHttpClient<MgtOcr.Sap.SapBusinessPartnerClient>();
 builder.Services.AddHttpClient<MgtOcr.Sap.SapProductClient>();
+builder.Services.AddHttpClient<MgtOcr.Sap.SapBillingClient>();
 // Singleton (not AddHttpClient<T>, unlike the SAP clients above) so its in-memory OAuth
 // access-token cache is shared across requests instead of being torn down each call.
 builder.Services.AddSingleton<MgtOcr.Zoho.ZohoClient>();
