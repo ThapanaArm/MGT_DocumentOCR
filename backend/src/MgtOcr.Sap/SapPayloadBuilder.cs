@@ -125,6 +125,20 @@ public static class SapPayloadBuilder
                     item["_docQuantity"] = $"{FormatGNum(Num(l.Get("qty")))} {l.GetStr("uom")}";
                     item["_uomFactor"] = factor;
                 }
+                // Item-level SD Sales Employee custom field (YY1_SDSalesEmployeeI_SDI). Per the user,
+                // each line records which sales person handled/verified THAT line's mapping. Person ID
+                // (SAP custom value, e.g. "9980000002") is stored per line in the line's `extra` bag
+                // (extra.salesEmployee) so it survives the DB round-trip — GetDocumentAsync only keeps
+                // typed columns + ExtraJson, so a bare top-level line field would be lost by send time.
+                // It's pre-filled from the Sales Order history of this customer+material and picked/
+                // edited by the CS. Priority: per-line extra -> a fresh (not-yet-saved) top-level line
+                // value -> the document-level fallback (header.salesEmployee). Sent only when set, so a
+                // blank never overwrites anything in SAP.
+                var lineExtra = l.Get("extra") as Dictionary<string, object?>;
+                var lineSalesEmp = Pick(lineExtra?.GetStr("salesEmployee"),
+                    Pick(l.GetStr("salesEmployee"), header.GetStr("salesEmployee"), ""), "");
+                if (!string.IsNullOrWhiteSpace(lineSalesEmp))
+                    item["YY1_SDSalesEmployeeI_SDI"] = lineSalesEmp;
                 // Manual Price Gross (ZPR0) — GLC only, and only when a unit price was actually
                 // read/entered for the line. NOTE: entity/nav-property name
                 // (A_SalesOrderItemPrElement via "to_PricingElement") not yet verified against
@@ -187,6 +201,14 @@ public static class SapPayloadBuilder
             var salesGroup = header.GetStr("salesGroup");
             if (!string.IsNullOrWhiteSpace(salesGroup))
                 soPayload["SalesGroup"] = salesGroup;
+            // SD Sales Employee custom field, HEADER extension (YY1_SDSalesEmployee_SDH). The per-line
+            // item field YY1_SDSalesEmployeeI_SDI above is the primary record; this header field is
+            // sent only when the CS set a single document-level sales employee (header.salesEmployee)
+            // — e.g. the whole order handled by one person. Omitted otherwise so a blank never
+            // overwrites anything in SAP, and SAP still derives it from the customer master as before.
+            var salesEmployee = header.GetStr("salesEmployee");
+            if (!string.IsNullOrWhiteSpace(salesEmployee))
+                soPayload["YY1_SDSalesEmployee_SDH"] = salesEmployee;
             return soPayload;
         }
 

@@ -125,6 +125,7 @@ builder.Services.AddHttpClient<MgtOcr.Sap.SapClient>();
 builder.Services.AddHttpClient<MgtOcr.Sap.SapBusinessPartnerClient>();
 builder.Services.AddHttpClient<MgtOcr.Sap.SapProductClient>();
 builder.Services.AddHttpClient<MgtOcr.Sap.SapBillingClient>();
+builder.Services.AddHttpClient<MgtOcr.Sap.SapSalesOrderClient>();
 // Singleton (not AddHttpClient<T>, unlike the SAP clients above) so its in-memory OAuth
 // access-token cache is shared across requests instead of being torn down each call.
 builder.Services.AddSingleton<MgtOcr.Zoho.ZohoClient>();

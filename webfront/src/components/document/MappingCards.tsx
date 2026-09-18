@@ -15,6 +15,8 @@ import {
   type SapLastPrice,
   type SapCustomerPaymentTerms,
   type SapCustomerSalesArea,
+  type SapSalesEmployee,
+  type SapSalesEmployeeSuggestion,
 } from '../../api/sap';
 import {
   searchZohoAccount,
@@ -2036,6 +2038,91 @@ function qtyTxt(n: unknown) {
   return num(n).toLocaleString('en-US', { maximumFractionDigits: 3 });
 }
 
+/* GLC Sales Order, per line: pick which sales person handled/verified THIS line's mapping. The value
+   is a SAP custom Person ID (YY1_SDSalesEmployeeI_SDI). It's auto-filled from the Sales Order history
+   of this customer+material (shown as the "จากประวัติ" hint) and can be changed here from the full
+   list (DB master + live SAP). Person IDs that aren't in the list yet (the current value, or the
+   suggestion) are still offered so nothing is lost. */
+function SalesEmployeePicker({
+  value,
+  suggestion,
+  list,
+  disabled,
+  onChange,
+}: {
+  value: string;
+  suggestion?: SapSalesEmployeeSuggestion | null;
+  list: SapSalesEmployee[];
+  disabled?: boolean;
+  onChange: (personId: string) => void;
+}) {
+  const nameById = new Map<string, string>();
+  for (const e of list) if (e.name) nameById.set(e.personId, e.name);
+  if (suggestion?.personId && suggestion.name) nameById.set(suggestion.personId, suggestion.name);
+
+  const label = (id: string) => {
+    const nm = nameById.get(id);
+    return nm ? `${id} — ${nm}` : id;
+  };
+
+  // Options: every list entry, plus the current value and the suggestion if they're not in the list.
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  const add = (id?: string | null) => { if (id && !seen.has(id)) { seen.add(id); ids.push(id); } };
+  add(value);
+  if (suggestion?.personId) add(suggestion.personId);
+  for (const e of list) add(e.personId);
+
+  const suggestionMatches = !!suggestion?.personId && suggestion.personId === value;
+
+  return (
+    <div className="cmp-sub">
+      <div className="cmp-head">
+        <b>ผู้ขาย (Sales) — รายการนี้</b>
+        {value ? (
+          <span className="badge b-ok" style={{ marginLeft: 8 }}>
+            <i className="fa-solid fa-user-check" /> {label(value)}
+          </span>
+        ) : (
+          <span className="badge b-idle" style={{ marginLeft: 8 }}>ยังไม่ได้เลือก</span>
+        )}
+      </div>
+      <div className="cmp-body" style={{ display: 'block' }}>
+        <select
+          value={value}
+          disabled={disabled}
+          onChange={(e) => onChange(e.target.value)}
+          style={{ maxWidth: 360, width: '100%' }}
+        >
+          <option value="">-- เลือกผู้ขาย --</option>
+          {ids.map((id) => (
+            <option key={id} value={id}>{label(id)}</option>
+          ))}
+        </select>
+        {suggestion?.personId ? (
+          <small className="master-field-help">
+            จากประวัติ: <b>{label(suggestion.personId)}</b>
+            {suggestion.salesOrder ? ` · SO ${suggestion.salesOrder}` : ''}
+            {suggestion.creationDate ? ` · ${suggestion.creationDate}` : ''}
+            {!suggestionMatches && !disabled && (
+              <>
+                {' '}
+                <button className="btn sm" style={{ marginLeft: 6 }} onClick={() => onChange(suggestion.personId)}>
+                  ใช้ค่านี้
+                </button>
+              </>
+            )}
+          </small>
+        ) : (
+          <small className="master-field-help">
+            ไม่พบประวัติผู้ขายของลูกค้ารายนี้กับสินค้านี้ — เลือกจากรายชื่อทั้งหมด
+          </small>
+        )}
+      </div>
+    </div>
+  );
+}
+
 interface Props {
   doc: DocModel;
   map: MapResult;
@@ -2044,8 +2131,9 @@ interface Props {
   plant: string;
   posted: boolean;
   onManualHeader: (key: string, value: string) => void;
-  /** GLC: apply the chosen (or single auto-used) SAP sales area — persists DistributionChannel /
-   *  Division / Sales Group onto the document header so the SAP payload uses them, then re-maps. */
+  /** GLC: persist SO header fields onto the document (so the SAP payload uses them) and re-map —
+   *  the chosen sales area's DistributionChannel / Division / Sales Group. (The Sales Employee is now
+   *  recorded per line via onSetLineSalesEmployee below, not as a header override.) */
   onSetSalesArea: (fields: { distChannel?: string; division?: string; salesGroup?: string }) => void;
   onManualLine: (i: number, value: string) => void;
   onQuickAddVendor: () => void;
@@ -2054,6 +2142,12 @@ interface Props {
   onQuickAddMaterial: (i: number) => void;
   onUseSapMaterial: (i: number, material: SapMaterial) => void;
   onAddUomRule: (i: number) => void;
+  /** GLC Sales Order only: the full Sales Employee pick list (DB master + live SAP), the per-line
+   *  history suggestion (who handled this customer+material last time), and the setter that stores
+   *  the chosen Person ID on the line (extra.salesEmployee → SAP item field YY1_SDSalesEmployeeI_SDI). */
+  salesEmployees?: SapSalesEmployee[];
+  lineSalesEmpSuggest?: Record<number, SapSalesEmployeeSuggestion | null>;
+  onSetLineSalesEmployee?: (i: number, personId: string) => void;
   /** "ดึงหน่วยแปลงจาก SAP" — for a material that's already matched locally but has no/wrong Unit
    *  Conversion rule: fetches SAP's live pack size for the matched material and opens the same
    *  editable confirm-and-save popup as onUseSapMaterial's step 2, pre-filled with it. Unlike
@@ -2119,6 +2213,9 @@ export default function MappingCards({
   onQuickAddMaterial,
   onUseSapMaterial,
   onAddUomRule,
+  salesEmployees,
+  lineSalesEmpSuggest,
+  onSetLineSalesEmployee,
   onFetchSapUom,
   onUseSapCustomer,
   onUseZohoAccount,
@@ -2630,6 +2727,18 @@ export default function MappingCards({
               </div>
             </div>
           </div>
+        )}
+        {/* GLC only, per matched line: which sales person handled/verified this line's mapping.
+            Auto-filled from the Sales Order history of this customer+material, editable from the full
+            list. Persisted per line and sent as the SAP item custom field YY1_SDSalesEmployeeI_SDI. */}
+        {!isMgt && r.code && onSetLineSalesEmployee && (
+          <SalesEmployeePicker
+            value={((l.extra as Record<string, string> | undefined)?.salesEmployee) || ''}
+            suggestion={lineSalesEmpSuggest?.[i]}
+            list={salesEmployees || []}
+            disabled={posted}
+            onChange={(personId) => onSetLineSalesEmployee(i, personId)}
+          />
         )}
       </CmpCard>
     );

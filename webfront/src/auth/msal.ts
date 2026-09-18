@@ -25,11 +25,11 @@ export const AUTH_ENABLED = clientId.length > 0;
 // reads: the backend only honours tokens from the tenants listed in AzureAd:Tenants, and then only
 // for addresses with an active row in Ms_User. Keeping it generic here means the group's second
 // company — expected to have its own tenant — needs no frontend change at all.
-const authority = (import.meta.env.VITE_AZURE_AUTHORITY ??
+const authority = (import.meta.env.VITE_AZURE_AUTHORITY ||
   'https://login.microsoftonline.com/organizations').trim();
 
 // Must match the scope exposed by the app registration ("Expose an API" -> access_as_user).
-const apiScope = (import.meta.env.VITE_AZURE_API_SCOPE ??
+const apiScope = (import.meta.env.VITE_AZURE_API_SCOPE ||
   (clientId ? `api://${clientId}/access_as_user` : '')).trim();
 
 const config: Configuration = {

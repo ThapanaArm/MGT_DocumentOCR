@@ -200,3 +200,44 @@ export const getSapCustomerSalesAreas = (soldToSapCode: string, salesOrganizatio
     `/api/sap/business-partner/${encodeURIComponent(soldToSapCode)}/sales-areas` + (suffix ? '?' + suffix : ''),
   );
 };
+
+/* Sales Employee (per Sales Order line) — GLC flow. Two endpoints:
+   1) last-sales-employee: who was the Sales Employee the LAST time THIS customer bought THIS
+      material, read from the most recent Sales Order item custom field YY1_SDSalesEmployeeI_SDI.
+      Used to pre-fill each OCR line with a suggestion. `suggestion` is null when there's no prior
+      order for the pair / SAP not configured / lookup failed — treat as optional, then fall back to
+      the full picker.
+   2) sales-employees: the full pick list, merged from the DB master
+      (dbo.SysDataMapping Subject='SalesEmployee') AND live SAP (distinct Person IDs used on recent
+      orders). Each entry carries a name (from DB when known) and which sources it came from.
+   Backend: GET /api/sap/sales-order/last-sales-employee, GET /api/sap/sales-employees
+   (MgtOcr.Sap.SapSalesOrderClient + MasterRepository). */
+
+export interface SapSalesEmployeeSuggestion {
+  /** SAP custom Person ID, e.g. "9980000002". */
+  personId: string;
+  /** Display name from the DB master, or null when the DB has no row for this Person ID. */
+  name?: string | null;
+  /** The Sales Order the suggestion was read from (for "as used on SO ####"). */
+  salesOrder?: string | null;
+  creationDate?: string | null;
+}
+
+export const getSapLastSalesEmployee = (customerCode: string, materialCode: string) => {
+  const qs = new URLSearchParams({ customer: customerCode, material: materialCode });
+  return api.get<{ customer: string; material: string; suggestion: SapSalesEmployeeSuggestion | null }>(
+    '/api/sap/sales-order/last-sales-employee?' + qs.toString(),
+  );
+};
+
+export interface SapSalesEmployee {
+  personId: string;
+  name?: string | null;
+  /** "db", "sap", or both — where this Person ID was found. */
+  sources: string[];
+  lastSalesOrder?: string | null;
+  lastCreationDate?: string | null;
+}
+
+export const getSapSalesEmployees = () =>
+  api.get<{ count: number; results: SapSalesEmployee[] }>('/api/sap/sales-employees');

@@ -46,8 +46,8 @@ import MasterEditModal, {
   type MasterEditState,
 } from '../components/master/MasterEditModal';
 import { createMaster } from '../api/masters';
-import type { SapBusinessPartner, SapLastPrice, SapMaterial, SapMaterialDetail, SapPartnerFunctionLink } from '../api/sap';
-import { getSapLastPrice, getSapMaterialDetail } from '../api/sap';
+import type { SapBusinessPartner, SapLastPrice, SapMaterial, SapMaterialDetail, SapPartnerFunctionLink, SapSalesEmployee, SapSalesEmployeeSuggestion } from '../api/sap';
+import { getSapLastPrice, getSapMaterialDetail, getSapSalesEmployees, getSapLastSalesEmployee } from '../api/sap';
 import type {
   ZohoAccount,
   ZohoShipToInfo,
@@ -185,6 +185,14 @@ export default function DocumentPage() {
 
   const [masterEdit, setMasterEdit] = useState<MasterEditState | null>(null);
 
+  // GLC Sales Order — per-line Sales Employee (SD item custom field YY1_SDSalesEmployeeI_SDI).
+  // salesEmps: the full pick list (DB master + live SAP), loaded once. lineSalesEmpSuggest: the
+  // history-based suggestion per line (who handled this customer+material last time), shown as a hint.
+  // salesEmpAutoRef guards the auto-fill effect so it runs once per set of matched materials.
+  const [salesEmps, setSalesEmps] = useState<SapSalesEmployee[]>([]);
+  const [lineSalesEmpSuggest, setLineSalesEmpSuggest] = useState<Record<number, SapSalesEmployeeSuggestion | null>>({});
+  const salesEmpAutoRef = useRef<string>('');
+
   // Load document on mount / id change.
   useEffect(() => {
     let alive = true;
@@ -221,6 +229,69 @@ export default function DocumentPage() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
+
+  // GLC Sales Order: load the full Sales Employee pick list once (Ms_User.PersonID + live SAP).
+  // MGT/Zoho and non-SO documents don't use it. Best-effort — an empty list just means the per-line
+  // picker shows only whatever history suggested. (Declared here, above the early returns below, so
+  // the hook order stays stable on every render — React requires every hook to run unconditionally.)
+  useEffect(() => {
+    if (isMgt || !doc || doc.module !== 'SO') return;
+    let alive = true;
+    getSapSalesEmployees()
+      .then((r) => { if (alive) setSalesEmps(r.results || []); })
+      .catch(() => {});
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isMgt, doc?.module]);
+
+  // GLC Sales Order: once the mapping is in, look up who was the Sales Employee the LAST time this
+  // customer bought each matched material, and auto-fill the line with it (the person can still
+  // change it via the per-line picker). Runs once per set of matched material codes (salesEmpAutoRef),
+  // fetches every line's suggestion in parallel, then persists all found suggestions with ONE re-map.
+  // Only fills lines that don't already have a chosen sales employee, so it never overwrites a manual
+  // pick and converges (after the re-map the filled lines are no longer empty).
+  useEffect(() => {
+    if (isMgt || !doc || doc.module !== 'SO' || !map) return;
+    const cust = map.header.customer?.sapCode || map.header.customer?.code;
+    if (!cust) return;
+    const sig = doc.docId + '|' + (map.lines || []).map((m) => m?.code || '').join(',');
+    if (salesEmpAutoRef.current === sig) return;
+    salesEmpAutoRef.current = sig;
+
+    let alive = true;
+    (async () => {
+      const targets: { i: number; code: string }[] = [];
+      doc.lines.forEach((l, i) => {
+        const code = map.lines?.[i]?.code;
+        const has = (l.extra as Record<string, string> | undefined)?.salesEmployee;
+        if (code && !has) targets.push({ i, code });
+      });
+      if (!targets.length) return;
+      const results = await Promise.all(
+        targets.map((t) =>
+          getSapLastSalesEmployee(cust, t.code)
+            .then((r) => ({ i: t.i, s: r.suggestion }))
+            .catch(() => ({ i: t.i, s: null as SapSalesEmployeeSuggestion | null })),
+        ),
+      );
+      if (!alive) return;
+      const suggMap: Record<number, SapSalesEmployeeSuggestion | null> = {};
+      results.forEach((r) => { suggMap[r.i] = r.s; });
+      setLineSalesEmpSuggest((prev) => ({ ...prev, ...suggMap }));
+
+      const found = results.filter((r) => r.s && r.s.personId);
+      if (!found.length) return;
+      const lines = doc.lines.slice();
+      found.forEach((r) => {
+        lines[r.i] = { ...lines[r.i], extra: { ...(lines[r.i].extra || {}), salesEmployee: r.s!.personId } };
+      });
+      const updated = { ...doc, lines };
+      setDoc(updated);
+      await runMap(true, updated);
+    })();
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isMgt, doc?.docId, map]);
 
   if (failed) return <div className="card"><div className="empty">Failed to load document</div></div>;
   if (!doc || !masters) return <div className="card"><div className="empty">Loading…</div></div>;
@@ -269,6 +340,19 @@ export default function DocumentPage() {
   const setSalesArea = (fields: { distChannel?: string; division?: string; salesGroup?: string }) =>
     guard(async () => {
       const updated = { ...doc, header: { ...doc.header, ...fields } };
+      setDoc(updated);
+      await runMap(true, updated);
+    });
+
+  // GLC: record which sales person handled/verified THIS line's mapping. Stored in the line's
+  // `extra` bag (extra.salesEmployee) so it survives the DB round-trip and is emitted per item as the
+  // SAP custom field YY1_SDSalesEmployeeI_SDI. Re-maps to persist (same reason as setSalesArea — the
+  // payload is rebuilt from the stored document at send time).
+  const setLineSalesEmployee = (i: number, personId: string) =>
+    guard(async () => {
+      const lines = doc.lines.slice();
+      lines[i] = { ...lines[i], extra: { ...(lines[i].extra || {}), salesEmployee: personId } };
+      const updated = { ...doc, lines };
       setDoc(updated);
       await runMap(true, updated);
     });
@@ -1172,6 +1256,9 @@ export default function DocumentPage() {
           onQuickAddMaterial={quickAddMaterial}
           onUseSapMaterial={useSapMaterial}
           onAddUomRule={addUomRule}
+          salesEmployees={salesEmps}
+          lineSalesEmpSuggest={lineSalesEmpSuggest}
+          onSetLineSalesEmployee={setLineSalesEmployee}
           onUseSapCustomer={useSapCustomer}
           onUseZohoAccount={useZohoCustomer}
           onUseSapShipTo={useSapShipTo}
