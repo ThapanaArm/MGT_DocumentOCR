@@ -1,14 +1,10 @@
 import type { OcrProvider } from '../api/masters';
 
-/* Ports ocrProviderSelect() — a <select> of OCR engines with ready flags. */
-export default function OcrProviderSelect({
-  id,
-  providers,
-  value,
-  onChange,
-  className = 'ocr-pick',
-  disabled,
-}: {
+/* Was a <select> of OCR engines. Per Megachem the reading engine is now LOCKED to Gemini
+   everywhere, so there is nothing to choose — this renders a plain, read-only label that just tells
+   the user which AI is reading the document. The old props (value / onChange / disabled) are still
+   accepted so every caller keeps compiling, but they're intentionally unused now. */
+export default function OcrProviderSelect(props: {
   id?: string;
   providers: OcrProvider[];
   value: string;
@@ -16,24 +12,33 @@ export default function OcrProviderSelect({
   className?: string;
   disabled?: boolean;
 }) {
-  // Locked to Gemini: only the Gemini engine is offered in the dropdown (per Megachem). Falls back
-  // to the full list only if no Gemini engine is present, so the control is never empty.
-  const geminiOnly = providers.filter((p) => p.id.toLowerCase().includes('gemini'));
-  const opts = geminiOnly.length ? geminiOnly : providers;
+  const { id, providers, className = 'ocr-engine-label' } = props;
+
+  // Show the Gemini engine's own label when it's in the list, else a sensible constant so the badge
+  // is never empty even before the provider list has loaded.
+  const gemini = providers.find((p) => p.id.toLowerCase().includes('gemini'));
+  const label = gemini?.label || 'Gemini Vision (AI)';
+
   return (
-    <select
+    <span
       id={id}
       className={className}
-      value={value}
-      disabled={disabled}
-      onChange={(e) => onChange(e.target.value)}
+      title={gemini?.desc || 'AI engine used to read this document'}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 6,
+        padding: '4px 10px',
+        borderRadius: 999,
+        background: 'var(--chip-bg, #eef2ff)',
+        color: 'var(--chip-fg, #3730a3)',
+        border: '1px solid var(--chip-bd, #c7d2fe)',
+        fontSize: 13,
+        fontWeight: 600,
+        whiteSpace: 'nowrap',
+      }}
     >
-      {opts.map((p) => (
-        <option key={p.id} value={p.id} title={p.desc}>
-          {p.label}
-          {p.ready ? '' : ' (Not configured)'}
-        </option>
-      ))}
-    </select>
+      <i className="fa-solid fa-robot" /> {label}
+    </span>
   );
 }
