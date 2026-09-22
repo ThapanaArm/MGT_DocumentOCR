@@ -1,17 +1,16 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useAppState } from '../state/AppState';
 import { useMeta } from '../state/MetaContext';
-import { deleteDocument, listDocuments, type InboxRow } from '../api/documents';
+import { deleteDocument, listDocumentsPaged, type DocumentsPage, type InboxRow } from '../api/documents';
 import { dt, fmt, moduleLabel, statusBadge } from '../utils/format';
 import { OCR_PROVIDER_SHORT } from '../constants/fields';
 import type { ModuleCode } from '../api/types';
-import Pager, { DateRange, inDateRange, paginate } from '../components/Pager';
+import Pager, { DateRange } from '../components/Pager';
+import { usePagedList } from '../hooks/usePagedList';
 
-// Deprecated. The backend no longer reads any "user" value sent by the client — it stamps the
-// identity from the validated Entra ID token instead, so whatever is passed here is discarded.
-// Left in place only so the existing call signatures keep compiling; remove it together with the
-// `user` parameters in api/documents.ts.
+// Deprecated. The backend stamps identity from the validated token; whatever is passed here is
+// discarded. Kept only so the delete call signature keeps compiling.
 const USER = '(ignored by the server)';
 
 function inboxTitle(mod?: string | null) {
@@ -32,70 +31,54 @@ function docFormat(mod?: string | null): { label: string; cls: string } {
 export default function InboxPage() {
   const { module } = useParams<{ module: ModuleCode }>();
   const mod = module ?? null;
-  // AP = liability-recording list: shows Supplier (with PO) + Incoming (without PO) together;
-  // both use the Document Type (liability) category.
   const isInvoice = mod === 'AP';
+  const isSalesOrder = mod === 'SO';
   const navigate = useNavigate();
   const { guard, showToast } = useAppState();
   const { apDocCategories, loadApDocCategories } = useMeta();
 
-  const [rows, setRows] = useState<InboxRow[] | null>(null);
+  // Page-local filter state; the current page of rows + total + counts come from the shared hook.
   const [search, setSearch] = useState('');
+  const [searchQ, setSearchQ] = useState(''); // debounced value sent to the server
   const [category, setCategory] = useState('');
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(50);
-  const [invTab, setInvTab] = useState<'all' | 'AP' | 'II'>('all'); // Supplier(AP)/Incoming(II) tabs on the merged invoice list
+  const [invTab, setInvTab] = useState<'all' | 'AP' | 'II'>('all');
 
-  const reload = () => {
-    setRows(null);
-    guard(() => listDocuments(mod, category)).then((r) => setRows(r ?? []));
-  };
-
+  // Reset filters when the module tab changes (page reset is handled by the hook when deps change).
   useEffect(() => {
     if (isInvoice) loadApDocCategories();
     setCategory('');
     setInvTab('all');
-    setPage(1);
-    setRows(null);
-    guard(() => listDocuments(mod, '')).then((r) => setRows(r ?? []));
+    setSearch('');
+    setSearchQ('');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mod]);
 
-  const searchDateFiltered = useMemo(() => {
-    if (!rows) return [];
-    const q = search.trim().toLowerCase();
-    let list = !q
-      ? rows
-      : rows.filter(
-          (r) =>
-            String(r.DocNo || '').toLowerCase().includes(q) ||
-            String(r.PartnerName || '').toLowerCase().includes(q),
-        );
-    list = list.filter((r) => inDateRange(r.DocDate, from, to));
-    return list;
-  }, [rows, search, from, to]);
+  // Debounce the search box so typing doesn't hit the server on every keystroke.
+  useEffect(() => {
+    const t = setTimeout(() => setSearchQ(search), 350);
+    return () => clearTimeout(t);
+  }, [search]);
 
-  // Supplier(AP) / Incoming(II) tab filter — only on the merged invoice list.
-  const filtered = useMemo(
-    () =>
-      isInvoice && invTab !== 'all'
-        ? searchDateFiltered.filter((r) => r.Module === invTab)
-        : searchDateFiltered,
-    [searchDateFiltered, isInvoice, invTab],
+  const { rows, total, data, page, pageSize, setPage, setPageSize, reload } = usePagedList<InboxRow, DocumentsPage>(
+    (pg, ps) =>
+      guard(() =>
+        listDocumentsPaged({
+          module: mod,
+          apDocCategory: category,
+          search: searchQ,
+          dateFrom: from,
+          dateTo: to,
+          invModule: invTab === 'all' ? '' : invTab,
+          page: pg,
+          pageSize: ps,
+        }),
+      ),
+    [mod, category, from, to, invTab, searchQ],
   );
 
-  const invCounts = useMemo(
-    () => ({
-      all: searchDateFiltered.length,
-      AP: searchDateFiltered.filter((r) => r.Module === 'AP').length,
-      II: searchDateFiltered.filter((r) => r.Module === 'II').length,
-    }),
-    [searchDateFiltered],
-  );
-
-  const pageRows = paginate(filtered, page, pageSize);
+  const invCounts = data?.counts ?? { all: total, AP: 0, II: 0 };
   const catLabel = (id: string | null) =>
     (apDocCategories ?? []).find((c) => c.id === id)?.label || id || '';
 
@@ -109,52 +92,41 @@ export default function InboxPage() {
   };
 
   const invColHead = ['AP', 'II', 'PODP'].includes(mod ?? '') ? 'Invoice Number' : 'PO Number';
-  const colCount = 12 + (!mod ? 1 : 0) + (isInvoice ? 1 : 0);
+  const colCount = 12 + (!mod ? 1 : 0) + (isInvoice ? 1 : 0) - (isSalesOrder ? 2 : 0);
 
   return (
     <div className="card">
-      <div className="card-h">
+      <div className="card-h register-toolbar">
         <h2>
-          {inboxTitle(mod)} ({filtered.length})
+          {inboxTitle(mod)} ({total})
         </h2>
-        <div className="sp" />
-        <input
-          type="text"
-          placeholder="Search partner / document no.…"
-          value={search}
-          onChange={(e) => {
-            setSearch(e.target.value);
-            setPage(1);
-          }}
-          style={{ maxWidth: 220, marginRight: 8 }}
-        />
-        <span className="hint" style={{ marginRight: 4 }}>
-          Date:
-        </span>
-        <DateRange from={from} to={to} setFrom={setFrom} setTo={setTo} />
-        <div style={{ marginRight: 8 }} />
-        {isInvoice && (
-          <select
-            value={category}
-            onChange={(e) => {
-              setCategory(e.target.value);
-              setPage(1);
-              setRows(null);
-              guard(() => listDocuments(mod, e.target.value)).then((r) => setRows(r ?? []));
-            }}
-            style={{ marginRight: 8 }}
-          >
-            <option value="">All Document Types</option>
-            {(apDocCategories ?? []).map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.label}
-              </option>
-            ))}
-          </select>
-        )}
-        <button className="btn sm" onClick={reload}>
-          <i className="fa-solid fa-arrow-rotate-right" /> Refresh
-        </button>
+        <div className="register-filters">
+          <input
+            className="register-search"
+            type="search"
+            aria-label="Search documents"
+            placeholder="Search partner / document no.…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+          <div className="register-date-filter">
+            <span className="hint">Date:</span>
+            <DateRange from={from} to={to} setFrom={setFrom} setTo={setTo} />
+          </div>
+          {isInvoice && (
+            <select value={category} onChange={(e) => setCategory(e.target.value)}>
+              <option value="">All Document Types</option>
+              {(apDocCategories ?? []).map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.label}
+                </option>
+              ))}
+            </select>
+          )}
+          <button className="btn sm" onClick={reload}>
+            <i className="fa-solid fa-arrow-rotate-right" /> Refresh
+          </button>
+        </div>
       </div>
       <div className="card-b">
         {isInvoice && (
@@ -162,41 +134,38 @@ export default function InboxPage() {
             {(
               [
                 ['all', 'All', invCounts.all],
-                ['AP', 'Supplier Invoice \u00b7 With PO', invCounts.AP],
-                ['II', 'Incoming Invoice \u00b7 Without PO', invCounts.II],
+                ['AP', 'Supplier Invoice · With PO', invCounts.AP],
+                ['II', 'Incoming Invoice · Without PO', invCounts.II],
               ] as const
             ).map(([key, label, count]) => (
               <button
                 key={key}
                 className={'btn sm' + (invTab === key ? '' : ' ghost')}
-                onClick={() => {
-                  setInvTab(key);
-                  setPage(1);
-                }}
+                onClick={() => setInvTab(key)}
               >
                 {label} ({count})
               </button>
             ))}
           </div>
         )}
-        <div className="tw">
-          <table>
+        <div className="tw register-table-wrap">
+          <table className="reg">
             <thead>
               <tr>
                 <th>#</th>
                 {!mod && <th>Module</th>}
-                <th>File</th>
+                <th className="reg-col-file">File</th>
                 <th>{invColHead}</th>
-                <th>Type</th>
-                <th>PO Date</th>
-                <th>Supplier</th>
+                {!isSalesOrder && <th className="reg-col-type">Type</th>}
+                <th className="reg-col-date">PO Date</th>
+                <th className="reg-col-supplier">Supplier</th>
                 <th style={{ textAlign: 'right' }}>Total</th>
                 {isInvoice && <th>Document Type</th>}
                 <th>Status</th>
-                <th>Model OCR</th>
-                <th>SAP Doc</th>
-                <th>Create Date</th>
-                <th />
+                {!isSalesOrder && <th className="reg-col-ocr">Model OCR</th>}
+                <th className="reg-col-sap">SAP Doc</th>
+                <th className="reg-col-created">Create Date</th>
+                <th className="reg-col-actions" aria-label="Actions" />
               </tr>
             </thead>
             <tbody>
@@ -206,11 +175,16 @@ export default function InboxPage() {
                     Loading…
                   </td>
                 </tr>
-              ) : pageRows.length ? (
-                pageRows.map((r) => {
+              ) : rows.length ? (
+                rows.map((r) => {
                   const sb = statusBadge(r.Status);
                   return (
-                    <tr key={r.DocId}>
+                    <tr
+                      key={r.DocId}
+                      className="reg-row"
+                      style={{ cursor: 'pointer' }}
+                      onClick={() => navigate('/doc/' + r.DocId)}
+                    >
                       <td>{r.DocId}</td>
                       {!mod && (
                         <td>
@@ -224,16 +198,18 @@ export default function InboxPage() {
                           </span>
                         </td>
                       )}
-                      <td>{r.FileName || ''}</td>
+                      <td className="reg-col-file" title={r.FileName || ''}>{r.FileName || ''}</td>
                       <td>{r.DocNo || ''}</td>
-                      <td>
-                        {(() => {
-                          const fmtd = docFormat(r.Module);
-                          return <span className={'badge ' + fmtd.cls}>{fmtd.label}</span>;
-                        })()}
-                      </td>
-                      <td>{r.DocDate || ''}</td>
-                      <td>{r.PartnerName || ''}</td>
+                      {!isSalesOrder && (
+                        <td className="reg-col-type">
+                          {(() => {
+                            const fmtd = docFormat(r.Module);
+                            return <span className={'badge ' + fmtd.cls}>{fmtd.label}</span>;
+                          })()}
+                        </td>
+                      )}
+                      <td className="reg-col-date">{r.DocDate || ''}</td>
+                      <td className="reg-col-supplier" title={r.PartnerName || ''}>{r.PartnerName || ''}</td>
                       <td style={{ textAlign: 'right' }}>{fmt(r.TotalAmount)}</td>
                       {isInvoice && (
                         <td>
@@ -246,20 +222,27 @@ export default function InboxPage() {
                           <span className="hint">{Math.round(r.OcrConfidence * 100)}%</span>
                         )}
                       </td>
-                      <td>
-                        <span className="hint">
-                          {OCR_PROVIDER_SHORT[r.OcrProvider ?? ''] || r.OcrProvider || '—'}
-                        </span>
-                      </td>
-                      <td>{r.SapDocNo || ''}</td>
-                      <td className="hint">{dt(r.CreatedAt)}</td>
-                      <td style={{ whiteSpace: 'nowrap' }}>
-                        <button className="btn sm" onClick={() => navigate('/doc/' + r.DocId)}>
-                          Open
-                        </button>{' '}
+                      {!isSalesOrder && (
+                        <td className="reg-col-ocr">
+                          <span className="hint">
+                            {OCR_PROVIDER_SHORT[r.OcrProvider ?? ''] || r.OcrProvider || '—'}
+                          </span>
+                        </td>
+                      )}
+                      <td className="reg-col-sap">{r.SapDocNo || ''}</td>
+                      <td className="hint reg-col-created">{dt(r.CreatedAt)}</td>
+                      <td className="reg-col-actions" style={{ whiteSpace: 'nowrap' }}>
                         {r.Status !== 'POSTED' && (
-                          <button className="btn sm ghost" onClick={() => delDoc(r.DocId)}>
-                            <i className="fa-solid fa-xmark" />
+                          <button
+                            className="btn sm ghost"
+                            title="Delete"
+                            aria-label="Delete"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              delDoc(r.DocId);
+                            }}
+                          >
+                            <i className="fa-solid fa-trash-can" />
                           </button>
                         )}
                       </td>
@@ -269,20 +252,14 @@ export default function InboxPage() {
               ) : (
                 <tr>
                   <td colSpan={colCount} className="empty">
-                    No documents in the system yet
+                    No documents found
                   </td>
                 </tr>
               )}
             </tbody>
           </table>
         </div>
-        <Pager
-          page={page}
-          setPage={setPage}
-          pageSize={pageSize}
-          setPageSize={setPageSize}
-          total={filtered.length}
-        />
+        <Pager page={page} setPage={setPage} pageSize={pageSize} setPageSize={setPageSize} total={total} />
       </div>
     </div>
   );

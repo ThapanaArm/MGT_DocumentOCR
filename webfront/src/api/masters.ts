@@ -55,7 +55,15 @@ export interface LogRow {
   FileName: string | null;
   [k: string]: unknown;
 }
-export const getLogs = () => api.get<LogRow[]>('/api/logs?limit=5000');
+export interface PagedLogs { results: LogRow[]; total: number; }
+export const getLogs = (params: { dateFrom?: string; dateTo?: string; page: number; pageSize: number }) => {
+  const qs = new URLSearchParams();
+  if (params.dateFrom) qs.set('dateFrom', params.dateFrom);
+  if (params.dateTo) qs.set('dateTo', params.dateTo);
+  qs.set('page', String(params.page));
+  qs.set('pageSize', String(params.pageSize));
+  return api.get<PagedLogs>('/api/logs?' + qs.toString());
+};
 export const getLogPayload = (id: number) => api.get<Record<string, any>>('/api/logs/' + id + '/payload');
 
 export interface AuditRow {
@@ -70,4 +78,13 @@ export interface AuditRow {
   PerformedBy: string | null;
   [k: string]: unknown;
 }
-export const getAuditLogs = () => api.get<AuditRow[]>('/api/audit-logs?limit=5000');
+export interface PagedAudit { results: AuditRow[]; total: number; }
+export const getAuditLogs = (params: { module?: string; dateFrom?: string; dateTo?: string; page: number; pageSize: number }) => {
+  const qs = new URLSearchParams();
+  if (params.module) qs.set('module', params.module);
+  if (params.dateFrom) qs.set('dateFrom', params.dateFrom);
+  if (params.dateTo) qs.set('dateTo', params.dateTo);
+  qs.set('page', String(params.page));
+  qs.set('pageSize', String(params.pageSize));
+  return api.get<PagedAudit>('/api/audit-logs?' + qs.toString());
+};

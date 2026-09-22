@@ -17,6 +17,24 @@ export interface SapBusinessPartner {
    *  physical locations. Not yet confirmed reliable, may be null. */
   addressCity?: string | null;
   addressStreet?: string | null;
+  /** Address sub-fields added 2026-09-22 alongside the SAP backend's expanded
+   *  A_BusinessPartnerAddress $select (see SapBusinessPartnerClient.BusinessPartner) -- the SAP
+   *  equivalents of Zoho's ZohoShipToInfo breakdown, so Ship-to/Sold-to can show more than just
+   *  street+city for SAP too. Street2-5/DifferenceCity added same day (2026-09-22, second pass)
+   *  once Megachem's own SAP->Zoho Ship_to sync job (ZohoShipToSyncJob, a separate service)
+   *  confirmed SAP does have 4 street lines plus a "home city"/Difference City equivalent
+   *  (StreetPrefixName/AdditionalStreetPrefixName/StreetSuffixName/AdditionalStreetSuffixName/
+   *  HomeCityName) -- this class's first pass had only gone up to Street 3 and guessed the wrong
+   *  OData field names for it. */
+  addressHouseNumber?: string | null;
+  addressDistrict?: string | null;
+  addressPostalCode?: string | null;
+  addressCountry?: string | null;
+  addressStreet2?: string | null;
+  addressStreet3?: string | null;
+  addressStreet4?: string | null;
+  addressStreet5?: string | null;
+  addressDifferenceCity?: string | null;
   /** SAP's own Tax ID on file for this partner (A_BusinessPartnerTaxNumber, BPTaxNumber) — always
    *  filled in when SAP has one, regardless of whether the search was by Tax ID or by name, so it
    *  can be shown/used even when the document being matched had none of its own. */

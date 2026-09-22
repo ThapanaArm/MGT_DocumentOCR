@@ -1,32 +1,23 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useState } from 'react';
 import { useAppState } from '../state/AppState';
 import { getLogPayload, getLogs, type LogRow } from '../api/masters';
 import { dt, fmt } from '../utils/format';
 import { OCR_PROVIDER_SHORT } from '../constants/fields';
 import Modal, { ModalHeader } from '../components/Modal';
-import Pager, { DateRange, inDateRange, paginate } from '../components/Pager';
+import Pager, { DateRange } from '../components/Pager';
+import { usePagedList } from '../hooks/usePagedList';
 
-/* Ports renderLog()/renderLogLocal()/showLogPayload(). */
+/* SAP submission history — server-side paged (see usePagedList); only the current page is loaded. */
 export default function LogPage() {
   const { guard } = useAppState();
-  const [rows, setRows] = useState<LogRow[] | null>(null);
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(50);
   const [payload, setPayload] = useState<{ id: number; data: Record<string, any> } | null>(null);
 
-  const reload = () => {
-    setRows(null);
-    guard(() => getLogs()).then((r) => setRows(r ?? []));
-  };
-  useEffect(reload, [guard]);
-
-  const filtered = useMemo(
-    () => (rows ?? []).filter((l) => inDateRange(l.PostedAt, from, to)),
-    [rows, from, to],
+  const { rows, total, page, pageSize, setPage, setPageSize, reload } = usePagedList<LogRow>(
+    (pg, ps) => guard(() => getLogs({ dateFrom: from, dateTo: to, page: pg, pageSize: ps })),
+    [from, to],
   );
-  const pageRows = paginate(filtered, page, pageSize);
 
   const showPayload = (id: number) =>
     guard(async () => {
@@ -37,7 +28,7 @@ export default function LogPage() {
   return (
     <div className="card">
       <div className="card-h">
-        <h2>SAP Submission History ({filtered.length})</h2>
+        <h2>SAP Submission History ({total})</h2>
         <div className="sp" />
         <span className="hint" style={{ marginRight: 4 }}>
           Date:
@@ -73,8 +64,8 @@ export default function LogPage() {
                     Loading…
                   </td>
                 </tr>
-              ) : pageRows.length ? (
-                pageRows.map((l) => (
+              ) : rows.length ? (
+                rows.map((l) => (
                   <tr key={l.LogId}>
                     <td className="hint">{dt(l.PostedAt)}</td>
                     <td>
@@ -123,7 +114,7 @@ export default function LogPage() {
             </tbody>
           </table>
         </div>
-        <Pager page={page} setPage={setPage} pageSize={pageSize} setPageSize={setPageSize} total={filtered.length} />
+        <Pager page={page} setPage={setPage} pageSize={pageSize} setPageSize={setPageSize} total={total} />
       </div>
 
       <Modal open={payload != null} onClose={() => setPayload(null)}>

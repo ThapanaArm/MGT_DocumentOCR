@@ -160,6 +160,52 @@ public class ZohoDealClient(ZohoClient zoho)
             Items: ExtractDealItems(full));
     }
 
+    /// <summary>
+    /// Manual fallback for when the automatic Account_Code lookup above finds nothing --
+    /// searches by the Deal's own name instead, with NO account-code or stage filter at all, so
+    /// the person can see (and pick) a Deal that the auto lookup missed because: the Deal's
+    /// Account_Code doesn't match this document's customer code (e.g. the Deal's Account wasn't
+    /// set, or a different/duplicate Account was picked when it was created -- Account_Code is
+    /// auto-filled by Zoho from the linked Account and is blank/wrong if that link is wrong), or
+    /// because the Deal is already in a Closed stage. The Stage and Account_Code of every result
+    /// are returned so the UI can show the person which of those two reasons applies.
+    /// </summary>
+    public async Task<List<ZohoDeal>> SearchByNameAsync(string nameContains, int top = 20)
+    {
+        var query = nameContains?.Trim();
+        if (string.IsNullOrEmpty(query)) return [];
+        var module = await ResolveModuleAsync();
+        var rows = await zoho.QueryCoqlAsync(
+            module,
+            "id, Deal_Name, Stage, Account_Code, Customer_Ref, Delivery_Date, Closing_Date",
+            $"Deal_Name like '%{Escape(query)}%'",
+            "Deal_Name");
+
+        var result = new List<ZohoDeal>();
+        foreach (var row in rows.Take(top))
+        {
+            var id = Str(row, "id");
+            if (string.IsNullOrEmpty(id)) continue;
+
+            // COQL cannot return subform data (see FindOpenDealsByAccountCodeAsync) -- fetch the
+            // full record so a picked search result already carries its Deal Items.
+            var full = await zoho.GetByIdAsync(module, id);
+            var items = full is null ? [] : ExtractDealItems(full);
+
+            result.Add(new ZohoDeal(
+                Id: id,
+                DealName: Str(row, "Deal_Name") ?? "",
+                Stage: Str(row, "Stage") ?? "",
+                AccountId: full is null ? null : LookupId(full["Account_Name"]),
+                AccountCode: Str(row, "Account_Code"),
+                CustomerRef: Str(row, "Customer_Ref"),
+                DeliveryDate: Str(row, "Delivery_Date"),
+                ClosingDate: Str(row, "Closing_Date"),
+                Items: items));
+        }
+        return result;
+    }
+
     // The Deal Items subform's own container field is never given an "API Name" in the manual's
     // field table (only its individual columns are, since it's a custom subform with no
     // standard Zoho equivalent to fall back on) — so rather than guess the container's key,

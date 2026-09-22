@@ -15,10 +15,7 @@ export default function Pager({
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const cur = Math.min(Math.max(1, page), totalPages);
   return (
-    <div
-      className="row"
-      style={{ justifyContent: 'space-between', alignItems: 'center', marginTop: 12, flexWrap: 'wrap', gap: 10 }}
-    >
+    <div className="pager">
       <div className="row" style={{ gap: 6, alignItems: 'center' }}>
         <span className="hint">Show</span>
         <select
@@ -28,7 +25,7 @@ export default function Pager({
             setPage(1);
           }}
         >
-          {[10, 50, 100].map((n) => (
+          {[10, 25, 50, 100].map((n) => (
             <option key={n} value={n}>
               {n}
             </option>

@@ -152,6 +152,10 @@
   .b-ok{background:var(--green-bg);color:var(--green)}
   .b-fail{background:var(--red-bg);color:var(--red)}
   .b-warn{background:var(--orange-bg);color:var(--orange)}
+  /* F08: warn-badge text darkened in light mode — #c79305 on the light amber bg was ~2.6:1,
+     below WCAG AA. Dark mode keeps the bright amber, already high-contrast on its dark bg. */
+  .b-warn{color:#7a5a00}
+  [data-theme="dark"] .b-warn{color:var(--orange)}
   .b-idle{background:var(--line-soft);color:var(--muted)}
 
   /* ---------- Steps ---------- */
@@ -200,7 +204,12 @@
   .f.ok input,.f.ok select{border-color:var(--brand-line)}
 
   /* ---------- Table ---------- */
-  .tw{overflow-x:auto;border:1px solid var(--line);border-radius:var(--r4)}
+  .tw{overflow-x:auto;border:1px solid var(--line);border-radius:var(--r4);max-width:1600px}
+  /* Register actions column (Open / delete) pinned as the first column — keep it snug and
+     visually separated from the data so a row does not start with a loose button cluster. */
+  .reg-col-actions{width:1%;white-space:nowrap;text-align:center;border-left:1px solid var(--line-soft)}
+  .reg-row{transition:background .12s}
+  .reg-row:hover{background:var(--row-hover,rgba(0,0,0,.035))}
   table{width:100%;border-collapse:collapse;font-size:15px;min-width:780px}
   th{background:var(--line-soft);text-align:left;padding:11px 14px;font-size:13px;line-height:19px;color:var(--muted);
      font-weight:600;letter-spacing:.02em;border-bottom:1px solid var(--line);white-space:nowrap}
@@ -487,7 +496,27 @@
   .sidebar .user-card{justify-content:center;padding:6px;border:none;background:transparent}
 }
 /* Friendly UI refresh: clearer hierarchy, calmer surfaces and larger touch targets. */
-.content{max-width:1540px;margin:0 auto;padding:28px 32px 88px}
+.content{padding:28px 32px 88px}
+/* .content is the full-width vertical scroll pane; the width cap lives on the inner wrapper
+   so the scrollbar sits at the window edge instead of floating at the 1600px boundary. */
+.content-inner{max-width:none;margin:0}
+/* Content is capped to a comfortable width and left-aligned (starts right after the sidebar,
+   whitespace only on the far right of very wide monitors) so tables/cards do not stretch
+   edge-to-edge on a big screen — the content sits about as wide as the table needs. The app
+   shell still fills the viewport height with the content pane owning the scrollbar. */
+/* Register (Document list) table: give it room so 13 columns are not cramped, and so the .tw
+   wrapper shows a horizontal scrollbar when the pane is narrower than this. */
+.tw table.reg{width:100%;min-width:1180px;table-layout:auto}
+/* Full-screen app shell (desktop): the whole app fills the viewport, the sidebar + topbar
+   stay fixed, and ONLY the content pane scrolls, with its own scrollbar. Mobile (<=760px)
+   keeps the normal single body scroll — this block is min-width:761px so it never touches it. */
+@media (min-width:761px){
+  .app{height:100vh;overflow:hidden}
+  .main{min-height:0;overflow:hidden}
+  .topbar{flex-shrink:0}
+  .content{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden}
+  .nav{overflow-y:auto;min-height:0}
+}
 .card{border-radius:18px;box-shadow:0 8px 28px rgba(25,55,42,.07);margin-bottom:24px}
 .card-h{padding:19px 24px;background:color-mix(in srgb,var(--card) 94%,var(--brand-soft))}
 .card-h h2{font-size:19px;font-weight:700;letter-spacing:-.01em}
@@ -636,3 +665,43 @@
 .master-system-fields { grid-column: 1 / -1; border-top: 1px solid var(--border, #dbe3e9); padding-top: 16px; }
 .master-field-help { display: block; margin-top: 5px; font-weight: 400; overflow-wrap: anywhere; }
 @media (max-width: 640px) { .master-field-groups { grid-template-columns: 1fr; } }
+
+/* Document lists: keep the controls readable and prioritize the columns people scan most. */
+.register-toolbar{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.register-toolbar>h2{margin-right:auto}
+.register-filters{display:flex;align-items:center;justify-content:flex-end;gap:10px;flex:1 1 680px;flex-wrap:wrap}
+.register-search{width:min(230px,100%)}
+.register-date-filter{display:flex;align-items:center;gap:8px;padding:4px 8px 4px 12px;border:1px solid var(--line);border-radius:var(--r3);background:var(--card)}
+.register-date-filter input{width:120px;border:0;padding:5px 4px;box-shadow:none!important}
+.register-date-filter .btn{width:auto}
+.register-table-wrap{display:block;width:100%;max-width:none}
+.register-table-wrap>table.reg{width:100%}
+.reg td,.reg th{white-space:nowrap}
+.reg .reg-col-supplier{max-width:240px;overflow:hidden;text-overflow:ellipsis}
+.reg .reg-col-file{max-width:260px;overflow:hidden;text-overflow:ellipsis}
+.pager{display:flex;justify-content:space-between;align-items:center;margin-top:14px;flex-wrap:wrap;gap:10px}
+
+@media (max-width:1399px){
+  .reg .reg-col-file,.reg .reg-col-type,.reg .reg-col-date,.reg .reg-col-ocr,.reg .reg-col-sap,.reg .reg-col-created{display:none}
+  .tw table.reg{width:100%;min-width:0;table-layout:fixed}
+  .reg th,.reg td{padding-left:10px;padding-right:10px;overflow:hidden;text-overflow:ellipsis}
+  .reg td:last-child{overflow:visible}
+  .reg .badge{display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;vertical-align:middle}
+}
+@media (max-width:900px){
+  .register-toolbar{align-items:stretch}
+  .register-toolbar>h2{width:100%}
+  .register-filters{justify-content:flex-start;flex-basis:100%}
+  .register-search{flex:1 1 240px}
+  .register-date-filter{flex:1 1 auto}
+  .pager{align-items:stretch}
+}
+@media (max-width:600px){
+  .register-filters>*{width:100%}
+  .register-date-filter{display:grid;grid-template-columns:auto 1fr;gap:8px}
+  .register-date-filter .hint{grid-column:1/-1}
+  .register-date-filter input{width:100%}
+  .register-date-filter .btn{grid-column:1/-1;width:100%}
+  .pager>.row{width:100%;justify-content:space-between}
+  .pager>.row .btn{width:auto}
+}

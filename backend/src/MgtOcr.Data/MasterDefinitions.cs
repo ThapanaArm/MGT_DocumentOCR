@@ -12,11 +12,13 @@ public static class MasterDefinitions
         // mapping engine is derived from CustomerMaterial (see MasterRepository.LoadAllAsync).
         ["customers"] = new("ocr.Customer", "id", true,
             ["SalesOrg", "CompanyName", "ComcompyCodeSAP", "CompanyNameSAP", "TaxId", "Branch",
-             "DistChannel", "Division", "Currency", "PaymentTerms", "IsActive"],
+             "DistChannel", "Division", "Currency", "PaymentTerms",
+             "HouseNumber", "Street", "Street2", "Street3", "Street4", "Street5", "District", "City", "DifferenceCity", "PostCode", "CountryReg", "IsActive"],
             "SalesOrg, ComcompyCodeSAP, id"),
 
         ["shiptos"] = new("ocr.ShipTo", "id", true,
-            ["SalesOrg", "ShipToCode", "SapShipToCode", "CustomerCode", "ShipToName", "ShipToAddress", "IsActive"],
+            ["SalesOrg", "ShipToCode", "SapShipToCode", "CustomerCode", "ShipToName", "ShipToAddress",
+             "HouseNumber", "Street", "Street2", "Street3", "Street4", "Street5", "District", "City", "DifferenceCity", "PostCode", "CountryReg", "IsActive"],
             "SalesOrg, CustomerCode, ShipToCode"),
 
         ["custmaterials"] = new("ocr.CustomerMaterial", "Id", true,

@@ -31,7 +31,8 @@ public static class VisionPrompt
             "incoterms": "Incoterms ถ้ามี", "subTotal": 0, "vatAmount": 0, "totalAmount": 0, "remark": ""
           },
           "lines": [{"extCode": "รหัสสินค้าตามเอกสาร", "desc": "ชื่อ/รายละเอียดสินค้า",
-                     "qty": 0, "uom": "หน่วยนับ", "price": 0, "amount": 0}]
+                     "qty": 0, "uom": "หน่วยนับ", "price": 0, "amount": 0,
+                     "itemNote": "หมายเหตุเฉพาะรายการสินค้านี้ ถ้าเอกสารระบุไว้แยกต่อบรรทัด เช่น รายละเอียดการจัดส่ง/ล็อต/สเปกเฉพาะรายการ หากไม่มีให้ใส่สตริงว่าง"}]
         }
         """ : """
         {
@@ -98,6 +99,7 @@ public static class VisionPrompt
                     ExtCode = GetStr(ln, "extCode"), Desc = GetStr(ln, "desc"),
                     Qty = GetNum(ln, "qty"), Uom = GetStr(ln, "uom") is { Length: > 0 } u ? u : "EA",
                     Price = GetNum(ln, "price"), Amount = GetNum(ln, "amount"),
+                    ItemNote = GetStr(ln, "itemNote"),
                 });
             }
         }

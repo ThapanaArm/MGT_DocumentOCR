@@ -47,7 +47,7 @@ const SapSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function SapSa
             'Document created in SAP successfully — No. ' +
             result.sapDocNo,
         );
-        window.scrollTo({ top: 0, behavior: 'smooth' });
+        document.querySelector('.content')?.scrollTo({ top: 0, behavior: 'smooth' }); window.scrollTo({ top: 0, behavior: 'smooth' });
       } finally {
         setPosting(false);
       }

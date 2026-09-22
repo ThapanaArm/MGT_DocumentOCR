@@ -3,11 +3,11 @@
    even for MGT documents, which are reviewed and sent to Zoho CRM in Step 3, not SAP — the same
    isMgt flag DocumentPage already uses to pick the Step 3 button/action bar wording). */
 const STEPS_HEAD: [string, string][] = [
-  ['อ่านเอกสาร', 'ระบบดึงข้อมูลจากเอกสาร'],
-  ['จับคู่ข้อมูล', 'ตรวจสอบกับข้อมูลหลัก'],
+  ['Read document', 'The system extracts data from the document'],
+  ['Match data', 'Check against master data'],
 ];
-const STEP3_SAP: [string, string] = ['ตรวจและส่ง SAP', 'ตรวจข้อมูลก่อนสร้างรายการ'];
-const STEP3_ZOHO: [string, string] = ['ตรวจและส่ง Zoho', 'ตรวจ Sales Order ก่อนส่ง'];
+const STEP3_SAP: [string, string] = ['Review and send to SAP', 'Review the data before creating the order'];
+const STEP3_ZOHO: [string, string] = ['Review and send to Zoho', 'Review the Sales Order before sending'];
 
 export default function Steps({ current, isMgt }: { current: number; isMgt?: boolean }) {
   const STEPS: [string, string][] = [...STEPS_HEAD, isMgt ? STEP3_ZOHO : STEP3_SAP];

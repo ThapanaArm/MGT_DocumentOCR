@@ -32,6 +32,21 @@ const authority = (import.meta.env.VITE_AZURE_AUTHORITY ||
 const apiScope = (import.meta.env.VITE_AZURE_API_SCOPE ||
   (clientId ? `api://${clientId}/access_as_user` : '')).trim();
 
+// App-local sign-out must not sign the person out of Microsoft 365 in the browser. Remember the
+// explicit choice so a later page refresh does not immediately ssoSilent them back into OCR.
+const MANUAL_SIGN_OUT_KEY = 'mgtocr.microsoft.manuallySignedOut';
+const wasManuallySignedOut = () => {
+  try { return window.localStorage.getItem(MANUAL_SIGN_OUT_KEY) === '1'; } catch { return false; }
+};
+const markManuallySignedOut = (value: boolean) => {
+  try {
+    if (value) window.localStorage.setItem(MANUAL_SIGN_OUT_KEY, '1');
+    else window.localStorage.removeItem(MANUAL_SIGN_OUT_KEY);
+  } catch {
+    /* private mode/storage disabled: sign-out still works for the current page */
+  }
+};
+
 const config: Configuration = {
   auth: {
     clientId,
@@ -66,7 +81,8 @@ export function initAuth(): Promise<void> {
   // after MSAL's ~10s iframe timeout, which would freeze the sign-in screen on "Checking sign-in…".
   // The silent attempt is a separate, background call (attemptSilentSignIn) the gate never waits on.
   ready ??= msalInstance.initialize().then(async () => {
-    await msalInstance.handleRedirectPromise();
+    const redirectResult = await msalInstance.handleRedirectPromise();
+    if (redirectResult?.account) markManuallySignedOut(false);
     const accounts = msalInstance.getAllAccounts();
     if (accounts.length > 0 && !msalInstance.getActiveAccount()) {
       msalInstance.setActiveAccount(accounts[0]);
@@ -80,6 +96,7 @@ export function initAuth(): Promise<void> {
 // an account. When SSO is off, or no session exists, it just returns false.
 export async function attemptSilentSignIn(): Promise<boolean> {
   if (!AUTH_ENABLED) return false;
+  if (wasManuallySignedOut()) return false;
   if (msalInstance.getActiveAccount()) return true;
   try {
     const result = await msalInstance.ssoSilent({ scopes: [apiScope] });
@@ -118,9 +135,16 @@ export async function getAccessToken(): Promise<string | null> {
 }
 
 export async function signIn(): Promise<void> {
-  if (AUTH_ENABLED) await msalInstance.loginRedirect({ scopes: [apiScope] });
+  if (AUTH_ENABLED) {
+    markManuallySignedOut(false);
+    await msalInstance.loginRedirect({ scopes: [apiScope] });
+  }
 }
 
 export async function signOut(): Promise<void> {
-  if (AUTH_ENABLED) await msalInstance.logoutRedirect();
+  if (!AUTH_ENABLED) return;
+  markManuallySignedOut(true);
+  const account = msalInstance.getActiveAccount() ?? undefined;
+  await msalInstance.clearCache({ account });
+  msalInstance.setActiveAccount(null);
 }

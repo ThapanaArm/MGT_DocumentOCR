@@ -95,7 +95,6 @@ export async function signOut(): Promise<void> {
   clearLocalToken();
   if (MS_ENABLED && getAccount()) {
     await msalSignOut();
-    return;
   }
   window.dispatchEvent(new Event('mgtocr:signedout'));
 }

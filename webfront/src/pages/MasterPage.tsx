@@ -57,7 +57,7 @@ export default function MasterPage() {
   const count = (k: string) => (masters[k] || []).length;
 
   const cell = (r: Record<string, any>, c: (typeof def.cols)[number]) => {
-    if (c.source === 'system') return Number(r[c.k]) ? 'ใช้งาน' : 'ไม่ใช้งาน';
+    if (c.source === 'system') return Number(r[c.k]) ? 'Active' : 'Inactive';
     if (c.sap)
       return r[c.k] ? (
         <b className="sapcode">{r[c.k]}</b>
@@ -134,7 +134,7 @@ export default function MasterPage() {
         )}
 
         <div className="hint" style={{ marginBottom: 12 }}>
-          {def.cols.some((c) => c.source) ? 'ข้อมูลจากเอกสาร → รหัส SAP / Zoho Account Code · รายการที่ไม่ใช้งานจะไม่ถูกนำไปจับคู่เอกสาร' : MASTER_NOTE[activeTab]}
+          {def.cols.some((c) => c.source) ? 'Document data → SAP code / Zoho Account Code · inactive items are not used for document matching' : MASTER_NOTE[activeTab]}
         </div>
 
         <div className="row" style={{ marginBottom: 14 }}>

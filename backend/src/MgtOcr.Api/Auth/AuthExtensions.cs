@@ -59,8 +59,22 @@ public static class AuthExtensions
         services.AddScoped<PasswordService>();
 
         var msEnabled = cfg.AuthConfigured;
+        // Entra can issue either a v2 access token (login.microsoftonline.com/.../v2.0) or a v1
+        // access token (sts.windows.net/.../) depending on the API app registration's token-version
+        // setting. Both are valid Microsoft issuers; tenant IDs still come exclusively from our
+        // allow-list, so supporting v1 does not broaden access to another tenant.
         var microsoftIssuers = cfg.ConfiguredTenants
-            .Select(t => $"https://login.microsoftonline.com/{t.TenantId.Trim()}/v2.0").ToArray();
+            .SelectMany(t =>
+            {
+                var tenantId = t.TenantId.Trim();
+                return new[]
+                {
+                    $"https://login.microsoftonline.com/{tenantId}/v2.0",
+                    $"https://sts.windows.net/{tenantId}/",
+                };
+            })
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
 
         var auth = services.AddAuthentication(o =>
         {
@@ -72,7 +86,7 @@ public static class AuthExtensions
         auth.AddPolicyScheme(Smart, Smart, o =>
             o.ForwardDefaultSelector = ctx =>
             {
-                if (msEnabled && LooksMicrosoft(ctx.Request.Headers.Authorization)) return MicrosoftScheme;
+                if (msEnabled && LooksMicrosoft(ctx.Request.Headers.Authorization.ToString())) return MicrosoftScheme;
                 return LocalScheme;
             });
 
@@ -134,7 +148,9 @@ public static class AuthExtensions
         {
             var token = authorizationHeader["Bearer ".Length..].Trim();
             var jwt = new JsonWebTokenHandler().ReadJsonWebToken(token);
-            return (jwt.Issuer ?? "").Contains("login.microsoftonline.com", StringComparison.OrdinalIgnoreCase);
+            var issuer = jwt.Issuer ?? "";
+            return issuer.Contains("login.microsoftonline.com", StringComparison.OrdinalIgnoreCase)
+                || issuer.Contains("sts.windows.net", StringComparison.OrdinalIgnoreCase);
         }
         catch { return false; }
     }

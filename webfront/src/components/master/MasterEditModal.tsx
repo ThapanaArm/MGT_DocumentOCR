@@ -182,7 +182,7 @@ export default function MasterEditModal({
       o[c.k] = c.source === 'system' ? Number(form[c.k] ?? 1) : (form[c.k] ?? '').toString().trim();
     });
     const missing = def.cols.find((c) => isColRequired(c) && !o[c.k]);
-    if (missing) { showToast('กรุณาระบุ ' + missing.l); return; }
+    if (missing) { showToast('Please specify ' + missing.l); return; }
     if (state!.rowKey == null && !['Id', 'id'].includes(def.key) && !o[def.key]) {
       showToast('Please enter ' + def.cols.find((c) => c.k === def.key)?.l);
       return;
@@ -223,7 +223,7 @@ export default function MasterEditModal({
 
   // Same idea, MGT side: fill the configured Zoho Account Code and let the person review it.
   function selectZohoRecord(acc: ZohoAccount) {
-    if (!acc.accountCode?.trim()) { showToast('Zoho record นี้ไม่มี Account Code'); return; }
+    if (!acc.accountCode?.trim()) { showToast('This Zoho record has no Account Code'); return; }
     setForm((f) => ({
       ...f,
       ComcompyCodeSAP: acc.accountCode,
@@ -370,7 +370,7 @@ export default function MasterEditModal({
         <div className="master-field-groups">
           {(visibleCols.some((c) => c.source) ? ['document', 'external', 'system'] : ['all']).map((source) => (
           <section key={source} className={source === 'system' ? 'master-system-fields' : ''}>
-          {source !== 'all' && <h3>{source === 'document' ? 'ลูกค้าและข้อมูลจากเอกสาร' : source === 'external' ? 'ข้อมูล SAP / Zoho' : 'สถานะและข้อมูลระบบ'}</h3>}
+          {source !== 'all' && <h3>{source === 'document' ? 'Customer and document data' : source === 'external' ? 'SAP / Zoho data' : 'Status and system data'}</h3>}
           <div className="grid">
           {visibleCols.filter((c) => source === 'all' || c.source === source).map((c) => (
             <Fragment key={c.k}>
@@ -381,10 +381,10 @@ export default function MasterEditModal({
                   <option value="1000">1000 — MGT</option><option value="2000">2000 — GLC</option>
                 </select>
               ) : c.source === 'system' ? (
-                <select id={'master-' + c.k} value={Number(form[c.k] ?? 1)} onChange={(e) => setField(c.k, e.target.value)}><option value="1">1 — ใช้งาน</option><option value="0">0 — ไม่ใช้งาน</option></select>
+                <select id={'master-' + c.k} value={Number(form[c.k] ?? 1)} onChange={(e) => setField(c.k, e.target.value)}><option value="1">1 — Active</option><option value="0">0 — Inactive</option></select>
               ) : c.ref ? (
                 <select id={'master-' + c.k} value={form[c.k] ?? ''} onChange={(e) => setField(c.k, e.target.value)}>
-                  {!c.blank && <option value="">— เลือก —</option>}
+                  {!c.blank && <option value="">— Select —</option>}
                   {c.blank && <option value="">— All materials (global rule) —</option>}
                   {(masters[c.ref] || []).filter((o) => (o.IsActive == null || !!Number(o.IsActive)) && (c.ref !== 'customers' || !form.SalesOrg || (state.tab !== 'custmaterials' && state.tab !== 'shiptos') || String(o.SalesOrg) === String(form.SalesOrg))).map((o, index) => {
                     const vk = MASTER_DEF[c.ref!].matchKey || MASTER_DEF[c.ref!].key;

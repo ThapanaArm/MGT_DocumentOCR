@@ -44,6 +44,31 @@ public static class MappingEngine
     private static Dictionary<string, object?> Fld(string label, object? value, bool? match = null) =>
         new() { ["label"] = label, ["value"] = value?.ToString() ?? "", ["match"] = match };
 
+    // Every confirmed address sub-field on a matched Customer/ShipTo master row, as individual
+    // Fld() rows -- added 2026-09-22 so the persisted "main table" (SideList) shows the same
+    // level of detail as the live SAP/Zoho search panels, instead of one collapsed "Address"
+    // string (Ship-to) or nothing at all (Customer/Sold-to, which never showed an address here).
+    // Field order/labels mirror the frontend's AddressFieldRows(). Empty sub-fields are skipped
+    // entirely (not shown as blank rows) -- same behavior as AddressFieldRows on the frontend.
+    private static List<object> AddressFlds(Dictionary<string, object?>? row)
+    {
+        if (row == null) return new List<object>();
+        var pairs = new (string Label, string Col)[]
+        {
+            ("House Number", "HouseNumber"), ("Street", "Street"), ("Street 2", "Street2"),
+            ("Street 3", "Street3"), ("Street 4", "Street4"), ("Street 5", "Street5"),
+            ("District", "District"), ("City", "City"), ("Difference City", "DifferenceCity"),
+            ("Post Code", "PostCode"), ("Country / Reg", "CountryReg"),
+        };
+        var result = new List<object>();
+        foreach (var (label, col) in pairs)
+        {
+            var v = row.GetStr(col);
+            if (!string.IsNullOrWhiteSpace(v)) result.Add(Fld(label, v));
+        }
+        return result;
+    }
+
     private static string SapKey(Dictionary<string, object?>? rec, string field) => (rec.Get(field) ?? "").ToString()?.Trim() ?? "";
 
     private static bool Same(object? a, object? b)
@@ -491,7 +516,12 @@ public static class MappingEngine
                 Fld("Sales Org / Channel / Div", $"{Dash(c.GetStr("SalesOrg"))} / {Dash(c.GetStr("DistChannel"))} / {Dash(c.GetStr("Division"))}"),
                 Fld("Payment Terms", c.Get("PaymentTerms")),
                 Fld("Currency", c.Get("Currency")),
-            };
+            }
+            // Sold-to address rows added 2026-09-22 -- this card never showed an address at all
+            // before (Zoho's live "Sold-to Address" sub-panel was the only place it appeared, and
+            // only transiently/live, never persisted here for either SAP or Zoho). See AddressFlds.
+            .Concat(AddressFlds(c))
+            .ToList();
 
             r = (Dictionary<string, object?>)resHeader["shipTo"]!;
             var sn = header.Get("shipToName"); var sa = header.Get("shipToAddress");
@@ -504,8 +534,16 @@ public static class MappingEngine
             {
                 Fld("ShipToCode", st.GetStr("SapShipToCode")),
                 Fld("Location Name", st.GetStr("ShipToName"), Like(sn, st.GetStr("ShipToName"))),
-                Fld("Address", st.Get("Address"), Like(sa, st.Get("Address"))),
-            };
+            }
+            // Address used to be one collapsed Fld("Address", ...) row here -- replaced
+            // 2026-09-22 with the full per-field breakdown (see AddressFlds above). The
+            // doc-vs-master similarity match (previously shown as a tick/x on that one row) still
+            // runs against the same collapsed st.Get("Address") string; it just isn't rendered as
+            // its own row anymore, since there's no single "sap side" address string left to pair
+            // it with -- Like(sa, st.Get("Address")) is kept available on the underlying data for
+            // any caller that still wants it, but no longer surfaced as a UI row here.
+            .Concat(AddressFlds(st))
+            .ToList();
         }
         else
         {

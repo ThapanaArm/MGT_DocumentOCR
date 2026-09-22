@@ -54,6 +54,7 @@ import type {
   ZohoDeal,
   ZohoDealItem,
 } from '../api/zoho';
+import { getZohoAccountSoldTo } from '../api/zoho';
 import { compareCandidates, type CompareField, type CompareResult } from '../api/compare';
 import type { CustomerMatchProposal } from '../components/document/MappingCards';
 import { resolveDocTarget } from '../utils/salesTarget';
@@ -412,7 +413,7 @@ export default function DocumentPage() {
         showToast(
           (r.simulated ? '(Simulation Mode) ' : '') + 'Document created in SAP successfully — No. ' + r.sapDocNo,
         );
-        window.scrollTo({ top: 0, behavior: 'smooth' });
+        document.querySelector('.content')?.scrollTo({ top: 0, behavior: 'smooth' }); window.scrollTo({ top: 0, behavior: 'smooth' });
       } finally {
         setPosting(false);
       }
@@ -470,11 +471,19 @@ export default function DocumentPage() {
         // the source of truth here, and should show up even when the document had no Tax ID (or a
         // stale/wrong one) of its own to go on.
         TaxId: bp.taxId || h.customerTaxId || '',
+        // Address sub-fields added 2026-09-22, so the Customer card's persisted "main table" can
+        // show the Sold-to's real SAP address (previously never saved here at all).
+        HouseNumber: bp.addressHouseNumber || '', Street: bp.addressStreet || '',
+        Street2: bp.addressStreet2 || '', Street3: bp.addressStreet3 || '',
+        Street4: bp.addressStreet4 || '', Street5: bp.addressStreet5 || '',
+        District: bp.addressDistrict || '', City: bp.addressCity || '',
+        DifferenceCity: bp.addressDifferenceCity || '',
+        PostCode: bp.addressPostalCode || '', CountryReg: bp.addressCountry || '',
       });
       await loadMasters(true);
       setManualHeader('customer', code);
       if (pendingMatch) {
-        setMatchChatLog((log) => [...log, { role: 'assistant', text: `เลือก "${code}" จากตารางโดยตรงแล้วครับ` }]);
+        setMatchChatLog((log) => [...log, { role: 'assistant', text: `Selected "${code}" directly from the table.` }]);
         setPendingMatch(null);
       }
       showToast('Customer added from SAP and matched');
@@ -484,7 +493,12 @@ export default function DocumentPage() {
   const useZohoCustomer = (acc: ZohoAccount) =>
     guard(async () => {
       const code = acc.accountCode?.trim();
-      if (!code) { showToast('Zoho record นี้ไม่มี Account Code'); return; }
+      if (!code) { showToast('This Zoho record has no Account Code'); return; }
+      // Sold-to address sub-fields added 2026-09-22: the account search result itself doesn't
+      // carry them (see ZohoAccount), so fetch the same Sold-to address the live "Sold-to
+      // Address" panel shows (getZohoAccountSoldTo) and save it into the Customer master row too
+      // -- previously this was never persisted, only shown live/transiently.
+      const soldTo = await getZohoAccountSoldTo(acc.accountId).catch(() => null);
       await createMaster('customers', {
         ComcompyCodeSAP: code,
         CompanyName: h.customerName || '',
@@ -493,11 +507,17 @@ export default function DocumentPage() {
         IsActive: 1,
         TaxId: acc.taxId || h.customerTaxId || '',
         Branch: h.branch || '',
+        HouseNumber: soldTo?.houseNumber || '', Street: soldTo?.street || '',
+        Street2: soldTo?.street2 || '', Street3: soldTo?.street3 || '',
+        Street4: soldTo?.street4 || '', Street5: soldTo?.street5 || '',
+        District: soldTo?.district || '', City: soldTo?.city || '',
+        DifferenceCity: soldTo?.differenceCity || '', PostCode: soldTo?.postCode || '',
+        CountryReg: soldTo?.countryReg || '',
       });
       await loadMasters(true);
       setManualHeader('customer', code);
       if (pendingMatch) {
-        setMatchChatLog((log) => [...log, { role: 'assistant', text: `เลือก "${code}" จากตารางโดยตรงแล้วครับ` }]);
+        setMatchChatLog((log) => [...log, { role: 'assistant', text: `Selected "${code}" directly from the table.` }]);
         setPendingMatch(null);
       }
       showToast('Customer added from Zoho CRM and matched');
@@ -517,7 +537,15 @@ export default function DocumentPage() {
         tab: 'shiptos', rowKey: null,
         prefill: { SalesOrg: companyCode, ShipToCode: info.code || h.shipToCode || '', CustomerCode: custCode,
           SapShipToCode: info.code || custCode, ShipToName: h.shipToName || '',
-          ShipToAddress: info.address || h.shipToAddress || '' },
+          ShipToAddress: info.address || h.shipToAddress || '',
+          // Address sub-fields added 2026-09-22 -- info already carries every Zoho field
+          // individually (see ZohoShipToInfo); previously only the collapsed info.address string
+          // above was kept, so the persisted "main table" only ever showed one joined row.
+          HouseNumber: info.houseNumber || '', Street: info.street || '',
+          Street2: info.street2 || '', Street3: info.street3 || '', Street4: info.street4 || '',
+          Street5: info.street5 || '', District: info.district || '', City: info.city || '',
+          DifferenceCity: info.differenceCity || '', PostCode: info.postCode || '',
+          CountryReg: info.countryReg || '' },
         onSaved: async (code) => {
           setManualHeader('shipTo', code);
           setSelectedZohoShipTo(info);
@@ -535,10 +563,26 @@ export default function DocumentPage() {
         return;
       }
       const code = link.partnerCustomer;
+      const bp = link.partner;
       setMasterEdit({
         tab: 'shiptos', rowKey: null,
         prefill: { SalesOrg: companyCode, ShipToCode: h.shipToCode || '', CustomerCode: custCode, SapShipToCode: code,
-          ShipToName: h.shipToName || '', ShipToAddress: h.shipToAddress || '' },
+          ShipToName: h.shipToName || '',
+          // Previously fell back straight to the document's own OCR'd address text and never
+          // used SAP's own data at all, even though it was right there on `link.partner` --
+          // fixed 2026-09-22 alongside the SAP address field expansion (see
+          // SapBusinessPartnerClient.BusinessPartner). SAP's real address wins when we have it;
+          // the OCR text is now only a fallback for when SAP returned nothing.
+          ShipToAddress: [bp?.addressHouseNumber, bp?.addressStreet, bp?.addressStreet2, bp?.addressStreet3,
+            bp?.addressStreet4, bp?.addressStreet5, bp?.addressDistrict, bp?.addressCity,
+            bp?.addressPostalCode, bp?.addressCountry]
+            .filter((v) => v && v.trim() !== '').join(', ') || h.shipToAddress || '',
+          HouseNumber: bp?.addressHouseNumber || '', Street: bp?.addressStreet || '',
+          Street2: bp?.addressStreet2 || '', Street3: bp?.addressStreet3 || '',
+          Street4: bp?.addressStreet4 || '', Street5: bp?.addressStreet5 || '',
+          District: bp?.addressDistrict || '', City: bp?.addressCity || '',
+          DifferenceCity: bp?.addressDifferenceCity || '',
+          PostCode: bp?.addressPostalCode || '', CountryReg: bp?.addressCountry || '' },
         onSaved: async (savedCode) => setManualHeader('shipTo', savedCode),
       });
     });
@@ -624,7 +668,7 @@ export default function DocumentPage() {
 
       const finishLine = async () => {
         await setManualLine(i, material.materialCode);
-        showToast(`เลือก Material ${material.materialCode} จาก SAP แล้ว`);
+        showToast(`Selected Material ${material.materialCode} from SAP`);
       };
 
       const maybeAddUomRule = async () => {
@@ -725,7 +769,7 @@ export default function DocumentPage() {
       }
       const matCode = (item.materialCode || '').trim();
       if (!matCode) {
-        showToast('รายการนี้ไม่มี Material Code ใน Zoho');
+        showToast('This item has no Material Code in Zoho');
         return;
       }
       const line = doc.lines[i];
@@ -762,7 +806,7 @@ export default function DocumentPage() {
       const finishLine = async () => {
         await loadMasters(true);
         await setManualLine(i, matCode);
-        showToast(`บันทึก Material ${matCode} จาก Deal แล้ว`);
+        showToast(`Saved Material ${matCode} from the Deal`);
       };
 
       if (!docUnit || !zohoUnit || docUnit.toLowerCase() === zohoUnit.toLowerCase() || existingRuleMatchesZoho) {
@@ -814,14 +858,14 @@ export default function DocumentPage() {
   const proposeCustomerMatch = (p: CustomerMatchProposal) => {
     setPendingMatch({ ...p });
     const lines = [
-      `พบข้อมูลลูกค้าที่เป็นไปได้ ${p.candidates.length} รายการ กรุณาตรวจสอบ:`,
+      `Found ${p.candidates.length} possible customer matches — please review:`,
       '',
       ...p.candidates.map((c, i) => {
         const bits = c.fields.filter((f) => f.value).map((f) => `${f.label}: ${f.value}`).join(' · ');
         return `${i + 1}. ${c.label}${bits ? ' — ' + bits : ''}`;
       }),
       '',
-      'พิมพ์บอกได้เลยว่าอยากใช้ตัวไหน (เช่น "ใช้ 1000698") หรือพิมพ์ "ช่วยเทียบให้หน่อย" ให้ผมช่วยวิเคราะห์',
+      'Just tell me which one to use (e.g. "use 1000698"), or ask me to "compare them" and I will analyze.',
     ];
     setMatchChatLog((log) => [...log, { role: 'assistant', text: lines.join('\n') }]);
 
@@ -861,7 +905,7 @@ export default function DocumentPage() {
     pm.onSelect(candidateId);
     setMatchChatLog((log) => [
       ...log,
-      { role: 'assistant', text: `เลือก "${c?.label ?? candidateId}" ให้แล้วครับ${reason ? ' — ' + reason : ''}` },
+      { role: 'assistant', text: `Selected "${c?.label ?? candidateId}" for you.${reason ? ' — ' + reason : ''}` },
     ]);
     // pm.onSelect() above runs useSapCustomer/useZohoCustomer, which already clears pendingMatch
     // itself once the master row is saved — not duplicated here to avoid racing that async save.
@@ -896,7 +940,7 @@ export default function DocumentPage() {
       } catch (e) {
         setMatchChatLog((log) => [
           ...log,
-          { role: 'assistant', text: 'ขอโทษครับ วิเคราะห์ไม่สำเร็จ: ' + (e instanceof Error ? e.message : String(e)) },
+          { role: 'assistant', text: 'Sorry, the analysis failed: ' + (e instanceof Error ? e.message : String(e)) },
         ]);
         return;
       }
@@ -912,7 +956,7 @@ export default function DocumentPage() {
           ...log,
           {
             role: 'assistant',
-            text: `ผมว่าน่าจะเป็น "${c?.label ?? candidateId}" ครับ — ${reason}\n\nพิมพ์ "ใช่" เพื่อยืนยัน หรือบอกผมว่าจะใช้ตัวไหนแทน`,
+            text: `I think it's probably "${c?.label ?? candidateId}" — ${reason}\n\nType "yes" to confirm, or tell me which one to use instead.`,
           },
         ]);
         setPendingMatch((cur) => (cur ? { ...cur, lastSuggestedId: candidateId } : cur));
@@ -925,7 +969,7 @@ export default function DocumentPage() {
               return `- ${c?.label ?? v.candidateId}: ${v.match} (${v.confidence}%) — ${v.reason}`;
             })
             .join('\n')
-        : 'ยังไม่สามารถวิเคราะห์ได้ครับ ลองพิมพ์บอกให้ชัดเจนขึ้น เช่น "ใช้ตัวแรก" ได้ไหมครับ';
+        : 'I could not analyze that yet — try being more specific, e.g. "use the first one".';
       setMatchChatLog((log) => [...log, { role: 'assistant', text: summary }]);
     })();
   };
@@ -1121,7 +1165,7 @@ export default function DocumentPage() {
             </ul>
             <div className="row" style={{ marginTop: 14 }}>
               <button className="btn" onClick={() => navigate('/master')}>
-                <i className="fa-solid fa-gear" /> ไปที่ข้อมูล Mapping
+                <i className="fa-solid fa-gear" /> Go to Mapping data
               </button>
               <span className="hint">or select the correct value from the dropdown below</span>
             </div>
@@ -1181,7 +1225,7 @@ export default function DocumentPage() {
             <i className="fa-solid fa-file-lines" /> Extracted Text
           </button>
           <button className="btn sm ghost" onClick={() => setReviewOpen(true)}>
-            <i className="fa-solid fa-eye" /> ดูเอกสาร
+            <i className="fa-solid fa-eye" /> View document
           </button>
           {canSplit && (
             <button className="btn sm ghost" onClick={() => setSplitOpen(true)}>
@@ -1353,8 +1397,9 @@ export default function DocumentPage() {
           posted={posted}
           onUseMaterial={async (lineIndex, item) => {
             await saveZohoMaterial(lineIndex, item);
-            showToast('บันทึก CustomerMaterial จาก Zoho แล้ว และจะใช้กับ Sales Order นี้');
+            showToast('Saved the CustomerMaterial from Zoho — it will be used for this Sales Order');
           }}
+          onPosted={setDoc}
         />
       )}
 
@@ -1383,7 +1428,7 @@ export default function DocumentPage() {
               onClick={() => zohoStepRef.current?.open()}
               disabled={!(map && !posted && !isSplit)}
             >
-              ⎋ ขั้นตอน 3 · ตรวจ Sales Order
+              ⎋ Step 3 · Review Sales Order
             </button>
           )}
           {/* For MGT/Zoho and SAP/SO the Send button lives inside the review card above (next to
@@ -1395,7 +1440,7 @@ export default function DocumentPage() {
               onClick={() => sapStepRef.current?.open()}
               disabled={!(map && map.pass && !posted && !isSplit)}
             >
-              ⎋ ขั้นตอน 3 · ตรวจและส่ง SAP
+              ⎋ Step 3 · Review and send to SAP
             </button>
           )}
           {!isMgt && doc.module !== 'SO' && (
@@ -1404,7 +1449,7 @@ export default function DocumentPage() {
               onClick={() => setPostOpen(true)}
               disabled={!(map && map.pass && !posted && !isSplit)}
             >
-              ⎋ ขั้นตอน 3 · ตรวจและส่ง SAP
+              ⎋ Step 3 · Review and send to SAP
             </button>
           )}
           {!isMgt && doc.module !== 'SO' && (
@@ -1439,7 +1484,7 @@ export default function DocumentPage() {
 
       {/* ---- Modals ---- */}
       <Modal open={reviewOpen} onClose={() => setReviewOpen(false)} wide>
-        <ModalHeader title={`<i className="fa-solid fa-eye" /> ดูเอกสาร — ${doc.fileName}`} onClose={() => setReviewOpen(false)} />
+        <ModalHeader title={`<i className="fa-solid fa-eye" /> View document — ${doc.fileName}`} onClose={() => setReviewOpen(false)} />
         <div className="card-b">
           <p className="hint">Compare the original file with the data extracted in the HEADER/DETAIL sections</p>
           {doc.provider === 'demo' ? (
@@ -1537,7 +1582,7 @@ export default function DocumentPage() {
               </div>
               <div className="row" style={{ marginTop: 18 }}>
                 <button className="btn success" onClick={confirmPost} disabled={SEND_DISABLED || posting}>
-                  {posting ? 'Sending…' : 'ยืนยันส่งไป SAP'}
+                  {posting ? 'Sending…' : 'Confirm send to SAP'}
                 </button>
                 <button className="btn" onClick={() => setPostOpen(false)}>
                   Cancel

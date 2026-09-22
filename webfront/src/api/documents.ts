@@ -188,5 +188,36 @@ export const listDocuments = (module?: string | null, apDocCategory?: string) =>
   return api.get<InboxRow[]>(url);
 };
 
+export interface DocumentsPage {
+  results: InboxRow[];
+  total: number;
+  counts?: { all: number; AP: number; II: number } | null;
+}
+
+/* Real server-side paging for the Document Register: search / date range / module+category /
+   invoice sub-tab / page / pageSize are all applied on the backend, which returns one page plus
+   the true total (and per-tab counts for the merged AP+II invoice list). */
+export const listDocumentsPaged = (params: {
+  module?: string | null;
+  apDocCategory?: string;
+  search?: string;
+  dateFrom?: string;
+  dateTo?: string;
+  invModule?: string;
+  page: number;
+  pageSize: number;
+}) => {
+  const qs = new URLSearchParams();
+  if (params.module) qs.set('module', params.module);
+  if (params.module === 'AP' && params.apDocCategory) qs.set('apDocCategory', params.apDocCategory);
+  if (params.search && params.search.trim()) qs.set('search', params.search.trim());
+  if (params.dateFrom) qs.set('dateFrom', params.dateFrom);
+  if (params.dateTo) qs.set('dateTo', params.dateTo);
+  if (params.invModule) qs.set('invModule', params.invModule);
+  qs.set('page', String(params.page));
+  qs.set('pageSize', String(params.pageSize));
+  return api.get<DocumentsPage>('/api/documents?' + qs.toString());
+};
+
 export const deleteDocument = (id: number, user: string) =>
   api.del('/api/documents/' + id + '?user=' + encodeURIComponent(user));

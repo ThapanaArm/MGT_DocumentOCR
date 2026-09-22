@@ -126,23 +126,27 @@ export default function ZohoSalesOrderEditor({
           </div>
         </div>
 
+        <p className="hint" style={{ margin: '4px 0 10px' }}>
+          Fields left blank fall back to the linked Deal&apos;s saved value — they are not sent empty.
+          The greyed text in a field is what will be sent to Zoho if you leave it blank.
+        </p>
         <div className="grid">
           <div className="f">
             <label>Subject</label>
-            <input type="text" value={header.subject} disabled={posted} maxLength={50} onChange={(e) => onHeaderChange({ subject: e.target.value })} />
+            <input type="text" value={header.subject} placeholder={preview.subject || ''} disabled={posted} maxLength={50} onChange={(e) => onHeaderChange({ subject: e.target.value })} />
           </div>
           <div className="f">
             <label>Customer PO / Customer Ref.</label>
-            <input type="text" value={header.customerRef} disabled={posted} onChange={(e) => onHeaderChange({ customerRef: e.target.value })} />
+            <input type="text" value={header.customerRef} placeholder={preview.customerRef || ''} disabled={posted} onChange={(e) => onHeaderChange({ customerRef: e.target.value })} />
           </div>
           <div className="f">
             <label>Delivery Date</label>
-            <input type="text" value={header.deliveryDate} disabled={posted} onChange={(e) => onHeaderChange({ deliveryDate: e.target.value })} />
+            <input type="text" value={header.deliveryDate} placeholder={preview.deliveryDate || ''} disabled={posted} onChange={(e) => onHeaderChange({ deliveryDate: e.target.value })} />
           </div>
           <div className="f">
             <label>Payment Terms</label>
             <select value={header.paymentTerms} disabled={posted} onChange={(e) => onHeaderChange({ paymentTerms: e.target.value })}>
-              <option value="">— not set —</option>
+              <option value="">{preview.paymentTerms ? `— use Deal default (${preview.paymentTerms}) —` : '— not set —'}</option>
               {preview.paymentTermsOptions.map((o) => (
                 <option key={o} value={o}>
                   {o}
@@ -153,7 +157,7 @@ export default function ZohoSalesOrderEditor({
           <div className="f">
             <label>Payment Currency</label>
             <select value={header.paymentCurrency} disabled={posted} onChange={(e) => onHeaderChange({ paymentCurrency: e.target.value })}>
-              <option value="">— not set —</option>
+              <option value="">{preview.paymentCurrency ? `— use Deal default (${preview.paymentCurrency}) —` : '— not set —'}</option>
               {preview.paymentCurrencyOptions.map((o) => (
                 <option key={o} value={o}>
                   {o}
@@ -163,11 +167,11 @@ export default function ZohoSalesOrderEditor({
           </div>
           <div className="f">
             <label>Incoterms</label>
-            <input type="text" value={header.incoterms} disabled={posted} onChange={(e) => onHeaderChange({ incoterms: e.target.value })} />
+            <input type="text" value={header.incoterms} placeholder={preview.incoterms || ''} disabled={posted} onChange={(e) => onHeaderChange({ incoterms: e.target.value })} />
           </div>
           <div className="f">
             <label>Tax ID</label>
-            <input type="text" value={header.taxId} disabled={posted} onChange={(e) => onHeaderChange({ taxId: e.target.value })} />
+            <input type="text" value={header.taxId} placeholder={preview.taxId || ''} disabled={posted} onChange={(e) => onHeaderChange({ taxId: e.target.value })} />
           </div>
           {preview.accountCode && (
             <div className="f">
@@ -193,6 +197,7 @@ export default function ZohoSalesOrderEditor({
                   <th>Qty</th>
                   <th>Unit</th>
                   <th>Unit Price</th>
+                  <th>Conversion</th>
                 </tr>
               </thead>
               <tbody>
@@ -217,6 +222,13 @@ export default function ZohoSalesOrderEditor({
                       </td>
                       <td>
                         <input type="text" value={e.unitPrice} disabled={posted} onChange={(ev) => onLineChange(l.itemNo, { unitPrice: ev.target.value })} style={{ width: 110 }} />
+                      </td>
+                      <td style={{ whiteSpace: 'nowrap' }}>
+                        {l.conversionRatio && l.subUnit ? (
+                          <span className="hint">1 {l.unit || 'unit'} = {l.conversionRatio} {l.subUnit}</span>
+                        ) : (
+                          <span className="hint">—</span>
+                        )}
                       </td>
                     </tr>
                   );
@@ -284,13 +296,13 @@ export default function ZohoSalesOrderEditor({
               disabled={SEND_DISABLED || sending || posted || preview.lines.length === 0 || !!result?.success}
             >
               {sending
-                ? 'กำลังส่ง…'
+                ? 'Sending…'
                 : result?.success
-                  ? 'ส่งสำเร็จ ✓'
+                  ? 'Sent ✓'
                   : `⎋ Send ${preview.lines.length} line${preview.lines.length === 1 ? '' : 's'} to Zoho CRM`}
             </button>
             <button className="btn" onClick={onViewPayload} disabled={preview.lines.length === 0}>
-              {'{}'} ดูข้อมูลที่จะส่ง
+              {'{}'} View payload
             </button>
           </div>
           <div style={{ textAlign: 'right' }}>
@@ -318,7 +330,7 @@ export default function ZohoSalesOrderEditor({
     <>
       <div className="card">
         <div className="card-h">
-          <h2>สรุป Sales Order ที่จะส่งไป Zoho CRM</h2>
+          <h2>Sales Order summary to send to Zoho CRM</h2>
           <div className="sp" />
           {preview && (
             <span className="badge b-idle">

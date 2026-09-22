@@ -28,11 +28,20 @@ public static partial class ExtConversion
         ["_note"] = pd.Note,
     };
 
-    public static Dictionary<string, object?> ToLineDict(LineItem l) => new()
+    public static Dictionary<string, object?> ToLineDict(LineItem l)
     {
-        ["extCode"] = l.ExtCode, ["desc"] = l.Desc, ["qty"] = l.Qty, ["uom"] = l.Uom,
-        ["price"] = l.Price, ["amount"] = l.Amount,
-    };
+        var d = new Dictionary<string, object?>
+        {
+            ["extCode"] = l.ExtCode, ["desc"] = l.Desc, ["qty"] = l.Qty, ["uom"] = l.Uom,
+            ["price"] = l.Price, ["amount"] = l.Amount,
+        };
+        // OCR-prefilled Item Note 1 rides in the line's extra bag (same bag the CS-edited
+        // salesEmployee/deliveryDate/itemNote1 use); persisted as ExtraJson and read back
+        // by SapPayloadBuilder for the to_Text send. Only added when the OCR found a note.
+        if (!string.IsNullOrWhiteSpace(l.ItemNote))
+            d["extra"] = new Dictionary<string, object?> { ["itemNote1"] = l.ItemNote };
+        return d;
+    }
 
     // safe_name(): mirrors app/main.py's safe_name() — NFC-normalize, replace anything outside
     // word chars/Thai block/dot/dash/space with "_", trim, cap at 120 chars.

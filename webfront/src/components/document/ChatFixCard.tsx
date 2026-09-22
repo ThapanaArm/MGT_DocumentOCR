@@ -54,7 +54,7 @@ export default function ChatFixCard({
   return (
     <div className="card">
       <div className="card-h">
-        <h2><i className="fa-solid fa-wand-magic-sparkles" /> ให้ AI ช่วยแก้ข้อมูลเอกสาร</h2>
+        <h2><i className="fa-solid fa-wand-magic-sparkles" /> Ask AI to fix document data</h2>
         <div className="sp" />
         <select
           className="ocr-pick"
@@ -69,7 +69,7 @@ export default function ChatFixCard({
             </option>
           ))}
         </select>
-        {!ready && <span className="hint">ยังใช้งานไม่ได้ กรุณาตั้งค่าโมเดล AI อย่างน้อยหนึ่งรายการ</span>}
+        {!ready && <span className="hint">Not available yet — configure at least one AI model</span>}
       </div>
       <div className="card-b">
         <div className="chat-history">
@@ -90,19 +90,19 @@ export default function ChatFixCard({
             })
           ) : (
             <p className="hint">
-              พิมพ์สิ่งที่ต้องการแก้ หรือแนบภาพประกอบ เช่น “วันที่ส่งสินค้าคือ 20 กันยายน”, “แถวที่ 2 เปลี่ยน Material เป็น
-              SOCA01-CN-BG-12”, “เปลี่ยนที่อยู่จัดส่งเป็นสาขาบางนา” หรือ “ลูกค้าไม่ใช่รายนี้ ช่วยหาใหม่จาก SAP” — AI
-              จะแก้เฉพาะเอกสารนี้และไม่กระทบเอกสารอื่น
-              (การเลือก Material/Ship-to/ลูกค้าผ่านแชทเป็นแค่การเลือกให้เอกสารนี้ ยังไม่บันทึกเป็น Master — ถ้าต้องการบันทึกไว้ใช้ซ้ำ ให้เลือกจากการ์ดด้านบนแทน)
+              Type what you want to fix, or attach an image — e.g. "delivery date is 20 September", "row 2: change Material to
+              SOCA01-CN-BG-12", "change the delivery address to the Bang Na branch", or "this is not the right customer, please search SAP again" — AI
+              only edits this document and does not affect others
+              (Choosing a Material/Ship-to/customer via chat only applies to this document and is not saved as Master — to save it for reuse, choose from the cards above instead)
             </p>
           )}
         </div>
         {chatImage && (
           <div className="chat-attach-preview">
             <img src={chatImage} alt="" />
-            <span className="hint">แนบรูปภาพแล้ว</span>
+            <span className="hint">Image attached</span>
             <button className="btn sm ghost" onClick={() => setChatImage(null)}>
-              <i className="fa-solid fa-xmark" /> ลบรูป
+              <i className="fa-solid fa-xmark" /> Remove image
             </button>
           </div>
         )}
@@ -124,7 +124,7 @@ export default function ChatFixCard({
           </button>
           <input
             type="text"
-            placeholder="เช่น ยอดรวมที่ถูกต้องคือ 25,680 บาท"
+            placeholder="e.g. the correct total is 25,680 THB"
             style={{ flex: 1 }}
             value={text}
             disabled={!ready}
@@ -143,7 +143,7 @@ export default function ChatFixCard({
             }}
           />
           <button className="btn primary" onClick={send} disabled={!ready}>
-            <i className="fa-solid fa-paper-plane" /> ส่งให้ AI
+            <i className="fa-solid fa-paper-plane" /> Send to AI
           </button>
         </div>
       </div>

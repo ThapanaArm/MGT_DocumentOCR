@@ -61,6 +61,17 @@ public class AppConfig
     // the user isn't 100% sure ZPR0 is fixed for every case, so it's a setting, not a literal.
     public string SapSalesOrderPriceConditionType { get; init; } = "ZPR0";
 
+    // Item Note 1 (SD item long text) sent per Sales Order line via the to_Text
+    // navigation. LongTextID = the SAP text ID configured for "Item Note 1"
+    // (Sap:SalesOrder:ItemNoteTextId, default "ZI01" per this tenant's VOTXN config).
+    // ItemNoteLanguages = comma-separated SAP language keys the note is sent under so it
+    // shows whatever the SAP logon language (Sap:SalesOrder:ItemNoteLanguages, default
+    // "TH,EN"). Blank ItemNoteTextId = feature off (nothing sent). NOTE: the exact
+    // Language key FORMAT this service accepts (ISO "TH"/"EN" vs SAP internal "2"/"E")
+    // is not yet verified against $metadata — adjust the config value if SAP rejects it.
+    public string SapSalesOrderItemNoteTextId { get; init; } = "ZI01";
+    public string SapSalesOrderItemNoteLanguages { get; init; } = "TH,EN";
+
     // Material (Product) plant-extension lookup — Step 2 of SAP integration for the Sales Order
     // module (after the Business Partner lookup above): confirms a material has been extended to
     // the target Plant in SAP before a Sales Order is posted. Same shape/fallback as the other

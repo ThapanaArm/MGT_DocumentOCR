@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, NavLink, Navigate, Outlet, useLocation } from 'react-router-dom';
 import { visibleNavSections, allowedModules } from '../navConfig';
 import { useAppState } from '../state/AppState';
@@ -184,40 +184,6 @@ export default function AppLayout() {
 
   const sections = visibleNavSections(me);
 
-  // Company-context switch (MGT ⇄ GLC) without signing out. The whole app decides Zoho-vs-SAP
-  // purely from me.primaryCompany.companyCode === 'MGT' (see DocumentPage/MasterPage), so
-  // overriding just the primaryCompany handed to the child routes flips every downstream branch
-  // at once. The backend is department-gated (DepartmentAccessFilter), never company-gated, so
-  // this changes nothing about what the API allows -- it only re-points the UI. The choice is
-  // remembered per user in localStorage; with no choice yet, the real primaryCompany is used.
-  const COMPANY_KEY = 'mgtocr.activeCompanyCode.' + (me?.userId ?? 'anon');
-  const [activeCode, setActiveCode] = useState<string | null>(null);
-  useEffect(() => {
-    if (!me) return;
-    try {
-      setActiveCode(localStorage.getItem('mgtocr.activeCompanyCode.' + me.userId));
-    } catch {
-      setActiveCode(null);
-    }
-  }, [me]);
-  const mgtCompany = me?.companies.find((c) => c.companyCode === 'MGT') ?? { companyId: -1, companyCode: 'MGT', companyName: 'Megachem (MGT)' };
-  const glcCompany = me?.companies.find((c) => c.companyCode !== 'MGT') ?? { companyId: -2, companyCode: 'GLC', companyName: 'Green Leaf (GLC)' };
-  const effectiveCode = activeCode ?? me?.primaryCompany?.companyCode ?? null;
-  const activeIsMgt = effectiveCode === 'MGT';
-  const effectiveMe: Me | null = useMemo(() => {
-    if (!me || !activeCode) return me;
-    const chosen = activeCode === 'MGT' ? mgtCompany : glcCompany;
-    return { ...me, primaryCompany: { companyId: chosen.companyId, companyCode: chosen.companyCode, companyName: chosen.companyName } };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [me, activeCode]);
-  const switchCompany = (code: string) => {
-    setActiveCode(code);
-    try {
-      localStorage.setItem(COMPANY_KEY, code);
-    } catch {
-      /* ignore -- private mode etc.; the switch still applies for this session */
-    }
-  };
 
   // Backstop for the hidden nav: opening a module route the department may not see (typed URL,
   // old bookmark) sends the user home. The API is guarded regardless. Wait for /api/me first so
@@ -269,7 +235,7 @@ export default function AppLayout() {
           </span>
         </button>
 
-        <SidebarFoot me={effectiveMe} denied={denied} />
+        <SidebarFoot me={me} denied={denied} />
       </aside>
 
       <div className="main">
@@ -286,38 +252,19 @@ export default function AppLayout() {
           </button>
           <h1 id="pageTitle">{pageTitle(location.pathname)}</h1>
           <div className="sp" />
-          {me && (
-            <div
-              className="company-switch"
-              style={{ display: 'flex', gap: 4, marginRight: 8, alignItems: 'center' }}
-              title="Switch company context — MGT sends Sales Orders to Zoho CRM, GLC matches against SAP. No sign-out needed."
-            >
-              <span className="hint" style={{ marginRight: 2 }}>View as:</span>
-              <button
-                type="button"
-                className={'btn sm' + (activeIsMgt ? ' primary' : '')}
-                onClick={() => switchCompany('MGT')}
-              >
-                MGT · Zoho
-              </button>
-              <button
-                type="button"
-                className={'btn sm' + (!activeIsMgt ? ' primary' : '')}
-                onClick={() => switchCompany(glcCompany.companyCode)}
-              >
-                GLC · SAP
-              </button>
-            </div>
-          )}
           <Link className="btn sm start-document" to="/">
             <i className="fa-solid fa-arrow-rotate-right" /> Start New Document
           </Link>
         </div>
 
         <div className="content" id="content">
-          {/* me is threaded to child routes (DocumentPage) via context so the Sales Order page
-              can branch Customer matching by company: MGT -> Zoho CRM, others (Green Leaf) -> SAP. */}
-          <Outlet context={{ me: effectiveMe }} />
+          {/* .content is the full-width scroll pane (so its scrollbar sits at the window edge, not
+              floating mid-screen); .content-inner caps the readable width so tables/cards don't
+              stretch edge-to-edge. me is threaded to child routes via context so the Sales Order
+              page can branch Customer matching by company: MGT -> Zoho CRM, others -> SAP. */}
+          <div className="content-inner">
+            <Outlet context={{ me }} />
+          </div>
         </div>
       </div>
 

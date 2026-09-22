@@ -1,4 +1,5 @@
 import { api } from './client';
+import type { DocModel } from './documents';
 
 /* Live Zoho CRM "Accounts" (customer) lookup — the Zoho-side counterpart to sap.ts, used for
    the MGT-side Sales Order flow (Green Leaf keeps using sap.ts / SAP Business Partner).
@@ -156,6 +157,16 @@ export const getZohoDealsByAccountCode = (accountCode: string) =>
     '/api/zoho/deals/by-account-code/' + encodeURIComponent(accountCode),
   );
 
+/* Manual fallback search shown by the Deal card when the Account_Code lookup above finds no
+   open Deal -- searches by Deal Name (partial match), with no account-code or stage filter, so
+   a Deal that was missed because its Zoho Account link (and so its Account_Code) is wrong/blank,
+   or because it's already in a Closed stage, still shows up. Backend: GET /api/zoho/deals/search
+   (MgtOcr.Zoho.ZohoDealClient.SearchByNameAsync). */
+export const searchZohoDeals = (query: string, top = 20) =>
+  api.get<{ count: number; deals: ZohoDeal[] }>(
+    '/api/zoho/deals/search?q=' + encodeURIComponent(query) + '&top=' + top,
+  );
+
 /* Creates a Zoho CRM "Sales Orders" record from a document, linked by lookup to the given Deal.
    Backend: GET .../preview + POST .../create/{docId} (MgtOcr.Zoho.ZohoSalesOrderClient +
    ZohoSalesOrderController) -- deliberately separate from postToSap/DocumentsController.
@@ -177,6 +188,10 @@ export interface ZohoSalesOrderPreviewLine {
   quantity: number;
   unitPrice?: number | null;
   unit?: string | null;
+  /** UoM conversion the mapping applied for this MGT line, surfaced in the preview (F10):
+   *  1 order unit = conversionRatio subUnit. Null when no conversion applies. */
+  conversionRatio?: number | null;
+  subUnit?: string | null;
 }
 
 export interface ZohoSalesOrderPreview {
@@ -233,6 +248,9 @@ export interface ZohoSalesOrderResult {
   dealName: string;
   linesSent: number;
   skipped: ZohoSalesOrderSkippedLine[];
+  /** The updated document after the send (status flips to POSTED on success), so the page can
+   *  reflect the posted state without a manual refresh -- mirrors the SAP /post response. */
+  document?: DocModel;
 }
 
 export const createZohoSalesOrder = (docId: number, dealId: string, edits?: ZohoSalesOrderEdits) =>

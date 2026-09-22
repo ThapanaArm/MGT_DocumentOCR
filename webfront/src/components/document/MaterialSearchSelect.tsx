@@ -55,8 +55,8 @@ export default function MaterialSearchSelect({
   onChange,
   searchSap,
   emptyLabel = '-- Not found / Please select --',
-  searchPlaceholder = 'พิมพ์ชื่อหรือรหัสเพื่อค้นหา…',
-  ariaLabel = 'ค้นหาและเลือกรายการ',
+  searchPlaceholder = 'Type a name or code to search…',
+  ariaLabel = 'Search and select an item',
   minWidth = 300,
 }: {
   options: MaterialSearchOption[];
@@ -162,7 +162,7 @@ export default function MaterialSearchSelect({
         const rows = await searchSap(q);
         if (active) setSapOptions(rows);
       } catch (e) {
-        if (active) setSapError(e instanceof Error ? e.message : 'ค้นหา SAP ไม่สำเร็จ');
+        if (active) setSapError(e instanceof Error ? e.message : 'SAP search failed');
       } finally {
         if (active) setSapLoading(false);
       }
@@ -234,7 +234,7 @@ export default function MaterialSearchSelect({
     >
       {selectedLabel && (
         <div style={{ padding: '4px 10px 6px', fontSize: 11, color: 'var(--muted)' }}>
-          ปัจจุบัน: {selectedLabel}
+          Current: {selectedLabel}
         </div>
       )}
       {!q && value && (
@@ -251,7 +251,7 @@ export default function MaterialSearchSelect({
       )}
       {listOptions.length === 0 && (
         <div style={{ padding: '10px', fontSize: 13, color: 'var(--muted)' }}>
-          {sapLoading ? 'กำลังค้นหา…' : 'ไม่พบรายการ — ลองพิมพ์คำค้นอื่น'}
+          {sapLoading ? 'Searching…' : 'No items found — try another search term'}
         </div>
       )}
       {listOptions.map((o, index) => {
@@ -298,7 +298,7 @@ export default function MaterialSearchSelect({
       })}
       {searchSap && q.length >= 2 && (
         <div style={{ padding: '6px 10px', fontSize: 12, color: 'var(--muted)' }}>
-          {sapLoading ? 'ค้นหาจาก SAP…' : `พบใน SAP ${sapOptions.length} รายการ`}
+          {sapLoading ? 'Searching SAP…' : `Found ${sapOptions.length} in SAP`}
           {sapError && ` · ${sapError}`}
         </div>
       )}
@@ -313,8 +313,8 @@ export default function MaterialSearchSelect({
           background: 'var(--card)',
         }}
       >
-        แสดง {listOptions.length} / {options.length} รายการ
-        {q ? ` · ค้นหา “${query.trim()}”` : ''}
+        Showing {listOptions.length} / {options.length} items
+        {q ? ` · search "${query.trim()}"` : ''}
       </div>
     </div>
   );
@@ -367,7 +367,7 @@ export default function MaterialSearchSelect({
         <button
           type="button"
           disabled={disabled}
-          aria-label={open ? 'ปิดรายการ' : 'เปิดรายการ'}
+          aria-label={open ? 'Close list' : 'Open list'}
           onMouseDown={(e) => {
             e.preventDefault(); // don't steal focus / cause a blur-close race
             if (disabled) return;

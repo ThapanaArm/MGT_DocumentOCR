@@ -205,6 +205,37 @@ public partial class DocumentRepository(Db db, string uploadDir)
         await tx.CommitAsync();
     }
 
+    // Records an external-system post (Zoho CRM Sales Order) exactly the way
+    // DocumentsController.PostDocument records a SAP post: always one ocr.PostLog row, and on
+    // success flip the document to POSTED with the external doc number + who/when. Lives here (not
+    // in the Zoho controller) so it reuses the repo's own Db/transaction, and so
+    // DocumentsController.PostDocument / sap.PostAsync stay untouched (standing rule). extDocNo is
+    // stored in the generic SapDocNo ("external document number") column — SalesOrder has no
+    // separate Zoho column and adding one would need a migration for no functional gain.
+    //
+    // companyCode (added 2026-09-22, SharePoint archiving phase-1 foundation): the canonical
+    // "MGT"/"GLC" label (AppConfig.CompanyProfile.Name), stamped once here at the moment of a
+    // successful post -- never recomputed later from whoever is viewing the document, since a user
+    // can belong to more than one company. This endpoint only ever posts to Zoho, which only ever
+    // means MGT, so callers pass "MGT" literally here; nullable purely so a failed post (no
+    // company decided yet, since nothing was actually posted) leaves it unset. See
+    // sql/22_document_company_code.sql for the column itself and the fuller rationale.
+    public async Task RecordExternalPostAsync(string module, int docId, string? extDocNo, string? endpoint,
+        string payloadJson, bool success, string? message, string user, string? companyCode = null)
+    {
+        var docT = DocumentTables.For(module).Doc;
+        await using var conn = await db.OpenAsync();
+        await using var tx = await conn.BeginTransactionAsync();
+        await conn.ExecuteAsync("""
+            INSERT ocr.PostLog(DocId,Module,SapDocNo,Endpoint,PayloadJson,Success,Message,PostedBy)
+            VALUES(@docId,@module,@extDocNo,@endpoint,@payloadJson,@success,@message,@user)
+            """, new { docId, module, extDocNo, endpoint, payloadJson, success = success ? 1 : 0, message, user }, tx);
+        if (success)
+            await conn.ExecuteAsync($"UPDATE {docT} SET Status='POSTED', SapDocNo=@extDocNo, CompanyCode=@companyCode, PostedAt=SYSDATETIME(), PostedBy=@user, UpdatedAt=SYSDATETIME() WHERE DocId=@docId",
+                new { extDocNo, companyCode, user, docId }, tx);
+        await tx.CommitAsync();
+    }
+
     public async Task<Dictionary<string, object?>> GetDocumentAsync(int docId)
     {
         var t = DocumentTables.ForId(docId);
@@ -317,6 +348,95 @@ public partial class DocumentRepository(Db db, string uploadDir)
         p.Add("limit", limit);
         return await db.QueryAsync(
             $"SELECT TOP (@limit) * FROM ({string.Join(" UNION ALL ", parts)}) x ORDER BY DocId DESC", p);
+    }
+
+    public record DocumentsPage(IReadOnlyList<dynamic> Rows, int Total, int? CountAll, int? CountAP, int? CountII);
+
+    // Real server-side paging for the Document Register (InboxPage). Search (DocNo/PartnerName),
+    // date range (DocDate) and the module/category/status filters are ALL applied in SQL; one page
+    // is returned via OFFSET/FETCH plus the true total COUNT, so the client never pulls the whole
+    // table and slices it. For the merged invoice tab (module "AP" = AP+II) the per-tab counts
+    // (all/AP/II) are computed server-side too, respecting search+date but ignoring the selected
+    // tab. Common filter columns (Status, ApDocCategory, DocNo, PartnerName, DocDate) exist on both
+    // ocr.Document and ocr.SalesOrder, so the same predicates work across the union. Built with
+    // plain string concatenation (not $"" interpolation) to keep the nested SQL quotes unambiguous.
+    public async Task<DocumentsPage> ListDocumentsPagedAsync(
+        string module, string status, string apDocCategory, string search,
+        string dateFrom, string dateTo, string invModule, int page, int pageSize,
+        IReadOnlyCollection<string>? allowedModules = null)
+    {
+        var mod = module.ToUpperInvariant();
+        var p = new DynamicParameters();
+        var common = new List<string>();
+        if (status.Length > 0) { common.Add("Status=@status"); p.Add("status", status.ToUpperInvariant()); }
+        if (apDocCategory.Length > 0) { common.Add("ApDocCategory=@apDocCategory"); p.Add("apDocCategory", apDocCategory.ToUpperInvariant()); }
+        if (!string.IsNullOrWhiteSpace(search))
+        {
+            common.Add("(DocNo LIKE @q OR PartnerName LIKE @q)");
+            var esc = search.Trim().Replace("[", "[[]").Replace("%", "[%]").Replace("_", "[_]");
+            p.Add("q", "%" + esc + "%");
+        }
+        if (dateFrom.Length > 0) { common.Add("DocDate >= @dateFrom"); p.Add("dateFrom", dateFrom); }
+        if (dateTo.Length > 0) { common.Add("DocDate <= @dateTo"); p.Add("dateTo", dateTo); }
+
+        string Where(IEnumerable<string> extra)
+        {
+            var all = extra.Concat(common).ToList();
+            return all.Count > 0 ? " WHERE " + string.Join(" AND ", all) : "";
+        }
+
+        string srcSql;
+        int? cAll = null, cAp = null, cIi = null;
+
+        if (mod == "AP")
+        {
+            var extra = new List<string> { "Module IN ('AP','II')" };
+            var inv = invModule.ToUpperInvariant();
+            if (inv == "AP" || inv == "II") { extra.Add("Module=@invModule"); p.Add("invModule", inv); }
+            srcSql = "SELECT " + DocListCols + " FROM ocr.Document" + Where(extra);
+            var countWhere = Where(new List<string> { "Module IN ('AP','II')" });
+            var grp = await db.QueryAsync("SELECT Module, COUNT(*) AS Cnt FROM ocr.Document" + countWhere + " GROUP BY Module", p);
+            cAp = 0; cIi = 0;
+            foreach (var r in grp)
+            {
+                var m = (string)r.Module; var c = (int)r.Cnt;
+                if (m == "AP") cAp = c; else if (m == "II") cIi = c;
+            }
+            cAll = (cAp ?? 0) + (cIi ?? 0);
+        }
+        else if (mod == "SO")
+        {
+            srcSql = "SELECT " + DocListCols + " FROM ocr.SalesOrder" + Where(Array.Empty<string>());
+        }
+        else if (mod.Length > 0)
+        {
+            p.Add("module", mod);
+            srcSql = "SELECT " + DocListCols + " FROM ocr.Document" + Where(new[] { "Module=@module" });
+        }
+        else
+        {
+            IReadOnlyCollection<string> allow = allowedModules ?? new[] { "AP", "II", "PODP", "SO" };
+            var docMods = new[] { "AP", "II", "PODP" }.Where(m => allow.Contains(m)).ToArray();
+            var includeSo = allow.Contains("SO");
+            if (docMods.Length == 0 && !includeSo) return new DocumentsPage(Array.Empty<dynamic>(), 0, null, null, null);
+            var parts = new List<string>();
+            if (docMods.Length > 0)
+            {
+                p.Add("docMods", docMods);
+                parts.Add("SELECT " + DocListCols + " FROM ocr.Document" + Where(new[] { "Module IN @docMods" }));
+            }
+            if (includeSo)
+                parts.Add("SELECT " + DocListCols + " FROM ocr.SalesOrder" + Where(Array.Empty<string>()));
+            srcSql = string.Join(" UNION ALL ", parts);
+        }
+
+        p.Add("off", Math.Max(0, (page - 1) * pageSize));
+        p.Add("ps", pageSize);
+        var totalRow = await db.QueryOneAsync("SELECT COUNT(*) AS Cnt FROM (" + srcSql + ") x", p);
+        var total = totalRow == null ? 0 : (int)totalRow.Cnt;
+        var rows = (await db.QueryAsync(
+            "SELECT * FROM (" + srcSql + ") x ORDER BY DocId DESC OFFSET @off ROWS FETCH NEXT @ps ROWS ONLY", p)).ToList();
+        return new DocumentsPage(rows, total, cAll, cAp, cIi);
     }
 
     // ---------------------------------------------------------------- chat (AI correction history)

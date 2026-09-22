@@ -1,6 +1,8 @@
 using MgtOcr.Api.Auth;
+using System.Text.Json;
 using MgtOcr.Core;
 using MgtOcr.Core.Auth;
+using MgtOcr.Core.Json;
 using MgtOcr.Core.Config;
 using MgtOcr.Data;
 using MgtOcr.Zoho;
@@ -57,7 +59,10 @@ public class ZohoSalesOrderController(
     private record MatchedLine(
         string ItemNo, string? Desc, string? ExtCode, string MaterialId, string? MaterialName,
         string? MaterialCode, string? MaterialGroup, string? ShipVia, string? Stock, string? LeadTimeDays,
-        decimal Quantity, decimal? UnitPrice, string? Unit, decimal? ConversionRatio, string? SubUnit);
+        decimal Quantity, decimal? UnitPrice, string? Unit, decimal? ConversionRatio, string? SubUnit,
+        // Same source/column as SAP's Item Note 1 (line.extra.itemNote1) -- sent to Zoho's
+        // Status_Note column on the Ordered Items subform. See ZohoSalesOrderLine.StatusNote.
+        string? ItemNote1);
 
     private record SkippedLine(string ItemNo, string? Desc, string? ExtCode, string Reason);
 
@@ -242,6 +247,10 @@ public class ZohoSalesOrderController(
         var qty = Num(l.Get("qty"));
         if (qty <= 0) return null;
         var converted = ConvertZohoUom(l, item, uomRules, salesOrg, requireUomConversion);
+        // Same per-line "extra" bag SAP's Item Note 1 reads (SapPayloadBuilder) -- persisted
+        // separately from the top-level line fields so it survives the DB round-trip; edited by
+        // the CS in DetailTable regardless of GLC/SAP vs MGT/Zoho.
+        var lineExtra = l.Get("extra") as Dictionary<string, object?>;
         return new MatchedLine(
             ItemNo: l.Get("itemNo")?.ToString() ?? "",
             Desc: l.GetStr("desc"),
@@ -257,7 +266,8 @@ public class ZohoSalesOrderController(
             UnitPrice: converted.UnitPrice,
             Unit: converted.Unit,
             ConversionRatio: item.ConversionRatio,
-            SubUnit: item.SubUnit);
+            SubUnit: item.SubUnit,
+            ItemNote1: lineExtra?.GetStr("itemNote1"));
     }
 
     // GET /api/zoho/sales-order/preview/{docId}?dealId=... — every value Create would send,
@@ -295,6 +305,8 @@ public class ZohoSalesOrderController(
                 quantity = l.Quantity,
                 unitPrice = l.UnitPrice,
                 unit = l.Unit,
+                conversionRatio = l.ConversionRatio,
+                subUnit = l.SubUnit,
             }),
             skipped = d.Skipped,
         });
@@ -352,7 +364,8 @@ public class ZohoSalesOrderController(
                 UnitPrice: ov?.UnitPrice ?? l.UnitPrice,
                 Unit: ov?.Unit is { Length: > 0 } ? ov.Unit : l.Unit,
                 ConversionRatio: l.ConversionRatio,
-                SubUnit: l.SubUnit);
+                SubUnit: l.SubUnit,
+                StatusNote: l.ItemNote1);
         }).ToList();
 
         var subject = body.Subject is { Length: > 0 } ? body.Subject : d.Subject;
@@ -390,6 +403,12 @@ public class ZohoSalesOrderController(
         if (body is null || string.IsNullOrWhiteSpace(body.DealId))
             throw new HttpApiException(400, "A Deal must be selected first");
 
+        // F09: block a re-send. Once a document is POSTED (SAP or Zoho) it must not be sent again,
+        // exactly like DocumentsController.PostDocument guards the SAP path.
+        var existing = await repo.GetDocumentAsync(docId);
+        if (existing.GetStr("status") == "POSTED")
+            throw new HttpApiException(400, $"This document has already been sent to Zoho ({existing.GetStr("sapDocNo")})");
+
         var a = await AssembleAsync(docId, body);
         var result = await soClient.CreateAsync(
             dealId: a.Deal.Id,
@@ -411,6 +430,21 @@ public class ZohoSalesOrderController(
             : $"Zoho Sales Order creation failed from Deal \"{a.Deal.DealName}\": {result.Message}";
         await repo.LogAuditAsync(docId, "SO", "CREATE", actor, detail: detail, fileName: a.Doc.GetStr("fileName"));
 
+        // F09: persist the send result so it survives a page refresh and blocks a re-send — always
+        // one ocr.PostLog row; on success the document flips to POSTED carrying the Zoho record id.
+        var payloadJson = JsonSerializer.Serialize(new
+        {
+            dealId = a.Deal.Id, dealName = a.Deal.DealName, accountId = a.Deal.AccountId,
+            subject = a.Subject, customerRef = a.CustomerRef, deliveryDate = a.DeliveryDate,
+            paymentTerms = a.PaymentTerms, paymentCurrency = a.PaymentCurrency, incoterms = a.Incoterms,
+            taxId = a.TaxId, shipTo = a.ShipTo, lines = a.SoLines,
+        }, PyJson.Options);
+        // companyCode "MGT" literal: this controller only ever creates Zoho Sales Orders, which
+        // only ever means the MGT company (see sql/22_document_company_code.sql) -- no lookup
+        // needed, unlike the SAP/GLC path in DocumentsController.PostDocument.
+        await repo.RecordExternalPostAsync("SO", docId, result.ZohoId, "Zoho:Sales_Orders",
+            payloadJson, result.Status == "success", result.Message, actor, companyCode: "MGT");
+
         return Ok(new
         {
             success = result.Status == "success",
@@ -419,6 +453,7 @@ public class ZohoSalesOrderController(
             dealName = a.Deal.DealName,
             linesSent = a.SoLines.Count,
             skipped = a.StillSkipped,
+            document = await repo.GetDocumentAsync(docId),
         });
     }
 

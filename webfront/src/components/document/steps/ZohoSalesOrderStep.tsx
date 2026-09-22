@@ -37,6 +37,9 @@ interface Props {
   salesOrg: string;
   posted: boolean;
   onUseMaterial: (lineIndex: number, item: ZohoDealItem) => Promise<void>;
+  /** Called after a successful Zoho send with the updated (now POSTED) document, so the page can
+   *  flip to the posted state without a manual reload -- mirrors SapSalesOrderStep.onPosted. */
+  onPosted: (doc: DocModel) => void;
 }
 
 function convertedValues(
@@ -109,7 +112,7 @@ const EMPTY_HEADER: ZohoSalesOrderEditorHeader = {
 };
 
 const ZohoSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function ZohoSalesOrderStep(
-  { doc, map, selectedDealId, resolvedDeal, selectedShipTo, providers, uomRules, shipTos, salesOrg, posted, onUseMaterial },
+  { doc, map, selectedDealId, resolvedDeal, selectedShipTo, providers, uomRules, shipTos, salesOrg, posted, onUseMaterial, onPosted },
   ref,
 ) {
   const { guard, showToast } = useAppState();
@@ -251,7 +254,10 @@ const ZohoSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function Zoho
       setResult(response);
       if (response.success) {
         showToast(`Created Sales Order in Zoho CRM successfully — linked to Deal "${response.dealName}" (${response.linesSent} line(s) sent)`);
-        window.scrollTo({ top: 0, behavior: 'smooth' });
+        // Reflect the now-POSTED status immediately (disables re-send + inputs) instead of waiting
+        // for a manual refresh -- the backend returns the updated document (F09).
+        if (response.document) onPosted(response.document);
+        document.querySelector('.content')?.scrollTo({ top: 0, behavior: 'smooth' }); window.scrollTo({ top: 0, behavior: 'smooth' });
       }
     } finally {
       setSending(false);

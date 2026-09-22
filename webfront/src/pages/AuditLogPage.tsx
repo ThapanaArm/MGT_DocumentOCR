@@ -1,11 +1,12 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useState } from 'react';
 import { useAppState } from '../state/AppState';
 import { getAuditLogs, type AuditRow } from '../api/masters';
 import { dt, moduleLabel } from '../utils/format';
 import { OCR_PROVIDER_SHORT } from '../constants/fields';
-import Pager, { DateRange, inDateRange, paginate } from '../components/Pager';
+import Pager, { DateRange } from '../components/Pager';
+import { usePagedList } from '../hooks/usePagedList';
 
-/* Ports renderAuditLog()/renderAuditLogLocal(). */
+/* Activity log — server-side paged (see usePagedList); only the current page is loaded. */
 const ACTION_BADGE: Record<string, [string, string]> = {
   CREATE: ['b-ok', 'Document Created'],
   UPDATE: ['b-warn', 'Edited'],
@@ -22,30 +23,19 @@ const MODULE_FILTERS: [string, string][] = [
 
 export default function AuditLogPage() {
   const { guard } = useAppState();
-  const [rows, setRows] = useState<AuditRow[] | null>(null);
   const [modFilter, setModFilter] = useState('');
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(50);
 
-  const reload = () => {
-    setRows(null);
-    guard(() => getAuditLogs()).then((r) => setRows(r ?? []));
-  };
-  useEffect(reload, [guard]);
-
-  const filtered = useMemo(() => {
-    let list = rows ?? [];
-    if (modFilter) list = list.filter((l) => l.Module === modFilter);
-    return list.filter((l) => inDateRange(l.CreatedAt, from, to));
-  }, [rows, modFilter, from, to]);
-  const pageRows = paginate(filtered, page, pageSize);
+  const { rows, total, page, pageSize, setPage, setPageSize, reload } = usePagedList<AuditRow>(
+    (pg, ps) => guard(() => getAuditLogs({ module: modFilter, dateFrom: from, dateTo: to, page: pg, pageSize: ps })),
+    [modFilter, from, to],
+  );
 
   return (
     <div className="card">
       <div className="card-h">
-        <h2>Activity Log ({filtered.length})</h2>
+        <h2>Activity Log ({total})</h2>
         <div className="sp" />
         <span className="hint" style={{ marginRight: 4 }}>
           Date:
@@ -62,10 +52,7 @@ export default function AuditLogPage() {
             <button
               key={v}
               className={'btn sm ' + (v === modFilter ? 'primary' : 'ghost')}
-              onClick={() => {
-                setModFilter(v);
-                setPage(1);
-              }}
+              onClick={() => setModFilter(v)}
             >
               {l}
             </button>
@@ -91,8 +78,8 @@ export default function AuditLogPage() {
                     Loading…
                   </td>
                 </tr>
-              ) : pageRows.length ? (
-                pageRows.map((l, i) => {
+              ) : rows.length ? (
+                rows.map((l, i) => {
                   const b = ACTION_BADGE[l.Action] || ['b-idle', l.Action];
                   return (
                     <tr key={i}>
@@ -134,7 +121,7 @@ export default function AuditLogPage() {
             </tbody>
           </table>
         </div>
-        <Pager page={page} setPage={setPage} pageSize={pageSize} setPageSize={setPageSize} total={filtered.length} />
+        <Pager page={page} setPage={setPage} pageSize={pageSize} setPageSize={setPageSize} total={total} />
       </div>
     </div>
   );

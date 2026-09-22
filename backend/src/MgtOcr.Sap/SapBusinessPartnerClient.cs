@@ -10,7 +10,34 @@ namespace MgtOcr.Sap;
 // always the tax number SAP itself has on file for this partner, regardless of whether the
 // search was keyed by tax ID or by name, so the UI can show SAP's real value even when the
 // document being matched had no Tax ID of its own (or a different one) to search with.
-public record BusinessPartner(string BusinessPartnerId, string BusinessPartnerName, string? BusinessPartnerFullName = null, bool BusinessPartnerIsBlocked = false, string? AddressCity = null, string? AddressStreet = null, string? TaxId = null);
+public record BusinessPartner(
+    string BusinessPartnerId, string BusinessPartnerName, string? BusinessPartnerFullName = null,
+    bool BusinessPartnerIsBlocked = false, string? AddressCity = null, string? AddressStreet = null,
+    // Address sub-fields added 2026-09-22, field names CORRECTED the same day against a proven,
+    // already-live reference: Megachem's own SAP->Zoho "Ship_to" module sync job
+    // (SapUomSyncService.Jobs.ZohoShipToSyncJob, a separate scheduled service, not part of this
+    // app) reads this exact entity and has done so successfully in production, so its field names
+    // are trusted over this class's own earlier, explicitly-flagged-as-unconfirmed guess. That job
+    // maps StreetName -> Street (primary line), StreetPrefixName -> Street 2,
+    // AdditionalStreetPrefixName -> Street 3, StreetSuffixName -> Street 4,
+    // AdditionalStreetSuffixName -> Street 5, HouseNumber -> House Number, District -> District,
+    // CityName -> City, HomeCityName -> Zoho's "Difference City", PostalCode -> Post Code,
+    // Country -> Country/Reg -- this class previously guessed StreetSuffixName1/StreetSuffixName2
+    // for Street 2/Street 3 (never actually confirmed against this tenant's own $metadata) and had
+    // no Street 4/5 or Difference-City equivalent at all; both are fixed here.
+    string? AddressHouseNumber = null, string? AddressDistrict = null, string? AddressPostalCode = null,
+    string? AddressCountry = null, string? AddressStreet2 = null, string? AddressStreet3 = null,
+    string? AddressStreet4 = null, string? AddressStreet5 = null, string? AddressDifferenceCity = null,
+    string? TaxId = null);
+
+// One row from A_BusinessPartnerAddress, before it's applied onto a BusinessPartner -- kept as its
+// own small record (rather than a bare tuple) since it carries 11 fields. Field-to-property names
+// below follow the OData field names directly (Street2/3/4/5 are this record's own naming, not
+// SAP's -- see BusinessPartner's doc comment for the real OData field each one comes from).
+public record SapAddressFields(
+    string? City, string? Street, string? HouseNumber, string? District, string? PostalCode,
+    string? Country, string? Street2, string? Street3, string? Street4, string? Street5,
+    string? DifferenceCity);
 
 // One row from A_CustSalesPartnerFunc (a Sold-to's sales-area partner-function assignments).
 // PartnerFunction "SH" = Ship-to, "SP" = Sold-to (per Megachem — matches the "SH"/PartnerFunction
@@ -79,7 +106,13 @@ public class SapBusinessPartnerClient(AppConfig config, HttpClient httpClient)
             .Select(r =>
             {
                 var withAddr = addrByBp.TryGetValue(r.BusinessPartnerId, out var a)
-                    ? r with { AddressCity = a.city, AddressStreet = a.street }
+                    ? r with
+                    {
+                        AddressCity = a.City, AddressStreet = a.Street, AddressHouseNumber = a.HouseNumber,
+                        AddressDistrict = a.District, AddressPostalCode = a.PostalCode, AddressCountry = a.Country,
+                        AddressStreet2 = a.Street2, AddressStreet3 = a.Street3, AddressStreet4 = a.Street4,
+                        AddressStreet5 = a.Street5, AddressDifferenceCity = a.DifferenceCity,
+                    }
                     : r;
                 return withAddr with { TaxId = clean };
             })
@@ -453,7 +486,13 @@ public class SapBusinessPartnerClient(AppConfig config, HttpClient httpClient)
             .Select(r =>
             {
                 var withAddr = addrByBp.TryGetValue(r.BusinessPartnerId, out var a)
-                    ? r with { AddressCity = a.city, AddressStreet = a.street }
+                    ? r with
+                    {
+                        AddressCity = a.City, AddressStreet = a.Street, AddressHouseNumber = a.HouseNumber,
+                        AddressDistrict = a.District, AddressPostalCode = a.PostalCode, AddressCountry = a.Country,
+                        AddressStreet2 = a.Street2, AddressStreet3 = a.Street3, AddressStreet4 = a.Street4,
+                        AddressStreet5 = a.Street5, AddressDifferenceCity = a.DifferenceCity,
+                    }
                     : r;
                 return taxByBp.TryGetValue(r.BusinessPartnerId, out var t) && !string.IsNullOrWhiteSpace(t)
                     ? withAddr with { TaxId = t }
@@ -468,15 +507,27 @@ public class SapBusinessPartnerClient(AppConfig config, HttpClient httpClient)
     /// office and its branches are, by definition, different physical locations, and address is a
     /// standard entity (not a custom/localization field), so it should hold for any tenant.
     /// Field names confirmed (2026-09-10) against a real A_BusinessPartnerAddress OData response
-    /// from this tenant — CityName/StreetName below are exactly right, no guess.
+    /// from this tenant — CityName/StreetName below are exactly right, no guess. The rest
+    /// (HouseNumber/District/PostalCode/Country/StreetPrefixName/AdditionalStreetPrefixName/
+    /// StreetSuffixName/AdditionalStreetSuffixName/HomeCityName) were confirmed 2026-09-22 against
+    /// SapUomSyncService.Jobs.ZohoShipToSyncJob, a separate already-in-production job reading this
+    /// same entity for its own SAP->Zoho Ship-to sync (see BusinessPartner's doc comment) — not
+    /// re-guessed here.
     /// </summary>
-    private async Task<Dictionary<string, (string? city, string? street)>> FetchAddressMapAsync(List<BusinessPartner> results)
+    private async Task<Dictionary<string, SapAddressFields>> FetchAddressMapAsync(List<BusinessPartner> results)
     {
         var baseUrl = config.SapBusinessPartnerBaseUrl;
         var ids = results.Select(r => r.BusinessPartnerId).Distinct().ToList();
         var idFilter = string.Join(" or ", ids.Select(id => $"BusinessPartner eq '{EscapeODataLiteral(id)}'"));
+        // Expanded 2026-09-22, then CORRECTED the same day: the original expansion guessed
+        // StreetSuffixName1/StreetSuffixName2 for Street 2/3 (flagged as unconfirmed in this
+        // class's own earlier comment) -- replaced with the real field names confirmed against
+        // ZohoShipToSyncJob (see this method's own doc comment above), plus HomeCityName (Zoho's
+        // "Difference City") which wasn't requested at all before.
         var url = $"{baseUrl.TrimEnd('/')}/A_BusinessPartnerAddress?$filter={Uri.EscapeDataString(idFilter)}" +
-                  $"&$select=BusinessPartner,CityName,StreetName&$top={ids.Count}";
+                  "&$select=BusinessPartner,CityName,StreetName,HouseNumber,District,PostalCode,Country," +
+                  "StreetPrefixName,AdditionalStreetPrefixName,StreetSuffixName,AdditionalStreetSuffixName,HomeCityName" +
+                  $"&$top={ids.Count}";
         try
         {
             var text = await GetJsonAsync(url);
@@ -488,14 +539,19 @@ public class SapBusinessPartnerClient(AppConfig config, HttpClient httpClient)
         }
     }
 
-    private static Dictionary<string, (string? city, string? street)> ParseAddressMap(string json)
+    private static Dictionary<string, SapAddressFields> ParseAddressMap(string json)
     {
-        var map = new Dictionary<string, (string?, string?)>();
+        var map = new Dictionary<string, SapAddressFields>();
         foreach (var item in EnumerateResults(json))
         {
             var bp = GetString(item, "BusinessPartner");
             if (string.IsNullOrEmpty(bp)) continue;
-            map[bp] = (GetString(item, "CityName"), GetString(item, "StreetName"));
+            map[bp] = new SapAddressFields(
+                GetString(item, "CityName"), GetString(item, "StreetName"), GetString(item, "HouseNumber"),
+                GetString(item, "District"), GetString(item, "PostalCode"), GetString(item, "Country"),
+                GetString(item, "StreetPrefixName"), GetString(item, "AdditionalStreetPrefixName"),
+                GetString(item, "StreetSuffixName"), GetString(item, "AdditionalStreetSuffixName"),
+                GetString(item, "HomeCityName"));
         }
         return map;
     }

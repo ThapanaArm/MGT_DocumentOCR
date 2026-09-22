@@ -13,3 +13,6 @@ server_err.log
 .vs/
 _to_delete/
 *.bak
+
+# scratch / build output (not part of the app)
+tmp/

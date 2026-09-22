@@ -45,10 +45,10 @@ export function useDocumentEditor(user: string) {
         if (!silent) {
           showToast(
             res.pass
-              ? 'จับคู่ข้อมูลสำเร็จและบันทึกแล้ว'
-              : 'ยังจับคู่ไม่ครบ ' + res.errors.length + ' รายการ กรุณาตรวจและเลือกข้อมูล',
+              ? 'Data matched and saved successfully'
+              : 'Still incomplete: ' + res.errors.length + ' item(s) — please review and select data',
           );
-          window.scrollTo({ top: 0, behavior: 'smooth' });
+          document.querySelector('.content')?.scrollTo({ top: 0, behavior: 'smooth' }); window.scrollTo({ top: 0, behavior: 'smooth' });
         }
       }
     },

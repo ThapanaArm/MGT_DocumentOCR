@@ -139,7 +139,7 @@ export default function DetailTable({
       }));
   const showPoExtra = doc.module === 'AP';
   const showSoExtra = doc.module === 'SO';
-  const extraCols = (showPoExtra ? 1 : 0) + (showSoExtra ? 2 : 0);
+  const extraCols = (showPoExtra ? 1 : 0) + (showSoExtra ? 3 : 0);
   const sum = doc.lines.reduce((a, l) => a + num(l.amount), 0);
 
   const numInput = (
@@ -194,6 +194,7 @@ export default function DetailTable({
                   <>
                     <th style={{ minWidth: 160 }}>Sales Employee Name</th>
                     <th style={{ minWidth: 140 }}>Delivery Date</th>
+                    <th style={{ minWidth: 220 }}>Item Note 1</th>
                   </>
                 )}
                 <th style={{ width: 44 }} />
@@ -298,6 +299,14 @@ export default function DetailTable({
                               value={(l.extra || {}).deliveryDate || ''}
                               readOnly={posted}
                               onChange={(e) => onEditLineExtra(i, 'deliveryDate', e.target.value)}
+                            />
+                          </td>
+                          <td style={{ minWidth: 220 }}>
+                            <input
+                              value={(l.extra || {}).itemNote1 || ''}
+                              readOnly={posted}
+                              placeholder="OCR prefilled — editable"
+                              onChange={(e) => onEditLineExtra(i, 'itemNote1', e.target.value)}
                             />
                           </td>
                         </>

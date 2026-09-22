@@ -20,7 +20,7 @@ export interface FieldGroup {
 export const SO_H: FieldDef[] = [
   ['docType', 'Document Type'], ['poNo', 'Customer PO No.'], ['poDate', 'Document Date'],
   ['customerName', 'Customer Name'], ['customerTaxId', 'Tax ID'], ['customerAddress', 'Customer Address (Sold-to)'],
-  ['shipToCode', 'รหัส Ship-to ในเอกสาร'], ['shipToName', 'Ship-to Location'], ['shipToAddress', 'Delivery Address (Ship-to)'],
+  ['shipToCode', 'Ship-to code in document'], ['shipToName', 'Ship-to Location'], ['shipToAddress', 'Delivery Address (Ship-to)'],
   ['deliveryDate', 'Requested Delivery Date'], ['currency', 'Currency'],
   ['paymentTerms', 'Payment Terms'], ['incoterms', 'Incoterms'],
 ];
@@ -290,37 +290,59 @@ export interface MasterDef {
 
 export const MASTER_DEF: Record<string, MasterDef> = {
   customers: {
-    label: 'Customer — ลูกค้า', mod: 'SO', key: 'id', matchKey: 'ComcompyCodeSAP', cols: [
-      { k: 'CompanyName', l: 'ชื่อลูกค้าในเอกสาร', source: 'document', required: true, help: 'ชื่อที่อ่านได้จากเอกสาร' },
-      { k: 'TaxId', l: 'เลขประจำตัวผู้เสียภาษี', source: 'document', help: 'Tax ID ของลูกค้า' },
-      { k: 'Branch', l: 'สาขาในเอกสาร', source: 'document', help: 'สาขาที่อ่านได้จากเอกสาร' },
-      { k: 'SalesOrg', l: 'องค์กรขาย', source: 'external', required: true, help: 'MGT = 1000 / GLC = 2000' },
-      { k: 'ComcompyCodeSAP', l: 'รหัสลูกค้า SAP / Zoho Account Code', source: 'external', sap: true, required: true, help: 'ใช้เชื่อม CustomerCode ใน ShipTo และ CustomerMaterial; Zoho ใช้ Account Code' },
-      { k: 'CompanyNameSAP', l: 'ชื่อลูกค้าจาก SAP', source: 'external' },
-      { k: 'DistChannel', l: 'ช่องทางจัดจำหน่าย', source: 'external', help: 'ค่าจาก SAP' },
-      { k: 'Division', l: 'กลุ่มธุรกิจ', source: 'external', help: 'ค่าจาก SAP' },
-      { k: 'Currency', l: 'สกุลเงิน', source: 'external', help: 'ค่าจาก SAP' },
-      { k: 'PaymentTerms', l: 'เงื่อนไขการชำระเงิน', source: 'external', help: 'ค่าจาก SAP' },
-      { k: 'IsActive', l: 'สถานะ', source: 'system' }],
+    label: 'Customer', mod: 'SO', key: 'id', matchKey: 'ComcompyCodeSAP', cols: [
+      { k: 'CompanyName', l: 'Customer name in document', source: 'document', required: true, help: 'Name read from the document' },
+      { k: 'TaxId', l: 'Tax ID', source: 'document', help: 'Customer Tax ID' },
+      { k: 'Branch', l: 'Branch in document', source: 'document', help: 'Branch read from the document' },
+      { k: 'SalesOrg', l: 'Sales Organization', source: 'external', required: true, help: 'MGT = 1000 / GLC = 2000' },
+      { k: 'ComcompyCodeSAP', l: 'SAP Customer Code / Zoho Account Code', source: 'external', sap: true, required: true, help: 'Links CustomerCode in ShipTo and CustomerMaterial; Zoho uses Account Code' },
+      { k: 'CompanyNameSAP', l: 'Customer name from SAP', source: 'external' },
+      { k: 'DistChannel', l: 'Distribution Channel', source: 'external', help: 'Value from SAP' },
+      { k: 'Division', l: 'Division', source: 'external', help: 'Value from SAP' },
+      { k: 'Currency', l: 'Currency', source: 'external', help: 'Value from SAP' },
+      { k: 'PaymentTerms', l: 'Payment Terms', source: 'external', help: 'Value from SAP' },
+      { k: 'HouseNumber', l: 'House Number', source: 'external', help: 'Value from SAP / Zoho' },
+      { k: 'Street', l: 'Street', source: 'external', help: 'Value from SAP / Zoho' },
+      { k: 'Street2', l: 'Street 2', source: 'external', help: 'Value from SAP / Zoho' },
+      { k: 'Street3', l: 'Street 3', source: 'external', help: 'Value from SAP / Zoho' },
+      { k: 'Street4', l: 'Street 4', source: 'external', help: 'Value from SAP / Zoho' },
+      { k: 'Street5', l: 'Street 5', source: 'external', help: 'Value from SAP / Zoho' },
+      { k: 'District', l: 'District', source: 'external', help: 'Value from SAP / Zoho' },
+      { k: 'City', l: 'City', source: 'external', help: 'Value from SAP / Zoho' },
+      { k: 'DifferenceCity', l: 'Difference City', source: 'external', help: 'Value from SAP / Zoho' },
+      { k: 'PostCode', l: 'Post Code', source: 'external', help: 'Value from SAP / Zoho' },
+      { k: 'CountryReg', l: 'Country / Reg', source: 'external', help: 'Value from SAP / Zoho' },
+      { k: 'IsActive', l: 'Status', source: 'system' }],
   },
   shiptos: {
-    label: 'Ship-to — สถานที่จัดส่ง', mod: 'SO', key: 'id', matchKey: 'SapShipToCode', cols: [
-      { k: 'SalesOrg', l: 'องค์กรขาย', source: 'document', required: true, help: 'MGT = 1000 / GLC = 2000' },
-      { k: 'CustomerCode', l: 'รหัสลูกค้า SAP / Zoho Account Code', ref: 'customers', source: 'document', required: true, help: 'อ้างอิง Customer.ComcompyCodeSAP' },
-      { k: 'ShipToCode', l: 'รหัส Ship-to ในเอกสาร', source: 'document', help: 'รหัส Ship-to ที่อ่านจากเอกสาร หากเอกสารไม่ระบุสามารถเว้นว่างได้' },
-      { k: 'ShipToName', l: 'ชื่อสถานที่จัดส่งในเอกสาร', source: 'document' },
-      { k: 'ShipToAddress', l: 'ที่อยู่จัดส่ง', source: 'document', help: 'รายละเอียดที่อยู่จากเอกสาร' },
-      { k: 'SapShipToCode', l: 'ShipToCode', source: 'external', sap: true, required: true, help: 'รหัส Ship-to จาก SAP / Zoho Account Code' },
-      { k: 'IsActive', l: 'สถานะ', source: 'system' }],
+    label: 'Ship-to', mod: 'SO', key: 'id', matchKey: 'SapShipToCode', cols: [
+      { k: 'SalesOrg', l: 'Sales Organization', source: 'document', required: true, help: 'MGT = 1000 / GLC = 2000' },
+      { k: 'CustomerCode', l: 'SAP Customer Code / Zoho Account Code', ref: 'customers', source: 'document', required: true, help: 'References Customer.ComcompyCodeSAP' },
+      { k: 'ShipToCode', l: 'Ship-to code in document', source: 'document', help: 'Ship-to code read from the document; may be left blank if the document does not specify it' },
+      { k: 'ShipToName', l: 'Ship-to name in document', source: 'document' },
+      { k: 'ShipToAddress', l: 'Delivery address', source: 'document', help: 'Address details from the document' },
+      { k: 'SapShipToCode', l: 'ShipToCode', source: 'external', sap: true, required: true, help: 'Ship-to code from SAP / Zoho Account Code' },
+      { k: 'HouseNumber', l: 'House Number', source: 'external', help: 'Value from SAP / Zoho' },
+      { k: 'Street', l: 'Street', source: 'external', help: 'Value from SAP / Zoho' },
+      { k: 'Street2', l: 'Street 2', source: 'external', help: 'Value from SAP / Zoho' },
+      { k: 'Street3', l: 'Street 3', source: 'external', help: 'Value from SAP / Zoho' },
+      { k: 'Street4', l: 'Street 4', source: 'external', help: 'Value from SAP / Zoho' },
+      { k: 'Street5', l: 'Street 5', source: 'external', help: 'Value from SAP / Zoho' },
+      { k: 'District', l: 'District', source: 'external', help: 'Value from SAP / Zoho' },
+      { k: 'City', l: 'City', source: 'external', help: 'Value from SAP / Zoho' },
+      { k: 'DifferenceCity', l: 'Difference City', source: 'external', help: 'Value from SAP / Zoho' },
+      { k: 'PostCode', l: 'Post Code', source: 'external', help: 'Value from SAP / Zoho' },
+      { k: 'CountryReg', l: 'Country / Reg', source: 'external', help: 'Value from SAP / Zoho' },
+      { k: 'IsActive', l: 'Status', source: 'system' }],
   },
   custmaterials: {
-    label: 'CustomerMaterial — สินค้าของลูกค้า', mod: 'SO', key: 'Id', matchKey: 'MaterialCodeSAP', cols: [
-      { k: 'SalesOrg', l: 'องค์กรขาย', source: 'document', required: true, help: 'MGT = 1000 / GLC = 2000' },
-      { k: 'CustomerCode', l: 'รหัสลูกค้า SAP / Zoho Account Code', ref: 'customers', source: 'document', required: true, help: 'อ้างอิง Customer.ComcompyCodeSAP' },
-      { k: 'MaterialCodeCode', l: 'รหัสสินค้าในเอกสาร', source: 'document', required: true },
-      { k: 'MaterialCodeName', l: 'ชื่อสินค้าในเอกสาร', source: 'document' },
-      { k: 'MaterialCodeSAP', l: 'รหัสสินค้าจาก SAP', source: 'external', sap: true, required: true },
-      { k: 'Isactive', l: 'สถานะ', source: 'system' }],
+    label: 'CustomerMaterial', mod: 'SO', key: 'Id', matchKey: 'MaterialCodeSAP', cols: [
+      { k: 'SalesOrg', l: 'Sales Organization', source: 'document', required: true, help: 'MGT = 1000 / GLC = 2000' },
+      { k: 'CustomerCode', l: 'SAP Customer Code / Zoho Account Code', ref: 'customers', source: 'document', required: true, help: 'References Customer.ComcompyCodeSAP' },
+      { k: 'MaterialCodeCode', l: 'Material code in document', source: 'document', required: true },
+      { k: 'MaterialCodeName', l: 'Material name in document', source: 'document' },
+      { k: 'MaterialCodeSAP', l: 'Material code from SAP', source: 'external', sap: true, required: true },
+      { k: 'Isactive', l: 'Status', source: 'system' }],
   },
   vendors: {
     label: 'Vendor', mod: 'AP', key: 'VendorCode', cols: [
@@ -336,7 +358,7 @@ export const MASTER_DEF: Record<string, MasterDef> = {
   },
   uoms: {
     label: 'Unit Conversion (UoM)', mod: 'ALL', key: 'Id', cols: [
-      { k: 'MaterialCode', l: 'รหัส Material (เว้นว่าง = ทุกสินค้า)', ref: 'materials', blank: true },
+      { k: 'MaterialCode', l: 'Material code (blank = all materials)', ref: 'materials', blank: true },
       { k: 'ExtUom', l: 'Document Unit' }, { k: 'SapUom', l: 'SAP Unit' },
       { k: 'SapUomIso', l: 'ISO code', sap: true },
       { k: 'Factor', l: 'Factor (1 document unit = ? SAP units)' }, { k: 'Note', l: 'Note' }],
@@ -356,7 +378,7 @@ export const MASTER_NOTE: Record<string, string> = {
   vendors: 'Used to match Vendor: checks the Tax ID first, then compares the name if not found',
   venmaterials: "Used to convert the vendor's item code/name to a SAP Material",
   materials: 'SAP Material data (should be replicated from S/4HANA)',
-  uoms: 'แปลงหน่วยเอกสารเป็นหน่วย SAP โดยค้นตาม MaterialCode (SAP) + หน่วยเอกสารก่อน แล้วจึงใช้กฎกลางที่ไม่ระบุ Material',
+  uoms: 'Converts the document unit to the SAP unit — looks up by MaterialCode (SAP) + document unit first, then falls back to a general rule with no specific Material',
 };
 
 // apmaterials (ocr.Material master) removed — the material master is no longer used; material
@@ -373,8 +395,8 @@ export const MASTER_GROUPS: MasterGroup[] = [
   { key: 'vendor', label: '1. Vendor / Supplier', mod: 'AP', tabs: ['vendors'], note: 'Checks the 13-digit Tax ID first, then compares the vendor name if not found (similarity ≥ 82%)' },
   { key: 'customer', label: '2. Customer', mod: 'SO', tabs: ['customers'], note: 'Checks the 13-digit Tax ID first, then compares the customer name (Thai/English) if not found (similarity ≥ 82%)' },
   { key: 'shipto', label: '3. Ship-to', mod: 'SO', tabs: ['shiptos'], note: 'Compares location name + delivery address, only under a customer that has already been matched (similarity ≥ 70%)' },
-  { key: 'material', label: '4. CustomerMaterial', mod: 'SO', tabs: ['custmaterials', 'uoms'], note: 'สินค้าใช้ CustomerMaterial: จับคู่รหัสหรือชื่อสินค้าในเอกสารภายใต้ลูกค้าและ SalesOrg เดียวกัน → รหัสสินค้า SAP' },
-  { key: 'apmaterial', label: '5. สินค้าฝั่งจัดซื้อ', mod: 'AP', tabs: ['venmaterials'], note: 'ข้อมูลสินค้าและบริการสำหรับเอกสารฝั่งจัดซื้อ' },
+  { key: 'material', label: '4. CustomerMaterial', mod: 'SO', tabs: ['custmaterials', 'uoms'], note: 'Materials use CustomerMaterial: match the document material code or name under the same customer and SalesOrg → SAP material code' },
+  { key: 'apmaterial', label: '5. Purchasing materials', mod: 'AP', tabs: ['venmaterials'], note: 'Material and service data for purchasing documents' },
 ];
 
 export const M_LABEL: Record<string, string> = {

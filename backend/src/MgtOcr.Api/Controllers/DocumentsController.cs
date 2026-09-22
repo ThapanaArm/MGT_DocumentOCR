@@ -54,6 +54,21 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     private string AuthorizationGroupForSalesOrg(string salesOrg) =>
         config.CompanyForSalesOrg(salesOrg)?.AuthorizationGroup ?? "";
 
+    // SharePoint archiving phase-1 foundation (2026-09-22): the canonical "MGT"/"GLC" label to
+    // stamp on a document at the moment it posts successfully -- see
+    // sql/22_document_company_code.sql for why this must be resolved from the DOCUMENT's own
+    // header, never from whoever is signed in. This endpoint only ever posts to SAP, which for
+    // AP/II always means GLC (see this controller's own doc comment on Upload -- "Both are
+    // separate SAP apps") and for a Sales Order follows the SAME SalesOrg resolution already used
+    // to build its payload/master data above, just read back as the "MGT"/"GLC" name instead of
+    // the raw SalesOrg. A Sales Order that resolves to MGT never reaches this endpoint in practice
+    // (that company posts through ZohoSalesOrderController instead), but this still asks rather
+    // than assumes, so it stays correct if that ever changes.
+    private async Task<string> CompanyNameForPostAsync(string module, Dictionary<string, object?> header) =>
+        module == "SO"
+            ? config.CompanyForSalesOrg(await SalesOrgAsync(header))?.Name ?? "GLC"
+            : "GLC";
+
     // Department gate for endpoints whose module is not a plain action argument (e.g. it
     // arrives inside the JSON body). DepartmentAccessFilter covers the rest of the controller.
     private async Task RequireModuleAccessAsync(string module, CancellationToken ct = default)
@@ -166,12 +181,23 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
 
     [HttpGet("api/documents")]
     public async Task<IActionResult> ListDocuments([FromQuery] string module = "", [FromQuery] string status = "",
-        [FromQuery] string apDocCategory = "", [FromQuery] int limit = 100)
+        [FromQuery] string apDocCategory = "", [FromQuery] string search = "", [FromQuery] string dateFrom = "",
+        [FromQuery] string dateTo = "", [FromQuery] string invModule = "", [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 10)
     {
         // A specific tab is already authorized by DepartmentAccessFilter; for the all-tabs
         // listing, restrict to the modules this user's department may see.
         var allowed = DepartmentAccess.AllowedModules(await currentUser.RequireAsync());
-        return Ok(await repo.ListDocumentsAsync(module, status, apDocCategory, limit, allowed));
+        page = page < 1 ? 1 : page;
+        pageSize = Math.Clamp(pageSize, 1, 200);
+        var r = await repo.ListDocumentsPagedAsync(module, status, apDocCategory, search, dateFrom, dateTo,
+            invModule, page, pageSize, allowed);
+        return Ok(new
+        {
+            results = r.Rows,
+            total = r.Total,
+            counts = r.CountAll == null ? null : new { all = r.CountAll, AP = r.CountAP, II = r.CountII },
+        });
     }
 
     [HttpGet("api/documents/{docId:int}")]
@@ -768,6 +794,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         var user = await ActorAsync();
         var module = doc.GetStr("module");
         var docT = DocumentTables.For(module).Doc;
+        var companyCode = await CompanyNameForPostAsync(module, (Dictionary<string, object?>)doc["header"]!);
         var r = await sap.PostAsync(module, payload);
         await using (var conn = await GetDbAsync())
         await using (var tx = await conn.BeginTransactionAsync())
@@ -781,8 +808,8 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
                 payloadJson = JsonSerializer.Serialize(payload, PyJson.Options), success = r.Success ? 1 : 0, message = r.Message, user,
             }, tx);
             if (r.Success)
-                await conn.ExecuteAsync($"UPDATE {docT} SET Status='POSTED', SapDocNo=@sapDocNo, PostedAt=SYSDATETIME(), PostedBy=@user, UpdatedAt=SYSDATETIME() WHERE DocId=@docId",
-                    new { sapDocNo = r.SapDocNo, user, docId }, tx);
+                await conn.ExecuteAsync($"UPDATE {docT} SET Status='POSTED', SapDocNo=@sapDocNo, CompanyCode=@companyCode, PostedAt=SYSDATETIME(), PostedBy=@user, UpdatedAt=SYSDATETIME() WHERE DocId=@docId",
+                    new { sapDocNo = r.SapDocNo, companyCode, user, docId }, tx);
             await tx.CommitAsync();
         }
         return Ok(new { success = r.Success, simulated = r.Simulated, sapDocNo = r.SapDocNo, endpoint = r.Endpoint, message = r.Message, document = await repo.GetDocumentAsync(docId) });

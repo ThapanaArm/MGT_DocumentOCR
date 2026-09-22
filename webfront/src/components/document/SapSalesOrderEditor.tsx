@@ -208,23 +208,23 @@ export default function SapSalesOrderEditor({
           <div className="grid" style={{ maxWidth: 340, width: '100%' }}>
             {isUsd ? (
               <div className="f">
-                <label>ราคาสินค้าในเอกสาร (VAT)</label>
-                <input type="text" value="สกุลเงิน USD — ไม่คิด VAT" disabled readOnly />
+                <label>Item price in document (VAT)</label>
+                <input type="text" value="Currency USD — no VAT" disabled readOnly />
                 <small className="master-field-help">
-                  รายการสกุลเงิน USD (ส่งออก) ไม่คิด VAT — แสดงผลอย่างเดียว ไม่กระทบราคาที่ส่ง SAP
+                  USD (export) line — no VAT; display only, does not affect the price sent to SAP
                 </small>
               </div>
             ) : (
               <div className="f">
-                <label>ราคาสินค้าในเอกสาร (VAT)</label>
+                <label>Item price in document (VAT)</label>
                 <select value={vatMode} onChange={(e) => setVatMode(e.target.value as 'document' | 'exclude' | 'include')}>
-                  {docHasVat && <option value="document">เอกสารแยก VAT มาแล้ว — ใช้ค่าตามเอกสาร</option>}
-                  <option value="exclude">ยังไม่รวม VAT — บวก 7% เพิ่ม</option>
-                  <option value="include">รวม VAT แล้ว — ถอด 7% ออกมาแสดง</option>
+                  {docHasVat && <option value="document">Document already separates VAT — use the document value</option>}
+                  <option value="exclude">VAT not included — add 7%</option>
+                  <option value="include">VAT included — extract 7% for display</option>
                 </select>
                 <small className="master-field-help">
-                  เลือกให้ตรงกับเอกสารลูกค้า — แสดงผลอย่างเดียว ไม่กระทบราคาที่ส่ง SAP
-                  {docHasVat && ' · เอกสารนี้มี VAT มาแล้ว จึงตั้งค่าเริ่มต้นเป็น “ใช้ค่าตามเอกสาร”'}
+                  Match the customer document — display only, does not affect the price sent to SAP
+                  {docHasVat && ' · this document already has VAT, so the default is set to "use the document value"'}
                 </small>
               </div>
             )}
@@ -233,7 +233,7 @@ export default function SapSalesOrderEditor({
               <input type="text" value={fmt(subtotal)} disabled readOnly />
             </div>
             <div className="f">
-              <label>{isUsd ? 'VAT (ไม่คิด)' : `VAT (${(GLC_VAT_RATE * 100).toFixed(0)}%)`}</label>
+              <label>{isUsd ? 'VAT (none)' : `VAT (${(GLC_VAT_RATE * 100).toFixed(0)}%)`}</label>
               <input type="text" value={fmt(vatAmount)} disabled readOnly />
             </div>
             <div className="f">
@@ -253,7 +253,7 @@ export default function SapSalesOrderEditor({
         <div className="so-send" style={{ justifyContent: 'flex-end' }}>
           <div className="row" style={{ gap: 10 }}>
             <button className="btn success" onClick={onSend} disabled={SEND_DISABLED || sending || posted || !map.pass}>
-              {sending ? 'Sending…' : posted ? 'ส่งสำเร็จ ✓' : 'Send'}
+              {sending ? 'Sending…' : posted ? 'Sent ✓' : 'Send'}
             </button>
             <button className="btn" onClick={onViewPayload}>
               {'{}'} View Payload
@@ -267,7 +267,7 @@ export default function SapSalesOrderEditor({
   return (
     <div className="card">
       <div className="card-h">
-        <h2>สรุป Sales Order ที่จะส่งไป SAP</h2>
+        <h2>Sales Order summary to send to SAP</h2>
         <div className="sp" />
         {map && (
           <span className="badge b-idle">

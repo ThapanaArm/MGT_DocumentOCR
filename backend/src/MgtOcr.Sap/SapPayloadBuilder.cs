@@ -139,6 +139,31 @@ public static class SapPayloadBuilder
                     Pick(l.GetStr("salesEmployee"), header.GetStr("salesEmployee"), ""), "");
                 if (!string.IsNullOrWhiteSpace(lineSalesEmp))
                     item["YY1_SDSalesEmployeeI_SDI"] = lineSalesEmp;
+                // Item Note 1 (SD item long text). OCR-prefilled from the PO into
+                // extra.itemNote1 (editable by the CS), sent via the to_Item -> to_Text
+                // navigation as text ID ZI01 (Sap:SalesOrder:ItemNoteTextId). Emitted once
+                // per configured language (Sap:SalesOrder:ItemNoteLanguages, default
+                // "TH,EN") so the note shows whatever the SAP logon language. Sent only when
+                // a note exists, so a blank line never posts an empty text. NOTE: the exact
+                // Language key format this service accepts (ISO "TH"/"EN" vs SAP internal
+                // "2"/"E") is NOT yet verified against this tenant's $metadata -- same
+                // caveat as to_PricingElement below; adjust the config if SAP rejects it.
+                var itemNote1 = lineExtra?.GetStr("itemNote1");
+                if (!string.IsNullOrWhiteSpace(itemNote1) && !string.IsNullOrWhiteSpace(config.SapSalesOrderItemNoteTextId))
+                {
+                    var texts = new List<object>();
+                    foreach (var lang in config.SapSalesOrderItemNoteLanguages
+                                 .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                    {
+                        texts.Add(new Dictionary<string, object?>
+                        {
+                            ["Language"] = lang,
+                            ["LongTextID"] = config.SapSalesOrderItemNoteTextId,
+                            ["LongText"] = itemNote1,
+                        });
+                    }
+                    if (texts.Count > 0) item["to_Text"] = texts;
+                }
                 // Manual Price Gross (ZPR0) — GLC only, and only when a unit price was actually
                 // read/entered for the line. NOTE: entity/nav-property name
                 // (A_SalesOrderItemPrElement via "to_PricingElement") not yet verified against

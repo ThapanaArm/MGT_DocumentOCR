@@ -123,4 +123,27 @@ public class ZohoAccountController(ZohoAccountClient client, ZohoClient zoho, Zo
         var found = await deals.FindOpenDealsByAccountCodeAsync(code);
         return Ok(new { count = found.Count, deals = found });
     }
+
+    // GET /api/zoho/deals/search?q=... — manual fallback shown by the Deal card when the
+    // Account_Code lookup above comes up empty. Searches by Deal Name only, with no
+    // account-code or stage filter, so a Deal that was missed because its Account link (and so
+    // its Account_Code) is wrong/blank, or because it's already Closed, still turns up -- see
+    // ZohoDealClient.SearchByNameAsync.
+    [HttpGet("deals/search")]
+    public async Task<IActionResult> SearchDeals([FromQuery] string q, [FromQuery] int top = 20)
+    {
+        if (string.IsNullOrWhiteSpace(q))
+            return BadRequest(new { detail = "Provide 'q'" });
+        var found = await deals.SearchByNameAsync(q, top);
+        return Ok(new { count = found.Count, deals = found });
+    }
+
+    // GET /api/zoho/deals/{id} — one Deal by its Zoho record id (with Deal Items), used to
+    // re-fetch full details after the person picks a result from the manual search above.
+    [HttpGet("deals/{id}")]
+    public async Task<IActionResult> GetDealById(string id)
+    {
+        var deal = await deals.GetByIdAsync(id);
+        return deal is null ? NotFound(new { detail = "Deal not found" }) : Ok(deal);
+    }
 }
