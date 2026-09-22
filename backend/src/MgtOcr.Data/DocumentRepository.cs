@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using System.Text.RegularExpressions;
 using Dapper;
 using MgtOcr.Core;
@@ -36,6 +36,27 @@ public partial class DocumentRepository(Db db, string uploadDir)
         if (s.Length > 10) s = s[..10];
         if (!DateRegex().IsMatch(s)) return null;
         return DateTime.TryParseExact(s, "yyyy-MM-dd", null, System.Globalization.DateTimeStyles.None, out var d) ? d : null;
+    }
+
+    // Posting Date is the date the document entered the system (upload / OCR), not the date printed
+    // on the document: SAP posts into the period the document is recorded in, and the OCR header
+    // otherwise falls back to invoiceDate. Stamped once at creation and preserved on re-read; the
+    // user can still overwrite it in the header form. SO has no posting date (see Denorm).
+    public static void StampPostingDate(string module, Dictionary<string, object?> header, DateTime when)
+    {
+        if (module == "SO") return;
+        header["postingDate"] = when.ToString("yyyy-MM-dd");
+    }
+
+    // Tax tab (MIRO / FB60): Tax Reporting Date, Tax Fulfill Date and Tax Date default to the
+    // invoice date. Only blanks are filled, so a value OCR read or the user typed is never overwritten.
+    public static void DefaultTaxDates(string module, Dictionary<string, object?> header)
+    {
+        if (module == "SO") return;
+        var invoiceDate = header.GetStr("invoiceDate").Trim();
+        if (invoiceDate.Length == 0) return;
+        foreach (var key in new[] { "taxReportingDate", "taxFulfillDate", "taxDate" })
+            if (string.IsNullOrWhiteSpace(header.GetStr(key))) header[key] = invoiceDate;
     }
 
     public static Dictionary<string, object?> Denorm(string module, Dictionary<string, object?> h)
@@ -139,6 +160,8 @@ public partial class DocumentRepository(Db db, string uploadDir)
             var existing = ext.GetStr("confidenceNote");
             ext["confidenceNote"] = existing.Length > 0 ? $"{existing} / {note}" : note;
         }
+        StampPostingDate(module, header, DateTime.Today);
+        DefaultTaxDates(module, header);
         var d = Denorm(module, header);
         var docT = DocumentTables.For(module).Doc;
         var rawText = ext.GetStr("rawText");

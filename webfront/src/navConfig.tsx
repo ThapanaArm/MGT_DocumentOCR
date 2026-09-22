@@ -47,13 +47,6 @@ export const navSections: NavSection[] = [
     ],
   },
   {
-    title: 'PURCHASE ORDER DOWN PAYMENTS',
-    items: [
-      { label: 'Import PO Down Payment', to: '/import/PODP', icon: IMPORT, module: 'PODP' },
-      { label: 'PO Down Payment List', to: '/list/PODP', icon: LIST, module: 'PODP' },
-    ],
-  },
-  {
     title: 'SALES ORDER',
     items: [
       { label: 'Import Sales Order', to: '/import/SO', icon: IMPORT, module: 'SO' },
@@ -81,6 +74,7 @@ export const navSections: NavSection[] = [
 
 const DEPARTMENT_MODULES: Record<string, ModuleCode[]> = {
   finance: ['AP', 'II'],
+  account: ['AP', 'II'], // Ms_User stores the finance department as "Account"
   purchase: ['PODP'],
   csr: ['SO'],
 };

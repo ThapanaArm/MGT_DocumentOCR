@@ -1,4 +1,4 @@
-using System.Text.RegularExpressions;
+﻿using System.Text.RegularExpressions;
 using MgtOcr.Core.Config;
 
 using MgtOcr.Ocr.Providers;
@@ -51,6 +51,21 @@ public class OcrEngine(AppConfig config)
         d.Note = note;
         return d;
     }
+
+    // A read that did not succeed. Deliberately NOT sample data: substituting a demo document made a
+    // failed Gemini/Azure/... call look like a successful read (plausible vendor, amounts, reference)
+    // that a user could map and post to SAP without noticing the "demo" badge. A failed read comes
+    // back with a blank header, no lines, confidence 0 and provider "failed" — the UI already shows
+    // a failure toast and red badge for it, and Note carries the real error so it can be fixed.
+    // Sample data is only ever returned when the user explicitly picks the "demo" engine.
+    private static ParsedDocument FailedDoc(string module, string note) => new()
+    {
+        Header = HeaderParser.BlankHeader(module),
+        Lines = [],
+        Confidence = 0,
+        Provider = "failed",
+        Note = note,
+    };
 
     private static readonly Dictionary<string, string> ProviderCaveat = new()
     {
@@ -136,25 +151,25 @@ public class OcrEngine(AppConfig config)
         {
             var data = await AzureOcr.ExtractAsync(path, config);
             if (data != null) return AzureOcr.FromAzure(data, module);
-            return DemoFallback(path, module, "Could not connect to Azure Document Intelligence, or AZURE_DI_ENDPOINT/AZURE_DI_KEY is not set in .env");
+            return FailedDoc(module, "Could not connect to Azure Document Intelligence, or AZURE_DI_ENDPOINT/AZURE_DI_KEY is not set in .env");
         }
         if (provider == "claude")
         {
             var outDoc = await ClaudeOcr.VisionExtractAsync(path, module, config);
             if (outDoc != null) return outDoc;
-            return DemoFallback(path, module, "Could not connect to Claude Vision, or ANTHROPIC_API_KEY is not set in .env");
+            return FailedDoc(module, "Could not connect to Claude Vision, or ANTHROPIC_API_KEY is not set in .env");
         }
         if (provider == "gemini")
         {
             var (outDoc, gErr) = await GeminiOcr.VisionExtractAsync(path, module, config);
             if (outDoc != null) return outDoc;
-            return DemoFallback(path, module, gErr ?? "Could not connect to Google Gemini Vision");
+            return FailedDoc(module, gErr ?? "Could not connect to Google Gemini Vision");
         }
         if (provider == "openai")
         {
             var (outDoc, oErr) = await OpenAiOcr.VisionExtractAsync(path, module, config);
             if (outDoc != null) return outDoc;
-            return DemoFallback(path, module, oErr ?? "Could not connect to OpenAI Vision");
+            return FailedDoc(module, oErr ?? "Could not connect to OpenAI Vision");
         }
         if (provider == "claude_text")
         {
@@ -162,16 +177,16 @@ public class OcrEngine(AppConfig config)
             if (string.IsNullOrWhiteSpace(preText) && (ImageExt.Contains(ext) || ext == ".pdf"))
                 preText = await TesseractOcr.ExtractTextAsync(path, config);
             if (string.IsNullOrWhiteSpace(preText))
-                return DemoFallback(path, module, "OCR could not read text from the file, so it could not be sent to Claude for structuring (try Claude Vision instead)");
+                return FailedDoc(module, "OCR could not read text from the file, so it could not be sent to Claude for structuring (try Claude Vision instead)");
             var outDoc = await ClaudeOcr.TextExtractAsync(module, preText, config);
             if (outDoc != null) return outDoc;
-            return DemoFallback(path, module, "Could not connect to Claude (structuring from text), or ANTHROPIC_API_KEY is not set in .env");
+            return FailedDoc(module, "Could not connect to Claude (structuring from text), or ANTHROPIC_API_KEY is not set in .env");
         }
         if (provider == "typhoon")
         {
             var (text, err) = await TyphoonOcr.ExtractTextAsync(path, config);
             if (string.IsNullOrWhiteSpace(text))
-                return DemoFallback(path, module, err != "" ? err : "Typhoon OCR returned no text");
+                return FailedDoc(module, err != "" ? err : "Typhoon OCR returned no text");
             var blocks = ext == ".pdf" ? PdfExtraction.PdfBlocks(path) : null;
             var outDoc = HeaderParser.ParseText(text, module, blocks, "typhoon", config.OwnCompanyKeywords, config.OwnTaxId);
             if (outDoc.Lines.Count > 0 || HasValue(outDoc.Header, "vendorTaxId") || HasValue(outDoc.Header, "customerTaxId"))
@@ -199,7 +214,7 @@ public class OcrEngine(AppConfig config)
             return outDoc;
         }
 
-        return DemoFallback(path, module, "Could not read text from the file (scanned file / no OCR engine configured)");
+        return FailedDoc(module, "Could not read text from the file (scanned file / no OCR engine configured)");
     }
 
     private static bool HasValue(Dictionary<string, object?> header, string key) =>

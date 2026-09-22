@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using Dapper;
 using MgtOcr.Core;
 using MgtOcr.Core.Auth;
@@ -285,6 +285,13 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             var note = "Filled from a previously confirmed partner (not read directly from this document): " + string.Join(", ", filled);
             pd.ConfidenceNote = pd.ConfidenceNote.Length > 0 ? $"{pd.ConfidenceNote} / {note}" : note;
         }
+        // Keep the posting date this document was stamped with at upload — a re-read must not move it
+        // to today, and the fresh OCR header would otherwise fall back to the invoice date.
+        var keptPosting = ((Dictionary<string, object?>)doc["header"]!).GetStr("postingDate");
+        DocumentRepository.StampPostingDate(module, pd.Header,
+            DateTime.TryParseExact(keptPosting, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.None, out var kp) ? kp : DateTime.Today);
+        DocumentRepository.DefaultTaxDates(module, pd.Header);
         var dn = DocumentRepository.Denorm(module, pd.Header);
         var rawText = pd.RawText.Length > 20000 ? pd.RawText[..20000] : pd.RawText;
         await using (var conn = await GetDbAsync())

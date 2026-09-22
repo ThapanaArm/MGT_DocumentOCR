@@ -88,6 +88,31 @@ function seedWhtItems(d: DocModel): DocModel {
 // supplier invoice, if OCR captured a VAT amount/rate but no tax rows exist yet,
 // seed one input-VAT row (D/C = S, amount = vatAmount, rate = vatRate). Tax Code
 // defaults to V1 for the standard Thai 7% input VAT; a non-VAT invoice gets no row.
+// Incoming Invoice (FB60) shows its items as G/L rows (header.glItems), but OCR returns the
+// document's rows in `lines` — which the II page never displays — so the table stayed empty even
+// when the read found every row. Seed one debit G/L row per OCR line that carries an amount; the
+// G/L account / cost center are not on the document, so they are left for the user to fill.
+// Only when glItems is still empty, so rows the user already edited/saved are never replaced.
+function seedGlItems(d: DocModel): DocModel {
+  if (d.module !== 'II') return d;
+  if (d.header.glItems && d.header.glItems.length) return d;
+  const items = (d.lines || [])
+    .filter((l) => (Number(l.amount) || 0) !== 0)
+    .map((l) => ({
+      glAccount: '',
+      // Withholding-tax rows the OCR appended to a shipping bundle (extCode "WHT") are credits;
+      // the cost rows from the FORM SHIPPING EXPENSE table are debits.
+      drCr: l.extCode === 'WHT' ? 'C' : 'D', // GlItemsTable's values: D = S-Debit, C = H-Credit
+      amount: Number(l.amount) || 0,
+      taxCode: '',
+      assignment: '',
+      itemText: String(l.desc || '').slice(0, 50), // SAP item text is 50 chars
+      costCenter: '',
+    }));
+  if (!items.length) return d;
+  return { ...d, header: { ...d.header, glItems: items } };
+}
+
 function seedTaxItems(d: DocModel): DocModel {
   if (d.module !== 'AP' && d.module !== 'II') return d;
   if (d.header.taxItems && d.header.taxItems.length) return d;
@@ -215,7 +240,7 @@ export default function DocumentPage() {
       // Locked to Gemini (per Megachem) — the re-OCR engine is always Gemini regardless of which
       // engine last read the document.
       setReocrEngine('gemini');
-      setDoc(seedTaxItems(seedWhtItems(d)));
+      setDoc(seedGlItems(seedTaxItems(seedWhtItems(d))));
       if (d.module === 'AP') loadApDocCategories();
       try {
         const chat = await getChat(d.docId);
@@ -377,7 +402,7 @@ export default function DocumentPage() {
   const doReocr = () =>
     guard(async () => {
       const d = await reocrDocument(doc.docId, reocrEngine, USER);
-      setDoc(seedTaxItems(seedWhtItems(d)));
+      setDoc(seedGlItems(seedTaxItems(seedWhtItems(d))));
       setMap(null);
       manual.current = { header: {}, lines: {} };
       if (d.provider === 'failed')

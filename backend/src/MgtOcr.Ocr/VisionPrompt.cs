@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using System.Text.RegularExpressions;
 
 namespace MgtOcr.Ocr;
@@ -67,8 +67,24 @@ public static class VisionPrompt
             "- ห้ามใช้ชื่อ/เลขทะเบียนของบริษัทที่เป็น 'ผู้รับเอกสาร' (Megachem (Thailand)) เป็นชื่อคู่ค้าเด็ดขาด\n" +
             "- customerAddress คือที่อยู่ของลูกค้าเอง (สำหรับออกเอกสาร/ใบกำกับภาษี) ส่วน shipToAddress คือที่อยู่ปลายทางจัดส่งสินค้าเท่านั้น " +
             "ถ้าเอกสารมีที่อยู่เดียวไม่ได้แยกที่อยู่จัดส่งไว้ต่างหาก ให้ใส่ในช่อง customerAddress อย่างเดียว อย่าเติมซ้ำใน shipToAddress\n" +
-            "- ตรวจสอบผลรวม: subTotal + vatAmount ควรใกล้เคียง totalAmount";
+            "- ตรวจสอบผลรวม: subTotal + vatAmount ควรใกล้เคียง totalAmount" +
+            (module == "II" ? IiBundleRules : "");
     }
+
+    // Incoming Invoice (FB60) files are often a whole shipment bundle: several vendor invoices /
+    // receipts plus a "FORM SHIPPING EXPENSE" summary sheet (usually the last page). Per Finance:
+    // the line items come from that form's cost table, and the withholding tax — which the form's
+    // cost table does not include — is taken from the individual invoices and appended as extra
+    // lines (extCode "WHT"; the UI seeds those as credit G/L rows).
+    private const string IiBundleRules =
+        "\n- ไฟล์อาจมีหลายหน้าและรวมเอกสารหลายใบ ให้ดูทุกหน้า" +
+        "\n- ถ้ามีหน้า \"FORM SHIPPING EXPENSE\" ให้ lines มาจากตารางในฟอร์มนั้นเท่านั้น: 1 แถวต่อ 1 รายการ, " +
+        "desc = คอลัมน์ DESCRIPTION, amount = price = คอลัมน์ AMOUNT, qty = 1, extCode = \"\" " +
+        "ข้ามแถวที่ AMOUNT เป็น \"-\" หรือ 0 และห้ามใส่แถว TOTAL/Cost variance/MEMO" +
+        "\n- จากนั้นให้ต่อท้าย lines ด้วยภาษีหัก ณ ที่จ่าย (หัก ณ ที่จ่าย / WITHHOLDING TAX) ทุกรายการที่พบในใบแจ้งหนี้/ใบเสร็จ/ใบกำกับภาษีหน้าอื่นในไฟล์ " +
+        "1 แถวต่อ 1 รายการ: extCode = \"WHT\", desc = \"หัก ณ ที่จ่าย <อัตรา>% <ชื่อผู้ออกเอกสาร> <เลขที่เอกสาร>\", " +
+        "qty = 1, amount = price = ยอดที่หัก (ตัวเลขบวก) และใส่ header.whtAmount = ผลรวมยอดหัก ณ ที่จ่ายทั้งหมด";
+
 
     // Parses a model's raw text response (expected to contain one JSON object, possibly with
     // surrounding prose despite instructions not to) into a ParsedDocument, or null if no JSON

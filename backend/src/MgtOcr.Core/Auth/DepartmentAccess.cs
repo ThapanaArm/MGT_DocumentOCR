@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 
@@ -23,6 +23,7 @@ public static class DepartmentAccess
     private static readonly Dictionary<string, string[]> ByDepartment = new(StringComparer.OrdinalIgnoreCase)
     {
         ["Finance"] = ["AP", "II"],
+        ["Account"] = ["AP", "II"],   // Ms_User stores the finance department as "Account"
         ["Purchase"] = ["PODP"],
         ["CSR"] = ["SO"],
     };
