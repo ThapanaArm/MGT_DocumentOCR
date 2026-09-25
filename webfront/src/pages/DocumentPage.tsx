@@ -17,6 +17,7 @@ import {
   type ChatMessage,
   type DocModel,
 } from '../api/documents';
+import type { DocLine } from '../api/documents';
 import {
   AP_TOTALS_H,
   AP_TRADE_GROUPS,
@@ -24,6 +25,7 @@ import {
   PODP_TOTALS_H,
   SO_REMARK_H,
   SO_TOTALS_H,
+  WHT_CODE_RATE,
 } from '../constants/fields';
 import { SEND_DISABLED } from '../constants/flags';
 import { dt, fmt, fmtCost, intFmt, moduleLabel, statusBadge } from '../utils/format';
@@ -74,14 +76,96 @@ const USER = '(ignored by the server)';
 // seed one row the way SAP's Create Supplier Invoice / Journal Entry WHT tab does —
 // base defaults to the document amount excluding VAT. A goods invoice (whtAmount 0)
 // gets no row, exactly like SAP for a non-WHT vendor.
+// SAP withholding-tax defaults. MGT withholds at payment, so the type defaults to the first
+// payment-posting type; recipient type 53 is the ภ.ง.ด.53 form used for company suppliers, which
+// is what a shipping bundle always is. Both are dropdowns the user can change per row.
+const DEFAULT_WHT_TYPE = 'OA';
+const DEFAULT_RECIPIENT_TYPE = '53';
+
+// Pick the AP Withholding Tax Code from the row the read produced. The description is written as
+// "Withholding Tax <rate>% <issuer> <doc no>", so the wording decides first and the rate breaks
+// the tie (1% -> transport, 2% -> advertising, 3% -> service, which is how the shipping bundles
+// this system reads are made up). Anything unrecognised is left blank for the user to pick.
+function guessWhtCode(desc: string): string {
+  const d = desc.toLowerCase();
+  if (/transport|freight|ขนส่ง|ค่าระวาง/.test(d)) return '01';
+  if (/interest|ดอกเบี้ย/.test(d)) return '02';
+  if (/insur|ประกันภัย/.test(d)) return '03';
+  if (/advertis|โฆษณา/.test(d)) return '04';
+  if (/hire of work|จ้างทำของ/.test(d)) return '05';
+  if (/software|ซอฟต์แวร์/.test(d)) return '06';
+  if (/repair|maintenance|ซ่อม/.test(d)) return '07';
+  if (/commission|นายหน้า/.test(d)) return '08';
+  if (/licen[cs]e|ใบอนุญาต/.test(d)) return '10';
+  if (/service|บริการ/.test(d)) return '09';
+  const m = desc.match(/(\d+(?:\.\d+)?)\s*%/);
+  const rate = m ? Number(m[1]) : 0;
+  if (rate === 1) return '01';
+  if (rate === 2) return '04';
+  if (rate === 3) return '09';
+  return '';
+}
+
+// Rows saved before the Type / Recipient Type dropdowns existed hold free text ("WHT Type for
+// Payment Posting") or nothing at all, which no <select> can show. Map them onto the real SAP
+// codes once, on open, so an old document does not look blank.
+function normalizeWhtItems(d: DocModel): DocModel {
+  const items = d.header.whtItems as Array<Record<string, any>> | undefined;
+  if (!items || !items.length) return d;
+  let changed = false;
+  const next = items.map((w) => {
+    const row = { ...w };
+    const t = String(row.wtType ?? '');
+    if (/invoice/i.test(t) && !/^T[IJK]$/.test(t)) { row.wtType = 'TI'; changed = true; }
+    else if (/payment/i.test(t) && !/^O[ABC]$/.test(t)) { row.wtType = 'OA'; changed = true; }
+    if (!row.recipientType) { row.recipientType = DEFAULT_RECIPIENT_TYPE; changed = true; }
+    if (!row.whtCode) {
+      const guess = guessWhtCode(String(row.itemText ?? row.desc ?? ''));
+      if (guess) { row.whtCode = guess; changed = true; }
+    }
+    return row;
+  });
+  return changed ? { ...d, header: { ...d.header, whtItems: next } } : d;
+}
+
 function seedWhtItems(d: DocModel): DocModel {
   if (d.module !== 'AP' && d.module !== 'II') return d;
-  if (d.header.whtItems && d.header.whtItems.length) return d;
-  const amt = Number(d.header.whtAmount) || 0;
+  if (d.header.whtItems && d.header.whtItems.length) return normalizeWhtItems(d);
+  // Prefer the withholding-tax rows the read appended (extCode "WHT") over the header total:
+  // on a shipping bundle the header figure came off a different page and disagreed with them.
+  const fromLines = (d.lines || [])
+    .filter((l) => String(l.extCode || '').toUpperCase() === 'WHT')
+    .reduce((sum, l) => sum + (Number(l.amount) || 0), 0);
+  const amt = fromLines > 0 ? Math.round(fromLines * 100) / 100 : Number(d.header.whtAmount) || 0;
   if (amt <= 0) return d;
   const base = Number(d.header.subTotal) || 0;
-  const row = { wtType: 'WHT Type for Payment Posting', whtCode: '', baseFc: base, amtFc: amt };
-  return { ...d, header: { ...d.header, whtItems: [row] } };
+  const whtLines = (d.lines || []).filter((l) => String(l.extCode || '').toUpperCase() === 'WHT');
+  const rows = whtLines.length
+    ? whtLines.map((l) => {
+        const amtFc = Number(l.amount) || 0;
+        const code = guessWhtCode(String(l.desc || ''));
+        const rate = WHT_CODE_RATE[code];
+        return {
+          wtType: DEFAULT_WHT_TYPE,
+          whtCode: code,
+          recipientType: DEFAULT_RECIPIENT_TYPE,
+          // The description the read writes carries the rate ("Withholding Tax 1% ..."), so the
+          // base of the invoice that was actually withheld can be worked back out of it. Falls
+          // back to the document subtotal when the rate is unknown.
+          baseFc: rate && amtFc > 0 ? Math.round((amtFc / rate) * 100) / 100 : base,
+          amtFc,
+          vendorCode: String(l.extra?.vendorCode ?? ''),
+        };
+      })
+    : [{
+        wtType: DEFAULT_WHT_TYPE,
+        whtCode: '',
+        recipientType: DEFAULT_RECIPIENT_TYPE,
+        baseFc: base,
+        amtFc: amt,
+        vendorCode: '',
+      }];
+  return { ...d, header: { ...d.header, whtItems: rows } };
 }
 
 // SAP-like VAT prefill for the Tax tab, mirroring seedWhtItems: on an AP/II
@@ -97,6 +181,8 @@ function seedGlItems(d: DocModel): DocModel {
   if (d.module !== 'II') return d;
   if (d.header.glItems && d.header.glItems.length) return d;
   const items = (d.lines || [])
+    // "VAT" rows are the per-invoice VAT the read appended; they belong to the Tax tab only.
+    .filter((l) => String(l.extCode || '').toUpperCase() !== 'VAT')
     .filter((l) => (Number(l.amount) || 0) !== 0)
     .map((l) => ({
       glAccount: '',
@@ -113,20 +199,114 @@ function seedGlItems(d: DocModel): DocModel {
   return { ...d, header: { ...d.header, glItems: items } };
 }
 
+// MIRO / FB60 header Tax Code: fixed to VX (Input VAT Exempt Purchases) per Finance — the real
+// tax per invoice is carried by the rows in the Tax tab (V1 / D1 / ...), so the header code is
+// only the document-level default. Change this constant when Finance settles on another code.
+const HEADER_TAX_CODE = 'VX';
+
+// Business Place = branch for Thai tax purposes. Per the SAP training material both company
+// codes (1000 MGT, 2000 GLC) have only Head Office = 0000, so it is filled in rather than left
+// for the user; a branch document can still be changed by hand.
+const HEAD_OFFICE_BUSINESS_PLACE = '0000';
+
+function seedHeaderTaxCode(d: DocModel): DocModel {
+  if (d.module !== 'AP' && d.module !== 'II') return d;
+  const businessPlace = String(d.header.businessPlace ?? '').trim() || HEAD_OFFICE_BUSINESS_PLACE;
+  if (d.header.taxCode === HEADER_TAX_CODE && d.header.businessPlace === businessPlace) return d;
+  return { ...d, header: { ...d.header, taxCode: HEADER_TAX_CODE, businessPlace } };
+}
+
+function padBranch(value: unknown): string {
+  const digits = String(value ?? '').replace(/\D/g, '');
+  return digits.length ? digits.slice(-5).padStart(5, '0') : '00000';
+}
+
 function seedTaxItems(d: DocModel): DocModel {
   if (d.module !== 'AP' && d.module !== 'II') return d;
-  if (d.header.taxItems && d.header.taxItems.length) return d;
+  // Rows the user already has stay as they are — only a row with no D/C at all gets the S default.
+  if (d.header.taxItems && d.header.taxItems.length) {
+    const items = d.header.taxItems.map((t: Record<string, unknown>) =>
+      t.drCr ? t : { ...t, drCr: 'S' },
+    );
+    return { ...d, header: { ...d.header, taxItems: items } };
+  }
   const amt = Number(d.header.vatAmount) || 0;
   const rate = Number(d.header.vatRate) || 0;
   if (amt <= 0 && rate <= 0) return d;
-  const row = {
-    drCr: 'S',
-    docCurrencyAmt: amt,
-    taxCode: rate === 7 ? 'V1' : '',
-    validFrom: '',
-    taxRate: rate ? String(rate) : '',
+  // SAP codes (procedure 0TXTH): claimable input VAT is V0/V1/V2, and VAT that is still waiting
+  // for the supplier's tax invoice is booked as deferred tax D0/D1/D2 at the same rate.
+  const codeFor = (kind: string) => {
+    const suffix = rate === 10 ? '2' : rate === 0 ? '0' : '1';
+    return (kind === 'DEFERRED' ? 'D' : 'V') + suffix;
   };
-  return { ...d, header: { ...d.header, taxItems: [row] } };
+  const mkRow = (
+    value: number,
+    taxKind = '',
+    vendorCode = '',
+    label = 'Input VAT',
+    src?: DocLine,
+  ) => ({
+    label,
+    drCr: 'S',
+    docCurrencyAmt: value,
+    taxCode: codeFor(taxKind),
+    validFrom: '',
+    taxRate: rate ? String(rate) : '7',
+    // INPUT = ใบกำกับภาษี/ใบเสร็จ (เข้ารายงานภาษีซื้องวดนี้), DEFERRED = ใบแจ้งหนี้ (รอเรียกเก็บ)
+    taxKind,
+    // which vendor's invoice this tax belongs to — the MIRO tabs are keyed per vendor
+    vendorCode,
+    // Identity of the tax invoice behind this row. The Input VAT file Finance sends to SAP is one
+    // row per tax invoice, so these ride on the tax row and are reviewable before export. The
+    // read fills them; base amount falls back to VAT / rate when the document did not spell it out.
+    issuerName: String(src?.extra?.issuerName ?? ''),
+    issuerTaxId: String(src?.extra?.issuerTaxId ?? ''),
+    // Branch is 5 digits in the Input VAT file, head office = 00000. A read that returns 0 or "0"
+    // must still show as 00000, so pad rather than take the value as it comes.
+    issuerBranch: src ? padBranch(src.extra?.issuerBranch) : '',
+    taxDocNo: String(src?.extra?.taxDocNo ?? ''),
+    taxDocDate: String(src?.extra?.taxDocDate ?? ''),
+    baseAmount:
+      Number(src?.extra?.baseAmount) ||
+      (value > 0 && rate ? Math.round((value / (rate / 100)) * 100) / 100 : 0),
+  });
+  // A shipping bundle carries VAT on several invoices; the read returns one "VAT" line per
+  // invoice, so seed a tax row for each instead of a single row for one page's VAT.
+  const vatLines = (d.lines || []).filter((l) => String(l.extCode || '').toUpperCase() === 'VAT');
+  // Fallback when the read did not classify a VAT row: the document's own supplier bills us with
+  // an invoice / billing note, so its VAT is only claimable once the tax invoice arrives
+  // (DEFERRED). VAT on the other documents in the bundle comes from tax invoices / receipts and
+  // goes straight on the input-VAT report (INPUT).
+  const onInvoice = /ใบแจ้งหนี้|ใบวางบิล|invoice|billing/i.test(String(d.header.docType ?? ''));
+  const vendorWords = String(d.header.vendorName ?? '')
+    .replace(/บริษัท|จำกัด|มหาชน|ห้างหุ้นส่วน|company|limited|public|co\.|ltd\.?/gi, ' ')
+    .split(/[\s.,()-]+/)
+    .filter((w) => w.length >= 3);
+  const kindOf = (l: DocLine) => {
+    const given = String(l.extra?.taxKind ?? '').toUpperCase();
+    if (given === 'INPUT' || given === 'DEFERRED') return given;
+    const desc = String(l.desc ?? '');
+    const isOwnVendor = vendorWords.length > 0 && vendorWords.some((w) => desc.includes(w));
+    return isOwnVendor && onInvoice ? 'DEFERRED' : 'INPUT';
+  };
+  const vatRows = vatLines.length
+    ? vatLines
+        .map((l) => mkRow(Number(l.amount) || 0, kindOf(l), String(l.extra?.vendorCode ?? ''), 'Input VAT', l))
+        .filter((r) => r.docCurrencyAmt > 0)
+    : [mkRow(amt, onInvoice ? 'DEFERRED' : 'INPUT')];
+  // Customs charges (import duty, excise, interior tax) are not items on the FORM, so the read
+  // returns them as "DUTY" rows and they are recorded here in the Tax tab, named per row.
+  const dutyRows = (d.lines || [])
+    .filter((l) => String(l.extCode || '').toUpperCase() === 'DUTY')
+    .map((l) =>
+      mkRow(Number(l.amount) || 0, '', String(l.extra?.vendorCode ?? ''), String(l.desc ?? '')),
+    )
+    .filter((r) => r.docCurrencyAmt > 0)
+    // Import duty / excise carry no input VAT of their own — booked with VX (Input VAT Exempt).
+    .map((r) => ({ ...r, taxCode: 'VX', taxRate: '0' }));
+  const rows = [...vatRows, ...dutyRows];
+  if (!rows.length) return d;
+  return { ...d, header: { ...d.header, taxItems: rows } };
 }
 
 // Merges person-confirmed AI material matches into a GET .../preview response for display only
@@ -198,6 +378,7 @@ export default function DocumentPage() {
   const [rawText, setRawText] = useState<string | null>(null);
   const [payload, setPayload] = useState<Record<string, any> | null>(null);
   const [splitOpen, setSplitOpen] = useState(false);
+  const [vendorFilter, setVendorFilter] = useState('');
   const [lineExtraIdx, setLineExtraIdx] = useState<number | null>(null);
   const [postOpen, setPostOpen] = useState(false);
   const [posting, setPosting] = useState(false);
@@ -240,7 +421,7 @@ export default function DocumentPage() {
       // Locked to Gemini (per Megachem) — the re-OCR engine is always Gemini regardless of which
       // engine last read the document.
       setReocrEngine('gemini');
-      setDoc(seedGlItems(seedTaxItems(seedWhtItems(d))));
+      setDoc(seedHeaderTaxCode(seedGlItems(seedTaxItems(seedWhtItems(d)))));
       if (d.module === 'AP') loadApDocCategories();
       try {
         const chat = await getChat(d.docId);
@@ -402,7 +583,7 @@ export default function DocumentPage() {
   const doReocr = () =>
     guard(async () => {
       const d = await reocrDocument(doc.docId, reocrEngine, USER);
-      setDoc(seedGlItems(seedTaxItems(seedWhtItems(d))));
+      setDoc(seedHeaderTaxCode(seedGlItems(seedTaxItems(seedWhtItems(d)))));
       setMap(null);
       manual.current = { header: {}, lines: {} };
       if (d.provider === 'failed')
@@ -512,6 +693,30 @@ export default function DocumentPage() {
         setPendingMatch(null);
       }
       showToast('Customer added from SAP and matched');
+    });
+
+  // Add a supplier to the local vendor master straight from SAP. ocr.Vendor is a local table
+  // that starts with only the sample rows, so before this every new supplier failed mapping and
+  // had to be typed in by hand. A supplier is an A_BusinessPartner in S/4HANA exactly like a
+  // customer, so the same lookup serves both — VendorCode is the SAP Business Partner id, which
+  // is what MIRO/FB60 need anyway.
+  const useSapVendor = (bp: SapBusinessPartner) =>
+    guard(async () => {
+      const code = bp.businessPartnerId;
+      await createMaster('vendors', {
+        VendorCode: code,
+        SapVendorCode: code,
+        VendorName: bp.businessPartnerFullName || bp.businessPartnerName || h.vendorName || '',
+        // SAP's own Tax ID wins when it has one; the document's is the fallback, same rule as
+        // useSapCustomer — SAP is the source of truth and the document may carry a stale one.
+        TaxId: bp.taxId || h.vendorTaxId || '',
+        Branch: h.branch || '',
+        Currency: h.currency || 'THB',
+        IsActive: 1,
+      });
+      await loadMasters(true);
+      setManualHeader('vendor', code);
+      showToast('Vendor added from SAP and matched');
     });
 
   // MGT uses the real Zoho Account Code stored in Customer.ComcompyCodeSAP.
@@ -1090,9 +1295,65 @@ export default function DocumentPage() {
   };
 
   // ---- derived render pieces ----
+  // Totals follow the vendor lookup: picking a vendor in the DETAIL table shows what that
+  // vendor's own MIRO run is worth, so the figures can be keyed straight into SAP. VAT and
+  // withholding tax sit on the main vendor's invoices (the shipping agent that re-bills the
+  // rest), so they only show up when that vendor is the one selected. Read-only while filtered —
+  // the stored header totals still cover the whole document.
+  const vendorTotals = (() => {
+    if (!vendorFilter || (doc.module !== 'AP' && doc.module !== 'II')) return null;
+    const codeOf = (l: DocLine) => String(l.extra?.vendorCode ?? '').trim();
+    const isTax = (l: DocLine) =>
+      l.extCode === 'WHT' || l.extCode === 'VAT' || l.extCode === 'DUTY';
+    const costByVendor = new Map<string, number>();
+    for (const l of doc.lines) {
+      if (isTax(l)) continue;
+      const c = codeOf(l);
+      if (!c) continue;
+      costByVendor.set(c, (costByVendor.get(c) ?? 0) + (Number(l.amount) || 0));
+    }
+    const mainVendor = [...costByVendor.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? '';
+    const subTotal = costByVendor.get(vendorFilter) ?? 0;
+    // Tax rows carry their own vendor code when the read could match them to a form row; only
+    // when none of them do does the whole tax fall back to the main vendor.
+    const taxSum = (code: string) => {
+      const rows = doc.lines.filter((l) => l.extCode === code);
+      const tagged = rows.filter((l) => codeOf(l).length > 0);
+      if (tagged.length > 0) {
+        return tagged
+          .filter((l) => codeOf(l) === vendorFilter)
+          .reduce((a, l) => a + (Number(l.amount) || 0), 0);
+      }
+      return vendorFilter === mainVendor
+        ? rows.reduce((a, l) => a + (Number(l.amount) || 0), 0)
+        : 0;
+    };
+    const vatAmount = taxSum('VAT');
+    // Customs duty is not billed as an item but it is still paid to this vendor, so it counts
+    // towards the net total even though it sits in the Tax tab.
+    const dutyAmount = taxSum('DUTY');
+    return {
+      ...h,
+      subTotal,
+      vatAmount,
+      whtAmount: taxSum('WHT'),
+      totalAmount: subTotal + vatAmount + dutyAmount,
+    };
+  })();
+
   const totalsFields =
     doc.module === 'AP' ? (
-      <FieldGrid fields={AP_TOTALS_H} values={h} posted={posted} numeric onEdit={editHeader} />
+      <FieldGrid
+        // The numeric inputs are uncontrolled (defaultValue, so typing is not fought by a
+        // re-render), which means switching vendors would leave the old figures on screen —
+        // remount the grid when the lookup changes.
+        key={vendorFilter || 'all'}
+        fields={AP_TOTALS_H}
+        values={vendorTotals ?? h}
+        posted={posted || !!vendorTotals}
+        numeric
+        onEdit={editHeader}
+      />
     ) : doc.module === 'SO' ? (
       <>
         <FieldGrid fields={SO_TOTALS_H} values={h} posted={posted} numeric onEdit={editHeader} />
@@ -1124,6 +1385,8 @@ export default function DocumentPage() {
     onLearn: learn,
     onShowLineExtra: (i: number) => setLineExtraIdx(i),
     onAddUomRule: addUomRule,
+    vendorFilter,
+    onVendorFilter: setVendorFilter,
   };
   const glProps = {
     module: doc.module,
@@ -1133,19 +1396,35 @@ export default function DocumentPage() {
     onAdd: addGlItem,
     onDelete: delGlItem,
   };
+  // The MIRO tabs are read per vendor, so the Tax / Withholding rows show only that vendor's
+  // invoices. Rows keep their real position in the header so editing and deleting still hit the
+  // right one; when no row carries a vendor code (older documents) nothing is filtered out.
+  const forVendor = <T extends { vendorCode?: string }>(rows: T[]) => {
+    if (!vendorFilter) return { items: rows, at: rows.map((_, i) => i) };
+    const at: number[] = [];
+    rows.forEach((r, i) => {
+      if (String(r.vendorCode ?? '') === vendorFilter) at.push(i);
+    });
+    if (at.length === 0 && !rows.some((r) => String(r.vendorCode ?? ''))) {
+      return { items: rows, at: rows.map((_, i) => i) };
+    }
+    return { items: at.map((i) => rows[i]), at };
+  };
+  const taxRows = forVendor<Record<string, any>>(h.taxItems || []);
+  const whtRows = forVendor<Record<string, any>>(h.whtItems || []);
   const taxProps = {
-    items: h.taxItems || [],
+    items: taxRows.items,
     posted,
-    onEdit: editTaxItem,
+    onEdit: (i: number, k: string, v: string) => editTaxItem(taxRows.at[i], k, v),
     onAdd: addTaxItem,
-    onDelete: delTaxItem,
+    onDelete: (i: number) => delTaxItem(taxRows.at[i]),
   };
   const whtProps = {
-    items: h.whtItems || [],
+    items: whtRows.items,
     posted,
-    onEdit: editWhtItem,
+    onEdit: (i: number, k: string, v: string) => editWhtItem(whtRows.at[i], k, v),
     onAdd: addWhtItem,
-    onDelete: delWhtItem,
+    onDelete: (i: number) => delWhtItem(whtRows.at[i]),
   };
 
   return (
@@ -1329,6 +1608,7 @@ export default function DocumentPage() {
           lineSalesEmpSuggest={lineSalesEmpSuggest}
           onSetLineSalesEmployee={setLineSalesEmployee}
           onUseSapCustomer={useSapCustomer}
+          onUseSapVendor={useSapVendor}
           onUseZohoAccount={useZohoCustomer}
           onUseSapShipTo={useSapShipTo}
           isMgt={isMgt}
@@ -1353,6 +1633,14 @@ export default function DocumentPage() {
         <div className="card">
           <div className="card-h">
             <h2>Totals</h2>
+            {vendorTotals && (
+              <>
+                <div className="sp" />
+                <span className="hint">
+                  Vendor {vendorFilter} only · pick "All vendors" to go back to the whole document
+                </span>
+              </>
+            )}
           </div>
           <div className="card-b">{totalsFields}</div>
         </div>
@@ -1363,10 +1651,20 @@ export default function DocumentPage() {
         <div className="card">
           <div className="card-h">
             <h2>Supplier Invoice (MIRO)</h2>
+            {vendorTotals && (
+              <>
+                <div className="sp" />
+                <span className="hint">Totals for vendor {vendorFilter}</span>
+              </>
+            )}
           </div>
           <TabbedGroups
+            // Amount / tax figures follow the vendor lookup so the MIRO tabs show exactly what
+            // this vendor's run is worth; remount on change because the numeric inputs are
+            // uncontrolled (see the Totals card).
+            key={vendorFilter || 'all'}
             groups={AP_TRADE_GROUPS}
-            values={h}
+            values={vendorTotals ?? h}
             posted={posted}
             onEdit={editHeader}
             extras={{

@@ -271,12 +271,14 @@ public partial class DocumentRepository(Db db, string uploadDir)
 
         var lineRows = DynamicRow.ToDictList(await db.QueryAsync($"SELECT * FROM {t.Line} WHERE DocId=@docId ORDER BY ItemNo", new { docId }));
 
-        int? sourceDocId = t.Doc == "ocr.SalesOrder" ? (d.Get("SourceDocId") as int?) : null;
+        // Both tables carry SourceDocId now: Sales Orders split by group, AP/II documents split by
+        // the vendor code on each cost line (sql/15_so_split.sql and sql/21_ap_vendor_split.sql).
+        int? sourceDocId = d.Get("SourceDocId") as int?;
         IEnumerable<dynamic> splitChildren = [];
-        if (t.Doc == "ocr.SalesOrder" && sourceDocId == null)
+        if (sourceDocId == null)
         {
             splitChildren = await db.QueryAsync(
-                "SELECT DocId, DocNo, Status, TotalAmount FROM ocr.SalesOrder WHERE SourceDocId=@docId ORDER BY DocId", new { docId });
+                $"SELECT DocId, DocNo, Status, TotalAmount FROM {t.Doc} WHERE SourceDocId=@docId ORDER BY DocId", new { docId });
         }
 
         return new Dictionary<string, object?>

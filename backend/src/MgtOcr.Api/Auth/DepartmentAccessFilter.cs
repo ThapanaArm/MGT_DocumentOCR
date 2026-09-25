@@ -22,7 +22,7 @@ public sealed class DepartmentAccessFilter(ICurrentUserAccessor current, Documen
                 throw new HttpApiException(403, "You do not have access to this document type (your department can only see its own documents)");
         }
         await next();
-    }
+   }
 
     // The module a request acts on, or null when it is not scoped to one specific module.
     private async Task<string?> ResolveModuleAsync(ActionExecutingContext context)

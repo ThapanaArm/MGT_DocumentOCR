@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
 using MgtOcr.Ocr;
@@ -38,8 +38,22 @@ public static partial class ExtConversion
         // OCR-prefilled Item Note 1 rides in the line's extra bag (same bag the CS-edited
         // salesEmployee/deliveryDate/itemNote1 use); persisted as ExtraJson and read back
         // by SapPayloadBuilder for the to_Text send. Only added when the OCR found a note.
-        if (!string.IsNullOrWhiteSpace(l.ItemNote))
-            d["extra"] = new Dictionary<string, object?> { ["itemNote1"] = l.ItemNote };
+        var extra = new Dictionary<string, object?>();
+        if (!string.IsNullOrWhiteSpace(l.ItemNote)) extra["itemNote1"] = l.ItemNote;
+        // Vendor code per line (FORM SHIPPING EXPENSE); read back by the vendor split and shown
+        // in the DETAIL table's Vendor column.
+        if (!string.IsNullOrWhiteSpace(l.VendorCode)) extra["vendorCode"] = l.VendorCode.Trim();
+        // INPUT / DEFERRED for a VAT row — drives the input-VAT report vs ภาษีซื้อรอเรียกเก็บ.
+        if (!string.IsNullOrWhiteSpace(l.TaxKind)) extra["taxKind"] = l.TaxKind.Trim();
+        // Identity of the tax invoice behind a VAT row — one row per invoice in the Input VAT file
+        // Finance sends to SAP, so these travel with the line rather than the document header.
+        if (!string.IsNullOrWhiteSpace(l.TaxDocNo)) extra["taxDocNo"] = l.TaxDocNo.Trim();
+        if (!string.IsNullOrWhiteSpace(l.TaxDocDate)) extra["taxDocDate"] = l.TaxDocDate.Trim();
+        if (!string.IsNullOrWhiteSpace(l.IssuerName)) extra["issuerName"] = l.IssuerName.Trim();
+        if (!string.IsNullOrWhiteSpace(l.IssuerTaxId)) extra["issuerTaxId"] = l.IssuerTaxId.Trim();
+        if (!string.IsNullOrWhiteSpace(l.IssuerBranch)) extra["issuerBranch"] = l.IssuerBranch.Trim();
+        if (l.BaseAmount != 0) extra["baseAmount"] = l.BaseAmount;
+        if (extra.Count > 0) d["extra"] = extra;
         return d;
     }
 

@@ -178,6 +178,7 @@ function SapCustomerPanel({
   onUse,
   onProposeMatch,
   onClearMatch,
+  partyLabel = 'Customer',
 }: {
   customerName?: string;
   taxId?: string;
@@ -191,6 +192,9 @@ function SapCustomerPanel({
   onUse: (bp: SapBusinessPartner) => void;
   onProposeMatch?: (proposal: CustomerMatchProposal) => void;
   onClearMatch?: () => void;
+  /** What this party is called on screen. A supplier is a Business Partner in S/4HANA exactly
+   *  like a customer, so the Vendor card reuses this panel with partyLabel="Vendor". */
+  partyLabel?: string;
 }) {
   const [results, setResults] = useState<SapBusinessPartner[]>([]);
   const [loading, setLoading] = useState(false);
@@ -233,9 +237,9 @@ function SapCustomerPanel({
         if (r.results.length > 1) {
           onProposeMatch?.({
             docFields: [
-              { label: 'Customer Name', value: name },
+              { label: `${partyLabel} Name`, value: name },
               { label: 'Tax ID', value: tax },
-              { label: 'Customer Address (from document)', value: address },
+              { label: `${partyLabel} Address (from document)`, value: address },
             ],
             candidates: r.results.map((bp) => ({
               id: bp.businessPartnerId,
@@ -297,7 +301,8 @@ function SapCustomerPanel({
       <input type="search" className="txt" style={{ minWidth: 240 }} value={manualQuery}
         onChange={(e) => setManualQuery(e.target.value)}
         onKeyDown={(e) => { if (e.key === 'Enter') runManualSearch(); }}
-        placeholder="Enter customer name or search term" aria-label="Customer search term" />
+        placeholder={`Enter ${partyLabel.toLowerCase()} name or search term`}
+        aria-label={`${partyLabel} search term`} />
       <button className="btn sm" onClick={runManualSearch} disabled={!manualQuery.trim() || loading}>
         <i className="fa-solid fa-magnifying-glass" /> Search
       </button>
@@ -305,14 +310,14 @@ function SapCustomerPanel({
   );
 
   if (!name && !tax)
-    return <div className="hint" style={{ padding: '6px 0' }}><div>Enter a search term to look up the customer in SAP</div>{renderManualSearchBox()}</div>;
+    return <div className="hint" style={{ padding: '6px 0' }}><div>Enter a search term to look up the {partyLabel.toLowerCase()} in SAP</div>{renderManualSearchBox()}</div>;
   if (loading) return hint('Searching SAP…');
   if (error)
     return <div className="hint" style={{ padding: '6px 0' }}><div>SAP search failed: {error}</div>{renderManualSearchBox()}</div>;
   if (searched && results.length === 0)
     return (
       <div className="hint" style={{ padding: '6px 0' }}>
-        <div>No match found in SAP — use "+ Add New Customer" to enter it manually</div>
+        <div>No match found in SAP — use "+ Add New {partyLabel}" to enter it manually</div>
         {renderManualSearchBox()}
       </div>
     );
@@ -2225,6 +2230,7 @@ interface Props {
    *  they're already matched (that panel only renders when r.status === 'fail'). */
   onFetchSapUom?: (i: number) => void;
   onUseSapCustomer: (bp: SapBusinessPartner) => void;
+  onUseSapVendor: (bp: SapBusinessPartner) => void;
   onUseZohoAccount: (acc: ZohoAccount) => void;
   /** true when the signed-in user's company is MGT — routes Customer matching to Zoho CRM
    *  instead of SAP (see DocumentPage, which reads primaryCompany.companyCode via AppLayout's
@@ -2287,6 +2293,7 @@ export default function MappingCards({
   onSetLineSalesEmployee,
   onFetchSapUom,
   onUseSapCustomer,
+  onUseSapVendor,
   onUseZohoAccount,
   isMgt,
   onProposeMatch,
@@ -2306,6 +2313,7 @@ export default function MappingCards({
   // keeps Customer, Ship-to and Material consistent: first click Search, then inspect the initial
   // result and optionally type another query inside the opened panel.
   const [customerSapOpen, setCustomerSapOpen] = useState(false);
+  const [vendorSapOpen, setVendorSapOpen] = useState(false);
   const [shipToSapOpen, setShipToSapOpen] = useState(false);
   // Same idea per Material line: the live SAP/Zoho material search panel normally only shows for a
   // line whose match failed. This lets a person open it on demand for an already-matched line too
@@ -2439,7 +2447,36 @@ export default function MappingCards({
               <i className="fa-solid fa-wand-magic-sparkles" /> Ask AI to match
             </button>
             {r.status === 'fail' && addBtn('Add New Vendor', onQuickAddVendor)}
+            {/* The vendor master is local and starts empty, so every new supplier used to have to
+                be typed in by hand. A supplier is a Business Partner in S/4HANA just like a
+                customer, so the same SAP lookup the Customer card uses works here — picking a
+                result writes the master row and matches the document in one step. */}
+            {!posted && (
+              <button
+                className={'btn sm' + (vendorSapOpen ? ' primary' : '')}
+                style={{ marginLeft: 6 }}
+                onClick={() => setVendorSapOpen((v) => !v)}
+                title="Look this supplier up in SAP and add it to the vendor master"
+              >
+                <i className="fa-solid fa-magnifying-glass" /> Search SAP
+              </button>
+            )}
           </>
+        }
+        sapSlot={
+          vendorSapOpen ? (
+            <SapCustomerPanel
+              partyLabel="Vendor"
+              customerName={doc.header.vendorName}
+              taxId={doc.header.vendorTaxId}
+              companyCode={companyCode}
+              disabled={posted}
+              onUse={(bp) => {
+                onUseSapVendor(bp);
+                setVendorSapOpen(false);
+              }}
+            />
+          ) : undefined
         }
       />,
     );

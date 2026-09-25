@@ -29,6 +29,92 @@ export const SO_TOTALS_H: FieldDef[] = [
 ];
 export const SO_REMARK_H: FieldDef[] = [['remark', 'Remark']];
 
+// Tax on Sales/Purchases codes from SAP (procedure 0TXTH, T007A — 22 entries). S/4HANA Cloud
+// public edition has no released API that lists tax codes, so this mirrors the F4 help in
+// MIRO/FB60 — keep it in sync if Finance adds a code.
+export const TAX_CODES: Array<[string, string]> = [
+  // Input tax
+  ['V1', 'V1 — Input VAT 7%'],
+  ['V0', 'V0 — Input VAT 0%'],
+  ['V2', 'V2 — Input VAT 10%'],
+  ['V3', 'V3 — Input VAT 0% - Imports (Services)'],
+  ['V4', 'V4 — Input VAT RC 7% - Imports Services'],
+  ['VX', 'VX — Input VAT Exempt Purchases'],
+  // Deferred input tax (tax invoice not yet received)
+  ['D1', 'D1 — Input Deferred Tax 7%'],
+  ['D0', 'D0 — Input Deferred Tax 0%'],
+  ['D2', 'D2 — Input Deferred Tax 10%'],
+  // Unclaimable input tax
+  ['U1', 'U1 — Unclaimed Purchase Tax Rate 7% (incl. Assets & Exp)'],
+  ['U2', 'U2 — Unclaimed Purchase Tax Rate 10% (incl. Assets & Exp)'],
+  ['N1', "N1 — Unclaimed Purchase Tax Rate 7% (can't to exp.)"],
+  ['N2', "N2 — Unclaimed Purchase Tax Rate 10% (can't to exp.)"],
+  ['WP', 'WP — Non-taxable Purchase: 0%'],
+  // Output tax (not used on a supplier invoice, kept so the list matches SAP)
+  ['O0', 'O0 — Output VAT 0%'],
+  ['O1', 'O1 — Output VAT 7%'],
+  ['O2', 'O2 — Output VAT 10%'],
+  ['OX', 'OX — Output VAT Exempt Sales'],
+  ['DL', 'DL — Output Deferred Tax 0%'],
+  ['WS', 'WS — Non-taxable Sales: 0%'],
+];
+
+// ---- Withholding tax master data (SAP · from KUT-FI-AP-204) ----
+// Withholding Tax Type: X1-X2 where the pair says when the tax is posted.
+export const WHT_TYPES: Array<[string, string]> = [
+  ['', '— Select —'],
+  ['TI', 'TI — WHT Type for Invoice Posting 1'],
+  ['TJ', 'TJ — WHT Type for Invoice Posting 2'],
+  ['TK', 'TK — WHT Type for Invoice Posting 3'],
+  ['OA', 'OA — WHT Type for Payment Posting 1'],
+  ['OB', 'OB — WHT Type for Payment Posting 2'],
+  ['OC', 'OC — WHT Type for Payment Posting 3'],
+];
+
+// AP Withholding Tax Code — the rate is part of the code, so picking the code fixes the rate.
+export const WHT_CODES: Array<[string, string]> = [
+  ['', '— Select —'],
+  ['01', '01 — Transportation 1%'],
+  ['02', '02 — Interest 1%'],
+  ['03', '03 — Insurance 1%'],
+  ['04', '04 — Advertising 2%'],
+  ['05', '05 — Hire of work 3%'],
+  ['06', '06 — Software 3%'],
+  ['07', '07 — Repair & maintenance 3%'],
+  ['08', '08 — Commission 3%'],
+  ['09', '09 — Service 3%'],
+  ['10', '10 — Licence 3%'],
+];
+
+// Rate that belongs to each W/Tax Code, used to work back to the W/Tax Base.
+export const WHT_CODE_RATE: Record<string, number> = {
+  '01': 1, '02': 1, '03': 1, '04': 2, '05': 3, '06': 3, '07': 3, '08': 3, '09': 3, '10': 3,
+};
+
+// Recipient Type — which Phaw.Ngaw.Daw. (withholding return) form the withholding is reported on. Mandatory in SAP.
+export const RECIPIENT_TYPES: Array<[string, string]> = [
+  ['', '— Select —'],
+  ['02', '02 — Phaw.Ngaw.Daw. 02'],
+  ['03', '03 — Phaw.Ngaw.Daw. 03 (individual)'],
+  ['53', '53 — Phaw.Ngaw.Daw. 53 (juristic person)'],
+  ['54', '54 — Phaw.Ngaw.Daw. 54 (paid abroad)'],
+];
+
+// SAP document types used by AP (KUT-FI-AP-201 / 204). KR and RE are the two that
+// matter for a supplier invoice; the rest are here so the dropdown matches SAP's F4 help.
+export const SAP_DOC_TYPES: Array<[string, string]> = [
+  ['', '— Select —'],
+  ['KR', 'KR — Vendor Invoice'],
+  ['RE', 'RE — Invoice (Gross)'],
+  ['RN', 'RN — Invoice (Net)'],
+  ['KG', 'KG — Vendor Credit Memo'],
+  ['KA', 'KA — Vendor Document'],
+  ['KN', 'KN — Net Vendors'],
+  ['KP', 'KP — Account Maintenance'],
+  ['KZ', 'KZ — Vendor Payment'],
+  ['RV', 'RV — Billing Doc. Transfer'],
+];
+
 export const AP_H: FieldDef[] = [
   ['docType', 'Document Type'], ['invoiceNo', 'Invoice No.'], ['invoiceDate', 'Invoice Date'],
   ['postingDate', 'Posting Date'], ['vendorName', 'Vendor Name'], ['vendorTaxId', 'Tax ID'],
@@ -65,23 +151,12 @@ export const II_GROUPS: FieldGroup[] = [
       ['invoiceDate', 'Invoice Date'],      // 3)
       ['invoiceNo', 'Reference'],           // 4)
       ['postingDate', 'Posting Date'],      // 5)
-      ['sapDocType', 'Document Type', 'select', [ // 6)
-        ['KR', 'KR - Vendor Invoice'],
-        ['KG', 'KG - Vendor Credit Memo'],
-        ['RE', 'RE - Invoice (Gross)'],
-        ['RN', 'RN - Invoice (Net)'],
-      ]],
+      ['sapDocType', 'Document Type', 'select', SAP_DOC_TYPES], // 6)
       ['totalAmount', 'Amount'],            // 7)
       ['currency', 'Currency'],             // 8)
       ['calculateTax', 'Calculate Tax', 'checkbox'], // 9)
       ['vatAmount', 'Tax Amount'],          // 10)
-      ['taxCode', 'Tax Code', 'select', [   // 11)
-        ['', '—'],
-        ['V1', 'V1 - Input VAT 7%'],
-        ['D1', 'D1 - Input Deferred Tax 7%'],
-        ['V0', 'V0 - Input VAT 0%'],
-        ['VN', 'VN - No Tax'],
-      ]],
+      ['taxCode', 'Tax Code', 'select', TAX_CODES], // 11)
       ['businessPlace', 'Business Place'],  // 12)
       ['headerText', 'Text'],               // 13)
     ],
@@ -157,7 +232,7 @@ export const AP_TRADE_GROUPS: FieldGroup[] = [
       ['totalAmount', 'Amount'],           // 5)
       ['currency', 'Currency'],            // 6)
       ['calculateTax', 'Calculate Tax', 'checkbox'], // 7)
-      ['taxCode', 'Tax Code'],             // 8)
+      ['taxCode', 'Tax Code', 'select', TAX_CODES],             // 8)
       ['businessPlace', 'Business Place'], // 9)
       ['headerText', 'Text'],              // 10)
     ],
@@ -218,12 +293,7 @@ export const AP_TRADE_GROUPS: FieldGroup[] = [
     // Matches the SAP "Enter Incoming Invoice · Details" tab (numbered fields 2-7; 1 is the tab).
     fields: [
       ['unplannedDeliveryCost', 'Unplanned Delivery Costs'], // 2)
-      ['sapDocType', 'Document Type', 'select', [            // 3)
-        ['RE', 'RE - Invoice - Gross'],
-        ['RN', 'RN - Invoice - Net'],
-        ['KR', 'KR - Vendor Invoice'],
-        ['KG', 'KG - Vendor Credit Memo'],
-      ]],
+      ['sapDocType', 'Document Type', 'select', SAP_DOC_TYPES], // 3)
       ['invoicingParty', 'Invoicing Party'],  // 4)
       ['assignmentText', 'Assignment'],        // 5)
       ['glAccountHeader', 'G/L Account'],      // 6)
@@ -250,7 +320,7 @@ export const PO_LINE_EXTRA_FIELDS: FieldDef[] = [
   ['itemCategory', 'Item Category', 'select', [['', '— Select —'], ['STANDARD', 'Standard'], ['SERVICE', 'Service']]],
   ['plant', 'Plant'], ['glAccount', 'G/L Account'], ['costCenter', 'Cost Center'],
   ['internalOrder', 'Internal Order'], ['wbsElement', 'WBS Element'], ['assetNumber', 'Asset Number'],
-  ['taxCode', 'Tax Code'], ['deliveryDate', 'Delivery Date'],
+  ['taxCode', 'Tax Code', 'select', TAX_CODES], ['deliveryDate', 'Delivery Date'],
   ['grIndicator', 'GR Indicator', 'select', [['', '— Select —'], ['YES', 'Yes — Goods/service receipt required'], ['NO', 'No']]],
   ['irIndicator', 'IR Indicator', 'select', [['', '— Select —'], ['YES', 'Yes — Invoice receipt allowed'], ['NO', 'No']]],
   ['grBasedIv', 'GR-Based IV', 'select', [['', '— Select —'], ['YES', 'Yes — Must reference goods already received'], ['NO', 'No']]],

@@ -129,6 +129,14 @@ export const splitDocument = (id: number, assign: Record<string, number>, user: 
     user,
   });
 
+/** Splits an AP/II shipping bundle into one document per vendor code read from the FORM's
+ *  VENDOR column. Withholding-tax and VAT rows stay with the document's main vendor. */
+export const splitByVendor = (id: number, user: string) =>
+  api.post<{ source: DocModel; created: unknown[] }>('/api/documents/' + id + '/split', {
+    mode: 'vendor',
+    user,
+  });
+
 export const setDocCategory = (id: number, apDocCategory: string, user: string) =>
   api.post<DocModel>('/api/documents/' + id + '/category', { apDocCategory, user });
 

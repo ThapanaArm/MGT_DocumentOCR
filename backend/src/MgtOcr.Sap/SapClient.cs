@@ -53,8 +53,13 @@ public class SapClient(AppConfig config, HttpClient httpClient)
         // `endpoint` after the last "/") gets appended to it, not the full "SRV/A_Entity" path.
         // Falls back to the old flat Sap:BaseUrl (+ "/sap/opu/odata/sap/{endpoint}") when blank,
         // so this keeps working exactly as before until Sap:SalesOrder is filled in.
-        var useDedicatedSoUrl = module == "SO" && !string.IsNullOrEmpty(config.SapSalesOrderBaseUrl);
-        var baseUrl = useDedicatedSoUrl ? config.SapSalesOrderBaseUrl : config.SapBaseUrl;
+        // This is the ONLY place the app creates anything in SAP, so it is the only place that
+        // uses the WRITE base URLs (Sap:WriteEnvironment). Everything else — Business Partner,
+        // Product, Billing, Sales Order lookups — keeps reading from Sap:ActiveEnvironment. With
+        // WriteEnvironment = dev and ActiveEnvironment = prod, master data is matched against live
+        // production data while no document is ever posted into production.
+        var useDedicatedSoUrl = module == "SO" && !string.IsNullOrEmpty(config.SapSalesOrderWriteBaseUrl);
+        var baseUrl = useDedicatedSoUrl ? config.SapSalesOrderWriteBaseUrl : config.SapWriteBaseUrl;
 
         if (string.IsNullOrEmpty(baseUrl))
         {

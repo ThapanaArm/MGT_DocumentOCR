@@ -2,6 +2,7 @@ import { useCallback, useRef, useState } from 'react';
 import { useAppState } from '../../../state/AppState';
 import { mapDocument, type DocModel, type MapResult } from '../../../api/documents';
 import { num } from '../../../utils/format';
+import { WHT_CODE_RATE } from '../../../constants/fields';
 
 /* =====================================================================
    useDocumentEditor — the provider-agnostic core of the document editor.
@@ -134,14 +135,23 @@ export function useDocumentEditor(user: string) {
     setDoc((d) => {
       if (!d) return d;
       const items = (d.header.whtItems || []).slice();
-      items[i] = { ...items[i], [k]: v };
+      const row = { ...items[i], [k]: v };
+      // The W/Tax Code carries its own rate (01 = 1%, 04 = 2%, 05..10 = 3%), so picking a code
+      // is enough to work the base back out of the amount that was withheld. Only done when the
+      // user changes the code — the base stays typed-over-able afterwards.
+      if (k === 'whtCode') {
+        const rate = WHT_CODE_RATE[v];
+        const amt = Number(row.amtFc) || 0;
+        if (rate && amt > 0) row.baseFc = Math.round((amt / rate) * 100) / 100;
+      }
+      items[i] = row;
       return { ...d, header: { ...d.header, whtItems: items } };
     });
   const addWhtItem = () =>
     setDoc((d) => {
       if (!d) return d;
       const items = (d.header.whtItems || []).slice();
-      items.push({ wtType: '', whtCode: '', baseFc: Number(d.header.subTotal) || 0, amtFc: 0 });
+      items.push({ wtType: '', whtCode: '', recipientType: '', baseFc: Number(d.header.subTotal) || 0, amtFc: 0 });
       return { ...d, header: { ...d.header, whtItems: items } };
     });
   const delWhtItem = (i: number) =>

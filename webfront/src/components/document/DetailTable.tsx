@@ -77,6 +77,10 @@ interface Props {
   onLearn: (i: number) => void;
   onShowLineExtra: (i: number) => void;
   onAddUomRule: (i: number) => void;
+  /** Vendor lookup (AP/II bundles): the code currently filtered on ("" = show all) and the
+   *  handlers the page wires to it. Omitted -> the lookup still shows but only filters. */
+  vendorFilter?: string;
+  onVendorFilter?: (code: string) => void;
   bare?: boolean; // render without the outer .card wrapper (for use inside a tabbed card)
   /** F01: this table checks OCR lines against shared Master Data (materials/UoM rules) — for the
    *  SAP/GLC path that master data IS the SAP material master, but for MGT the actual Sales Order
@@ -100,6 +104,8 @@ export default function DetailTable({
   onLearn,
   onShowLineExtra,
   onAddUomRule,
+  vendorFilter = '',
+  onVendorFilter,
   bare,
   isMgt,
 }: Props) {
@@ -137,10 +143,41 @@ export default function DetailTable({
         description: m.Description || '',
         label: m.MaterialCode + ' — ' + m.Description,
       }));
+  // Vendor code per line comes from the FORM SHIPPING EXPENSE "VENDOR" column. One SAP document
+  // can only be posted to one vendor, so when a bundle carries more than one the table offers a
+  // lookup that splits it into one document per vendor.
+  const vendorOf = (l: DocLine) => String(l.extra?.vendorCode ?? '').trim();
+  // WHT / VAT / DUTY rows are taxes, not items: they live in the Tax and Withholding Tax tabs.
+  const isTaxRow = (l: DocLine) =>
+    l.extCode === 'WHT' || l.extCode === 'VAT' || l.extCode === 'DUTY';
+  const vendorGroups = doc.lines.reduce<Record<string, { rows: number; total: number }>>((acc, l) => {
+    const code = vendorOf(l);
+    if (!code || isTaxRow(l)) return acc;
+    const g = acc[code] || (acc[code] = { rows: 0, total: 0 });
+    g.rows += 1;
+    g.total += num(l.amount);
+    return acc;
+  }, {});
+  const vendorCodes = Object.keys(vendorGroups).sort();
+  // Shown for every AP/II document, not only when codes were read: a re-read of an older document
+  // has no vendorCode yet, and the column is where the user types or fixes one by hand.
+  const showVendor = doc.module === 'AP' || doc.module === 'II';
   const showPoExtra = doc.module === 'AP';
   const showSoExtra = doc.module === 'SO';
-  const extraCols = (showPoExtra ? 1 : 0) + (showSoExtra ? 3 : 0);
-  const sum = doc.lines.reduce((a, l) => a + num(l.amount), 0);
+  const extraCols = (showPoExtra ? 1 : 0) + (showSoExtra ? 3 : 0) + (showVendor ? 1 : 0);
+  // Withholding tax is not part of what is billed — it is deducted at payment — so the footer
+  // total leaves those rows out (they stay in the table as a record). The total also follows the
+  // vendor lookup, so filtering by a vendor shows exactly what that vendor's MIRO run is worth.
+  // Filtered to one vendor the table is the basis for that vendor's MIRO run, so it shows only
+  // that vendor's cost rows — the tax rows live in the Tax / Withholding tabs and would make the
+  // total unreadable here. The unfiltered view stays the full picture (tax rows shown, withholding
+  // left out of the total because it is deducted at payment, not billed).
+  const hideRow = (l: DocLine) =>
+    l.extCode === 'DUTY' || (vendorFilter ? isTaxRow(l) || vendorOf(l) !== vendorFilter : false);
+  const sum = doc.lines
+    .filter((l) => l.extCode !== 'WHT' && l.extCode !== 'DUTY')
+    .filter((l) => !hideRow(l))
+    .reduce((a, l) => a + num(l.amount), 0);
 
   const numInput = (
     value: unknown,
@@ -175,12 +212,40 @@ export default function DetailTable({
         {bare && addBtn && (
           <div className="row" style={{ justifyContent: 'flex-end', marginBottom: 12 }}>{addBtn}</div>
         )}
+        {showVendor && (
+          <div
+            className="row"
+            style={{ alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 12 }}
+          >
+            <span className="hint">Vendor in this document:</span>
+            <select
+              value={vendorFilter}
+              onChange={(e) => onVendorFilter?.(e.target.value)}
+              disabled={vendorCodes.length === 0}
+              style={{ minWidth: 240 }}
+            >
+              <option value="">All vendors ({doc.lines.length} items)</option>
+              {vendorCodes.map((code) => (
+                <option key={code} value={code}>
+                  {code} — {vendorGroups[code].rows} items · {fmtAmt(vendorGroups[code].total)}
+                </option>
+              ))}
+            </select>
+            {vendorCodes.length === 0 && (
+              <span className="hint">
+                No vendor code on any line yet — click Re-read Document so the VENDOR column is
+                read, or type the code yourself in the Vendor column
+              </span>
+            )}
+          </div>
+        )}
         <div className="tw">
           <table>
             <thead>
               <tr>
                 <th style={{ width: 54 }}>Item</th>
                 <th style={{ width: 150 }}>Item Code (Partner)</th>
+                {showVendor && <th style={{ width: 110 }}>Vendor</th>}
                 <th style={{ minWidth: 260 }}>Item Description (per Document)</th>
                 <th style={{ minWidth: 110 }}>Quantity</th>
                 <th style={{ width: 74 }}>Unit</th>
@@ -203,6 +268,8 @@ export default function DetailTable({
             <tbody>
               {doc.lines.length ? (
                 doc.lines.map((l, i) => {
+                  // Vendor lookup filters the view only — nothing is removed from the document.
+                  if (hideRow(l)) return null;
                   const r = map ? map.lines[i] : null;
                   return (
                     <tr key={i}>
@@ -214,6 +281,16 @@ export default function DetailTable({
                           onChange={(e) => onEditLine(i, 'extCode', e.target.value)}
                         />
                       </td>
+                      {showVendor && (
+                        <td>
+                          <input
+                            value={(l.extra?.vendorCode as string) ?? ''}
+                            readOnly={posted}
+                            onChange={(e) => onEditLineExtra(i, 'vendorCode', e.target.value)}
+                            style={{ width: 96 }}
+                          />
+                        </td>
+                      )}
                       <td>
                         <input
                           value={l.desc ?? ''}
@@ -331,11 +408,16 @@ export default function DetailTable({
             </tbody>
             <tfoot>
               <tr className="totrow">
-                <td colSpan={6} style={{ textAlign: 'right' }}>
-                  Total
+                <td colSpan={5 + (showVendor ? 1 : 0)} style={{ textAlign: 'right' }}>
+                  Total{' '}
+                  <span className="hint" style={{ fontWeight: 400 }}>
+                    {vendorFilter
+                      ? `(costs of vendor ${vendorFilter} only · taxes are on the Tax / Withholding Tax tabs)`
+                      : '(excludes withholding tax)'}
+                  </span>
                 </td>
                 <td style={{ textAlign: 'right' }}>{fmtAmt(sum)}</td>
-                <td colSpan={4 + extraCols} />
+                <td colSpan={4 + extraCols - (showVendor ? 1 : 0)} />
               </tr>
             </tfoot>
           </table>

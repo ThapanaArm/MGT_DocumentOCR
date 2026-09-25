@@ -1,4 +1,5 @@
-﻿using System.Text;
+﻿using System.Linq;
+using System.Text;
 using System.Text.Json;
 using MgtOcr.Core.Config;
 
@@ -18,12 +19,22 @@ public static class GeminiOcr
         try
         {
             var ext = Path.GetExtension(path).ToLowerInvariant();
-            // Was the first 3 pages only — a shipping bundle (invoices + receipts + packing slip, with
-            // the FORM SHIPPING EXPENSE summary as the LAST page) never had its summary read. Send
-            // every page up to 20, as JPEG at 150 dpi to stay under the inline request size limit.
+            // Was the first 3 pages only — a shipping bundle (invoices + receipts + packing slip,
+            // with the FORM SHIPPING EXPENSE summary as the LAST page) never had its summary read.
+            // Shipping bundles run long (the FORM summary is the last page), so read up to 50
+            // pages. Gemini's inline request limit is ~20 MB including base64 overhead, so the
+            // resolution steps down as the file gets longer — still readable, still one request.
+            const int MaxPages = 50;
             var isPdf = ext == ".pdf";
+            var pageCount = isPdf ? PdfRasterizer.PageCount(path) : 1;
+            var (dpi, quality) = pageCount switch
+            {
+                <= 20 => (150, 80),
+                <= 35 => (130, 75),
+                _ => (110, 70),
+            };
             var imgs = isPdf
-                ? PdfRasterizer.RenderPagesToJpeg(path, maxPages: 20, dpi: 150)
+                ? PdfRasterizer.RenderPagesToJpeg(path, maxPages: MaxPages, dpi: dpi, quality: quality)
                 : [await File.ReadAllBytesAsync(path)];
             var mime = isPdf ? "image/jpeg" : ext switch
             {
@@ -36,20 +47,35 @@ public static class GeminiOcr
             // with 17 pages Gemini still took the first invoice's lines. When the text layer shows
             // which page the form is, put that page FIRST and say so explicitly up front.
             var prompt = VisionPrompt.Build(module);
-            if (isPdf && module == "II" && imgs.Count > 1)
+            // "AP" too: Import Invoice uploads are read as module AP and only routed to II (no PO) AFTER
+            // the read, so an II-only check here never fired for a fresh upload.
+            if (isPdf && (module is "AP" or "II") && imgs.Count > 1)
             {
-                var formIdx = PdfExtraction.FindPageIndex(path,
+                // A bundle can hold one FORM per PO, so every form page is pulled to the front —
+                // including any that sits beyond the page cap (rendered on its own, replacing the
+                // last and least useful page).
+                var formIdxs = PdfExtraction.FindPageIndexes(path,
                     new System.Text.RegularExpressions.Regex(@"FORM\s*SHIPPING\s*EXPENSE", System.Text.RegularExpressions.RegexOptions.IgnoreCase));
-                if (formIdx > 0 && formIdx < imgs.Count)
+                var formPageNos = formIdxs.Select(i => i + 1).ToList();
+                var formPages = new List<byte[]>();
+                foreach (var idx in formIdxs)
                 {
-                    var form = imgs[formIdx];
-                    imgs.RemoveAt(formIdx);
-                    imgs.Insert(0, form);
+                    if (idx < imgs.Count) { formPages.Add(imgs[idx]); }
+                    else if (PdfRasterizer.RenderPageToJpeg(path, idx, dpi, quality) is { } extra) { formPages.Add(extra); }
                 }
-                if (formIdx >= 0 && formIdx < imgs.Count)
-                    prompt = $"สำคัญ: ภาพแรกคือหน้า FORM SHIPPING EXPENSE (หน้า {formIdx + 1} ของไฟล์) " +
-                             "lines ต้องมาจากตารางในภาพแรกนี้เท่านั้น ห้ามใช้รายการจากใบแจ้งหนี้/ใบเสร็จในภาพอื่นเป็น lines " +
+                if (formPages.Count > 0)
+                {
+                    foreach (var idx in formIdxs.Where(i => i < imgs.Count).OrderByDescending(i => i)) imgs.RemoveAt(idx);
+                    while (imgs.Count + formPages.Count > MaxPages) imgs.RemoveAt(imgs.Count - 1);
+                    imgs.InsertRange(0, formPages);
+                    prompt = $"สำคัญ: {formPages.Count} ภาพแรกคือหน้า FORM SHIPPING EXPENSE (หน้า {string.Join(", ", formPageNos)} ของไฟล์) " +
+                             "lines ต้องมาจากตารางในภาพเหล่านี้เท่านั้น ห้ามใช้รายการจากใบแจ้งหนี้/ใบเสร็จในภาพอื่นเป็น lines " +
+                             (formPages.Count > 1
+                                ? "ฟอร์มมีหลายใบเพราะมีหลาย PO — ให้รวมรายการชื่อเดียวกันของ vendor เดียวกันจากทุกใบเป็นแถวเดียวโดยบวกยอดกัน " +
+                                  "และใส่ poRef เป็นเลข PO ทุกใบคั่นด้วย \", \" "
+                                : "") +
                              "ภาพที่เหลือเป็นเอกสารประกอบ ให้ใช้เพื่อหายอดหัก ณ ที่จ่ายมาต่อท้าย lines ตามกติกาด้านล่าง\n\n" + prompt;
+                }
             }
             var parts = new List<object> { new { text = prompt } };
             parts.AddRange(imgs.Select(b => (object)new { inline_data = new { mime_type = mime, data = Convert.ToBase64String(b) } }));

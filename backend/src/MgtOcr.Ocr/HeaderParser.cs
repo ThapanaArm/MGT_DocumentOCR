@@ -1,4 +1,4 @@
-using System.Text.RegularExpressions;
+﻿using System.Text.RegularExpressions;
 
 namespace MgtOcr.Ocr;
 
@@ -37,6 +37,9 @@ public static class HeaderParser
         : new Dictionary<string, object?>
         {
             ["docType"] = "ใบกำกับภาษี/ใบแจ้งหนี้", ["invoiceNo"] = "", ["invoiceDate"] = "", ["postingDate"] = "",
+            // MIRO "Reference Document Category" (PO Reference tab): 1 goods/service items,
+            // 2 planned delivery costs, 3 both. Read from the document; "" when unclear.
+            ["refDocType"] = "",
             ["vendorName"] = "", ["vendorTaxId"] = "", ["branch"] = "", ["poRef"] = "", ["currency"] = "THB",
             ["paymentTerms"] = "", ["subTotal"] = 0.0, ["vatRate"] = 7.0, ["vatAmount"] = 0.0, ["whtAmount"] = 0.0, ["totalAmount"] = 0.0,
         };

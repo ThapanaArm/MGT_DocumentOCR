@@ -42,8 +42,17 @@ if (tessdataPrefix == "" && Directory.Exists(defaultTessdata)) tessdataPrefix = 
 // value in appsettings.json (or an env-var override, e.g. Sap__ActiveEnvironment=prod) moves
 // every SAP integration's target environment together without editing URLs/secrets in place.
 var sapBpEnv = Get("Sap:ActiveEnvironment", "dev");
+// Writes can target a different tenant from reads: Sap:WriteEnvironment overrides
+// Sap:ActiveEnvironment for the POST path only (see AppConfig.SapWriteBaseUrl). Leave it unset
+// and writes go wherever reads go, which is how this behaved before the split.
+var sapWriteEnv = Get("Sap:WriteEnvironment", sapBpEnv);
 var zohoEnv = Get("ZohoConfig:ActiveEnvironment", "sandbox");
 startupLog.LogInformation("[CONFIG] Sap active environment (BusinessPartner/SalesOrder/Product/Billing) = {Env}", sapBpEnv);
+startupLog.LogInformation("[CONFIG] Sap WRITE environment (documents posted to SAP) = {Env}{Note}",
+    sapWriteEnv,
+    string.Equals(sapWriteEnv, sapBpEnv, StringComparison.OrdinalIgnoreCase)
+        ? ""
+        : $"  <-- reads come from '{sapBpEnv}', nothing is created there");
 startupLog.LogInformation("[CONFIG] ZohoConfig active environment = {Env}", zohoEnv);
 
 var appConfig = new AppConfig
@@ -83,6 +92,10 @@ var appConfig = new AppConfig
     SapBusinessPartnerBaseUrl = Get($"Sap:BusinessPartner:BaseUrl_{Cap(sapBpEnv)}", Get("Sap:BusinessPartner:BaseUrl")),
     SapBusinessPartnerAuthHeader = Get("Sap:BusinessPartner:AuthHeader"),
     SapSalesOrderBaseUrl = Get($"Sap:SalesOrder:BaseUrl_{Cap(sapBpEnv)}", Get("Sap:SalesOrder:BaseUrl")),
+    // Same keys, resolved against the write environment — used only by SapClient.PostAsync.
+    SapWriteEnvironment = sapWriteEnv,
+    SapWriteBaseUrl = Get($"Sap:BaseUrl_{Cap(sapWriteEnv)}", Get("Sap:BaseUrl")),
+    SapSalesOrderWriteBaseUrl = Get($"Sap:SalesOrder:BaseUrl_{Cap(sapWriteEnv)}", Get("Sap:SalesOrder:BaseUrl")),
     SapSalesOrderAuthHeader = Get("Sap:SalesOrder:AuthHeader"),
     SapSalesOrderPriceConditionType = Get("Sap:SalesOrder:PriceConditionType", "ZPR0"),
     SapSalesOrderItemNoteTextId = Get("Sap:SalesOrder:ItemNoteTextId", "ZI01"),

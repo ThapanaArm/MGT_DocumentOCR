@@ -55,6 +55,16 @@ public class AppConfig
     // Sap:SalesOrder is filled in.
     public string SapSalesOrderBaseUrl { get; init; } = "";
     public string SapSalesOrderAuthHeader { get; init; } = "";
+
+    // --- Write (POST) target, kept separate from the read target ---
+    // Reads (Business Partner / Product / Billing / Sales Order lookups) and writes (creating a
+    // document in SAP) can point at different tenants: Sap:ActiveEnvironment picks the read one,
+    // Sap:WriteEnvironment the write one. With WriteEnvironment = "dev" and ActiveEnvironment =
+    // "prod", master data is matched against live production while nothing is ever created there.
+    // When Sap:WriteEnvironment is absent these fall back to the read URLs, i.e. the old behaviour.
+    public string SapWriteEnvironment { get; init; } = "";
+    public string SapWriteBaseUrl { get; init; } = "";
+    public string SapSalesOrderWriteBaseUrl { get; init; } = "";
     // Manual Gross Price condition type used for GLC lines (Sap:SalesOrder:PriceConditionType).
     // Not hardcoded: the existing, already-working Excel/Zoho -> SAP Sales Order integration
     // (SalesOrderImportJob.BuildCreateBody) keeps this in config for exactly the same reason —

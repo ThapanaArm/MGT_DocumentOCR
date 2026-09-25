@@ -169,11 +169,18 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         var uploadEngine = string.IsNullOrEmpty(ocr_) || ocr_ == "auto" ? "gemini" : ocr_;
         var pd = await ocr.ExtractAsync(stored, mod, uploadEngine, password);
         var durationMs = (int)(DateTime.UtcNow - t0).TotalMilliseconds;
+        // Expense is always an Incoming Invoice (FB60, no PO). Its bundles carry a FORM SHIPPING
+        // EXPENSE sheet whose "PO. NO." (the goods PO the costs relate to) would otherwise be read
+        // as poRef and wrongly route the document to Supplier Invoice (MIRO). Other categories
+        // keep the PO-based routing.
         if (detect)
-            mod = (pd.Header.GetStr("poRef")).Trim().Length > 0 ? "AP" : "II";
+            mod = string.Equals((apDocCategory ?? "").Trim(), "EXPENSE", StringComparison.OrdinalIgnoreCase)
+                ? "II"
+                : (pd.Header.GetStr("poRef")).Trim().Length > 0 ? "AP" : "II";
         var apCat = ValidateApDocCategory(mod, apDocCategory);
         var ext = ExtConversion.ToExtDict(pd);
         var docId = await repo.CreateDocumentAsync(mod, ext, fname, stored, size, user, apCat, durationMs);
+
         var outDoc = await repo.GetDocumentAsync(docId);
         outDoc["ocrNote"] = pd.Note ?? "";
         return Ok(outDoc);
@@ -660,47 +667,119 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     public async Task<IActionResult> SplitDocument(int docId, [FromBody] Dictionary<string, object?> rawBody)
     {
         var body = JsonBodyHelpers.Unwrap(rawBody);
+        var (source, created) = await SplitCoreAsync(docId, body.GetStr("mode") == "vendor",
+            body.Get("assign") as Dictionary<string, object?> ?? new(), await ActorAsync());
+        return Ok(new { source, created });
+    }
+
+    // Shared by the endpoint and by Upload's automatic vendor split.
+    private async Task<(Dictionary<string, object?> Source, List<Dictionary<string, object?>> Created)> SplitCoreAsync(
+        int docId, bool byVendor, Dictionary<string, object?> assign, string user)
+    {
         var doc = await repo.GetDocumentAsync(docId);
-        if (doc.GetStr("module") != "SO") throw new HttpApiException(400, "Split is only available for Sales Order documents");
+        var module = doc.GetStr("module");
+        // "vendor" mode splits a shipping bundle by the FORM's VENDOR column — one MIRO / FB60
+        // document per vendor code, since SAP posts one document to one vendor. The manual
+        // group-assignment mode stays Sales-Order-only.
+        if (byVendor)
+        {
+            if (module is not ("AP" or "II"))
+                throw new HttpApiException(400, "Splitting by vendor is only available for Supplier Invoice / Incoming Invoice documents");
+        }
+        else if (module != "SO")
+        {
+            throw new HttpApiException(400, "Split is only available for Sales Order documents");
+        }
         if (doc.GetStr("status") is "POSTED" or "SPLIT") throw new HttpApiException(400, "This document has been posted to SAP or already split");
         if (doc.Get("sourceDocId") != null) throw new HttpApiException(400, "A document split from another cannot be split again");
 
-        var assign = body.Get("assign") as Dictionary<string, object?> ?? new();
-        var user = await ActorAsync();
         var lines = (List<Dictionary<string, object?>>)doc["lines"]!;
         var groups = new SortedDictionary<int, List<Dictionary<string, object?>>>();
-        foreach (var l in lines)
+        var groupVendor = new Dictionary<int, string>();
+        if (byVendor)
         {
-            var itemNo = l.Get("itemNo")?.ToString() ?? "";
-            var g = (int)Num(assign.Get(itemNo));
-            if (g <= 0) continue;
-            if (!groups.TryGetValue(g, out var list)) groups[g] = list = [];
-            list.Add(l);
-        }
-        if (groups.Count < 2) throw new HttpApiException(400, "At least 2 groups are required to split");
+            // Tax rows (WHT / VAT) belong to the document's own vendor, which is the one carrying
+            // the largest cost total — the shipping agent that re-bills everything else.
+            static string VendorOf(Dictionary<string, object?> l) =>
+                ((l.Get("extra") as Dictionary<string, object?>)?.GetStr("vendorCode") ?? "").Trim();
+            static bool IsTaxRow(Dictionary<string, object?> l) =>
+                l.GetStr("extCode") is "WHT" or "VAT";
 
-        var docT = DocumentTables.For("SO").Doc;
+            var byCode = lines.Where(l => !IsTaxRow(l) && VendorOf(l).Length > 0)
+                              .GroupBy(VendorOf)
+                              .OrderByDescending(g => g.Sum(l => Num(l.Get("amount"))))
+                              .ToList();
+            if (byCode.Count < 2) throw new HttpApiException(400, "This document's lines carry fewer than 2 vendor codes, so there is nothing to split");
+            var mainVendor = byCode[0].Key;
+            var gNo = 0;
+            foreach (var g in byCode.OrderBy(g => g.Key, StringComparer.Ordinal))
+            {
+                gNo++;
+                groupVendor[gNo] = g.Key;
+                var list = g.ToList();
+                if (g.Key == mainVendor) list.AddRange(lines.Where(IsTaxRow));
+                groups[gNo] = list;
+            }
+            var orphans = lines.Where(l => !IsTaxRow(l) && VendorOf(l).Length == 0).ToList();
+            if (orphans.Count > 0)
+            {
+                var mainNo = groupVendor.First(kv => kv.Value == mainVendor).Key;
+                groups[mainNo].AddRange(orphans); // no vendor code read — keep them with the main vendor
+            }
+        }
+        else
+        {
+            foreach (var l in lines)
+            {
+                var itemNo = l.Get("itemNo")?.ToString() ?? "";
+                var g = (int)Num(assign.Get(itemNo));
+                if (g <= 0) continue;
+                if (!groups.TryGetValue(g, out var list)) groups[g] = list = [];
+                list.Add(l);
+            }
+            if (groups.Count < 2) throw new HttpApiException(400, "At least 2 groups are required to split");
+        }
+
+        var docT = DocumentTables.For(module).Doc;
         dynamic? src = await GetDbInstance().QueryOneAsync($"SELECT StoredPath, FileSize, RawText FROM {docT} WHERE DocId=@docId", new { docId });
         var header = (Dictionary<string, object?>)doc["header"]!;
         var created = new List<Dictionary<string, object?>>();
         foreach (var (gNo, gLines) in groups)
         {
             var gHeader = new Dictionary<string, object?>(header);
-            var gTotal = gLines.Sum(l => Num(l.Get("amount")));
-            gHeader["totalAmount"] = gTotal; gHeader["subTotal"] = gTotal;
-            if (gHeader.GetStr("poNo").Length > 0) gHeader["poNo"] = $"{gHeader.GetStr("poNo")}-{gNo}";
-            var d = DocumentRepository.Denorm("SO", gHeader);
+            var costTotal = gLines.Where(l => l.GetStr("extCode") is not ("WHT" or "VAT")).Sum(l => Num(l.Get("amount")));
+            var gVat = gLines.Where(l => l.GetStr("extCode") == "VAT").Sum(l => Num(l.Get("amount")));
+            var gWht = gLines.Where(l => l.GetStr("extCode") == "WHT").Sum(l => Num(l.Get("amount")));
+            if (byVendor)
+            {
+                gHeader["subTotal"] = costTotal;
+                gHeader["vatAmount"] = gVat;
+                gHeader["whtAmount"] = gWht;
+                gHeader["totalAmount"] = costTotal + gVat;
+                gHeader["vendorCode"] = groupVendor.GetValueOrDefault(gNo, "");
+                // only the main vendor keeps the tax tabs' seeded rows; the rest start clean
+                if (gVat <= 0) gHeader.Remove("taxItems");
+                if (gWht <= 0) gHeader.Remove("whtItems");
+                gHeader.Remove("glItems");
+            }
+            else
+            {
+                var gTotal = gLines.Sum(l => Num(l.Get("amount")));
+                gHeader["totalAmount"] = gTotal; gHeader["subTotal"] = gTotal;
+                if (gHeader.GetStr("poNo").Length > 0) gHeader["poNo"] = $"{gHeader.GetStr("poNo")}-{gNo}";
+            }
+            var d = DocumentRepository.Denorm(module, gHeader);
             var newId = await GetDbInstance().InsertReturningIdAsync($"""
                 INSERT {docT}(Module,FileName,StoredPath,FileSize,OcrProvider,OcrConfidence,OcrConfidenceNote,Status,
                       DocNo,DocDate,PostingDate,PartnerName,PartnerTaxId,Currency,SubTotal,VatRate,VatAmount,
                       WhtAmount,TotalAmount,HeaderJson,RawText,CreatedBy,SourceDocId)
-                VALUES('SO',@fileName,@storedPath,@fileSize,@provider,@confidence,@confidenceNote,'NEW',
+                VALUES(@module,@fileName,@storedPath,@fileSize,@provider,@confidence,@confidenceNote,'NEW',
                       @docNo,@docDate,@postingDate,@partnerName,@partnerTaxId,@currency,@subTotal,@vatRate,@vatAmount,
                       @whtAmount,@totalAmount,@headerJson,@rawText,@user,@sourceDocId);
                 SELECT SCOPE_IDENTITY();
                 """, new
             {
-                fileName = doc.GetStr("fileName"), storedPath = (string?)src?.StoredPath, fileSize = (int?)src?.FileSize,
+                module, fileName = doc.GetStr("fileName"), storedPath = (string?)src?.StoredPath, fileSize = (int?)src?.FileSize,
                 provider = doc.Get("provider"), confidence = doc.Get("confidence"), confidenceNote = doc.GetStr("confidenceNote"),
                 docNo = d.Get("DocNo"), docDate = d.Get("DocDate"), postingDate = d.Get("PostingDate"),
                 partnerName = d.Get("PartnerName"), partnerTaxId = d.Get("PartnerTaxId"), currency = d.Get("Currency"),
@@ -708,20 +787,20 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
                 whtAmount = d.Get("WhtAmount"), totalAmount = d.Get("TotalAmount"),
                 headerJson = JsonSerializer.Serialize(gHeader, PyJson.Options), rawText = (string?)src?.RawText, user, sourceDocId = docId,
             });
-            await repo.SaveLinesAsync("SO", newId, gLines.Select(l => new Dictionary<string, object?>
+            await repo.SaveLinesAsync(module, newId, gLines.Select(l => new Dictionary<string, object?>
             {
                 ["extCode"] = l.Get("extCode"), ["desc"] = l.Get("desc"), ["qty"] = l.Get("qty"), ["uom"] = l.Get("uom"),
                 ["price"] = l.Get("price"), ["amount"] = l.Get("amount"), ["materialCode"] = l.Get("materialCode"), ["extra"] = l.Get("extra"),
             }).ToList());
-            await repo.LogAuditAsync(newId, "SO", "CREATE", user, detail: $"Split from document #{docId}", docNo: d.GetStr("DocNo"), fileName: doc.GetStr("fileName"));
+            await repo.LogAuditAsync(newId, module, "CREATE", user, detail: $"Split from document #{docId}", docNo: d.GetStr("DocNo"), fileName: doc.GetStr("fileName"));
             created.Add(await repo.GetDocumentAsync(newId));
         }
 
         await using (var conn = await GetDbAsync())
             await conn.ExecuteAsync($"UPDATE {docT} SET Status='SPLIT', UpdatedAt=SYSDATETIME() WHERE DocId=@docId", new { docId });
-        await repo.LogAuditAsync(docId, "SO", "UPDATE", user,
-            detail: $"Split into {groups.Count} Sales Order: {string.Join(", ", created.Select(c => c["docId"]))}", fileName: doc.GetStr("fileName"));
-        return Ok(new { source = await repo.GetDocumentAsync(docId), created });
+        await repo.LogAuditAsync(docId, module, "UPDATE", user,
+            detail: $"Split into {groups.Count} document(s){(byVendor ? " by vendor" : "")}: {string.Join(", ", created.Select(c => c["docId"]))}", fileName: doc.GetStr("fileName"));
+        return (await repo.GetDocumentAsync(docId), created);
     }
 
     private async Task<(Dictionary<string, object?> Payload, Dictionary<string, object?> Res)> PayloadForAsync(Dictionary<string, object?> doc, Dictionary<string, object?>? manual = null)

@@ -50,7 +50,26 @@ public static class PdfExtraction
     // almost every regex in AmountFinder/HeaderParser depends on a plausible separator between a
     // label and its value, reproducing that layout-aware reconstruction here is required for
     // parity, not optional — reuses the same Y-bucketing approach as PdfBlocks().
-    // 0-based index of the first page (of the first 20) whose text layer matches `pattern`, or -1
+    // 0-based indexes of every page whose text layer matches `pattern` (a bundle can carry one
+    // FORM per PO). Empty when none match or the PDF has no text layer.
+    public static List<int> FindPageIndexes(string path, Regex pattern)
+    {
+        var hits = new List<int>();
+        try
+        {
+            using var doc = PdfDocument.Open(path, PdfOpenOptions());
+            var i = 0;
+            foreach (var page in doc.GetPages())
+            {
+                if (pattern.IsMatch(ReconstructPageText(page))) hits.Add(i);
+                i++;
+            }
+        }
+        catch { /* unreadable / encrypted without password — caller falls back to prompt-only */ }
+        return hits;
+    }
+
+    // 0-based index of the first page whose text layer matches `pattern`, or -1
     // when none does / the PDF has no text layer. Used to locate a summary sheet inside a bundle.
     public static int FindPageIndex(string path, Regex pattern)
     {
@@ -58,7 +77,7 @@ public static class PdfExtraction
         {
             using var doc = PdfDocument.Open(path, PdfOpenOptions());
             var i = 0;
-            foreach (var page in doc.GetPages().Take(20))
+            foreach (var page in doc.GetPages())
             {
                 if (pattern.IsMatch(ReconstructPageText(page))) return i;
                 i++;
