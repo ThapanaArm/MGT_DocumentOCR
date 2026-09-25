@@ -19,15 +19,17 @@ public class ZohoAccountController(ZohoAccountClient client, ZohoClient zoho, Zo
     }
 
     [HttpGet("account")]
-    public async Task<IActionResult> Find([FromQuery] string? name, [FromQuery] string? taxId, [FromQuery] int top = 20)
+    public async Task<IActionResult> Find([FromQuery] string? name, [FromQuery] string? taxId, [FromQuery] string? code, [FromQuery] int top = 20)
     {
-        if (string.IsNullOrWhiteSpace(name) && string.IsNullOrWhiteSpace(taxId))
-            return BadRequest(new { detail = "Provide 'taxId' and/or 'name'" });
+        if (string.IsNullOrWhiteSpace(name) && string.IsNullOrWhiteSpace(taxId) && string.IsNullOrWhiteSpace(code))
+            return BadRequest(new { detail = "Provide 'taxId', 'code' and/or 'name'" });
 
+        // Same cascade as the SAP side: exact Tax ID → Account_Code (substring) → fuzzy name.
         var results = new List<ZohoAccount>();
         if (!string.IsNullOrWhiteSpace(taxId))
             results = await client.FindByTaxIdAsync(taxId, top);
-
+        if (results.Count == 0 && !string.IsNullOrWhiteSpace(code))
+            results = await client.FindByAccountCodeContainsAsync(code, top);
         if (results.Count == 0 && !string.IsNullOrWhiteSpace(name))
             results = await client.FindByNameAsync(name, top);
 

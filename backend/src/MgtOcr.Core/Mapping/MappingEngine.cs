@@ -164,13 +164,19 @@ public static class MappingEngine
         if (baseUom.Length > 0 && du.Equals(baseUom, StringComparison.OrdinalIgnoreCase))
             return new() { ["status"] = "ok", ["sapUom"] = baseUom, ["factor"] = 1.0, ["sapQty"] = q, ["method"] = "Unit matches Material" };
 
-        var rule = uomRules.FirstOrDefault(x => x.GetStr("MaterialCode") == materialCode && x.GetStr("ExtUom").Equals(du, StringComparison.OrdinalIgnoreCase));
-        var scope = "product-specific rule";
-        if (rule == null)
-        {
-            rule = uomRules.FirstOrDefault(x => string.IsNullOrEmpty(x.GetStr("MaterialCode")) && x.GetStr("ExtUom").Equals(du, StringComparison.OrdinalIgnoreCase));
-            scope = "general rule";
-        }
+        // uomRules is already limited to this company's rules + all-company rules (SalesOrg blank),
+        // by MasterSchema.ForSalesOrg. So a row with a non-empty SalesOrg here IS this company's.
+        // Resolve most-specific first: company+material > any+material > company+general > any+general.
+        bool ext(Dictionary<string, object?> x) => x.GetStr("ExtUom").Equals(du, StringComparison.OrdinalIgnoreCase);
+        bool forMat(Dictionary<string, object?> x) => x.GetStr("MaterialCode") == materialCode;
+        bool general(Dictionary<string, object?> x) => string.IsNullOrEmpty(x.GetStr("MaterialCode"));
+        bool forCompany(Dictionary<string, object?> x) => !string.IsNullOrEmpty(x.GetStr("SalesOrg"));
+        var rule = uomRules.FirstOrDefault(x => ext(x) && forMat(x) && forCompany(x))
+                ?? uomRules.FirstOrDefault(x => ext(x) && forMat(x))
+                ?? uomRules.FirstOrDefault(x => ext(x) && general(x) && forCompany(x))
+                ?? uomRules.FirstOrDefault(x => ext(x) && general(x));
+        var scope = rule == null ? ""
+            : (general(rule) ? "general rule" : "product-specific rule") + (forCompany(rule) ? " (this company)" : "");
 
         if (rule != null)
         {
@@ -180,6 +186,11 @@ public static class MappingEngine
                 return new() { ["status"] = "fail", ["sapUom"] = baseUom, ["factor"] = 0, ["sapQty"] = 0, ["method"] = "", ["detail"] = $"Rule converts to {sapUom} but Material uses unit {baseUom}" };
             if (f <= 0 || string.IsNullOrWhiteSpace(sapUom))
                 return new() { ["status"] = "fail", ["sapUom"] = baseUom, ["factor"] = 0, ["sapQty"] = 0, ["method"] = "", ["detail"] = "Factor must be greater than 0" };
+            // The resolved unit is what goes onto the SAP/Zoho order line. A composite label like
+            // "KG/PC" is exactly what SAP rejects with RequestedQuantityUnit invalid, so stop it here
+            // even if an old rule still carries one (the master screen now prevents new ones).
+            if (sapUom.Contains(' ') || sapUom.Contains('/') || sapUom.Contains('\\'))
+                return new() { ["status"] = "fail", ["sapUom"] = sapUom, ["factor"] = 0, ["sapQty"] = 0, ["method"] = "", ["detail"] = $"Order unit '{sapUom}' isn't a valid code (no spaces or '/'). Fix it in Master → Unit Conversion" };
             return new()
             {
                 ["status"] = "convert", ["sapUom"] = sapUom, ["factor"] = f, ["sapQty"] = Math.Round(q * f, 3),
@@ -188,10 +199,16 @@ public static class MappingEngine
             };
         }
 
-        // CustomerMaterial intentionally has no dependency on the legacy Material table. When
-        // no UoM rule was configured, preserve the document unit and let SAP validate it.
+        // CustomerMaterial intentionally has no dependency on the legacy Material table. When no UoM
+        // rule was configured, forward the document unit as-is — but only if it already looks like a
+        // clean code. A composite/garbage label (has a space or '/') is the KG/PC bug, so fail with a
+        // clear ask to add a rule rather than posting an invalid unit to SAP.
         if (baseUom.Length == 0 && du.Length > 0)
+        {
+            if (du.Contains(' ') || du.Contains('/') || du.Contains('\\'))
+                return new() { ["status"] = "fail", ["sapUom"] = du, ["factor"] = 0, ["sapQty"] = 0, ["method"] = "", ["detail"] = $"No unit rule, and the document unit '{du}' isn't a valid code — add a rule in Master → Unit Conversion" };
             return new() { ["status"] = "ok", ["sapUom"] = du, ["iso"] = UomIso.GetValueOrDefault(du.ToUpperInvariant(), ""), ["factor"] = 1.0, ["sapQty"] = q, ["method"] = "Using document unit" };
+        }
 
         return new() { ["status"] = "fail", ["sapUom"] = baseUom, ["factor"] = 0, ["sapQty"] = 0, ["method"] = "", ["detail"] = "No unit-conversion rule yet" };
     }
@@ -285,13 +302,17 @@ public static class MappingEngine
                     }
                     else
                     {
-                        resHeader["shipTo"] = R("needchoice", cands: scope.Select(x => x.GetStr("SapShipToCode")).Take(3).ToList());
-                        errors.Add(new()
-                        {
-                            ["field"] = "Ship-to",
-                            ["msg"] = "ยังไม่ได้เลือกวิธีจัดการ Ship-to — เลือก/ระบุ Ship-to, กด \"ใช้ Sold-to เป็นผู้รับ\" หรือ \"ไม่ระบุ Ship-to\"",
-                            ["fix"] = "เลือก Ship-to จากรายการ/ค้นหาจาก SAP หรือกดปุ่มเลือกวิธีจัดการ Ship-to",
-                        });
+                        // GLC default (Megachem): no ship-to matched and the user made no explicit
+                        // choice, so fall back to the sold-to party automatically instead of blocking
+                        // — GLC orders usually ship to the sold-to. Non-blocking: surfaced as a warning,
+                        // not an error, so the mapping still passes. No SH is sent; SAP fills ship-to =
+                        // sold-to. The user can still override via the buttons (omit / pick a ship-to).
+                        var hadShipTo = !string.IsNullOrWhiteSpace(header.GetStr("shipToName"))
+                                     || !string.IsNullOrWhiteSpace(header.GetStr("shipToAddress"));
+                        resHeader["shipTo"] = R("skip", "", "", "ใช้ Sold-to เป็นผู้รับ (อัตโนมัติ)");
+                        warns.Add(hadShipTo
+                            ? $"Ship-to: the document's ship-to \"{Dash(header.GetStr("shipToName"))}\" didn't match any master, so the sold-to party is used as the receiver. Add it in Master → Ship-to if it should route elsewhere."
+                            : "Ship-to: none on the document — the sold-to party is used as the receiver (no SH sent; SAP defaults to sold-to).");
                     }
                 }
                 else

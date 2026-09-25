@@ -27,12 +27,15 @@ export interface ZohoAccountSearchResult {
 export interface ZohoAccountSearchParams {
   name?: string;
   taxId?: string;
+  /** Zoho Account_Code — matched as a substring, so a prefix works. */
+  code?: string;
   top?: number;
 }
 
-export const searchZohoAccount = ({ name, taxId, top = 10 }: ZohoAccountSearchParams) => {
+export const searchZohoAccount = ({ name, taxId, code, top = 10 }: ZohoAccountSearchParams) => {
   const qs = new URLSearchParams();
   if (taxId) qs.set('taxId', taxId);
+  if (code) qs.set('code', code);
   if (name) qs.set('name', name);
   qs.set('top', String(top));
   return api.get<ZohoAccountSearchResult>('/api/zoho/account?' + qs.toString());

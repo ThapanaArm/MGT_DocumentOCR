@@ -40,7 +40,7 @@ export default function LogPage() {
         </button>
       </div>
       <div className="card-b">
-        <div className="tw">
+        <div className={`tw paged-table paged-table-log page-size-${pageSize}`}>
           <table>
             <thead>
               <tr>

@@ -16,7 +16,7 @@ export default function Pager({
   const cur = Math.min(Math.max(1, page), totalPages);
   return (
     <div className="pager">
-      <div className="row" style={{ gap: 6, alignItems: 'center' }}>
+      <div className="row pager-size" style={{ gap: 6, alignItems: 'center' }}>
         <span className="hint">Show</span>
         <select
           value={pageSize}
@@ -31,21 +31,21 @@ export default function Pager({
             </option>
           ))}
         </select>
-        <span className="hint">per page · {total} items total</span>
+        <span className="hint pager-per-page"><span className="pager-per-page-desktop">per page</span><span className="pager-per-page-mobile">rows</span></span>
       </div>
-      <div className="row" style={{ gap: 6, alignItems: 'center' }}>
+      <div className="row pager-nav" style={{ gap: 6, alignItems: 'center' }}>
         <button className="btn sm ghost" onClick={() => setPage(Math.max(1, cur - 1))} disabled={cur <= 1}>
-          <i className="fa-solid fa-angle-left" /> Previous
+          <i className="fa-solid fa-angle-left" /> <span className="pager-nav-text">Previous</span>
         </button>
-        <span className="hint">
-          Page {cur} / {totalPages}
+        <span className="hint pager-page">
+          <span className="pager-page-label">Page </span>{cur} / {totalPages}
         </span>
         <button
           className="btn sm ghost"
           onClick={() => setPage(Math.min(totalPages, cur + 1))}
           disabled={cur >= totalPages}
         >
-          Next <i className="fa-solid fa-angle-right" />
+          <span className="pager-nav-text">Next</span> <i className="fa-solid fa-angle-right" />
         </button>
       </div>
     </div>
@@ -74,7 +74,7 @@ export function DateRange({
   return (
     <>
       <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} title="Start date" />
-      <span className="hint">to</span>
+      <span className="hint date-range-separator">to</span>
       <input type="date" value={to} onChange={(e) => setTo(e.target.value)} title="End date" />
       {(from || to) && (
         <button

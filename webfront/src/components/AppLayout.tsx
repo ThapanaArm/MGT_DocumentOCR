@@ -23,6 +23,17 @@ function pageTitle(pathname: string): string {
   return '';
 }
 
+function pageDescription(pathname: string): string {
+  if (pathname === '/') return 'Monitor document flow, OCR quality, and items that need attention.';
+  if (pathname.startsWith('/import')) return 'Upload a document and let OCR prepare it for review.';
+  if (pathname.startsWith('/doc/')) return 'Review extracted data, resolve mappings, and submit with confidence.';
+  if (pathname.startsWith('/list')) return 'Search, filter, and continue working on your documents.';
+  if (pathname.startsWith('/master')) return 'Maintain reusable mappings for faster, more accurate processing.';
+  if (pathname.startsWith('/audit-log')) return 'Review important activity and changes across the system.';
+  if (pathname.startsWith('/log')) return 'Track submissions and responses from SAP.';
+  return 'MGT Document OCR workspace';
+}
+
 // The document module a route belongs to (/import/:m, /list/:m), or null for other pages.
 function moduleOfPath(pathname: string): ModuleCode | null {
   const m = pathname.match(/^\/(?:import|list)\/(AP|PODP|II|SO)\b/i);
@@ -201,12 +212,25 @@ export default function AppLayout() {
         <button className="mobile-nav-close" type="button" aria-label="Close menu" onClick={() => setMobileNavOpen(false)}>
           <i className="fa-solid fa-xmark" />
         </button>
-        <div className="brand">
-          <Link to="/" style={{ textDecoration: 'none' }}>
-            <img src="/assets/logo.png" alt="MGT" className="brand-logo" />
-            <b className="lbl">MGT Document OCR</b>
-            <span className="lbl">Document Intake → SAP S/4HANA</span>
-          </Link>
+        <div className="sidebar-header">
+          <div className="brand">
+            <Link to="/" style={{ textDecoration: 'none' }}>
+              <img src="/assets/logo.png" alt="MGT" className="brand-logo" />
+              <b className="lbl">MGT Document OCR</b>
+            </Link>
+          </div>
+          <button
+            className="nav-toggle"
+            onClick={toggleNav}
+            title={navCollapsed ? 'Expand menu' : 'Collapse menu'}
+            aria-label={navCollapsed ? 'Expand menu' : 'Collapse menu'}
+          >
+            <span className="lbl">{navCollapsed ? 'Expand' : 'Collapse'}</span>
+            <span className="chev">
+              <i className={`fa-solid ${navCollapsed ? 'fa-chevron-right' : 'fa-chevron-left'}`} style={{ fontSize: 14 }} />
+            </span>
+          </button>
+          <span className="brand-subtitle lbl">Document Intake → SAP S/4HANA</span>
         </div>
 
         <nav className="nav" id="nav">
@@ -223,18 +247,6 @@ export default function AppLayout() {
           ))}
         </nav>
 
-        <button
-          className="nav-toggle"
-          onClick={toggleNav}
-          title={navCollapsed ? 'Expand menu' : 'Collapse menu'}
-          aria-label={navCollapsed ? 'Expand menu' : 'Collapse menu'}
-        >
-          <span className="lbl">{navCollapsed ? 'Expand' : 'Collapse'}</span>
-          <span className="chev">
-            <i className={`fa-solid ${navCollapsed ? 'fa-chevron-right' : 'fa-chevron-left'}`} style={{ fontSize: 14 }} />
-          </span>
-        </button>
-
         <SidebarFoot me={me} denied={denied} />
       </aside>
 
@@ -250,7 +262,10 @@ export default function AppLayout() {
           >
             <i className="fa-solid fa-bars" />
           </button>
-          <h1 id="pageTitle">{pageTitle(location.pathname)}</h1>
+          <div className="page-heading">
+            <h1 id="pageTitle">{pageTitle(location.pathname)}</h1>
+            <p>{pageDescription(location.pathname)}</p>
+          </div>
           <div className="sp" />
           <Link className="btn sm start-document" to="/">
             <i className="fa-solid fa-arrow-rotate-right" /> Start New Document

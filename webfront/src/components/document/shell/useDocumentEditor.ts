@@ -48,6 +48,7 @@ export function useDocumentEditor(user: string) {
             res.pass
               ? 'Data matched and saved successfully'
               : 'Still incomplete: ' + res.errors.length + ' item(s) — please review and select data',
+            res.pass ? 'success' : 'info',
           );
           document.querySelector('.content')?.scrollTo({ top: 0, behavior: 'smooth' }); window.scrollTo({ top: 0, behavior: 'smooth' });
         }

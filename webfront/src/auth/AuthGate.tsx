@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { AUTH_ENABLED as MS_ENABLED, attemptSilentSignIn, getAccount, initAuth, signIn } from './msal';
-import { hasLocalSession, loginWithPassword } from '../api/auth';
+import { AUTH_ENABLED as MS_ENABLED, COMPANIES, attemptSilentSignIn, consumeFreshSignIn, getAccount, initAuth, signIn } from './msal';
+import { claimSession, hasLocalSession, loginWithPassword, takeSignOutReason } from '../api/auth';
 import { MOCK_ALWAYS } from '../api/mocks';
 
 /* =====================================================================
@@ -107,14 +107,22 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
       try { await initAuth(); } catch { /* fall through to the sign-in screen */ }
       if (!alive) return;
       if (getAccount() || hasLocalSession()) {
-        setPhase('ready');
+        // Just came back from Microsoft sign-in: make this device the only active one first.
+        if (consumeFreshSignIn()) await claimSession().catch(() => { /* next API call re-checks */ });
+        if (alive) setPhase('ready');
         return;
       }
+      setFormError(takeSignOutReason());
       setPhase('signed-out');
       const ok = await attemptSilentSignIn();
+      if (ok && consumeFreshSignIn()) await claimSession().catch(() => { /* next API call re-checks */ });
       if (alive && ok) setPhase('ready');
     })();
-    const onSignedOut = () => alive && setPhase('signed-out');
+    const onSignedOut = () => {
+      if (!alive) return;
+      setFormError(takeSignOutReason());
+      setPhase('signed-out');
+    };
     window.addEventListener('mgtocr:signedout', onSignedOut);
     return () => {
       alive = false;
@@ -228,9 +236,21 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
               {MS_ENABLED && (
                 <>
                   <div className="login-divider">OR</div>
-                  <button type="button" className="login-ms" onClick={() => void signIn()}>
-                    <MicrosoftMark /> Continue with Microsoft
-                  </button>
+                  {COMPANIES.length <= 1 ? (
+                    <button type="button" className="login-ms" onClick={() => void signIn(COMPANIES[0]?.id)}>
+                      <MicrosoftMark /> Continue with Microsoft
+                    </button>
+                  ) : (
+                    // MGT and GLC are separate Entra registrations on the same URL — the person picks
+                    // which company to sign in with, and msal.ts remembers the choice.
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                      {COMPANIES.map((c) => (
+                        <button key={c.id} type="button" className="login-ms" onClick={() => void signIn(c.id)}>
+                          <MicrosoftMark /> Continue with Microsoft — {c.label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </>
               )}
 

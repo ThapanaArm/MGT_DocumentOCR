@@ -4,6 +4,7 @@ import { MetaProvider } from './state/MetaContext';
 import AppLayout from './components/AppLayout';
 import HomePage from './pages/HomePage';
 import ImportPage from './pages/ImportPage';
+import BatchStatusPage from './pages/BatchStatusPage';
 import DocumentPage from './pages/DocumentPage';
 import InboxPage from './pages/InboxPage';
 import MasterPage from './pages/MasterPage';
@@ -26,6 +27,7 @@ export default function App() {
             <Route element={<AppLayout />}>
               <Route index element={<HomePage />} />
               <Route path="import/:module" element={<ImportPage />} />
+              <Route path="import/:module/batch/:batchId" element={<BatchStatusPage />} />
               <Route path="doc/:docId" element={<DocumentPage />} />
               <Route path="list" element={<InboxPage />} />
               <Route path="list/:module" element={<InboxPage />} />

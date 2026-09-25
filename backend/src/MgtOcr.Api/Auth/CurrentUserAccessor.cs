@@ -81,19 +81,13 @@ public class CurrentUserAccessor(
         if (found is null)
             log.LogWarning("Sign-in refused: no active Ms_User row for {Key}.", cacheKey);
 
-        // Revocation: our token carries the TokenVersion it was minted with ("tv"); if Ms_User's has
-        // moved on (password change / forced logout), the token is stale. Microsoft tokens have no
-        // "tv", so this only affects password tokens.
-        if (found is not null)
-        {
-            var tv = principal?.FindFirst("tv")?.Value;
-            if (tv is not null && tv != found.TokenVersion)
-            {
-                log.LogWarning("Token stale (tv {Old} != {Now}) — treating as signed out.", tv, found.TokenVersion);
-                cache.Set(cacheKey, (CurrentUser?)null, TimeSpan.FromSeconds(15));
-                return _resolved = null;
-            }
-        }
+        // NOTE: the password token still carries "tv" (Ms_User.TokenVersion at sign-in) but it is
+        // deliberately NOT checked any more. The Dashboard system bumps TokenVersion on every login, so
+        // checking it here kicked OCR users whenever they signed in to the Dashboard. OCR's own
+        // one-device rule lives in Ms_UserSession (AppName='OCR') — see Auth/SingleSession.cs. To force a
+        // user out of OCR: UPDATE their Ms_UserSession row (AppName='OCR') SET SessionId='REVOKED' — every
+        // device is signed out within ~20 s until they sign in again — or set Ms_User.IsActive = 0.
+        // (Deleting the row does NOT kick anyone: the next request simply re-registers.)
 
         cache.Set(cacheKey, found, TimeSpan.FromSeconds(found is null ? 15 : 60));
         return _resolved = found;

@@ -24,6 +24,7 @@ export default function Modal({
 
   useEffect(() => {
     if (!open) return;
+    document.body.classList.add('modal-open');
     lastFocused.current = document.activeElement as HTMLElement | null;
 
     const FOCUSABLE =
@@ -66,6 +67,7 @@ export default function Modal({
     window.addEventListener('keydown', onKey);
     return () => {
       window.removeEventListener('keydown', onKey);
+      document.body.classList.remove('modal-open');
       lastFocused.current?.focus?.();
     };
   }, [open]);
@@ -95,10 +97,11 @@ export default function Modal({
 /* Standard modal header with title + close button. */
 export function ModalHeader({ title, onClose }: { title: ReactNode; onClose: () => void }) {
   return (
-    <div className="card-h">
+    <div className="card-h modal-header">
+      <span className="modal-title-icon" aria-hidden="true"><i className="fa-regular fa-window-maximize" /></span>
       <h2>{title}</h2>
       <div className="sp" />
-      <button className="btn sm" onClick={onClose} aria-label="Close" title="Close">
+      <button className="btn sm modal-close" onClick={onClose} aria-label="Close" title="Close">
         <i className="fa-solid fa-xmark" />
       </button>
     </div>

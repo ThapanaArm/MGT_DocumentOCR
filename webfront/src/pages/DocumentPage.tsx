@@ -65,6 +65,7 @@ import SapSalesOrderStep, {
   type SalesOrderStepHandle,
 } from '../components/document/steps/SapSalesOrderStep';
 import ZohoSalesOrderStep from '../components/document/steps/ZohoSalesOrderStep';
+import { deliveryDateGroups } from '../components/document/SapSalesOrderEditor';
 
 // Deprecated. The backend no longer reads any "user" value sent by the client — it stamps the
 // identity from the validated Entra ID token instead, so whatever is passed here is discarded.
@@ -372,6 +373,9 @@ export default function DocumentPage() {
   }
   const [pendingMatch, setPendingMatch] = useState<PendingCustomerMatch | null>(null);
   const [matchChatLog, setMatchChatLog] = useState<ChatMessage[]>([]);
+  // Signal to make the on-screen Zoho customer search run a query the AI chose (the AI "pressing"
+  // the Search Zoho button). nonce lets the same query fire again. Read-only: the person still picks.
+  const [customerSearchSignal, setCustomerSearchSignal] = useState<{ query: string; nonce: number } | undefined>();
 
   // modals
   const [reviewOpen, setReviewOpen] = useState(false);
@@ -515,6 +519,11 @@ export default function DocumentPage() {
   const companyCode = doc.module === 'SO' ? salesOrg : (me?.sapCompanyCode || salesOrg);
   const posted = doc.status === 'POSTED';
   const isSplit = doc.status === 'SPLIT';
+  // A split parent must be read-only: its lines now live in the child Sales Orders, so editing it
+  // would diverge from what was actually created. `locked` gates every editing surface (header/detail/
+  // mapping/tax/wht/gl) for BOTH posted and split, while `posted` alone still drives the posted-only
+  // UI (the "sent to SAP" banner, step 3). Split shows its own banner + status below.
+  const locked = posted || isSplit;
   const canSplit =
     doc.module === 'SO' && doc.lines.length > 1 && !posted && !isSplit && !doc.sourceDocId;
   const glItems = h.glItems || [];
@@ -576,7 +585,7 @@ export default function DocumentPage() {
         materialCode: code,
       });
       await loadMasters(true);
-      showToast('Saved to Master Mapping — the system will match it automatically next time');
+      showToast('Saved to Master Mapping — the system will match it automatically next time', 'success');
       await runMap(true);
     });
 
@@ -587,7 +596,15 @@ export default function DocumentPage() {
       setMap(null);
       manual.current = { header: {}, lines: {} };
       if (d.provider === 'failed')
-        showToast('Failed to read document — try attaching an image in the AI chat below');
+        // Surface the real reason the read failed (e.g. "Gemini HTTP 503 …", "timed out", bad key)
+        // instead of a generic message — and never silently fall back to sample/demo data. The
+        // backend now returns Provider="failed" with the reason in confidenceNote for any read
+        // failure (see OcrEngine.FailedResult) rather than substituting demo data.
+        showToast(
+          d.confidenceNote
+            ? `Could not read the document — ${d.confidenceNote}`
+            : 'Could not read the document — the OCR engine is unavailable. Try again, choose another engine, or attach an image in the AI chat below.',
+        );
       else
         showToast(
           'Document re-read complete — engine ' +
@@ -616,8 +633,10 @@ export default function DocumentPage() {
         const r = await postToSap(doc.docId, USER);
         setDoc(r.document);
         setPostOpen(false);
+        const sapReference = r.sapDocNo ? ` — SAP document ${r.sapDocNo}` : '';
         showToast(
-          (r.simulated ? '(Simulation Mode) ' : '') + 'Document created in SAP successfully — No. ' + r.sapDocNo,
+          `${r.simulated ? 'Simulation completed' : 'Document created in SAP successfully'}${sapReference}`,
+          'success',
         );
         document.querySelector('.content')?.scrollTo({ top: 0, behavior: 'smooth' }); window.scrollTo({ top: 0, behavior: 'smooth' });
       } finally {
@@ -631,7 +650,36 @@ export default function DocumentPage() {
       setSplitOpen(false);
       setDoc(res.source);
       setMap(null);
-      showToast(`<i className="fa-solid fa-check" /> Split successful — created ${res.created.length} new Sales Orders`);
+      showToast(`Split successful — created ${res.created.length} new Sales Orders`, 'success');
+    });
+
+  // GLC Sales Order: split this document into one Sales Order per delivery date. Groups the lines by
+  // their effective delivery date (per-line extra.deliveryDate, else the header date) using the same
+  // helper the SAP review card shows, builds the split assignment from those groups, and reuses the
+  // existing /split flow — every line is assigned so nothing is left behind. Each child then carries
+  // its own lines (with their delivery date), so posting each one creates a SAP Sales Order with the
+  // right RequestedDeliveryDate (see SapPayloadBuilder). No-op when the lines share a single date.
+  const splitByDeliveryDate = () =>
+    guard(async () => {
+      const groups = deliveryDateGroups(doc, h.deliveryDate || '');
+      if (groups.length < 2) {
+        showToast('ทุกบรรทัดมีวันส่งเดียวกัน — ไม่ต้องแยกเป็นหลาย Sales Order');
+        return;
+      }
+      const assign: Record<string, number> = {};
+      groups.forEach((g, gi) => {
+        g.itemNos.forEach((itemNo) => {
+          assign[String(itemNo)] = gi + 1;
+        });
+      });
+      const res = await splitDocument(doc.docId, assign, USER);
+      setDoc(res.source);
+      setMap(null);
+      showToast(
+        `<i className="fa-solid fa-check" /> แยกตามวันส่งสำเร็จ — สร้าง ${res.created.length} Sales Orders (เปิดแต่ละใบเพื่อส่งเข้า SAP)`,
+      );
+      document.querySelector('.content')?.scrollTo({ top: 0, behavior: 'smooth' });
+      window.scrollTo({ top: 0, behavior: 'smooth' });
     });
 
   const changeCategory = (v: string) =>
@@ -1231,6 +1279,11 @@ export default function DocumentPage() {
             : undefined,
         });
         setDoc(r.document);
+        // The AI asked the screen to run the Zoho customer search for it (MGT documents) — open the
+        // Customer card's Search Zoho panel and search the AI's query; the person picks + saves.
+        if (r.action?.type === 'searchZoho' && r.action.query) {
+          setCustomerSearchSignal({ query: r.action.query, nonce: Date.now() });
+        }
         // The AI may also have picked a whole new Customer/Account from a live SAP search -- e.g.
         // "ลูกค้าไม่ใช่รายนี้ ช่วยหาใหม่จาก SAP" -- staged the same way setManualHeader('customer', …)
         // does (including its own side effect of clearing the stale Ship-to, since a different
@@ -1350,17 +1403,17 @@ export default function DocumentPage() {
         key={vendorFilter || 'all'}
         fields={AP_TOTALS_H}
         values={vendorTotals ?? h}
-        posted={posted || !!vendorTotals}
+        posted={locked || !!vendorTotals}
         numeric
         onEdit={editHeader}
       />
     ) : doc.module === 'SO' ? (
       <>
-        <FieldGrid fields={SO_TOTALS_H} values={h} posted={posted} numeric onEdit={editHeader} />
-        <FieldGrid fields={SO_REMARK_H} values={h} posted={posted} onEdit={editHeader} />
+        <FieldGrid fields={SO_TOTALS_H} values={h} posted={locked} numeric onEdit={editHeader} />
+        <FieldGrid fields={SO_REMARK_H} values={h} posted={locked} onEdit={editHeader} />
       </>
     ) : doc.module === 'PODP' ? (
-      <FieldGrid fields={PODP_TOTALS_H} values={h} posted={posted} numeric onEdit={editHeader} />
+      <FieldGrid fields={PODP_TOTALS_H} values={h} posted={locked} numeric onEdit={editHeader} />
     ) : null;
 
   const sb = statusBadge(doc.status);
@@ -1376,7 +1429,7 @@ export default function DocumentPage() {
     doc,
     map,
     masters,
-    posted,
+    posted: locked,
     onEditLine: editLine,
     onEditLineExtra: editLineExtra,
     onManualLine: setManualLine,
@@ -1387,11 +1440,14 @@ export default function DocumentPage() {
     onAddUomRule: addUomRule,
     vendorFilter,
     onVendorFilter: setVendorFilter,
+    // Resolve a line's chosen Sales Employee Person ID to a display name for the DETAIL table's
+    // "Sales Employee Name" column (GLC/SO). Falls back to the raw ID inside DetailTable when unknown.
+    resolveSalesEmp: (id: string) => salesEmps.find((s) => s.personId === id)?.name || undefined,
   };
   const glProps = {
     module: doc.module,
     items: glItems,
-    posted,
+    posted: locked,
     onEdit: editGlItem,
     onAdd: addGlItem,
     onDelete: delGlItem,
@@ -1414,14 +1470,14 @@ export default function DocumentPage() {
   const whtRows = forVendor<Record<string, any>>(h.whtItems || []);
   const taxProps = {
     items: taxRows.items,
-    posted,
+    posted: locked,
     onEdit: (i: number, k: string, v: string) => editTaxItem(taxRows.at[i], k, v),
     onAdd: addTaxItem,
     onDelete: (i: number) => delTaxItem(taxRows.at[i]),
   };
   const whtProps = {
     items: whtRows.items,
-    posted,
+    posted: locked,
     onEdit: (i: number, k: string, v: string) => editWhtItem(whtRows.at[i], k, v),
     onAdd: addWhtItem,
     onDelete: (i: number) => delWhtItem(whtRows.at[i]),
@@ -1482,6 +1538,48 @@ export default function DocumentPage() {
           <div>
             SAP Document: <code>{doc.sapDocNo}</code> | {moduleLabel(doc.module)} | {dt(doc.postedAt)}
           </div>
+        </div>
+      )}
+
+      {isSplit && (
+        <div className="result">
+          <h3>
+            <span className="badge b-idle"><i className="fa-solid fa-code-branch" /> Split</span> This Sales Order was
+            split into separate Sales Orders — it is now locked and read-only
+          </h3>
+          <div>
+            The line items were moved into the new Sales Orders created from the split
+            {Array.isArray(doc.splitChildren) && doc.splitChildren.length > 0
+              ? ` (${doc.splitChildren.length} document(s))`
+              : ''}
+            . Open those documents to review, edit, or send them to SAP. This original is kept only as a reference.
+          </div>
+          {/* Navigation links straight to each split-off Sales Order (from the parent's splitChildren,
+              populated by GetDocumentAsync via ocr.SalesOrder.SourceDocId — persists across reloads). */}
+          {Array.isArray(doc.splitChildren) && doc.splitChildren.length > 0 && (
+            <div className="split-links">
+              {doc.splitChildren.map((c: Record<string, any>) => {
+                const cid = c.DocId ?? c.docId;
+                const cno = c.DocNo ?? c.docNo;
+                const cStatus = c.Status ?? c.status;
+                const cTotal = c.TotalAmount ?? c.totalAmount;
+                // Open each split-off Sales Order in a NEW TAB (anchor, not router navigate) so the
+                // person keeps this reference document open while working the children.
+                return (
+                  <a key={cid} className="btn sm split-link" href={'/doc/' + cid} target="_blank" rel="noopener noreferrer">
+                    <i className="fa-solid fa-arrow-up-right-from-square" /> Open #{cid}
+                    {cno ? ` · ${cno}` : ''}
+                    {cTotal != null ? ` · ${fmt(cTotal)}` : ''}
+                    {cStatus ? (
+                      <span className={'badge ' + statusBadge(String(cStatus)).cls} style={{ marginLeft: 6 }}>
+                        {cStatus}
+                      </span>
+                    ) : null}
+                  </a>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
 
@@ -1580,7 +1678,7 @@ export default function DocumentPage() {
           {doc.module !== 'II' && (
             <>
               <p className="sec-title">HEADER — Header Information</p>
-              <FieldGrid fields={headerDefFor(doc.module)} values={h} posted={posted} onEdit={editHeader} />
+              <FieldGrid fields={headerDefFor(doc.module)} values={h} posted={locked} onEdit={editHeader} />
             </>
           )}
         </div>
@@ -1594,7 +1692,7 @@ export default function DocumentPage() {
           masters={masters}
           companyCode={companyCode}
           plant={me?.defaultPlant || ''}
-          posted={posted}
+          posted={locked}
           onManualHeader={setManualHeader}
           onSetSalesArea={setSalesArea}
           onManualLine={setManualLine}
@@ -1612,6 +1710,7 @@ export default function DocumentPage() {
           onUseZohoAccount={useZohoCustomer}
           onUseSapShipTo={useSapShipTo}
           isMgt={isMgt}
+          customerSearchSignal={customerSearchSignal}
           onProposeMatch={proposeCustomerMatch}
           onClearMatch={clearCustomerMatch}
           onUseZohoShipTo={useZohoShipTo}
@@ -1734,6 +1833,7 @@ export default function DocumentPage() {
           salesOrg={salesOrg}
           posted={posted}
           onPosted={setDoc}
+          onSplitByDate={splitByDeliveryDate}
         />
       )}
 

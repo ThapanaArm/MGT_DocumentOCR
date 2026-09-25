@@ -92,7 +92,8 @@ export default function InboxPage() {
   };
 
   const invColHead = ['AP', 'II', 'PODP'].includes(mod ?? '') ? 'Invoice Number' : 'PO Number';
-  const colCount = 12 + (!mod ? 1 : 0) + (isInvoice ? 1 : 0) - (isSalesOrder ? 2 : 0);
+  // Sales Orders hide only the Type column now; Model OCR is shown for every module
+  const colCount = 12 + (!mod ? 1 : 0) + (isInvoice ? 1 : 0) - (isSalesOrder ? 1 : 0);
 
   return (
     <div className="card">
@@ -110,7 +111,7 @@ export default function InboxPage() {
             onChange={(e) => setSearch(e.target.value)}
           />
           <div className="register-date-filter">
-            <span className="hint">Date:</span>
+            <span className="hint register-date-label">Date:</span>
             <DateRange from={from} to={to} setFrom={setFrom} setTo={setTo} />
           </div>
           {isInvoice && (
@@ -148,21 +149,21 @@ export default function InboxPage() {
             ))}
           </div>
         )}
-        <div className="tw register-table-wrap">
+        <div className={`tw register-table-wrap paged-table paged-table-register page-size-${pageSize}`}>
           <table className="reg">
             <thead>
               <tr>
-                <th>#</th>
-                {!mod && <th>Module</th>}
+                <th className="reg-col-id">#</th>
+                {!mod && <th className="reg-col-module">Module</th>}
                 <th className="reg-col-file">File</th>
-                <th>{invColHead}</th>
+                <th className="reg-col-docno">{invColHead}</th>
                 {!isSalesOrder && <th className="reg-col-type">Type</th>}
                 <th className="reg-col-date">PO Date</th>
                 <th className="reg-col-supplier">Supplier</th>
-                <th style={{ textAlign: 'right' }}>Total</th>
-                {isInvoice && <th>Document Type</th>}
-                <th>Status</th>
-                {!isSalesOrder && <th className="reg-col-ocr">Model OCR</th>}
+                <th className="reg-col-total" style={{ textAlign: 'right' }}>Total</th>
+                {isInvoice && <th className="reg-col-category">Document Type</th>}
+                <th className="reg-col-status">Status</th>
+                <th className="reg-col-ocr">Model OCR</th>
                 <th className="reg-col-sap">SAP Doc</th>
                 <th className="reg-col-created">Create Date</th>
                 <th className="reg-col-actions" aria-label="Actions" />
@@ -185,9 +186,9 @@ export default function InboxPage() {
                       style={{ cursor: 'pointer' }}
                       onClick={() => navigate('/doc/' + r.DocId)}
                     >
-                      <td>{r.DocId}</td>
+                      <td className="reg-col-id">{r.DocId}</td>
                       {!mod && (
-                        <td>
+                        <td className="reg-col-module">
                           <span
                             className={
                               'badge ' +
@@ -199,7 +200,7 @@ export default function InboxPage() {
                         </td>
                       )}
                       <td className="reg-col-file" title={r.FileName || ''}>{r.FileName || ''}</td>
-                      <td>{r.DocNo || ''}</td>
+                      <td className="reg-col-docno" title={r.DocNo || ''}>{r.DocNo || ''}</td>
                       {!isSalesOrder && (
                         <td className="reg-col-type">
                           {(() => {
@@ -210,29 +211,42 @@ export default function InboxPage() {
                       )}
                       <td className="reg-col-date">{r.DocDate || ''}</td>
                       <td className="reg-col-supplier" title={r.PartnerName || ''}>{r.PartnerName || ''}</td>
-                      <td style={{ textAlign: 'right' }}>{fmt(r.TotalAmount)}</td>
+                      <td className="reg-col-total" style={{ textAlign: 'right' }}>{fmt(r.TotalAmount)}</td>
                       {isInvoice && (
-                        <td>
+                        <td className="reg-col-category">
                           {r.ApDocCategory ? catLabel(r.ApDocCategory) : <span className="hint">—</span>}
                         </td>
                       )}
-                      <td>
+                      <td className="reg-col-status">
                         <span className={'badge ' + sb.cls}>{sb.label}</span>{' '}
                         {r.OcrConfidence != null && (
                           <span className="hint">{Math.round(r.OcrConfidence * 100)}%</span>
                         )}
                       </td>
-                      {!isSalesOrder && (
-                        <td className="reg-col-ocr">
-                          <span className="hint">
-                            {OCR_PROVIDER_SHORT[r.OcrProvider ?? ''] || r.OcrProvider || '—'}
-                          </span>
-                        </td>
-                      )}
+                      <td className="reg-col-ocr">
+                        <span className="hint">
+                          {OCR_PROVIDER_SHORT[r.OcrProvider ?? ''] || r.OcrProvider || '—'}
+                        </span>
+                      </td>
                       <td className="reg-col-sap">{r.SapDocNo || ''}</td>
                       <td className="hint reg-col-created">{dt(r.CreatedAt)}</td>
                       <td className="reg-col-actions" style={{ whiteSpace: 'nowrap' }}>
-                        {r.Status !== 'POSTED' && (
+                        {r.Status === 'POSTED' ? (
+                          // Posted docs can't be deleted (already sent to SAP/Zoho), so instead of
+                          // an empty cell show a "view" button that opens the document's detail
+                          // page (same destination as clicking the row).
+                          <button
+                            className="btn sm ghost"
+                            title="View"
+                            aria-label="View"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              navigate('/doc/' + r.DocId);
+                            }}
+                          >
+                            <i className="fa-solid fa-eye" />
+                          </button>
+                        ) : (
                           <button
                             className="btn sm ghost"
                             title="Delete"

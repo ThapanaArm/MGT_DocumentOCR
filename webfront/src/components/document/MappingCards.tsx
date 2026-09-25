@@ -79,9 +79,6 @@ function StatusChip({ st }: { st: string }) {
   // GLC ship-to optional: the person explicitly chose a "no ship-to" fallback (use sold-to / omit) —
   // a neutral chip, never the green "Auto-matched", so "matched" only ever shows a real match.
   if (st === 'skip') return <span className="badge b-idle"><i className="fa-solid fa-check" /> Confirmed</span>;
-  // GLC ship-to optional and not yet decided: the person must pick a real ship-to or a fallback
-  // before sending. A warn chip (blocking) rather than a scary red "Not found".
-  if (st === 'needchoice') return <span className="badge b-warn"><i className="fa-solid fa-hand-pointer" /> Select Ship-to</span>;
   if (st === 'manual') return <span className="badge b-warn"><i className="fa-solid fa-pen" /> Manually selected</span>;
   if (st === 'convert') return <span className="badge b-ok"><i className="fa-solid fa-right-left" /> Unit converted</span>;
   if (st === 'fail') return <span className="badge b-fail"><i className="fa-solid fa-xmark" /> Not found</span>;
@@ -221,7 +218,10 @@ function SapCustomerPanel({
     let cancelled = false;
     setLoading(true);
     setError(null);
-    searchSapBusinessPartner({ name, taxId: appliedQuery ? undefined : tax })
+    // A manual search term is sent as both name and code, so it matches a SAP customer code too
+    // (the backend cascades Tax ID -> code -> name). The document's own Tax ID is only used for the
+    // first auto-lookup, not once the person has typed their own term.
+    searchSapBusinessPartner({ name, code: appliedQuery ?? undefined, taxId: appliedQuery ? undefined : tax })
       .then((r) => {
         if (cancelled) return;
         // Defensive: an unexpected response shape (e.g. an HTML page from a stale/mismatched
@@ -301,7 +301,7 @@ function SapCustomerPanel({
       <input type="search" className="txt" style={{ minWidth: 240 }} value={manualQuery}
         onChange={(e) => setManualQuery(e.target.value)}
         onKeyDown={(e) => { if (e.key === 'Enter') runManualSearch(); }}
-        placeholder={`Enter ${partyLabel.toLowerCase()} name or search term`}
+        placeholder={`${partyLabel} name or code`}
         aria-label={`${partyLabel} search term`} />
       <button className="btn sm" onClick={runManualSearch} disabled={!manualQuery.trim() || loading}>
         <i className="fa-solid fa-magnifying-glass" /> Search
@@ -762,6 +762,7 @@ function ZohoCustomerPanel({
   onUse,
   onProposeMatch,
   onClearMatch,
+  injectedQuery,
 }: {
   customerName?: string;
   taxId?: string;
@@ -769,6 +770,8 @@ function ZohoCustomerPanel({
    *  address, used only as an extra disambiguation hint. */
   address?: string;
   disabled?: boolean;
+  /** AI-driven "press Search": when nonce changes, run this query as if typed into the box. */
+  injectedQuery?: { query: string; nonce: number };
   onUse: (acc: ZohoAccount) => void;
   onProposeMatch?: (proposal: CustomerMatchProposal) => void;
   onClearMatch?: () => void;
@@ -788,6 +791,12 @@ function ZohoCustomerPanel({
   const [manualQuery, setManualQuery] = useState('');
   const [appliedQuery, setAppliedQuery] = useState<string | null>(null);
   useEffect(() => { setManualQuery(''); setAppliedQuery(null); }, [docName]);
+  // AI pressed "Search Zoho": apply its query the same way runManualSearch() does.
+  useEffect(() => {
+    const q = injectedQuery?.query?.trim();
+    if (q) { setManualQuery(q); setAppliedQuery(q); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [injectedQuery?.nonce]);
   const name = appliedQuery ?? docName;
 
   useEffect(() => {
@@ -802,7 +811,8 @@ function ZohoCustomerPanel({
     setLoading(true);
     setError(null);
     setAddresses({});
-    searchZohoAccount({ name, taxId: appliedQuery ? undefined : tax })
+    // Same as the SAP panel: the manual term is also sent as code so it matches Account_Code.
+    searchZohoAccount({ name, code: appliedQuery ?? undefined, taxId: appliedQuery ? undefined : tax })
       .then((r) => {
         if (cancelled) return;
         // Same defensive check as SapCustomerPanel above — never trust the response shape blindly.
@@ -882,7 +892,7 @@ function ZohoCustomerPanel({
         value={manualQuery}
         onChange={(e) => setManualQuery(e.target.value)}
         onKeyDown={(e) => { if (e.key === 'Enter') runManualSearch(); }}
-        placeholder="Enter customer name or search term"
+        placeholder="Customer name or code"
         aria-label="Customer search term"
       />
       <button className="btn sm" onClick={runManualSearch} disabled={!manualQuery.trim() || loading}>
@@ -1941,7 +1951,7 @@ function ZohoDealCard({
   // renders it like any auto-found Deal) and selects it -- even when its Account_Code doesn't
   // match this document's customer, or its Stage is Closed, since the person is choosing it on
   // purpose after seeing why the automatic lookup missed it.
-  const usePickedDeal = (d: ZohoDeal) => {
+  const selectPickedDeal = (d: ZohoDeal) => {
     setDeals((prev) => [d, ...(prev || []).filter((x) => x.id !== d.id)]);
     onSelectId(d.id);
     setManualResults(null);
@@ -2054,7 +2064,7 @@ function ZohoDealCard({
                               )}
                             </td>
                             <td>
-                              <button className="btn sm primary" onClick={() => usePickedDeal(d)}>
+                              <button className="btn sm primary" onClick={() => selectPickedDeal(d)}>
                                 Use this Deal
                               </button>
                             </td>
@@ -2232,6 +2242,8 @@ interface Props {
   onUseSapCustomer: (bp: SapBusinessPartner) => void;
   onUseSapVendor: (bp: SapBusinessPartner) => void;
   onUseZohoAccount: (acc: ZohoAccount) => void;
+  /** AI-driven "press Search Zoho": opens the customer search panel and runs this query. */
+  customerSearchSignal?: { query: string; nonce: number };
   /** true when the signed-in user's company is MGT — routes Customer matching to Zoho CRM
    *  instead of SAP (see DocumentPage, which reads primaryCompany.companyCode via AppLayout's
    *  Outlet context). */
@@ -2295,6 +2307,7 @@ export default function MappingCards({
   onUseSapCustomer,
   onUseSapVendor,
   onUseZohoAccount,
+  customerSearchSignal,
   isMgt,
   onProposeMatch,
   onClearMatch,
@@ -2314,6 +2327,11 @@ export default function MappingCards({
   // result and optionally type another query inside the opened panel.
   const [customerSapOpen, setCustomerSapOpen] = useState(false);
   const [vendorSapOpen, setVendorSapOpen] = useState(false);
+  // When the AI asks to run the Zoho customer search, open the Customer search panel so the
+  // ZohoCustomerPanel mounts and picks up the injected query.
+  useEffect(() => {
+    if (customerSearchSignal) setCustomerSapOpen(true);
+  }, [customerSearchSignal?.nonce]);
   const [shipToSapOpen, setShipToSapOpen] = useState(false);
   // Same idea per Material line: the live SAP/Zoho material search panel normally only shows for a
   // line whose match failed. This lets a person open it on demand for an already-matched line too
@@ -2514,6 +2532,7 @@ export default function MappingCards({
                 customerName={doc.header.customerName}
                 taxId={doc.header.customerTaxId}
                 address={doc.header.customerAddress}
+                injectedQuery={customerSearchSignal}
                 disabled={posted}
                 onUse={(account) => {
                   onUseZohoAccount(account);
@@ -2565,7 +2584,7 @@ export default function MappingCards({
         {/* Ship-to lives inside the Customer card as a sub-section instead of its own numbered
             section -- it's meaningless without a matched customer anyway, so keeping the two
             together reads more like "one company record" than two unrelated steps. */}
-        <div className={'cmp-sub ' + (sh.status === 'fail' || sh.status === 'needchoice' ? 'bad' : '')}>
+        <div className={'cmp-sub ' + (sh.status === 'fail' ? 'bad' : '')}>
           <div className="cmp-head">
             <span className="cmp-no sub">{`${n}.1`}</span>
             <b>Ship-to</b>
@@ -2581,40 +2600,10 @@ export default function MappingCards({
                   A customer must be specified first
                 </span>
               ))}
-            {/* GLC: ship-to is optional but the choice must be explicit -- when nothing is matched
-                the person picks a real ship-to (select/search above) OR one of these two "no ship-to"
-                fallbacks. Both send the same payload (no SH -> SAP uses sold-to); until one is chosen
-                the mapping blocks Send ("needchoice"). */}
-            {!posted && !isMgt && c.code && sh.status === 'needchoice' && (
-              <>
-                <button
-                  className="btn sm"
-                  style={{ marginLeft: 6 }}
-                  onClick={() => onManualHeader('shipToFallback', 'soldto')}
-                  title="Send without a Ship-to — SAP will use the Sold-to as the recipient"
-                >
-                  Use Sold-to as recipient
-                </button>
-                <button
-                  className="btn sm"
-                  style={{ marginLeft: 6 }}
-                  onClick={() => onManualHeader('shipToFallback', 'omit')}
-                  title="Don't send a Ship-to to SAP (SAP fills in the Sold-to automatically)"
-                >
-                  No Ship-to
-                </button>
-              </>
-            )}
-            {!posted && !isMgt && c.code && sh.status === 'skip' && (
-              <button
-                className="btn sm"
-                style={{ marginLeft: 6 }}
-                onClick={() => onManualHeader('shipToFallback', '')}
-                title="Clear this choice and pick a new Ship-to"
-              >
-                Change
-              </button>
-            )}
+            {/* GLC: ship-to is optional. When nothing matches, the mapping now auto-defaults to the
+                sold-to party (status "skip", a non-blocking warning) instead of prompting — so no
+                fallback buttons here. To send somewhere else, pick a real ship-to from the select /
+                SAP-search above (it becomes "Manually selected"). */}
             {!posted && c.code && (isMgt ? onUseZohoShipTo : onUseSapShipTo) && (
               <button
                 className={'btn sm' + (shipToSapOpen ? ' primary' : '')}

@@ -134,7 +134,14 @@ builder.Services.AddSingleton<DbConnectionFactory>();
 builder.Services.AddSingleton<Db>();
 builder.Services.AddSingleton<MasterRepository>();
 builder.Services.AddSingleton<OcrEngine>();
-builder.Services.AddSingleton(sp => new DocumentRepository(sp.GetRequiredService<Db>(), appConfig.UploadDir));
+builder.Services.AddSingleton(sp => new DocumentRepository(sp.GetRequiredService<Db>()));
+builder.Services.AddSingleton<UserSessionRepository>();
+builder.Services.AddSingleton<MgtOcr.Api.Auth.SingleSessionService>();
+// Batch OCR queue: a job table + background worker that reads uploaded files off the main request
+// thread (many files at once would otherwise time out the upload request and hit the OCR rate limit).
+builder.Services.AddSingleton<OcrJobRepository>();
+builder.Services.AddSingleton<MgtOcr.Api.Services.DocumentIngestService>();
+builder.Services.AddHostedService<MgtOcr.Api.Services.OcrQueueWorker>();
 builder.Services.AddScoped<MgtOcr.Api.Auth.DepartmentAccessFilter>();
 builder.Services.AddHttpClient<MgtOcr.Sap.SapClient>();
 builder.Services.AddHttpClient<MgtOcr.Sap.SapBusinessPartnerClient>();
@@ -232,6 +239,7 @@ if (Directory.Exists(publicDir))
 app.UseCors("frontend");
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseMiddleware<MgtOcr.Api.Auth.SingleSessionMiddleware>();   // one device per user (sql/26)
 app.MapControllers();
 
 // SPA client-side routing fallback: any non-/api path that is not a real file

@@ -24,6 +24,10 @@ export const createMaster = (tab: string, row: MasterRow) =>
 export const updateMaster = (tab: string, key: string, row: MasterRow) =>
   api.put('/api/masters/' + tab + '/' + encodeURIComponent(key), row);
 
+// Status switch — flips only the IsActive/Isactive flag (no full-row re-save / re-validation).
+export const setMasterActive = (tab: string, key: string, active: boolean) =>
+  api.put('/api/masters/' + tab + '/' + encodeURIComponent(key) + '/active', { active });
+
 export const deleteMaster = (tab: string, key: string) =>
   api.del('/api/masters/' + tab + '/' + encodeURIComponent(key));
 

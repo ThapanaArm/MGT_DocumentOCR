@@ -186,6 +186,24 @@ public static class SapPayloadBuilder
                 items.Add(item);
             }
 
+            // RequestedDeliveryDate: prefer a delivery date the LINES agree on (per-line
+            // extra.deliveryDate, OCR-prefilled and CS-editable) over the header's. When every line
+            // ships on the same date, that one line date is authoritative and is what gets sent. When
+            // the lines carry DIFFERENT dates the order is meant to be split by delivery date first —
+            // one SAP Sales Order per date (see the SO review step's "split by delivery date") — so
+            // after that split each child document has a single line date and resolves cleanly here;
+            // for the un-split mixed case this falls back to the header date rather than guessing one
+            // line's date. Blank per-line dates are ignored (they fall back to the header date too).
+            var lineDeliveryDates = lines
+                .Select(l => (l.Get("extra") as Dictionary<string, object?>).GetStr("deliveryDate"))
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .Select(s => s.Trim())
+                .Distinct()
+                .ToList();
+            var effectiveDeliveryDate = lineDeliveryDates.Count == 1
+                ? (object?)lineDeliveryDates[0]
+                : header.Get("deliveryDate");
+
             // Minimal payload matching the tenant's proven working SO integration
             // (SapUomSyncService.BuildDeepInsert). IncotermsClassification and CustomerPaymentTerms
             // are intentionally NOT sent — SAP derives both from the customer master, and sending
@@ -207,7 +225,7 @@ public static class SapPayloadBuilder
                 // "-" when the document has no PO number, rather than sending blank/null to SAP.
                 ["PurchaseOrderByCustomer"] = string.IsNullOrWhiteSpace(header.GetStr("poNo")) ? "-" : header.GetStr("poNo"),
                 ["CustomerPurchaseOrderDate"] = ODataDate(header.Get("poDate")),
-                ["RequestedDeliveryDate"] = ODataDate(header.Get("deliveryDate")),
+                ["RequestedDeliveryDate"] = ODataDate(effectiveDeliveryDate),
                 ["TransactionCurrency"] = currency,
                 ["to_Item"] = items,
                 ["_source"] = source,

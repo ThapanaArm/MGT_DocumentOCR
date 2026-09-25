@@ -249,17 +249,48 @@ public class SapBusinessPartnerClient(AppConfig config, HttpClient httpClient)
         return await EnrichAsync(orResults);
     }
 
+    /// <summary>Find a Business Partner by its exact SAP customer code (BusinessPartner key) — lets
+    /// the customer live-search box match on the code, not only name/Tax ID. Uses the SAME
+    /// FetchByIdsAsync path (`BusinessPartner eq 'code'`) that FindByTaxIdAsync relies on and that is
+    /// proven on this tenant. NOTE: substringof() on the BusinessPartner KEY field is unreliable on
+    /// SAP Gateway (it was returning 0 even for real codes like 2000028), so this is an EXACT match —
+    /// the person types the full code. Same AuthorizationGroup scoping and Enrich (Tax ID + address)
+    /// as the other lookups.</summary>
+    public async Task<List<BusinessPartner>> FindByCodeAsync(string code, string? authorizationGroup = null, int top = 20)
+    {
+        var baseUrl = config.SapBusinessPartnerBaseUrl;
+        if (string.IsNullOrWhiteSpace(baseUrl)) return []; // simulation mode
+        var clean = (code ?? "").Trim();
+        if (clean.Length == 0) return [];
+        return await EnrichAsync(await FetchByIdsAsync(new List<string> { clean }, top, authorizationGroup));
+    }
+
+    // Scope results to the signed-in company's AuthorizationGroup so one company can't read another's
+    // customers (see SapBusinessPartnerController). BUT also let through records with NO auth group at
+    // all (empty), because those are unassigned/shared master records — e.g. GREEN LEAF MYANMAR
+    // (2000028) has no auth group, and a plain `AuthorizationGroup eq 'XXX'` silently hid it from
+    // every search (Tax ID, code, and name alike). An unscoped record isn't "another company's" data,
+    // so surfacing it is safe; company-scoped records stay restricted to their own company.
     private static string WithAuthorizationGroup(string filter, string? authorizationGroup) =>
         string.IsNullOrWhiteSpace(authorizationGroup)
             ? filter
-            : $"({filter}) and AuthorizationGroup eq '{EscapeODataLiteral(authorizationGroup.Trim())}'";
+            : $"({filter}) and (AuthorizationGroup eq '{EscapeODataLiteral(authorizationGroup.Trim())}' or AuthorizationGroup eq '')";
 
-    /// <summary>substringof() check against BusinessPartnerName, upper-casing the search word
-    /// first since this tenant's SAP data is always stored upper-case and this OData service
-    /// doesn't support tolower()/toupper() as filter functions (see FindByNameAsync's 2026-09-10
-    /// take-3 note) — so the case-matching has to happen on the C# side, not in the filter.</summary>
-    private static string SubstringFilter(string word) =>
-        $"substringof('{EscapeODataLiteral(word.ToUpperInvariant())}',BusinessPartnerName)";
+    /// <summary>substringof() check for one search word across ALL of SAP's name fields, not just
+    /// BusinessPartnerName. For an organization the real name usually lives in OrganizationBPName1..4
+    /// (BusinessPartnerFullName is computed from them) while BusinessPartnerName is often blank or a
+    /// short form — so filtering on BusinessPartnerName alone silently misses even an exact-name
+    /// match. Each word becomes an OR across the name fields; FindByNameAsync then ANDs the words, so
+    /// every word must appear in SOME name field. The needle is upper-cased because substringof is
+    /// case-sensitive on this tenant and the data is stored upper-case (this OData service has no
+    /// tolower()/toupper() filter function — see FindByNameAsync's 2026-09-10 take-3 note).</summary>
+    private static readonly string[] NameFields =
+        { "BusinessPartnerName", "OrganizationBPName1", "OrganizationBPName2", "OrganizationBPName3", "OrganizationBPName4" };
+    private static string SubstringFilter(string word)
+    {
+        var needle = EscapeODataLiteral(word.ToUpperInvariant());
+        return "(" + string.Join(" or ", NameFields.Select(f => $"substringof('{needle}',{f})")) + ")";
+    }
 
     /// <summary>
     /// Diagnostic only — not called from any search path or the UI. Fetches one Business Partner

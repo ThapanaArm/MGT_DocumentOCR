@@ -20,7 +20,9 @@ namespace MgtOcr.Api.Controllers;
 [ApiController]
 [ServiceFilter(typeof(DepartmentAccessFilter))]
 public class DocumentsController(DocumentRepository repo, MasterRepository masters, OcrEngine ocr,
-    SapClient sap, SapBusinessPartnerClient sapBp, AppConfig config, ICurrentUserAccessor currentUser) : ControllerBase
+    SapClient sap, SapBusinessPartnerClient sapBp, AppConfig config, ICurrentUserAccessor currentUser,
+    OcrJobRepository jobs, MgtOcr.Api.Services.DocumentIngestService ingest,
+    SapProductClient sapProduct) : ControllerBase
 {
     // Who to stamp on CreatedBy / PerformedBy / PostedBy.
     //
@@ -143,7 +145,6 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         // then route by PO number (poRef present -> Supplier Invoice / MIRO, still module "AP";
         // absent -> Incoming Invoice / FB60, module "II"). Both are separate SAP apps.
         var mod = ValidateModule(module);
-        var detect = mod == "AP";
         var stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
         var fname = ExtConversion.SafeName(file.FileName);
         var stored = Path.Combine(config.UploadDir, $"{stamp}_{fname}");
@@ -163,27 +164,67 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             }
         }
 
-        var t0 = DateTime.UtcNow;
-        // Locked to Gemini (per Megachem): the empty / "auto" engine path always uses Gemini. An
-        // explicit non-auto engine is still honored, but the gemini-only UI never sends one.
-        var uploadEngine = string.IsNullOrEmpty(ocr_) || ocr_ == "auto" ? "gemini" : ocr_;
-        var pd = await ocr.ExtractAsync(stored, mod, uploadEngine, password);
-        var durationMs = (int)(DateTime.UtcNow - t0).TotalMilliseconds;
-        // Expense is always an Incoming Invoice (FB60, no PO). Its bundles carry a FORM SHIPPING
-        // EXPENSE sheet whose "PO. NO." (the goods PO the costs relate to) would otherwise be read
-        // as poRef and wrongly route the document to Supplier Invoice (MIRO). Other categories
-        // keep the PO-based routing.
-        if (detect)
-            mod = string.Equals((apDocCategory ?? "").Trim(), "EXPENSE", StringComparison.OrdinalIgnoreCase)
-                ? "II"
-                : (pd.Header.GetStr("poRef")).Trim().Length > 0 ? "AP" : "II";
-        var apCat = ValidateApDocCategory(mod, apDocCategory);
-        var ext = ExtConversion.ToExtDict(pd);
-        var docId = await repo.CreateDocumentAsync(mod, ext, fname, stored, size, user, apCat, durationMs);
-
+        // Category applies to both post-routing invoice modules (AP with PO, II without), so it can
+        // be validated up front against the pre-routing module before OCR decides AP vs II.
+        var apCat = ValidateApDocCategory(mod == "AP" ? "AP" : mod, apDocCategory);
+        var (docId, _, note) = await ingest.IngestAsync(mod, stored, fname, size, ocr_, apCat, user, password);
         var outDoc = await repo.GetDocumentAsync(docId);
-        outDoc["ocrNote"] = pd.Note ?? "";
+        outDoc["ocrNote"] = note ?? "";
         return Ok(outDoc);
+    }
+
+    // Batch import: accept up to 10 files for the CURRENT module, queue each, and let the
+    // background worker read them one by one. Returns immediately with a batchId the client polls.
+    // The document itself is created only when OCR finishes (unchanged pipeline), so AP still routes
+    // to AP/II per file. Encrypted PDFs can't be prompted for a password mid-batch, so each such
+    // file is recorded as FAILED with a note to import it on its own.
+    // Default Kestrel body limit is ~30 MB; 10 files can exceed it, so raise it for this endpoint.
+    [RequestSizeLimit(209_715_200)]
+    [RequestFormLimits(MultipartBodyLengthLimit = 209_715_200)]
+    [HttpPost("api/documents/upload-batch")]
+    public async Task<IActionResult> UploadBatch([FromForm] string module, [FromForm] string ocr_,
+        [FromForm(Name = "apDocCategory")] string? apDocCategory, [FromForm] List<IFormFile> files)
+    {
+        var mod = ValidateModule(module);
+        var user = await ActorAsync();
+        if (files is null || files.Count == 0) throw new HttpApiException(400, "No files were uploaded");
+        if (files.Count > 10) throw new HttpApiException(400, "Please import at most 10 files at a time");
+        var apCat = ValidateApDocCategory(mod == "AP" ? "AP" : mod, apDocCategory);
+        var engine = string.IsNullOrEmpty(ocr_) || ocr_ == "auto" ? "gemini" : ocr_;
+
+        var batchId = Guid.NewGuid();
+        var result = new List<object>();
+        foreach (var file in files)
+        {
+            var stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
+            var fname = ExtConversion.SafeName(file.FileName);
+            var stored = Path.Combine(config.UploadDir, $"{stamp}_{fname}");
+            await using (var fs = System.IO.File.Create(stored))
+                await file.CopyToAsync(fs);
+            var size = (int)new FileInfo(stored).Length;
+
+            if (Path.GetExtension(fname).Equals(".pdf", StringComparison.OrdinalIgnoreCase)
+                && PdfExtraction.CheckPassword(stored, null) != PdfExtraction.PdfOpenStatus.Ok)
+            {
+                try { System.IO.File.Delete(stored); } catch { /* best effort */ }
+                const string msg = "Password-protected PDF — import this file on its own to enter the password";
+                var failId = await jobs.EnqueueAsync(batchId, mod, apCat, engine, fname, "", size, user, "FAILED", msg);
+                result.Add(new { jobId = failId, fileName = fname, status = "FAILED", error = msg });
+                continue;
+            }
+
+            var jobId = await jobs.EnqueueAsync(batchId, mod, apCat, engine, fname, stored, size, user);
+            result.Add(new { jobId, fileName = fname, status = "QUEUED", error = (string?)null });
+        }
+        return Ok(new { batchId, module = mod, jobs = result });
+    }
+
+    // Poll one batch's per-file status (QUEUED / PROCESSING / DONE + resultDocId / FAILED + error).
+    [HttpGet("api/documents/batch/{batchId:guid}")]
+    public async Task<IActionResult> BatchStatus(Guid batchId)
+    {
+        var rows = (await jobs.ListByBatchAsync(batchId)).ToList();
+        return Ok(new { batchId, jobs = rows });
     }
 
     [HttpGet("api/documents")]
@@ -324,7 +365,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
                 whtAmount = dn.Get("WhtAmount"), totalAmount = dn.Get("TotalAmount"), docId,
             });
         }
-        await repo.SaveLinesAsync(module, docId, pd.Lines.Select(ExtConversion.ToLineDict).ToList());
+        await repo.SaveLinesAsync(module, docId, pd.Lines.Select(l => ExtConversion.ToLineDict(l, pd.Header.GetValueOrDefault("deliveryDate") as string)).ToList());
         await repo.LogAuditAsync(docId, module, "REOCR", await ActorAsync(),
             detail: "Re-read document", fileName: fileNameOnDisk, ocrProvider: pd.Provider);
         var outDoc = await repo.GetDocumentAsync(docId);
@@ -338,11 +379,9 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     [HttpGet("api/documents/{docId:int}/chat/{chatId:int}/image")]
     public async Task<IActionResult> ChatImage(int docId, int chatId)
     {
-        var chatT = DocumentTables.ForId(docId).Chat;
-        dynamic? r = await GetDbInstance().QueryOneAsync($"SELECT ImagePath FROM {chatT} WHERE DocId=@docId AND ChatId=@chatId", new { docId, chatId });
-        string? path = r?.ImagePath;
-        if (string.IsNullOrEmpty(path) || !System.IO.File.Exists(path)) throw new HttpApiException(404, "Image not found");
-        return PhysicalFile(Path.GetFullPath(path), "application/octet-stream");
+        var img = await repo.GetChatImageAsync(docId, chatId);
+        if (img == null) throw new HttpApiException(404, "Image not found");
+        return File(img.Value.Data, img.Value.Mime);
     }
 
     [HttpPost("api/documents/{docId:int}/chat-fix")]
@@ -356,20 +395,19 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         var doc = await repo.GetDocumentAsync(docId);
         if (doc.GetStr("status") == "POSTED") throw new HttpApiException(400, "This document has been posted to SAP and cannot be edited");
 
-        string? imageB64 = null; var imageMediaType = "image/png"; byte[]? imageBytes = null; var imageExt = ".png";
+        string? imageB64 = null; var imageMediaType = "image/png"; byte[]? imageBytes = null;
         if (imageDataUrl.Length > 0)
         {
             var m = System.Text.RegularExpressions.Regex.Match(imageDataUrl, @"^data:(image/([a-zA-Z0-9.+-]+));base64,(.+)$", System.Text.RegularExpressions.RegexOptions.Singleline);
             if (!m.Success) throw new HttpApiException(400, "Invalid image format");
-            imageMediaType = m.Groups[1].Value; var subtype = m.Groups[2].Value; imageB64 = m.Groups[3].Value;
-            imageExt = "." + (System.Text.RegularExpressions.Regex.IsMatch(subtype, "^[a-zA-Z0-9]+$") ? subtype : "png");
+            imageMediaType = m.Groups[1].Value; imageB64 = m.Groups[3].Value;
             try { imageBytes = Convert.FromBase64String(imageB64); }
             catch { throw new HttpApiException(400, "Failed to decode image"); }
         }
 
         var provider = body.GetStr("provider") is { Length: > 0 } pr && ChatFixProviderLabel.ContainsKey(pr) ? pr : "claude";
         var history = await repo.GetChatHistoryAsync(docId);
-        await repo.SaveChatMessageAsync(docId, "user", message, imageBytes, imageExt, user);
+        await repo.SaveChatMessageAsync(docId, "user", message, imageBytes, imageMediaType, user);
 
         var promptMessage = message.Length > 0 ? message : "Look at the attached image and correct the document data to match what is shown in the image";
         var module = doc.GetStr("module");
@@ -383,15 +421,18 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         var materialOptions = new List<(string Code, string Description, bool Mine)>();
         var shipToOptions = new List<(string Code, string Address)>();
         var accountOptions = new List<(string Code, string Description)>();
+        // Hoisted so the read-only SAP lookup loop below (after this block) can use them.
+        var isGlc = false;
+        var authorizationGroup = "";
         if (module == "SO")
         {
             var salesOrg = await SalesOrgAsync(header);
             var companyCode = CompanyCodeForSalesOrg(salesOrg);
-            var authorizationGroup = AuthorizationGroupForSalesOrg(salesOrg);
+            authorizationGroup = AuthorizationGroupForSalesOrg(salesOrg);
             var partnerCode = doc.GetStr("partnerCode");
             var masterData = MasterSchema.ForSalesOrg(await masters.LoadForMappingAsync(module, companyCode), companyCode);
             var currentUserInfo = await currentUser.RequireAsync();
-            var isGlc = currentUserInfo.PrimaryCompany?.CompanyCode != "MGT";
+            isGlc = currentUserInfo.PrimaryCompany?.CompanyCode != "MGT";
 
             // Own CustomerMaterial rows first, then other customers' (same cross-customer set the
             // Material dropdown searches) -- covers the SAP send path (map.lines[i].code) directly.
@@ -504,20 +545,99 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             }
         }
 
-        var (result, chatFixErr) = await ChatFix.ChatFixDocumentAsync(module, header, lines, history, promptMessage, imageB64, imageMediaType, provider, config, materialOptions, shipToOptions, accountOptions);
-        if (result == null)
+        // Read-only SAP lookup loop: the AI may reply asking to search SAP for a material/customer it
+        // wants to map (only on an SO + SAP/GLC document). We run just those read searches, add the
+        // hits to the option lists (so its next pick still passes the anti-hallucination validation),
+        // and re-invoke — bounded to a few rounds. The AI never gets a save/post tool here; only the
+        // person's explicit Save/Post actions ever write anything.
+        var lookupsEnabled = module == "SO" && isGlc;
+        // MGT/Zoho SO documents: the AI can instead ask the screen to run its existing Zoho customer
+        // search (read-only). GLC uses the backend SAP lookups above; MGT uses this on-screen action.
+        var actionsEnabled = module == "SO" && !isGlc;
+        const int maxRounds = 3; // rounds 0..1 may search; the last round forces a real answer
+        var lookupLog = new System.Text.StringBuilder();
+        ChatFixResult? result = null; string? chatFixErr = null;
+        for (var iter = 0; iter < maxRounds; iter++)
         {
-            var (label, envVar) = ChatFixProviderLabel[provider];
-            throw new HttpApiException(400, chatFixErr ?? $"Could not connect to {label}, or {envVar} is not set in .env");
-        }
+            // On the last round, turn lookups off so the AI must give a final edit/answer (using
+            // whatever it has already found) instead of asking to search yet again.
+            var enableThisRound = lookupsEnabled && iter < maxRounds - 1;
+            (result, chatFixErr) = await ChatFix.ChatFixDocumentAsync(module, header, lines, history, promptMessage,
+                imageB64, imageMediaType, provider, config, materialOptions, shipToOptions, accountOptions,
+                enableThisRound, lookupLog.ToString(), actionsEnabled);
+            if (result == null)
+            {
+                var (label, envVar) = ChatFixProviderLabel[provider];
+                throw new HttpApiException(400, chatFixErr ?? $"Could not connect to {label}, or {envVar} is not set in .env");
+            }
+            if (!enableThisRound || result.Lookups.Count == 0) break; // AI gave its final answer
 
-        await repo.SaveChatMessageAsync(docId, "assistant", result.Reply, null, ".png", "AI");
-        await repo.UpdateHeaderAsync(docId, module, result.Header);
-        await repo.SaveLinesAsync(module, docId, result.Lines);
-        var docT = DocumentTables.For(module).Doc;
-        await using (var conn = await GetDbAsync())
-            await conn.ExecuteAsync($"UPDATE {docT} SET Status=CASE WHEN Status='POSTED' THEN Status ELSE 'NEW' END, MapStatus=NULL, MapMessage=NULL WHERE DocId=@docId", new { docId });
-        await repo.LogAuditAsync(docId, module, "UPDATE", user, detail: "Edited via AI chat: " + message[..Math.Min(200, message.Length)], fileName: doc.GetStr("fileName"));
+            // Execute each requested read-only search and fold the hits into the option lists, so the
+            // AI's pick next round still passes the anti-hallucination validation. Found-or-not is
+            // logged back so the AI can either choose or tell the user it couldn't find a match.
+            foreach (var lk in result.Lookups)
+            {
+                try
+                {
+                    if (lk.Type == "material")
+                    {
+                        var seen = new HashSet<string>(materialOptions.Select(o => o.Code), StringComparer.OrdinalIgnoreCase);
+                        var mats = await sapProduct.SearchByDescriptionAsync(lk.Query, null, 15);
+                        var hits = 0;
+                        foreach (var mt in mats)
+                        {
+                            if (mt.MaterialCode.Length == 0 || !seen.Add(mt.MaterialCode)) continue;
+                            materialOptions.Add((mt.MaterialCode, mt.MaterialDescription, false));
+                            hits++;
+                        }
+                        lookupLog.AppendLine(hits > 0
+                            ? $"ค้น material '{lk.Query}' ใน SAP: พบ {hits} รายการ (เพิ่มเข้ารายการให้เลือกแล้ว)"
+                            : $"ค้น material '{lk.Query}' ใน SAP: ไม่พบรายการที่ตรง");
+                    }
+                    else if (lk.Type == "customer")
+                    {
+                        var seen = new HashSet<string>(accountOptions.Select(o => o.Code), StringComparer.OrdinalIgnoreCase);
+                        var digitsOnly = lk.Query.All(char.IsDigit);
+                        var bps = digitsOnly
+                            ? await sapBp.FindByTaxIdAsync(lk.Query, authorizationGroup, 10)
+                            : await sapBp.FindByNameAsync(lk.Query, authorizationGroup, 10);
+                        var hits = 0;
+                        foreach (var bp in bps)
+                        {
+                            if (bp.BusinessPartnerId.Length == 0 || !seen.Add(bp.BusinessPartnerId)) continue;
+                            var desc = $"{bp.BusinessPartnerFullName ?? bp.BusinessPartnerName}" +
+                                (string.IsNullOrWhiteSpace(bp.AddressStreet) && string.IsNullOrWhiteSpace(bp.AddressCity)
+                                    ? "" : $" ({bp.AddressStreet} {bp.AddressCity})".Trim());
+                            accountOptions.Add((bp.BusinessPartnerId, desc));
+                            hits++;
+                        }
+                        lookupLog.AppendLine(hits > 0
+                            ? $"ค้นลูกค้า '{lk.Query}' ใน SAP: พบ {hits} รายการ (เพิ่มเข้ารายการให้เลือกแล้ว)"
+                            : $"ค้นลูกค้า '{lk.Query}' ใน SAP: ไม่พบรายการที่ตรง");
+                    }
+                }
+                catch
+                {
+                    // SAP unreachable/misconfigured this turn — record it so the AI can tell the user
+                    // instead of silently looping. Never fatal to the rest of the chat.
+                    lookupLog.AppendLine($"ค้น {lk.Type} '{lk.Query}' ใน SAP: เชื่อมต่อ SAP ไม่ได้ในตอนนี้");
+                }
+            }
+        }
+        if (result is null) throw new HttpApiException(500, "AI chat produced no result"); // unreachable: the loop always runs and assigns
+
+        await repo.SaveChatMessageAsync(docId, "assistant", result.Reply, null, null, "AI");
+        // A front-end action turn (e.g. "search Zoho") is NOT an edit: it must not write the document
+        // or reset its mapping status. Only persist header/lines when the AI actually made an edit.
+        if (result.Action is null)
+        {
+            await repo.UpdateHeaderAsync(docId, module, result.Header);
+            await repo.SaveLinesAsync(module, docId, result.Lines);
+            var docT = DocumentTables.For(module).Doc;
+            await using (var conn = await GetDbAsync())
+                await conn.ExecuteAsync($"UPDATE {docT} SET Status=CASE WHEN Status='POSTED' THEN Status ELSE 'NEW' END, MapStatus=NULL, MapMessage=NULL WHERE DocId=@docId", new { docId });
+            await repo.LogAuditAsync(docId, module, "UPDATE", user, detail: "Edited via AI chat: " + message[..Math.Min(200, message.Length)], fileName: doc.GetStr("fileName"));
+        }
         var outDoc = await repo.GetDocumentAsync(docId);
         // materialCodes: line index -> Material code the AI picked for that line, if any.
         // shipToCode: the Ship-to code the AI picked for the whole document, if any.
@@ -525,7 +645,8 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         // None of these are persisted here -- the frontend applies each as a plain selection (see
         // sendChat()), same as picking manually; only an explicit save action creates/updates master
         // data.
-        return Ok(new { reply = result.Reply, document = outDoc, materialCodes = result.MaterialCodes, shipToCode = result.ShipToCode, customerCode = result.CustomerCode });
+        return Ok(new { reply = result.Reply, document = outDoc, materialCodes = result.MaterialCodes, shipToCode = result.ShipToCode, customerCode = result.CustomerCode,
+            action = result.Action is null ? null : new { type = result.Action.Type, query = result.Action.Query } });
     }
 
     [HttpGet("api/documents/{docId:int}/rawtext")]
@@ -616,7 +737,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             await conn.ExecuteAsync($"""
                 UPDATE {docT} SET SapPartnerCode=@sapPartner, SapShipToCode=@sapShipTo,
                     PartnerCode=@partner, ShipToCode=@shipTo, MapStatus=@mapStatus, MapMessage=@mapMessage,
-                    Status=CASE WHEN Status='POSTED' THEN 'POSTED' WHEN @pass=1 THEN 'MAPPED' ELSE 'INCOMPLETE' END,
+                    Status=CASE WHEN Status='POSTED' THEN 'POSTED' WHEN Status='SPLIT' THEN 'SPLIT' WHEN @pass=1 THEN 'MAPPED' ELSE 'INCOMPLETE' END,
                     UpdatedAt=SYSDATETIME() WHERE DocId=@docId
                 """, new
             {

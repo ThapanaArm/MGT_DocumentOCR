@@ -253,7 +253,9 @@ const ZohoSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function Zoho
       const response = await createZohoSalesOrder(doc.docId, selectedDealId, buildEdits());
       setResult(response);
       if (response.success) {
-        showToast(`Created Sales Order in Zoho CRM successfully — linked to Deal "${response.dealName}" (${response.linesSent} line(s) sent)`);
+        const dealReference = response.dealName ? ` — linked to Deal “${response.dealName}”` : '';
+        const lineSummary = response.linesSent != null ? ` (${response.linesSent} line(s) sent)` : '';
+        showToast(`Sales Order created in Zoho CRM${dealReference}${lineSummary}`, 'success');
         // Reflect the now-POSTED status immediately (disables re-send + inputs) instead of waiting
         // for a manual refresh -- the backend returns the updated document (F09).
         if (response.document) onPosted(response.document);

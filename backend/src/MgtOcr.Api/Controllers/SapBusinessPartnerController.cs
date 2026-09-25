@@ -17,10 +17,10 @@ public class SapBusinessPartnerController(
 {
     [HttpGet("business-partner")]
     public async Task<IActionResult> Find([FromQuery] string? name, [FromQuery] string? taxId,
-        [FromQuery] int top = 20)
+        [FromQuery] string? code, [FromQuery] int top = 20)
     {
-        if (string.IsNullOrWhiteSpace(name) && string.IsNullOrWhiteSpace(taxId))
-            return BadRequest(new { detail = "Provide 'taxId' and/or 'name'" });
+        if (string.IsNullOrWhiteSpace(name) && string.IsNullOrWhiteSpace(taxId) && string.IsNullOrWhiteSpace(code))
+            return BadRequest(new { detail = "Provide 'taxId', 'code' and/or 'name'" });
 
         // The AuthorizationGroup scope comes from the SIGNED-IN user's own company, never from a
         // client-supplied companyCode — same reason "user" moved from a request field to the
@@ -35,10 +35,14 @@ public class SapBusinessPartnerController(
         if (string.IsNullOrWhiteSpace(authorizationGroup))
             return BadRequest(new { detail = "No AuthorizationGroup is configured for this account's company" });
 
+        // Cascade most-precise → broadest: exact Tax ID, then the SAP customer code (substring),
+        // then a fuzzy name search. The live search box sends its term as both code and name, so a
+        // typed code matches here and a typed name still falls through to FindByNameAsync.
         var results = new List<BusinessPartner>();
         if (!string.IsNullOrWhiteSpace(taxId))
             results = await client.FindByTaxIdAsync(taxId, authorizationGroup, top);
-
+        if (results.Count == 0 && !string.IsNullOrWhiteSpace(code))
+            results = await client.FindByCodeAsync(code, authorizationGroup, top);
         if (results.Count == 0 && !string.IsNullOrWhiteSpace(name))
             results = await client.FindByNameAsync(name, authorizationGroup, top);
 

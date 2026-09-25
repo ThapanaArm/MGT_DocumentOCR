@@ -57,7 +57,7 @@ public class MasterRepository(Db db)
         // material data now comes solely from CustomerMaterial (the "materials" list above).
         result["venmaterials"] = await db.QueryAsync("SELECT * FROM ocr.VendorMaterial ORDER BY VendorCode, ExtCode");
         result["uoms"] = await db.QueryAsync(
-            "SELECT * FROM ocr.UomConversion ORDER BY CASE WHEN MaterialCode IS NULL THEN 0 ELSE 1 END, MaterialCode, ExtUom");
+            "SELECT * FROM ocr.UomConversion ORDER BY CASE WHEN SalesOrg IS NULL THEN 0 ELSE 1 END, SalesOrg, CASE WHEN MaterialCode IS NULL THEN 0 ELSE 1 END, MaterialCode, ExtUom");
         // Payment-terms code -> display-text mapping. SAP returns only the code (e.g. "5009") on the
         // customer master and has no text service on this tenant, so it's mapped to a description
         // from the shared dbo.SysDataMapping table (Subject='Payment_Terms', Code, Text) -- the same
@@ -145,12 +145,15 @@ public class MasterRepository(Db db)
                 var matCode = row.GetValueOrDefault("MaterialCode") as string;
                 var extUom = (row.GetValueOrDefault("ExtUom") as string)?.Trim();
                 if (string.IsNullOrEmpty(extUom)) continue; // ExtUom is the lookup key — skip blank rows
+                var salesOrg = row.GetValueOrDefault("SalesOrg") as string;
 
                 // ISNULL('') keeps a global rule (MaterialCode NULL) and a material-specific rule
-                // for the same ExtUom from colliding, matching how ConvertUom resolves them.
+                // for the same ExtUom from colliding, matching how ConvertUom resolves them. Same
+                // for SalesOrg: MGT and GLC may map the same document unit differently, so an
+                // all-company rule and a per-company one for the same ExtUom must coexist.
                 var exists = await conn.ExecuteScalarAsync<int>(
-                    "SELECT COUNT(1) FROM ocr.UomConversion WHERE ISNULL(MaterialCode,'')=ISNULL(@mc,'') AND ExtUom=@eu",
-                    new { mc = matCode, eu = extUom }, tx);
+                    "SELECT COUNT(1) FROM ocr.UomConversion WHERE ISNULL(MaterialCode,'')=ISNULL(@mc,'') AND ISNULL(SalesOrg,'')=ISNULL(@so,'') AND ExtUom=@eu",
+                    new { mc = matCode, so = salesOrg, eu = extUom }, tx);
                 if (exists > 0) { skipped++; continue; }
 
                 await InsertRowAsync(conn, tx, uomDef, row);
@@ -193,6 +196,22 @@ public class MasterRepository(Db db)
         for (var i = 0; i < cols.Length; i++) p.Add($"p{i}", body[cols[i]]);
         p.Add("key", key);
         var n = await db.ExecuteAsync(sql, p);
+        return n > 0;
+    }
+
+    // The table's active-flag column as spelled in MasterDefinitions (ocr.Customer/ShipTo use
+    // "IsActive", ocr.CustomerMaterial uses "Isactive"); null when the master has no status flag.
+    public static string? ActiveColumn(MasterDefinition m) =>
+        m.Cols.FirstOrDefault(c => string.Equals(c, "IsActive", StringComparison.OrdinalIgnoreCase));
+
+    // Flip only the active flag (+ UpdatedAt). The column name comes from the fixed definition
+    // list, never from the request, so it is safe to interpolate.
+    public async Task<bool> SetActiveAsync(MasterDefinition m, string key, bool active)
+    {
+        var col = ActiveColumn(m) ?? throw new InvalidOperationException($"{m.Table} has no active flag");
+        var n = await db.ExecuteAsync(
+            $"UPDATE {m.Table} SET {col}=@active, UpdatedAt=SYSDATETIME() WHERE {m.Key}=@key",
+            new { active, key });
         return n > 0;
     }
 

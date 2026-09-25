@@ -24,6 +24,7 @@ export type ThemeMode = 'light' | 'dark';
 interface ToastState {
   open: boolean;
   message: string;
+  type: 'success' | 'error' | 'info';
 }
 
 interface AppStateValue {
@@ -37,7 +38,7 @@ interface AppStateValue {
   setBusy: (b: boolean) => void;
 
   toast: ToastState;
-  showToast: (message: string) => void;
+  showToast: (message: string, type?: ToastState['type']) => void;
   hideToast: () => void;
 
   /** Wraps an async action with busy state + error toast (ports guard()). */
@@ -63,7 +64,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     readStored<boolean>(NAV_KEY, false, (v) => v === '1'),
   );
   const [busy, setBusyState] = useState(false);
-  const [toast, setToast] = useState<ToastState>({ open: false, message: '' });
+  const [toast, setToast] = useState<ToastState>({ open: false, message: '', type: 'info' });
 
   // Reflect theme onto <html data-theme> so legacy.css [data-theme="dark"] rules apply.
   useEffect(() => {
@@ -101,8 +102,15 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
 
   const setBusy = useCallback((b: boolean) => setBusyState(b), []);
 
-  const showToast = useCallback((message: string) => {
-    setToast({ open: true, message });
+  const showToast = useCallback((message: string, type?: ToastState['type']) => {
+    const resolvedType = type ?? (
+      /success|successful|successfully|saved|created|added|deleted|activated|deactivated|queued|complete|สำเร็จ|บันทึกแล้ว|สร้างแล้ว/i.test(message)
+        ? 'success'
+        : /error|failed|unable|could not|invalid|ผิดพลาด|ล้มเหลว/i.test(message)
+          ? 'error'
+          : 'info'
+    );
+    setToast({ open: true, message, type: resolvedType });
   }, []);
 
   const hideToast = useCallback(() => {
@@ -115,7 +123,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       try {
         return await fn();
       } catch (e) {
-        showToast(e instanceof Error ? e.message : String(e));
+        showToast(e instanceof Error ? e.message : String(e), 'error');
         return undefined;
       } finally {
         setBusyState(false);

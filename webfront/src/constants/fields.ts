@@ -349,6 +349,10 @@ export interface MasterCol {
   help?: string;
   source?: 'document' | 'external' | 'system';
   required?: boolean;
+  /** SAP/Zoho-derived field the person rarely edits by hand — collapsed under "SAP details". */
+  derived?: boolean;
+  /** hard cap on the input length — unit codes must stay <= 3 chars to be valid in SAP/Zoho */
+  maxLen?: number;
 }
 export interface MasterDef {
   label: string;
@@ -367,21 +371,15 @@ export const MASTER_DEF: Record<string, MasterDef> = {
       { k: 'SalesOrg', l: 'Sales Organization', source: 'external', required: true, help: 'MGT = 1000 / GLC = 2000' },
       { k: 'ComcompyCodeSAP', l: 'SAP Customer Code / Zoho Account Code', source: 'external', sap: true, required: true, help: 'Links CustomerCode in ShipTo and CustomerMaterial; Zoho uses Account Code' },
       { k: 'CompanyNameSAP', l: 'Customer name from SAP', source: 'external' },
-      { k: 'DistChannel', l: 'Distribution Channel', source: 'external', help: 'Value from SAP' },
-      { k: 'Division', l: 'Division', source: 'external', help: 'Value from SAP' },
-      { k: 'Currency', l: 'Currency', source: 'external', help: 'Value from SAP' },
-      { k: 'PaymentTerms', l: 'Payment Terms', source: 'external', help: 'Value from SAP' },
-      { k: 'HouseNumber', l: 'House Number', source: 'external', help: 'Value from SAP / Zoho' },
-      { k: 'Street', l: 'Street', source: 'external', help: 'Value from SAP / Zoho' },
-      { k: 'Street2', l: 'Street 2', source: 'external', help: 'Value from SAP / Zoho' },
-      { k: 'Street3', l: 'Street 3', source: 'external', help: 'Value from SAP / Zoho' },
-      { k: 'Street4', l: 'Street 4', source: 'external', help: 'Value from SAP / Zoho' },
-      { k: 'Street5', l: 'Street 5', source: 'external', help: 'Value from SAP / Zoho' },
-      { k: 'District', l: 'District', source: 'external', help: 'Value from SAP / Zoho' },
-      { k: 'City', l: 'City', source: 'external', help: 'Value from SAP / Zoho' },
-      { k: 'DifferenceCity', l: 'Difference City', source: 'external', help: 'Value from SAP / Zoho' },
-      { k: 'PostCode', l: 'Post Code', source: 'external', help: 'Value from SAP / Zoho' },
-      { k: 'CountryReg', l: 'Country / Reg', source: 'external', help: 'Value from SAP / Zoho' },
+      { k: 'DistChannel', derived: true, l: 'Distribution Channel', source: 'external', help: 'Value from SAP' },
+      { k: 'Division', derived: true, l: 'Division', source: 'external', help: 'Value from SAP' },
+      { k: 'Currency', derived: true, l: 'Currency', source: 'external', help: 'Value from SAP' },
+      { k: 'PaymentTerms', derived: true, l: 'Payment Terms', source: 'external', help: 'Value from SAP' },
+      // Per-field address breakdown (HouseNumber/Street/Street2-5/District/City/DifferenceCity/
+      // PostCode/CountryReg) is intentionally NOT shown in this hand-entry form — same as the Ship-to
+      // tab. The DB columns stay, and the one-click "Use & Save" from SAP/Zoho (DocumentPage
+      // useSapCustomer/useZohoCustomer) still fills them, so the mapping cards keep the full address;
+      // the master INSERT only writes columns the body sends, so a manual add here never touches them.
       { k: 'IsActive', l: 'Status', source: 'system' }],
   },
   shiptos: {
@@ -392,17 +390,12 @@ export const MASTER_DEF: Record<string, MasterDef> = {
       { k: 'ShipToName', l: 'Ship-to name in document', source: 'document' },
       { k: 'ShipToAddress', l: 'Delivery address', source: 'document', help: 'Address details from the document' },
       { k: 'SapShipToCode', l: 'ShipToCode', source: 'external', sap: true, required: true, help: 'Ship-to code from SAP / Zoho Account Code' },
-      { k: 'HouseNumber', l: 'House Number', source: 'external', help: 'Value from SAP / Zoho' },
-      { k: 'Street', l: 'Street', source: 'external', help: 'Value from SAP / Zoho' },
-      { k: 'Street2', l: 'Street 2', source: 'external', help: 'Value from SAP / Zoho' },
-      { k: 'Street3', l: 'Street 3', source: 'external', help: 'Value from SAP / Zoho' },
-      { k: 'Street4', l: 'Street 4', source: 'external', help: 'Value from SAP / Zoho' },
-      { k: 'Street5', l: 'Street 5', source: 'external', help: 'Value from SAP / Zoho' },
-      { k: 'District', l: 'District', source: 'external', help: 'Value from SAP / Zoho' },
-      { k: 'City', l: 'City', source: 'external', help: 'Value from SAP / Zoho' },
-      { k: 'DifferenceCity', l: 'Difference City', source: 'external', help: 'Value from SAP / Zoho' },
-      { k: 'PostCode', l: 'Post Code', source: 'external', help: 'Value from SAP / Zoho' },
-      { k: 'CountryReg', l: 'Country / Reg', source: 'external', help: 'Value from SAP / Zoho' },
+      // Per-field address breakdown (HouseNumber/Street/Street2-5/District/City/DifferenceCity/
+      // PostCode/CountryReg) is intentionally NOT shown in this hand-entry form — the single
+      // "Delivery address" (ShipToAddress) above is enough here. The DB columns stay, and the
+      // one-click "Use & Save" from SAP/Zoho (DocumentPage useSapShipTo/useZohoShipTo) still fills
+      // them, so the mapping cards keep the full breakdown; UpdateAsync only touches sent columns,
+      // so editing here never wipes SAP/Zoho-populated sub-fields.
       { k: 'IsActive', l: 'Status', source: 'system' }],
   },
   custmaterials: {
@@ -426,12 +419,20 @@ export const MASTER_DEF: Record<string, MasterDef> = {
       { k: 'VendorCode', l: 'Vendor Code', ref: 'vendors' }, { k: 'ExtCode', l: "Vendor's Item Code" },
       { k: 'ExtDesc', l: "Vendor's Item Description" }, { k: 'MaterialCode', l: 'Material (SAP)', ref: 'materials' }],
   },
+  // Unit Conversion normalizes the unit label the customer wrote (ExtUom) into a valid unit code
+  // we can actually send (SapUom, <=3 chars). Factor converts the quantity and is 1 for almost
+  // every GLC row (KG->KG, G->G) — it only differs when a label has to be rolled up into a larger
+  // unit (e.g. grams -> PAC, 1 PAC = 50 g -> Factor 50; qty sent = docQty / Factor). SalesOrg
+  // scopes a rule to one company because MGT (Zoho) and GLC (SAP) may map the same label differently.
   uoms: {
     label: 'Unit Conversion (UoM)', mod: 'ALL', key: 'Id', cols: [
+      { k: 'SalesOrg', l: 'Company', help: 'Leave blank to use this rule for every company · MGT = 1000 / GLC = 2000' },
       { k: 'MaterialCode', l: 'Material code (blank = all materials)', ref: 'materials', blank: true },
-      { k: 'ExtUom', l: 'Document Unit' }, { k: 'SapUom', l: 'SAP Unit' },
-      { k: 'SapUomIso', l: 'ISO code', sap: true },
-      { k: 'Factor', l: 'Factor (1 document unit = ? SAP units)' }, { k: 'Note', l: 'Note' }],
+      { k: 'ExtUom', l: 'Document Unit', required: true, help: 'The unit exactly as the customer wrote it on the document — the lookup key. Free text, Thai is fine (e.g. "กก.", "กรัม")' },
+      { k: 'SapUom', l: 'Order Unit', sap: true, required: true, maxLen: 3, help: 'The valid unit code actually sent on the order, at most 3 chars (KG, G, DR). Usually the same unit, just cleaned up' },
+      { k: 'Factor', l: 'Factor (1 document unit = ? order units)', help: 'The quantity is multiplied by this. 1 = same quantity (KG→KG, G→G). Use ≠1 only when the unit changes, e.g. 1 ตัน = 1000 KG → 1000' },
+      { k: 'SapUomIso', l: 'ISO code (SAP only)', sap: true, maxLen: 3, help: 'Optional ISO unit code, used by SAP only' },
+      { k: 'Note', l: 'Note' }],
   },
   materials: {
     label: 'Material / Service', mod: 'ALL', key: 'MaterialCode', cols: [
@@ -448,7 +449,7 @@ export const MASTER_NOTE: Record<string, string> = {
   vendors: 'Used to match Vendor: checks the Tax ID first, then compares the name if not found',
   venmaterials: "Used to convert the vendor's item code/name to a SAP Material",
   materials: 'SAP Material data (should be replicated from S/4HANA)',
-  uoms: 'Converts the document unit to the SAP unit — looks up by MaterialCode (SAP) + document unit first, then falls back to a general rule with no specific Material',
+  uoms: 'Turns the unit written on the document into a valid order-unit code — looked up by Company + Material + document unit, falling back to a rule with no Material, then to a rule with no Company. Factor changes the quantity only when it is not 1',
 };
 
 // apmaterials (ocr.Material master) removed — the material master is no longer used; material

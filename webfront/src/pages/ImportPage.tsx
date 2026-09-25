@@ -4,7 +4,7 @@ import { useAppState } from '../state/AppState';
 import { useMeta } from '../state/MetaContext';
 import { MODULE_LABEL } from '../navConfig';
 import { moduleLabel } from '../utils/format';
-import { sampleDocument, uploadDocument } from '../api/documents';
+import { sampleDocument, uploadDocument, uploadDocumentBatch } from '../api/documents';
 import type { ModuleCode } from '../api/types';
 import Steps from '../components/Steps';
 import OcrProviderSelect from '../components/OcrProviderSelect';
@@ -79,13 +79,39 @@ export default function ImportPage() {
     }
   }
 
-  function handleFile(file: File) {
-    setPwPrompt(null);
-    setPwValue('');
-    void doUpload(file);
+  async function doBatch(files: File[]) {
+    if (isInvoice && !category) {
+      showToast('Please select a document type first');
+      return;
+    }
+    const fd = new FormData();
+    fd.append('module', mod);
+    fd.append('ocr_', provider);
+    fd.append('apDocCategory', category || '');
+    files.forEach((f) => fd.append('files', f));
+    setProgress({ text: `Uploading ${files.length} files …`, pct: 45 });
+    try {
+      const r = await uploadDocumentBatch(fd);
+      setProgress(null);
+      showToast(`Queued ${r.jobs.length} document(s) — reading in the background`);
+      navigate(`/import/${mod}/batch/${r.batchId}`);
+    } catch (e) {
+      setProgress(null);
+      showToast(e instanceof Error ? e.message : String(e));
+    }
   }
 
-  async function useSample(i: number) {
+  function handleFiles(files: File[]) {
+    setPwPrompt(null);
+    setPwValue('');
+    if (files.length === 0) return;
+    // A single file keeps the instant "read then open the document" flow (and the password prompt);
+    // several files go through the background queue.
+    if (files.length === 1) void doUpload(files[0]);
+    else void doBatch(files);
+  }
+
+  async function loadSample(i: number) {
     if (isInvoice && !category) {
       showToast('Please select a document type first');
       return;
@@ -106,7 +132,7 @@ export default function ImportPage() {
         <div className="card-h">
           <h2>Step 1 — Import Document</h2>
           <div className="sp" />
-          <span className="hint">Supports PDF / JPG / PNG / TIFF</span>
+          <span className="hint">PDF / JPG / PNG / TIFF · up to 10 files at once</span>
         </div>
         <div className="card-b">
           {isInvoice && (
@@ -158,20 +184,22 @@ export default function ImportPage() {
             onDrop={(e) => {
               e.preventDefault();
               setDragOver(false);
-              const f = e.dataTransfer.files[0];
-              if (f) handleFile(f);
+              const fs = Array.from(e.dataTransfer.files);
+              if (fs.length) handleFiles(fs);
             }}
           >
             <div className="big"><i className="fa-solid fa-cloud-arrow-up" /></div>
-            <div style={{ margin: '12px 0 4px', fontWeight: 600 }}>Drag and drop a file here, or</div>
+            <div style={{ margin: '12px 0 4px', fontWeight: 600 }}>Drag and drop files here, or</div>
             <input
               ref={fileRef}
               type="file"
               accept=".pdf,.jpg,.jpeg,.png,.tif,.tiff"
+              multiple
               hidden
               onChange={(e) => {
-                const f = e.target.files?.[0];
-                if (f) handleFile(f);
+                const fs = Array.from(e.target.files ?? []);
+                if (fs.length) handleFiles(fs);
+                e.target.value = '';
               }}
             />
             <button className="btn primary" onClick={() => fileRef.current?.click()}>
@@ -223,7 +251,7 @@ export default function ImportPage() {
                 href="#"
                 onClick={(e) => {
                   e.preventDefault();
-                  useSample(0);
+                  loadSample(0);
                 }}
               >
                 use sample data

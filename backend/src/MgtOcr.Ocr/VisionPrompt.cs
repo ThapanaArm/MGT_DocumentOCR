@@ -33,6 +33,7 @@ public static partial class VisionPrompt
           },
           "lines": [{"extCode": "รหัสสินค้าตามเอกสาร", "desc": "ชื่อ/รายละเอียดสินค้า",
                      "qty": 0, "uom": "หน่วยนับ", "price": 0, "amount": 0,
+                     "deliveryDate": "วันที่ต้องการรับสินค้าของรายการนี้ รูปแบบ YYYY-MM-DD เฉพาะกรณีเอกสารระบุวันส่งแยกไว้ต่อบรรทัด (เช่น มีคอลัมน์วันส่ง/กำหนดส่งในตารางสินค้า) หากรายการนี้ไม่ได้ระบุวันแยก ให้ใส่สตริงว่าง (ระบบจะใช้วันส่งรวมของเอกสารแทน)",
                      "itemNote": "หมายเหตุเฉพาะรายการสินค้านี้ ถ้าเอกสารระบุไว้แยกต่อบรรทัด เช่น รายละเอียดการจัดส่ง/ล็อต/สเปกเฉพาะรายการ หากไม่มีให้ใส่สตริงว่าง"}]
         }
         """ : """
@@ -176,6 +177,7 @@ public static partial class VisionPrompt
                     IssuerBranch = NormBranch(GetStr(ln, "issuerBranch")),
                     BaseAmount = GetNum(ln, "baseAmount"),
                     Price = GetNum(ln, "price"), Amount = GetNum(ln, "amount"),
+                    DueDate = GetStr(ln, "deliveryDate"),
                     ItemNote = GetStr(ln, "itemNote"),
                 });
             }

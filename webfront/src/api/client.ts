@@ -7,7 +7,7 @@
    ===================================================================== */
 
 import { getMock, MOCK_ALWAYS } from './mocks';
-import { clearLocalToken, getAuthToken } from './auth';
+import { clearLocalToken, forceSignOut, getAuthToken, getSessionId } from './auth';
 
 export class ApiError extends Error {
   status: number;
@@ -40,6 +40,7 @@ async function request<T>(
   // token (renewed silently near expiry). Null only when truly signed out.
   const token = await getAuthToken();
   if (token) (opt.headers as Record<string, string>)['Authorization'] = `Bearer ${token}`;
+  (opt.headers as Record<string, string>)['X-Session-Id'] = getSessionId();
 
   if (body !== undefined) {
     if (isForm) {
@@ -72,8 +73,14 @@ async function request<T>(
   // Drop any password session and tell the gate to show sign-in again. 403 is different (signed in,
   // but not in Ms_User) and is left to surface as text for the person to read.
   if (r.status === 401) {
-    clearLocalToken();
-    window.dispatchEvent(new Event('mgtocr:signedout'));
+    const code = (data as { code?: string })?.code;
+    if (code === 'SESSION_REPLACED' || code === 'SESSION_MISSING') {
+      // Signed in on another device (one device per user) — sign this browser out for real.
+      await forceSignOut((data as { detail?: string })?.detail || 'You have been signed out.');
+    } else {
+      clearLocalToken();
+      window.dispatchEvent(new Event('mgtocr:signedout'));
+    }
   }
 
   if (!r.ok) {
@@ -93,3 +100,15 @@ export const api = {
   del: <T>(u: string) => request<T>('DELETE', u),
   upload: <T>(u: string, fd: FormData) => request<T>('POST', u, fd, true),
 };
+
+/** Fetch a protected binary endpoint (image/PDF) WITH the Bearer token and return an object URL.
+ *  A plain <img src="/api/..."> can't send the Authorization header, so it gets 401 from the
+ *  backend's auth fallback policy. Caller must URL.revokeObjectURL() the result when done. */
+export async function fetchBlobUrl(url: string): Promise<string> {
+  const token = await getAuthToken();
+  const headers: Record<string, string> = { 'X-Session-Id': getSessionId() };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const r = await fetch(url, { headers });
+  if (!r.ok) throw new ApiError(`HTTP ${r.status}`, r.status);
+  return URL.createObjectURL(await r.blob());
+}

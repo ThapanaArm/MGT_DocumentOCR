@@ -11,7 +11,7 @@ namespace MgtOcr.Data;
 // create_document(), save_lines(), get_document(), update_header(), vendor-memory helpers,
 // log_audit(), and chat helpers. Header/lines are plain Dictionary<string,object?> trees
 // throughout, matching Python's untyped dict handling exactly (see DynamicRow/JsonBodyHelpers).
-public partial class DocumentRepository(Db db, string uploadDir)
+public partial class DocumentRepository(Db db)
 {
     private static readonly Dictionary<string, string> VendorTaxIdField = new()
     {
@@ -465,35 +465,41 @@ public partial class DocumentRepository(Db db, string uploadDir)
     }
 
     // ---------------------------------------------------------------- chat (AI correction history)
-    private string ChatDir => Path.Combine(uploadDir, "chat");
-
-    public async Task<int> SaveChatMessageAsync(int docId, string role, string text, byte[]? imageBytes, string imageExt, string user)
+    // Chat attachments are stored IN the DB (ImageData varbinary + ImageMime), not on disk, so every
+    // machine pointing at the same SQL Server sees the same images (a disk path only exists on the PC
+    // that saved it). See sql/25_chat_image_in_db.sql.
+    public async Task<int> SaveChatMessageAsync(int docId, string role, string text, byte[]? imageBytes, string? imageMime, string user)
     {
-        string? imagePath = null;
-        if (imageBytes != null)
-        {
-            var dir = Path.Combine(ChatDir, docId.ToString());
-            Directory.CreateDirectory(dir);
-            var p = Path.Combine(dir, $"{DateTime.Now:yyyyMMdd_HHmmss_ffffff}{imageExt}");
-            await File.WriteAllBytesAsync(p, imageBytes);
-            imagePath = p;
-        }
         var chatT = DocumentTables.ForId(docId).Chat;
+        var mime = imageBytes != null ? (string.IsNullOrWhiteSpace(imageMime) ? "image/png" : imageMime) : null;
         return await db.InsertReturningIdAsync($"""
-            INSERT {chatT}(DocId,Role,MessageText,ImagePath,CreatedBy) VALUES(@docId,@role,@text,@imagePath,@user);
+            INSERT {chatT}(DocId,Role,MessageText,ImageData,ImageMime,CreatedBy) VALUES(@docId,@role,@text,@imageBytes,@mime,@user);
             SELECT SCOPE_IDENTITY();
-            """, new { docId, role, text, imagePath, user });
+            """, new { docId, role, text, imageBytes, mime, user });
+    }
+
+    public async Task<(byte[] Data, string Mime)?> GetChatImageAsync(int docId, int chatId)
+    {
+        var chatT = DocumentTables.ForId(docId).Chat;
+        dynamic? r = await db.QueryOneAsync(
+            $"SELECT ImageData, ImageMime FROM {chatT} WHERE DocId=@docId AND ChatId=@chatId AND ImageData IS NOT NULL", new { docId, chatId });
+        if (r == null) return null;
+        byte[] data = r.ImageData;
+        string? mime = r.ImageMime;
+        // Serve only plain raster types inline; anything else (e.g. image/svg+xml, which can carry
+        // script) goes out as a download so it can never run on our origin.
+        return (data, mime is "image/png" or "image/jpeg" or "image/gif" or "image/webp" ? mime : "application/octet-stream");
     }
 
     public async Task<List<Dictionary<string, object?>>> GetChatHistoryAsync(int docId)
     {
         var chatT = DocumentTables.ForId(docId).Chat;
         var rows = DynamicRow.ToDictList(await db.QueryAsync(
-            $"SELECT ChatId, Role, MessageText, ImagePath, CreatedAt FROM {chatT} WHERE DocId=@docId ORDER BY ChatId", new { docId }));
+            $"SELECT ChatId, Role, MessageText, CASE WHEN ImageData IS NULL THEN 0 ELSE 1 END AS HasImage, CreatedAt FROM {chatT} WHERE DocId=@docId ORDER BY ChatId", new { docId }));
         return rows.Select(x => new Dictionary<string, object?>
         {
             ["chatId"] = x.Get("ChatId"), ["role"] = x.Get("Role"), ["text"] = x.GetStr("MessageText"),
-            ["hasImage"] = !string.IsNullOrEmpty(x.GetStr("ImagePath")), ["createdAt"] = x.Get("CreatedAt"),
+            ["hasImage"] = Convert.ToInt32(x.Get("HasImage") ?? 0) == 1, ["createdAt"] = x.Get("CreatedAt"),
         }).ToList();
     }
 }

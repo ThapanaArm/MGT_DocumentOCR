@@ -83,30 +83,87 @@ public static class GeminiOcr
             var body = new
             {
                 contents = new[] { new { role = "user", parts = (object)parts } },
-                // maxOutputTokens was 3000: newer Gemini Flash models spend part of that budget on internal
+                // maxOutputTokens was 3000/8192: newer Gemini Flash models spend part of that budget on internal
                 // "thinking", so a longer invoice could be cut off mid-JSON (finishReason MAX_TOKENS) and fail
-                // to parse — intermittently, since thinking length varies run to run. responseMimeType makes
-                // Gemini emit bare JSON with no prose/code fences around it.
+                // to parse. responseMimeType makes Gemini emit bare JSON with no prose/code fences around it.
+                // (Kanomwan, 0cd227c)
                 generationConfig = new { temperature = 0, maxOutputTokens = 16384, responseMimeType = "application/json" },
             };
             var url = $"https://generativelanguage.googleapis.com/v1beta/models/{config.GeminiModel}:generateContent?key={config.GeminiApiKey}";
-            using var req = new HttpRequestMessage(HttpMethod.Post, url)
-            {
-                Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json"),
-            };
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(180));
-            using var resp = await Http.SendAsync(req, cts.Token);
-            var respText = await resp.Content.ReadAsStringAsync(cts.Token);
-            if (!resp.IsSuccessStatusCode)
-                return (null, $"Gemini HTTP {(int)resp.StatusCode} (model={config.GeminiModel}): {Trunc(respText, 400)}");
+            var payload = JsonSerializer.Serialize(body);
 
-            var raw = ExtractText(respText);
-            var parsed = VisionPrompt.ParseResponse(raw, module, "gemini", 0.87, raw);
-            if (parsed != null) return (parsed, null);
-            // Gemini answered 200 but the answer was not usable JSON — say why instead of a bare null
-            // (which surfaced as the misleading "Could not connect to Google Gemini Vision").
-            return (null, $"Gemini replied but the result could not be read as JSON (finishReason={FinishReason(respText)}, " +
-                          $"{raw.Length} chars, model={config.GeminiModel}) — try Re-read Document. Reply starts: {Trunc(raw, 200)}");
+            // Gemini's public endpoint frequently returns TRANSIENT errors — HTTP 503 (model
+            // overloaded) and 429 (rate limit / quota) especially — and a large multi-page PDF can hit
+            // the request timeout. With a single attempt any of these looked to the user like "Gemini
+            // won't connect" (and, worse, used to be swallowed into demo data). Retry a few times with a
+            // short exponential backoff on those transient conditions before giving up. Non-transient
+            // errors (400/401/403, bad model id, bad/blocked key) are returned immediately — retrying
+            // can't fix them — so the real reason still surfaces fast.
+            //
+            // Every failed attempt is also written to the console/log via Log() below, so an
+            // intermittent "sometimes it connects, sometimes it doesn't" failure is captured
+            // automatically (with the real HTTP status / reason) — no need to catch it live in a
+            // debugger. Look at the app's console/log output to see the pattern (503 vs 429 vs timeout).
+            const int maxAttempts = 4;
+            var lastErr = "Could not connect to Google Gemini Vision";
+            for (var attempt = 1; attempt <= maxAttempts; attempt++)
+            {
+                try
+                {
+                    using var req = new HttpRequestMessage(HttpMethod.Post, url)
+                    {
+                        Content = new StringContent(payload, Encoding.UTF8, "application/json"),
+                    };
+                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(180));
+                    using var resp = await Http.SendAsync(req, cts.Token);
+                    var respText = await resp.Content.ReadAsStringAsync(cts.Token);
+                    if (resp.IsSuccessStatusCode)
+                    {
+                        var raw = ExtractText(respText);
+                        var parsedDoc = VisionPrompt.ParseResponse(raw, module, "gemini", 0.87, raw);
+                        if (parsedDoc != null)
+                            return (parsedDoc, null);
+                        // 200 OK but the body held no parseable JSON. This is NOT a connection problem —
+                        // almost always the JSON got TRUNCATED because the model's output-token budget ran
+                        // out (thinking models spend part of it on reasoning/thoughtSignature), or the
+                        // response was empty/safety-blocked. Report THAT precisely instead of falling
+                        // through to the misleading "Could not connect to Google Gemini Vision" default.
+                        var finish = FinishReason(respText);
+                        lastErr = "Gemini returned HTTP 200 but no usable JSON"
+                            + (finish != null
+                                ? $" (finishReason={finish}{(finish == "MAX_TOKENS" ? " — response was cut off; raise maxOutputTokens" : "")})"
+                                : " (empty or safety-blocked response)")
+                            + $". extractedTextLen={raw.Length}, respLen={respText.Length}";
+                        Log(lastErr);
+                        return (null, lastErr);
+                    }
+                    var status = (int)resp.StatusCode;
+                    var transient = status is 429 or 500 or 502 or 503 or 504;
+                    lastErr = $"Gemini HTTP {status} (model={config.GeminiModel}"
+                        + (transient ? $", attempt {attempt}/{maxAttempts}" : "")
+                        + $"): {Trunc(respText, 400)}";
+                    Log(lastErr);
+                    if (!transient || attempt == maxAttempts)
+                        return (null, lastErr);
+                }
+                catch (OperationCanceledException)
+                {
+                    // HttpClient timeout (TaskCanceledException) — treat as transient.
+                    lastErr = $"Gemini request timed out after 180s (model={config.GeminiModel}, attempt {attempt}/{maxAttempts}) "
+                        + "— the document may be large, or Gemini is slow/overloaded";
+                    Log(lastErr);
+                    if (attempt == maxAttempts) return (null, lastErr);
+                }
+                catch (HttpRequestException ex)
+                {
+                    // Connection-level failure (DNS/TLS/network) — treat as transient and retry.
+                    lastErr = $"Gemini connection error (attempt {attempt}/{maxAttempts}): {ex.Message}";
+                    Log(lastErr);
+                    if (attempt == maxAttempts) return (null, lastErr);
+                }
+                await Task.Delay(TimeSpan.FromMilliseconds(800 * attempt * attempt));
+            }
+            return (null, lastErr);
         }
         catch (Exception ex)
         {
@@ -114,22 +171,32 @@ public static class GeminiOcr
         }
     }
 
-    private static string Trunc(string s, int max) => string.IsNullOrEmpty(s) || s.Length <= max ? s : s.Substring(0, max) + "\u2026";
+    // Writes each Gemini failure to the console/log with a timestamp so an intermittent, hard-to-catch
+    // failure is recorded automatically \u2014 the user doesn't have to reproduce it in a debugger. Prefixed
+    // so it's easy to filter the app log (e.g. findstr "[GeminiOcr]").
+    private static void Log(string msg) =>
+        Console.Error.WriteLine($"[GeminiOcr] {DateTime.Now:yyyy-MM-dd HH:mm:ss} {msg}");
 
-    private static string FinishReason(string responseJson)
+    // Reads candidates[0].finishReason from a Gemini 200 response so a truncated/blocked result can be
+    // reported precisely (e.g. "MAX_TOKENS"). Returns null if the field isn't present.
+    private static string? FinishReason(string responseJson)
     {
         try
         {
             using var doc = JsonDocument.Parse(responseJson);
-            if (doc.RootElement.TryGetProperty("candidates", out var c) && c.ValueKind == JsonValueKind.Array && c.GetArrayLength() > 0
-                && c[0].TryGetProperty("finishReason", out var fr))
-                return fr.GetString() ?? "?";
+            if (doc.RootElement.TryGetProperty("candidates", out var cands) && cands.ValueKind == JsonValueKind.Array
+                && cands.GetArrayLength() > 0 && cands[0].TryGetProperty("finishReason", out var fr)
+                && fr.ValueKind == JsonValueKind.String)
+                return fr.GetString();
+            // Prompt blocked before any candidate was produced (from 0cd227c).
             if (doc.RootElement.TryGetProperty("promptFeedback", out var pf) && pf.TryGetProperty("blockReason", out var br))
                 return "BLOCKED:" + br.GetString();
-            return "no candidates";
         }
-        catch (JsonException) { return "unparseable response"; }
+        catch { /* not JSON / unexpected shape \u2014 no finishReason to report */ }
+        return null;
     }
+
+    private static string Trunc(string s, int max) => string.IsNullOrEmpty(s) || s.Length <= max ? s : s.Substring(0, max) + "\u2026";
 
     private static string ExtractText(string responseJson)
     {

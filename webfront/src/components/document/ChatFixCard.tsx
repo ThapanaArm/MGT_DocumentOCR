@@ -1,8 +1,59 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { fetchBlobUrl } from '../../api/client';
 import type { ChatMessage } from '../../api/documents';
 import type { OcrProvider } from '../../api/masters';
 
 /* Ports chatFixCard() — the AI chat that fixes this document's fields. */
+
+/** Chat image: a just-attached data: URL renders directly; a stored one is loaded from the API with
+ *  the Bearer token (a bare <img src="/api/..."> would get 401). */
+function ChatImg({ src, onOpen }: { src: string; onOpen: (url: string) => void }) {
+  const [url, setUrl] = useState<string | null>(src.startsWith('data:') ? src : null);
+  useEffect(() => {
+    if (src.startsWith('data:')) {
+      setUrl(src);
+      return;
+    }
+    let obj: string | null = null;
+    let alive = true;
+    setUrl(null);
+    fetchBlobUrl(src)
+      .then((u) => {
+        obj = u;
+        if (alive) setUrl(u);
+        else URL.revokeObjectURL(u);
+      })
+      .catch(() => {
+        /* image missing (e.g. attached before images moved into the DB) — show nothing */
+      });
+    return () => {
+      alive = false;
+      if (obj) URL.revokeObjectURL(obj);
+    };
+  }, [src]);
+  return url ? (
+    <img src={url} className="chat-img zoomable" alt="" title="Click to enlarge" onClick={() => onOpen(url)} />
+  ) : null;
+}
+
+/** Full-screen viewer for a chat image. Click the backdrop, the X, or press Esc to close. */
+function ImageLightbox({ url, onClose }: { url: string; onClose: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+  return createPortal(
+    <div className="ov on img-lightbox" onClick={onClose}>
+      <button className="img-lightbox-x" onClick={onClose} aria-label="Close">
+        <i className="fa-solid fa-xmark" />
+      </button>
+      <img src={url} alt="" onClick={(e) => e.stopPropagation()} />
+    </div>,
+    document.body,
+  );
+}
 
 const CHAT_MODEL_IDS = ['claude', 'gemini', 'openai'];
 
@@ -35,6 +86,7 @@ export default function ChatFixCard({
   onSend: (message: string) => void;
 }) {
   const [text, setText] = useState('');
+  const [zoomUrl, setZoomUrl] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const chatModels = providers.filter((p) => CHAT_MODEL_IDS.includes(p.id));
   const ready = chatModels.some((p) => p.ready);
@@ -53,6 +105,7 @@ export default function ChatFixCard({
 
   return (
     <div className="card">
+      {zoomUrl && <ImageLightbox url={zoomUrl} onClose={() => setZoomUrl(null)} />}
       <div className="card-h">
         <h2><i className="fa-solid fa-wand-magic-sparkles" /> Ask AI to fix document data</h2>
         <div className="sp" />
@@ -83,7 +136,7 @@ export default function ChatFixCard({
               return (
                 <div className={'chat-msg ' + m.role} key={i}>
                   <b>{m.role === 'user' ? 'You' : 'AI'}</b>
-                  {imgSrc && <img src={imgSrc} className="chat-img" alt="" />}
+                  {imgSrc && <ChatImg src={imgSrc} onOpen={setZoomUrl} />}
                   {m.text && <div>{m.text}</div>}
                 </div>
               );
@@ -99,7 +152,7 @@ export default function ChatFixCard({
         </div>
         {chatImage && (
           <div className="chat-attach-preview">
-            <img src={chatImage} alt="" />
+            <img src={chatImage} alt="" className="zoomable" title="Click to enlarge" onClick={() => setZoomUrl(chatImage)} />
             <span className="hint">Image attached</span>
             <button className="btn sm ghost" onClick={() => setChatImage(null)}>
               <i className="fa-solid fa-xmark" /> Remove image

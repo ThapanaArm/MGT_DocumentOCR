@@ -10,15 +10,19 @@ public static class MasterDefinitions
         // "apmaterials" (ocr.Material) removed — the material master is no longer used; material
         // mapping now lives entirely in ocr.CustomerMaterial. The "materials" list handed to the
         // mapping engine is derived from CustomerMaterial (see MasterRepository.LoadAllAsync).
+        // Address is NOT stored broken out into sub-fields. The full address the person sees when a
+        // SAP/Zoho record is pulled comes from the LIVE fetched record (SapBusinessPartner /
+        // ZohoAccount), shown field-by-field in the search panels — it was never meant to be
+        // persisted here, so ocr.Customer/ocr.ShipTo keep only their own columns (ShipTo still has
+        // its single Address for the doc-vs-master fuzzy match). This also means sql/21_address_
+        // subfields.sql is unnecessary; nothing reads or writes those columns.
         ["customers"] = new("ocr.Customer", "id", true,
             ["SalesOrg", "CompanyName", "ComcompyCodeSAP", "CompanyNameSAP", "TaxId", "Branch",
-             "DistChannel", "Division", "Currency", "PaymentTerms",
-             "HouseNumber", "Street", "Street2", "Street3", "Street4", "Street5", "District", "City", "DifferenceCity", "PostCode", "CountryReg", "IsActive"],
+             "DistChannel", "Division", "Currency", "PaymentTerms", "IsActive"],
             "SalesOrg, ComcompyCodeSAP, id"),
 
         ["shiptos"] = new("ocr.ShipTo", "id", true,
-            ["SalesOrg", "ShipToCode", "SapShipToCode", "CustomerCode", "ShipToName", "ShipToAddress",
-             "HouseNumber", "Street", "Street2", "Street3", "Street4", "Street5", "District", "City", "DifferenceCity", "PostCode", "CountryReg", "IsActive"],
+            ["SalesOrg", "ShipToCode", "SapShipToCode", "CustomerCode", "ShipToName", "ShipToAddress", "IsActive"],
             "SalesOrg, CustomerCode, ShipToCode"),
 
         ["custmaterials"] = new("ocr.CustomerMaterial", "Id", true,
@@ -34,9 +38,12 @@ public static class MasterDefinitions
             ["VendorCode", "ExtCode", "ExtDesc", "MaterialCode"],
             "VendorCode, ExtCode"),
 
+        // SalesOrg scopes a unit rule to one company (NULL = every company); the rest of the model
+        // is unchanged (ExtUom label -> valid SapUom code, Factor converts the quantity). Global
+        // rules sort first, then per-company.
         ["uoms"] = new("ocr.UomConversion", "Id", true,
-            ["MaterialCode", "ExtUom", "SapUom", "SapUomIso", "Factor", "Note"],
-            "CASE WHEN MaterialCode IS NULL THEN 0 ELSE 1 END, MaterialCode, ExtUom"),
+            ["SalesOrg", "MaterialCode", "ExtUom", "SapUom", "SapUomIso", "Factor", "Note"],
+            "CASE WHEN SalesOrg IS NULL THEN 0 ELSE 1 END, SalesOrg, CASE WHEN MaterialCode IS NULL THEN 0 ELSE 1 END, MaterialCode, ExtUom"),
 
         // NOTE: Payment-terms code->text mapping is intentionally NOT an editable master here. It
         // lives in the shared dbo.SysDataMapping table (Subject='Payment_Terms'), which is

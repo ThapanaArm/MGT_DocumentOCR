@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { fmtAmt, num } from '../../utils/format';
 import { qtyTxt } from './MappingCards';
 import type { DocLine, DocModel, MapResult } from '../../api/documents';
@@ -64,6 +65,29 @@ function UomCell({
   );
 }
 
+// Controlled numeric cell for Quantity / Unit Price / Amount. It must be CONTROLLED (value=), not an
+// uncontrolled defaultValue input: a defaultValue input never updates its shown value after mount, so a
+// programmatic change to the line (e.g. the "Ask AI to fix data" chat setting a new Unit Price) was
+// applied to state but the cell still displayed the old value ("AI updated it but I don't see it").
+// While the user is typing (focused) we hold their raw text and don't clobber it; when they're not
+// editing we mirror the external value, showing it comma-formatted (raw while focused, like before).
+function NumCell({ value, posted, onInput }: { value: unknown; posted: boolean; onInput: (v: string) => void }) {
+  const [text, setText] = useState(() => fmtAmt(value));
+  const [editing, setEditing] = useState(false);
+  useEffect(() => {
+    if (!editing) setText(fmtAmt(value));
+  }, [value, editing]);
+  return (
+    <input
+      value={text}
+      readOnly={posted}
+      onFocus={() => { setEditing(true); setText(String(num(value))); }}
+      onBlur={() => { setEditing(false); setText(fmtAmt(value)); }}
+      onChange={(e) => { setText(e.target.value); onInput(e.target.value); }}
+    />
+  );
+}
+
 interface Props {
   doc: DocModel;
   map: MapResult | null;
@@ -81,6 +105,10 @@ interface Props {
    *  handlers the page wires to it. Omitted -> the lookup still shows but only filters. */
   vendorFilter?: string;
   onVendorFilter?: (code: string) => void;
+  /** GLC/SO: resolve a line's chosen Sales Employee Person ID (extra.salesEmployee) to a display
+   *  name for the "Sales Employee Name" column. Returns undefined when the ID isn't in the pick
+   *  list (then the raw ID is shown). Omitted for non-SO / MGT call sites. */
+  resolveSalesEmp?: (personId: string) => string | undefined;
   bare?: boolean; // render without the outer .card wrapper (for use inside a tabbed card)
   /** F01: this table checks OCR lines against shared Master Data (materials/UoM rules) — for the
    *  SAP/GLC path that master data IS the SAP material master, but for MGT the actual Sales Order
@@ -106,6 +134,7 @@ export default function DetailTable({
   onAddUomRule,
   vendorFilter = '',
   onVendorFilter,
+  resolveSalesEmp,
   bare,
   isMgt,
 }: Props) {
@@ -182,16 +211,7 @@ export default function DetailTable({
   const numInput = (
     value: unknown,
     onInput: (v: string) => void,
-  ) => (
-    <input
-      className=""
-      defaultValue={fmtAmt(value)}
-      readOnly={posted}
-      onFocus={(e) => (e.target.value = String(num(e.target.value)))}
-      onBlur={(e) => (e.target.value = fmtAmt(e.target.value))}
-      onInput={(e) => onInput((e.target as HTMLInputElement).value)}
-    />
-  );
+  ) => <NumCell value={value} posted={posted} onInput={onInput} />;
 
   const addBtn = !posted ? (
     <button className="btn sm" onClick={onAddLine}>
@@ -365,16 +385,39 @@ export default function DetailTable({
                       {showSoExtra && (
                         <>
                           <td style={{ minWidth: 160 }}>
-                            <input
-                              value={(l.extra || {}).salesEmployeeName || ''}
-                              readOnly={posted}
-                              onChange={(e) => onEditLineExtra(i, 'salesEmployeeName', e.target.value)}
-                            />
+                            {(() => {
+                              // Show the Sales Employee chosen for THIS line. The person is picked
+                              // per line in the "Sales Employee — this line" card above (stored as the
+                              // SAP Person ID in extra.salesEmployee); here we resolve it to a name via
+                              // the pick list. Falls back to the raw ID, then to the legacy free-text
+                              // salesEmployeeName, then "—". Read-only — pick/change it in the card above.
+                              const ex = l.extra || {};
+                              const id = ex.salesEmployee || '';
+                              if (id) {
+                                const name = resolveSalesEmp?.(id);
+                                return (
+                                  <>
+                                    <b>{name || id}</b>
+                                    {name && name !== id && <div className="hint">{id}</div>}
+                                  </>
+                                );
+                              }
+                              return ex.salesEmployeeName ? (
+                                <span>{ex.salesEmployeeName}</span>
+                              ) : (
+                                <span className="hint">—</span>
+                              );
+                            })()}
                           </td>
                           <td style={{ minWidth: 140 }}>
+                            {/* Delivery Date is a calendar date picker (pick a date instead of typing).
+                                type="date" uses/returns YYYY-MM-DD — the same format stored in
+                                extra.deliveryDate and used by SAP scheduling + the split-by-date grouping.
+                                disabled (not readOnly) when posted, since date inputs ignore readOnly. */}
                             <input
+                              type="date"
                               value={(l.extra || {}).deliveryDate || ''}
-                              readOnly={posted}
+                              disabled={posted}
                               onChange={(e) => onEditLineExtra(i, 'deliveryDate', e.target.value)}
                             />
                           </td>

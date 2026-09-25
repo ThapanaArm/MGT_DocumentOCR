@@ -49,15 +49,18 @@ export interface SapBusinessPartnerSearchResult {
 export interface SapBusinessPartnerSearchParams {
   name?: string;
   taxId?: string;
+  /** SAP customer code (BusinessPartner id) — matched as a substring, so a prefix works. */
+  code?: string;
   top?: number;
 }
 
 // companyCode is NOT sent here on purpose: the backend derives the AuthorizationGroup scope from
 // the signed-in user's own company (see SapBusinessPartnerController.Find), not from anything the
 // client passes, so a caller can't ask for another company's data by changing a query param.
-export const searchSapBusinessPartner = ({ name, taxId, top = 10 }: SapBusinessPartnerSearchParams) => {
+export const searchSapBusinessPartner = ({ name, taxId, code, top = 10 }: SapBusinessPartnerSearchParams) => {
   const qs = new URLSearchParams();
   if (taxId) qs.set('taxId', taxId);
+  if (code) qs.set('code', code);
   if (name) qs.set('name', name);
   qs.set('top', String(top));
   return api.get<SapBusinessPartnerSearchResult>('/api/sap/business-partner?' + qs.toString());

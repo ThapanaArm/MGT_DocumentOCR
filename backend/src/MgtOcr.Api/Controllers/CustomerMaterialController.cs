@@ -95,6 +95,8 @@ public class CustomerMaterialController(
                 if (string.IsNullOrEmpty(ext) || string.IsNullOrEmpty(sapU)) continue;
                 uomRows.Add(new Dictionary<string, object?>
                 {
+                    // SalesOrg scopes the rule to the company this CustomerMaterial belongs to.
+                    ["SalesOrg"] = req.SalesOrg,
                     ["MaterialCode"] = sapCode,
                     ["ExtUom"] = ext,
                     ["SapUom"] = sapU,
@@ -112,6 +114,7 @@ public class CustomerMaterialController(
             // base unit as an identity conversion (1:1)
             uomRows.Add(new Dictionary<string, object?>
             {
+                ["SalesOrg"] = req.SalesOrg,
                 ["MaterialCode"] = sapCode,
                 ["ExtUom"] = baseUnit,
                 ["SapUom"] = baseUnit,
@@ -126,6 +129,7 @@ public class CustomerMaterialController(
                 var factor = alt.Numerator / alt.Denominator; // 1 AltUnit = factor base units
                 uomRows.Add(new Dictionary<string, object?>
                 {
+                    ["SalesOrg"] = req.SalesOrg,
                     ["MaterialCode"] = sapCode,
                     ["ExtUom"] = alt.Unit.Trim(),
                     ["SapUom"] = baseUnit,

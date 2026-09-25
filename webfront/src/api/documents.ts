@@ -86,6 +86,26 @@ export interface ChatMessage {
   chatId?: number;
 }
 
+export interface BatchJob {
+  jobId: number;
+  fileName: string;
+  status: 'QUEUED' | 'PROCESSING' | 'DONE' | 'FAILED';
+  error?: string | null;
+  resultDocId?: number | null;
+  module?: string;
+}
+export interface BatchResult {
+  batchId: string;
+  module: string;
+  jobs: BatchJob[];
+}
+// Queue up to 10 files for the current module; each is OCR'd in the background.
+export const uploadDocumentBatch = (fd: FormData) =>
+  api.upload<BatchResult>('/api/documents/upload-batch', fd);
+// Poll one batch's per-file status.
+export const getBatch = (batchId: string) =>
+  api.get<{ batchId: string; jobs: BatchJob[] }>('/api/documents/batch/' + batchId);
+
 export const uploadDocument = (fd: FormData) =>
   api.upload<DocModel>('/api/documents/upload', fd);
 
@@ -163,6 +183,8 @@ export const chatFix = (
     materialCodes?: Record<string, string>;
     shipToCode?: string;
     customerCode?: string;
+    // A front-end action the AI asked to run (currently only { type: 'searchZoho', query }).
+    action?: { type: string; query: string } | null;
   }>('/api/documents/' + id + '/chat-fix', body);
 
 export interface InboxRow {

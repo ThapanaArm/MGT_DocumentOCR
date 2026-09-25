@@ -17,10 +17,13 @@ interface Props {
   salesOrg: string;
   posted: boolean;
   onPosted: (doc: DocModel) => void;
+  /** Split this document into one Sales Order per delivery date (called from the editor when the lines
+   *  carry more than one distinct delivery date). */
+  onSplitByDate: () => void;
 }
 
 const SapSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function SapSalesOrderStep(
-  { doc, map, salesOrg, posted, onPosted },
+  { doc, map, salesOrg, posted, onPosted, onSplitByDate },
   ref,
 ) {
   const { guard, showToast } = useAppState();
@@ -42,10 +45,10 @@ const SapSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function SapSa
       try {
         const result = await postToSap(doc.docId, USER);
         onPosted(result.document);
+        const sapReference = result.sapDocNo ? ` — SAP document ${result.sapDocNo}` : '';
         showToast(
-          (result.simulated ? '(Simulation Mode) ' : '') +
-            'Document created in SAP successfully — No. ' +
-            result.sapDocNo,
+          `${result.simulated ? 'Simulation completed' : 'Document created in SAP successfully'}${sapReference}`,
+          'success',
         );
         document.querySelector('.content')?.scrollTo({ top: 0, behavior: 'smooth' }); window.scrollTo({ top: 0, behavior: 'smooth' });
       } finally {
@@ -72,6 +75,7 @@ const SapSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function SapSa
             posted={posted}
             onSend={send}
             onViewPayload={viewPayload}
+            onSplitByDate={onSplitByDate}
           />
         </div>
       )}

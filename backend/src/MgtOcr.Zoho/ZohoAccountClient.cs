@@ -43,6 +43,17 @@ public class ZohoAccountClient(ZohoClient zoho)
         return matches.Count == 1 ? matches[0] : null;
     }
 
+    // Partial match on the (unique) Account_Code custom field, so the customer live-search box can
+    // find an account by its code, not just name/Tax ID. `like` mirrors FindByNameAsync; the exact
+    // FindByAccountCodeAsync above stays for the one-shot code lookup that needs a single unique hit.
+    public async Task<List<ZohoAccount>> FindByAccountCodeContainsAsync(string codeContains, int top = 20)
+    {
+        var clean = (codeContains ?? "").Trim();
+        if (clean.Length == 0) return [];
+        var rows = await zoho.QueryCoqlAsync(Module, SelectFields, $"Account_Code like '%{Escape(clean)}%'", "Account_Code");
+        return rows.Take(top).Select(ToAccount).ToList();
+    }
+
     public async Task<List<ZohoAccount>> FindByTaxIdAsync(string taxId, int top = 20)
     {
         if (string.IsNullOrWhiteSpace(taxId)) return [];
