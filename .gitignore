@@ -16,3 +16,5 @@ _to_delete/
 
 # scratch / build output (not part of the app)
 tmp/
+/sql
+/Claude outputs
