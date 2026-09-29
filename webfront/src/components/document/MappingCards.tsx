@@ -564,7 +564,7 @@ function SapMaterialPanel({
       <input type="search" className="txt" style={{ minWidth: 220 }} value={manualQuery}
         onChange={(e) => setManualQuery(e.target.value)}
         onKeyDown={(e) => { if (e.key === 'Enter') runManualSearch(); }}
-        placeholder="Search Material Description…" aria-label="Search Material by Description" />
+        placeholder="Search item description…" aria-label="Search item by description" />
       <button className="btn sm" onClick={runManualSearch} disabled={!manualQuery.trim() || loading}>
         <i className="fa-solid fa-magnifying-glass" /> Search
       </button>
@@ -581,7 +581,7 @@ function SapMaterialPanel({
   if (searched && results.length === 0)
     return (
       <div className="hint" style={{ padding: '6px 0' }}>
-        <div>Not found in SAP — try another search term, or use "+ Add New Material"</div>
+        <div>Not found in SAP — try another search term, or use "+ Add New Item"</div>
         {renderSearchBox()}
       </div>
     );
@@ -635,7 +635,7 @@ function SapMaterialPanel({
       <CompareModal<SapMaterial>
         open={aiOpen}
         onClose={() => setAiOpen(false)}
-        title="AI Suggested Match — Material (SAP)"
+        title="AI Suggested Match — Item (SAP)"
         docFields={[
           { label: 'Material (from document)', value: docDesc },
           ...(docCode ? [{ label: 'Customer Material Code', value: docCode }] : []),
@@ -2719,11 +2719,19 @@ export default function MappingCards({
     const r = map.lines[i];
     const u = r.unit || { doc: [], sap: [], status: 'idle' };
 
+    // Withholding tax / VAT / customs-duty rows are taxes, not items — they are recorded in the
+    // Tax and Withholding Tax tabs and have no material to match. Offering a material search for
+    // "VAT 7% <vendor> <invoice no>" only produces unrelated suggestions, so no card is drawn.
+    // Checked on the line itself as well as the mapping status, so the card disappears even on a
+    // mapping result produced before the backend learned to skip them.
+    const taxRow = ['WHT', 'VAT', 'DUTY'].includes(String(l.extCode || '').trim().toUpperCase());
+    if (taxRow || r.status === 'skip') return null;
+
     return (
       <CmpCard
         key={i}
         no={`${nMat}.${i + 1}`}
-        title={`Material — Row ${i + 1}`}
+        title={`Item — Row ${i + 1}`}
         r={r}
         sourceLabel={isMgt ? 'Data from Zoho CRM (Deal)' : undefined}
         picker={
@@ -2752,13 +2760,13 @@ export default function MappingCards({
                 }
               }}
             />
-            {r.status === 'fail' && addBtn('Add New Material', () => onQuickAddMaterial(i))}
+            {r.status === 'fail' && addBtn('Add New Item', () => onQuickAddMaterial(i))}
             {!posted && (
               <button
                 className={'btn sm' + (matSapOpen[i] ? ' primary' : '')}
                 style={{ marginLeft: 6 }}
                 onClick={() => setMatSapOpen((prev) => ({ ...prev, [i]: !prev[i] }))}
-                title={isMgt ? 'Search for a new Material in Zoho (Deal)' : 'Search for a new Material in SAP'}
+                title={isMgt ? 'Search for a new item in Zoho (Deal)' : 'Search for a new item in SAP'}
               >
                 <i className="fa-solid fa-magnifying-glass" /> {isMgt ? 'Search Zoho' : 'Search SAP'}
               </button>
@@ -2858,11 +2866,11 @@ export default function MappingCards({
         {/* Material/UoM mapping belongs to Sales Orders and PO-based Supplier Invoices. An
             Incoming Invoice (II/FB60) posts G/L account items instead, so OCR lines there must not
             be presented as Sales-Order-style materials. */}
-        {(doc.module === 'SO' || doc.module === 'AP') && <>
+        {(doc.module === 'SO' || doc.module === 'AP') && matCards.some(Boolean) && <>
           <p className="sec-title" style={{ marginTop: 20 }}>
             {isMgt
-              ? `${nMat}. MATERIAL (per line)`
-              : `${nMat}. MATERIAL & ${nMat + 1}. RELATE UNIT (per line)`}
+              ? `${nMat}. ITEM (per line)`
+              : `${nMat}. ITEM & ${nMat + 1}. RELATE UNIT (per line)`}
           </p>
           {matCards}
         </>}

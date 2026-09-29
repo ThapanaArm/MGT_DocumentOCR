@@ -204,7 +204,7 @@ export default function SapSalesOrderEditor({
             <thead>
               <tr>
                 <th>Line</th>
-                <th>Material (SAP)</th>
+                <th>Item (SAP)</th>
                 <th>Description</th>
                 <th>Qty</th>
                 <th>Unit</th>

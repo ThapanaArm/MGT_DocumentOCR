@@ -1,4 +1,5 @@
 import { fmt, num } from '../../utils/format';
+import { TAX_CODES } from '../../constants/fields';
 
 /* Ports the G/L Account Items table (header.glItems) from docHtml(). */
 export type GlItem = Record<string, any>;
@@ -87,11 +88,19 @@ export default function GlItemsTable({
                       />
                     </td>
                     <td>
-                      <input
+                      {/* A picker, not free text: the code decides the tax SAP calculates, and a
+                          typo here is silently wrong money. The row arrives with a suggestion
+                          (services 7%, duty exempt) that anyone can change. */}
+                      <select
                         value={g.taxCode || ''}
-                        readOnly={posted}
+                        disabled={posted}
                         onChange={(e) => onEdit(i, 'taxCode', e.target.value)}
-                      />
+                      >
+                        <option value="">— Select —</option>
+                        {TAX_CODES.map(([code, label]) => (
+                          <option key={code} value={code}>{label}</option>
+                        ))}
+                      </select>
                     </td>
                     <td>
                       <input

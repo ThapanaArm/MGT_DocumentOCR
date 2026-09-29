@@ -9,6 +9,15 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.10" />
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.10" />
+    <!-- Writes the Input VAT / Journal Voucher / SAP Import workbooks Finance uploads into SAP. -->
+    <PackageReference Include="ClosedXML" Version="0.104.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The SAP "Import Supplier Invoices" template exactly as that app hands it out. The export
+         opens this file and writes rows into it rather than rebuilding the sheet, so the hidden
+         technical-name row, the hidden columns and the section bands can never drift. -->
+    <None Update="Export\Templates\SupplierInvoice_EN.xlsx" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

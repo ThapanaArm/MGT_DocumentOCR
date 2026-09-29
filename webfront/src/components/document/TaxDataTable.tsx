@@ -1,5 +1,5 @@
 import { fmt, num } from '../../utils/format';
-import { TAX_CODES } from '../../constants/fields';
+import { TAX_CODES, isDutyRow } from '../../constants/fields';
 
 /* Tax Data grid from the SAP "Enter Incoming Invoice · Tax" tab
    (header.taxItems). Columns: D/C, Tax Doc. Currency, Tax Code,
@@ -113,16 +113,25 @@ export default function TaxDataTable({
                     </td>
                     <td>
                       {/* Tax invoice / receipt -> input tax claimable this period (goes on the
-                          input-VAT report); invoice / billing note -> deferred input tax. */}
-                      <select
-                        value={t.taxKind || ''}
-                        disabled={posted}
-                        onChange={(e) => onEdit(i, 'taxKind', e.target.value)}
-                      >
-                        <option value="">— Select —</option>
-                        <option value="INPUT">Input tax</option>
-                        <option value="DEFERRED">Deferred tax</option>
-                      </select>
+                          input-VAT report); invoice / billing note -> deferred input tax.
+                          A duty row (Excise Tax, Interior Tax, Import Duty) is not input VAT at
+                          all — there is nothing to claim and nothing to defer — so it shows a dash
+                          rather than an empty dropdown that reads as a field somebody forgot. */}
+                      {isDutyRow({ desc: t.label }) ? (
+                        <span className="muted" title="Duty is not input VAT — it has no input-tax type">
+                          —
+                        </span>
+                      ) : (
+                        <select
+                          value={t.taxKind || ''}
+                          disabled={posted}
+                          onChange={(e) => onEdit(i, 'taxKind', e.target.value)}
+                        >
+                          <option value="">— Select —</option>
+                          <option value="INPUT">Input tax</option>
+                          <option value="DEFERRED">Deferred tax</option>
+                        </select>
+                      )}
                     </td>
                     {/* Identity of the tax invoice this VAT came from — the columns the Input VAT
                         file needs, shown here so they can be checked before the file is made.
@@ -151,7 +160,7 @@ export default function TaxDataTable({
                       <input
                         value={t.issuerBranch || ''}
                         readOnly={posted}
-                        maxLength={5}
+                        maxLength={4}
                         onChange={(e) => onEdit(i, 'issuerBranch', e.target.value.replace(/\D/g, ''))}
                       />
                     </td>

@@ -601,6 +601,12 @@
   .card-h{align-items:flex-start}
   .card-h .sp{display:none}
   .card-h>.btn,.card-h>select{width:100%}
+  /* On a phone there is no single row to defend — stack the actions instead of squeezing them. */
+  .card-h-actions{flex-wrap:wrap;width:100%}
+  .card-h-actions>.btn,.card-h-actions>select{width:100%}
+  /* The Export menu is a wrapper, not a .btn, so it needs the same full-width treatment. */
+  .card-h-actions>.btnmenu,.card-h-actions>.btnmenu>.btn{width:100%}
+  .card-h-actions>.btnmenu .btnmenu-list{left:0;right:0}
   .btn{min-height:46px}
   .grid{grid-template-columns:1fr!important}
   .toast{top:72px;right:12px;width:calc(100vw - 24px);min-height:66px;padding:10px 11px}
@@ -1028,3 +1034,35 @@ input,select,textarea,.btn,.nav a{-webkit-tap-highlight-color:transparent}
 .master-derived>.grid{margin-top:12px;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px 18px}
 .master-edit-delete{margin-right:auto;color:var(--red)}
 .master-edit-delete:hover:not(:disabled){background:var(--red-bg)}
+
+/* The action group in a card header. Kept on one line: the title, badges and file name above it
+   are free to wrap, but the buttons never split across rows — a button stranded on a second line
+   reads as a different section. It shrinks before it wraps, and only wraps as a whole group. */
+.card-h-actions{
+  display:flex;align-items:center;gap:10px;flex-wrap:nowrap;
+  /* Its own full-width row, so the group never half-fits and spills a button onto a line by
+     itself. Left aligned: the title sits at the left edge, and the actions line up under it. */
+  flex:0 0 100%;min-width:0;justify-content:flex-start
+}
+.card-h-actions>.btn{flex:0 1 auto;min-width:0;white-space:nowrap}
+/* The file name is the one thing long enough to push the buttons off the row — let it give way. */
+.card-h .filechip{min-width:0;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* A ghost button that opens a small list under itself. Used by the Export button in the document
+   header, so three export files cost one slot in the toolbar instead of three and the header
+   stays on a single row. */
+.btnmenu{position:relative;display:inline-flex}
+.btnmenu-caret{font-size:10px;margin-left:2px;opacity:.7}
+.btnmenu-list{
+  position:absolute;top:calc(100% + 6px);right:0;z-index:30;min-width:200px;
+  background:var(--card);border:1px solid var(--line);border-radius:10px;
+  box-shadow:0 10px 30px rgba(0,0,0,.14);padding:6px;display:flex;flex-direction:column;gap:2px
+}
+.btnmenu-list button{
+  display:flex;align-items:center;gap:9px;width:100%;text-align:left;
+  padding:8px 10px;border:0;border-radius:7px;background:transparent;color:inherit;
+  font:inherit;font-size:13px;cursor:pointer;white-space:nowrap
+}
+.btnmenu-list button:hover:not(:disabled){background:var(--brand-soft)}
+.btnmenu-list button:disabled{opacity:.5;cursor:default}
+.btnmenu-list button i{width:14px;opacity:.75}

@@ -21,7 +21,7 @@ public class LineItem
     public string TaxDocDate { get; set; } = "";    // วันที่ใบกำกับภาษี, yyyy-MM-dd
     public string IssuerName { get; set; } = "";    // ชื่อผู้ออกใบกำกับภาษี
     public string IssuerTaxId { get; set; } = "";   // เลขประจำตัวผู้เสียภาษี 13 หลัก
-    public string IssuerBranch { get; set; } = ""; // สาขา, 00000 = สำนักงานใหญ่
+    public string IssuerBranch { get; set; } = ""; // สาขา 4 หลัก, 0000 = สำนักงานใหญ่ (ห้าม 5 หลัก)
     public double BaseAmount { get; set; }          // ฐานภาษี (มูลค่าก่อน VAT) ของใบนั้น
 
     // Vendor code from the FORM SHIPPING EXPENSE "VENDOR" column — each cost row is paid to a

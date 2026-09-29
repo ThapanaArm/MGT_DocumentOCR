@@ -57,7 +57,7 @@ public static partial class VisionPrompt
                      "taxDocDate": "เฉพาะแถว VAT: วันที่ของใบกำกับภาษีนั้น YYYY-MM-DD แถวอื่นใส่สตริงว่าง",
                      "issuerName": "เฉพาะแถว VAT: ชื่อผู้ออกใบกำกับภาษีตามที่พิมพ์ในใบ แถวอื่นใส่สตริงว่าง",
                      "issuerTaxId": "เฉพาะแถว VAT: เลขประจำตัวผู้เสียภาษี 13 หลักของผู้ออกใบ (ตัวเลขล้วน ไม่ต้องมีขีด) แถวอื่นใส่สตริงว่าง",
-                     "issuerBranch": "เฉพาะแถว VAT: รหัสสาขาของผู้ออกใบ 5 หลัก สำนักงานใหญ่ = \"00000\" สาขาที่ 1 = \"00001\" แถวอื่นใส่สตริงว่าง",
+                     "issuerBranch": "เฉพาะแถว VAT: รหัสสาขาของผู้ออกใบ 4 หลัก สำนักงานใหญ่ = \"0000\" สาขาที่ 1 = \"0001\" ห้ามตอบ 5 หลัก แถวอื่นใส่สตริงว่าง",
                      "baseAmount": 0}]
         }
         """;
@@ -88,6 +88,79 @@ public static partial class VisionPrompt
             (module is "AP" or "II" ? IiBundleRules : ""); // AP: uploads are read as AP, routed to II afterwards
     }
 
+    /// <summary>The prompt for the SUPPORTING pages of a bundle, used when the file is too long to
+    /// read in one request and is split into groups of pages.
+    ///
+    /// The cost lines come from the FORM SHIPPING EXPENSE sheet, which is read on its own in the
+    /// first request. These pages are the invoices, receipts and tax invoices behind those costs,
+    /// so all that is wanted from them is the tax: one VAT row per tax invoice, one WHT row per
+    /// withholding certificate, and the duty rows off a customs receipt. Asking for nothing else
+    /// keeps each request small and stops the model from mistaking an invoice’s own item table for
+    /// the document’s line items — the exact confusion the single-request prompt has to work
+    /// around by pushing the form page to the front.</summary>
+    public static string BuildSupporting(string module, string mainVendorName = "")
+    {
+        if (module is not ("AP" or "II")) return Build(module);
+
+        return "ภาพเหล่านี้คือเอกสารประกอบของชุดเอกสารค่าขนส่งชุดเดียวกัน "
+            + "ตารางรายการค่าใช้จ่ายอ่านจากหน้า FORM SHIPPING EXPENSE ไปแล้ว "
+            + "สิ่งที่ต้องการจากภาพเหล่านี้คือ \"ภาษี\" เท่านั้น\n\n"
+            + "ตอบกลับเป็น JSON ล้วน ๆ ตามโครงสร้างนี้เท่านั้น ห้ามมีข้อความอื่นนอก JSON:\n"
+            + SupportingSchema + "\n\n"
+            + "กติกา:\n"
+            + SupportingRowRules(mainVendorName);
+    }
+
+    private const string SupportingSchema = """
+        {
+          "header": {},
+          "lines": [{"extCode": "VAT หรือ WHT หรือ DUTY เท่านั้น", "desc": "",
+                     "qty": 1, "uom": "EA", "price": 0, "amount": 0, "vendorCode": "",
+                     "taxKind": "", "taxDocNo": "", "taxDocDate": "",
+                     "issuerName": "", "issuerTaxId": "", "issuerBranch": "", "baseAmount": 0}]
+        }
+        """;
+
+    // The VAT / WHT / DUTY rules, phrased for a group of supporting pages seen on their own — the
+    // same substance as the matching clauses in IiBundleRules, minus everything about the form.
+    private static string SupportingRowRules(string mainVendorName) =>
+        "- ห้ามใส่รายการสินค้า/บริการของใบแจ้งหนี้เป็น lines เด็ดขาด lines ต้องมีแต่แถว VAT, WHT และ DUTY\n" +
+        "- header ให้ส่งเป็นอ็อบเจกต์ว่าง {} ถ้าไม่มีภาษีเลย ให้ตอบ lines เป็นอาร์เรย์ว่าง []\n" +
+        "- ตัวเลขทุกช่องเป็นตัวเลขล้วน วันที่รูปแบบ YYYY-MM-DD (พ.ศ. ลบ 543) "
+            + "ค่าข้อความตอบเป็นภาษาอังกฤษ ยกเว้นชื่อบริษัท/บุคคล และเลขที่เอกสาร\n" +
+        "- VAT: 1 แถวต่อ 1 ใบกำกับภาษี/ใบเสร็จที่มี VAT, extCode = \"VAT\", "
+            + "desc = \"VAT 7% <ชื่อผู้ออกเอกสาร> <เลขที่เอกสาร>\", amount = price = ยอด VAT ของใบนั้น "
+            + "ต้องไล่ดูทุกภาพให้ครบทุกใบ รวมใบยอดน้อย ตรวจทานว่าแต่ละใบ VAT ≈ 7% ของฐานภาษี "
+            + "ยกเว้น VAT จากใบเสร็จของสถานกงสุล/กงสุล (Consular) ห้ามใส่\n" +
+        "- ทุกแถว VAT ต้องกรอกข้อมูลของใบนั้นให้ครบ เพราะต้องนำไปออกรายงานภาษีซื้อ: "
+            + "taxKind = \"INPUT\" ถ้าเป็นใบกำกับภาษี/ใบเสร็จรับเงิน หรือ \"DEFERRED\" ถ้าเป็นใบแจ้งหนี้/ใบวางบิล, "
+            + "taxDocNo = เลขที่ใบ, taxDocDate = วันที่ของใบ, "
+            + "issuerName = ชื่อผู้ออกใบ (ผู้ขาย ไม่ใช่ MEGACHEM/GREEN LEAF ที่เป็นผู้ซื้อ) เป็นภาษาอังกฤษ, "
+            + "issuerTaxId = เลขผู้เสียภาษี 13 หลัก (ตัวเลขล้วน) ถ้าในใบไม่มีให้ใส่สตริงว่าง ห้ามเดา, "
+            + "issuerBranch = รหัสสาขา 4 หลัก สำนักงานใหญ่ = \"0000\" (ห้าม 5 หลัก), baseAmount = มูลค่าก่อน VAT ของใบนั้น\n" +
+        "- WHT: ภาษีหัก ณ ที่จ่ายที่พบในใบเหล่านี้ 1 แถวต่อ 1 รายการ extCode = \"WHT\", "
+            + "desc = \"Withholding Tax <อัตรา>% <ชื่อผู้ออกเอกสาร> <เลขที่เอกสาร>\", amount = price = ยอดที่หัก (ตัวเลขบวก)\n" +
+        "- DUTY: ค่าธรรมเนียมและภาษีในใบเสร็จกรมศุลกากร/ใบขนสินค้าขาเข้า extCode = \"DUTY\" แถวละรายการ "
+            + "ได้แก่ อากรขาเข้า (desc = \"Import Duty\"), ภาษีสรรพสามิต (\"Excise Tax\"), ภาษีเก็บเพิ่มเพื่อมหาดไทย (\"Interior Tax\") "
+            + "ข้ามรายการที่ยอดเป็น 0 ส่วน VAT ของใบนั้นให้ไปอยู่ในแถว VAT ตามปกติ\n" +
+        // The three rules below are the ones this prompt was missing, and each omission cost a
+        // wrong figure on screen in bundle #707: the same VAT counted twice from a billing note
+        // and its tax invoice, the customs VAT counted twice from the import entry and the
+        // receipt, and another vendor's withholding tax picked up as if it were ours.
+        "- ห้ามใส่ vendorCode ให้เว้นเป็นสตริงว่างเสมอ เพราะภาพชุดนี้ไม่มีหน้าฟอร์มให้ดูคอลัมน์ VENDOR ห้ามเดารหัสผู้ขาย\n" +
+        "- ห้ามนับ VAT ก้อนเดียวกันซ้ำ: ใบวางบิล/ใบแจ้งหนี้ กับ ใบกำกับภาษี/ใบเสร็จรับเงิน ของรายการเดียวกัน " +
+            "(ผู้ออกรายเดียวกัน ยอด VAT เท่ากัน ถึงเลขที่เอกสารจะคนละเลข) คือภาษีก้อนเดียวกัน ให้ออกเพียงแถวเดียว " +
+            "โดยใช้ใบกำกับภาษี/ใบเสร็จรับเงินเป็นหลัก (taxKind = \"INPUT\" พร้อม taxDocNo/taxDocDate ของใบนั้น) " +
+            "จะใช้ taxKind = \"DEFERRED\" ก็ต่อเมื่อในไฟล์มีแต่ใบวางบิล/ใบแจ้งหนี้ ยังไม่มีใบกำกับภาษีของรายการนั้น\n" +
+        "- เช่นเดียวกัน ใบขนสินค้าขาเข้า (Import Entry) กับ ใบเสร็จรับเงินกรมศุลกากรของ shipment เดียวกัน " +
+            "เป็นภาษีก้อนเดียวกัน ให้ออกแถว VAT แถวเดียว (ยึดตามใบเสร็จรับเงิน) และแถว DUTY ชุดเดียว " +
+            "ห้ามออกซ้ำแม้เลขที่เอกสารหรือฐานภาษีจะต่างกันเล็กน้อยจากการปัดเศษ\n" +
+        "- WHT: ใส่เฉพาะใบที่ออกโดย " +
+            (mainVendorName.Trim().Length > 0
+                ? "\"" + mainVendorName.Trim() + "\" "
+                : "ผู้ขายหลักของชุดเอกสารนี้ (รายที่เราจ่ายเงินโดยตรง) ") +
+            "เท่านั้น ใบของผู้ขายรายอื่นในชุด ตัวแทนชิปปิ้งหักและนำส่งแทนไปแล้ว ห้ามใส่";
+
     // Incoming Invoice (FB60) files are often a whole shipment bundle: several vendor invoices /
     // receipts plus a "FORM SHIPPING EXPENSE" summary sheet (usually the last page). Per Finance:
     // the line items come from that form's cost table, and the withholding tax — which the form's
@@ -95,10 +168,23 @@ public static partial class VisionPrompt
     // lines (extCode "WHT"; the UI seeds those as credit G/L rows).
     private const string IiBundleRules =
         "\n- ไฟล์อาจมีหลายหน้าและรวมเอกสารหลายใบ ให้ดูทุกหน้า" +
+        // The form sheet is an internal cost summary: it names the agent but prints no tax id, no
+        // invoice date and no payment terms. All three ARE in the file, together on the vendor's
+        // own invoice, which is normally the first page — bundle #709 came back with Tax ID and
+        // Invoice Date empty because the read never looked there.
+        "\n- ข้อมูลหัวเอกสาร (invoiceNo, invoiceDate, vendorTaxId, paymentTerms) ให้อ่านจากใบแจ้งหนี้/ใบกำกับภาษีของผู้ขายหลัก " +
+        "ซึ่งมักเป็นหน้าแรกของไฟล์ ไม่ใช่จากหน้า FORM SHIPPING EXPENSE (ฟอร์มเป็นใบสรุปต้นทุนภายใน ไม่มีเลขผู้เสียภาษี วันที่ และเงื่อนไขชำระเงิน) " +
+        "ทั้งสามค่านี้พิมพ์อยู่ในหน้าเดียวกันของใบนั้น ต้องอ่านมาให้ครบ ห้ามเว้นว่างถ้าในใบมีพิมพ์อยู่: " +
+        "vendorTaxId = เลขประจำตัวผู้เสียภาษี 13 หลักของผู้ขาย (ตัวเลขล้วน ไม่ใช่ของ MEGACHEM/GREEN LEAF ที่เป็นผู้ซื้อ), " +
+        "invoiceDate = วันที่ของใบนั้น YYYY-MM-DD, paymentTerms = เงื่อนไขการชำระเงินตามที่พิมพ์ในใบ เช่น \"30 days\" " +
+        "ส่วน branch ให้ใส่ \"0000\" เสมอ (สำนักงานใหญ่)" +
         "\n- ถ้ามีหน้า \"FORM SHIPPING EXPENSE\" ให้ lines มาจากตารางในฟอร์มนั้นเท่านั้น: 1 แถวต่อ 1 รายการ, " +
-        "desc = คอลัมน์ DESCRIPTION, amount = price = คอลัมน์ AMOUNT, qty = 1, extCode = \"\", " +
+        "desc = คอลัมน์ DESCRIPTION, amount = price = คอลัมน์ AMOUNT, qty = 1, extCode = \"COST\", " +
         "vendorCode = คอลัมน์ VENDOR ของแถวนั้น (ถ้าว่างหรือเป็น #N/A ให้ใส่ \"\") " +
         "ข้ามแถวที่ AMOUNT เป็น \"-\" หรือ 0 และห้ามใส่แถว TOTAL/Cost variance/MEMO" +
+        "\n- (เฉพาะกรณีที่มีหน้า FORM SHIPPING EXPENSE) extCode = \"COST\" ของแถวในฟอร์มมีไว้บอกว่าเป็นค่าขนส่ง/พิธีการ/ค่าธรรมเนียม ไม่ใช่สินค้า " +
+        "จะได้ไม่ถูกนำไปจับคู่กับรหัสสินค้าใน SAP ยกเว้นแถวภาษีและอากรที่ใช้ extCode เฉพาะของมัน (WHT, VAT, DUTY) ตามกติกาด้านล่าง " +
+        "ส่วน desc ให้คงข้อความตามฟอร์ม เช่น \"OTHER : EDI\", \"STORAGE CHARGE\"" +
         "\n- (เฉพาะกรณีที่มีหน้า FORM SHIPPING EXPENSE) แถว DO ในตารางให้ใส่เป็น line เฉพาะเมื่อผู้ให้บริการชิปปิ้ง (ช่อง SHIPPING ของฟอร์ม) " +
         "เป็น PROMPT หรือ CHEETAH เท่านั้น ถ้าเป็นรายอื่นห้ามใส่แถว DO แม้ในฟอร์มจะมียอดอยู่" +
         "\n- (เฉพาะกรณีที่มีหน้า FORM SHIPPING EXPENSE) แถวที่เป็นสกุลเงินต่างประเทศ เช่น \"OTHER : Oversea Charge (USD)\" " +
@@ -130,9 +216,16 @@ public static partial class VisionPrompt
         "ตรวจทานด้วยว่าแต่ละใบ VAT ≈ 7% ของฐานภาษีในใบนั้น และจำนวนแถว VAT เท่ากับจำนวนใบกำกับภาษี/ใบเสร็จที่มี VAT ในไฟล์ " +
         "ยกเว้น VAT จากใบเสร็จของสถานกงสุล/กงสุล (Consular) ห้ามใส่เป็นแถว VAT และห้ามรวมใน header.vatAmount " +
         "\n- ทุกแถว VAT ต้องกรอกข้อมูลของใบกำกับภาษีใบนั้นให้ครบด้วย เพราะต้องนำไปออกรายงานภาษีซื้อ: " +
-        "issuerName = ชื่อผู้ออกใบกำกับภาษี (ผู้ขาย ไม่ใช่ MEGACHEM/GREEN LEAF ที่เป็นผู้ซื้อ), " +
-        "issuerTaxId = เลขประจำตัวผู้เสียภาษี 13 หลักของผู้ออกใบ ตัวเลขล้วนไม่ต้องมีขีดหรือเว้นวรรค, " +
-        "issuerBranch = รหัสสาขา 5 หลัก (สำนักงานใหญ่/HEAD OFFICE = \"00000\" สาขาที่ 1 = \"00001\") ถ้าใบไม่ระบุให้ใส่ \"00000\", " +
+        "issuerName = ชื่อผู้ออกใบกำกับภาษี (ผู้ขาย ไม่ใช่ MEGACHEM/GREEN LEAF ที่เป็นผู้ซื้อ) ให้ตอบเป็นภาษาอังกฤษเสมอ " +
+        "ถ้าในใบมีชื่ออังกฤษให้ใช้ตามนั้น ถ้ามีแต่ภาษาไทยให้ใช้ชื่ออังกฤษที่เป็นทางการขององค์กรนั้น เช่น กรมศุลกากร = \"The Customs Department\", " +
+        "กรมสรรพสามิต = \"The Excise Department\", สำนักงานคณะกรรมการอาหารและยา = \"Food and Drug Administration\", " +
+        "issuerTaxId = เลขประจำตัวผู้เสียภาษี 13 หลักของผู้ออกใบ ตัวเลขล้วนไม่ต้องมีขีดหรือเว้นวรรค " +
+        "ห้ามเว้นว่างถ้าในใบมีเลขนี้พิมพ์อยู่ ให้มองหาคำว่า \"เลขประจำตัวผู้เสียภาษีอากร\" \"เลขประจำตัวผู้เสียภาษี\" \"TAX ID\" \"TIN\" ทั้งหัวและท้ายใบ " +
+        "ใบเสร็จของหน่วยงานราชการ (กรมศุลกากร กรมสรรพสามิต การท่าเรือ ฯลฯ) ก็มีเลขนี้เหมือนกัน มักพิมพ์เล็กใต้ชื่อหน่วยงานหรือมุมบน ต้องอ่านมาด้วย " +
+        "ระวังอย่าหยิบเลขผู้เสียภาษีของบริษัทผู้ซื้อ (MEGACHEM / GREEN LEAF) มาใส่แทน " +
+        "และถ้าอ่านเลขนี้จากเอกสารไม่ได้จริง ๆ ให้ตอบสตริงว่าง ห้ามเดา ห้ามสร้างเลขขึ้นเองจากความรู้ทั่วไป " +
+        "ห้ามใช้รูปแบบเลขราชการ เช่น 0994000xxxxxx มาเติมให้ดูสมบูรณ์ เพราะเลขผิดอันตรายกว่าช่องว่าง, " +
+        "issuerBranch = รหัสสาขา 4 หลัก (สำนักงานใหญ่/HEAD OFFICE = \"0000\" สาขาที่ 1 = \"0001\") ถ้าใบไม่ระบุให้ใส่ \"0000\" ห้ามตอบ 5 หลักเด็ดขาด, " +
         "taxDocNo = เลขที่ใบกำกับภาษี, taxDocDate = วันที่ในใบกำกับภาษี YYYY-MM-DD, " +
         "baseAmount = มูลค่าสินค้า/บริการก่อนภาษีของใบนั้น (ต้อง ≈ ยอด VAT หารด้วย 0.07) " +
         "ข้อมูลเหล่านี้ให้อ่านจากหัวของใบกำกับภาษีใบนั้นโดยตรง ห้ามคัดลอกของใบอื่นหรือของบริษัทผู้ซื้อ" +
@@ -172,8 +265,10 @@ public static partial class VisionPrompt
                     TaxKind = NormTaxKind(GetStr(ln, "taxKind")),
                     TaxDocNo = GetStr(ln, "taxDocNo").Trim(),
                     TaxDocDate = GetStr(ln, "taxDocDate").Trim(),
-                    IssuerName = GetStr(ln, "issuerName").Trim(),
-                    IssuerTaxId = DigitsOnly().Replace(GetStr(ln, "issuerTaxId"), ""),
+                    IssuerName = NormIssuerName(GetStr(ln, "issuerName")),
+                    IssuerTaxId = ResolveIssuerTaxId(
+                        DigitsOnly().Replace(GetStr(ln, "issuerTaxId"), ""),
+                        NormIssuerName(GetStr(ln, "issuerName"))),
                     IssuerBranch = NormBranch(GetStr(ln, "issuerBranch")),
                     BaseAmount = GetNum(ln, "baseAmount"),
                     Price = GetNum(ln, "price"), Amount = GetNum(ln, "amount"),
@@ -208,12 +303,18 @@ public static partial class VisionPrompt
             var excise = Math.Round(l.Amount / 1.1, 2);
             var interior = Math.Round(l.Amount - excise, 2);
             if (interior <= 0) continue;
+            // Both halves are duties, not things we bought, so they carry extCode "DUTY" — the same
+            // tag the customs-receipt rows get. That is what puts them in the Tax tab (named, with
+            // tax code VX) instead of leaving them in the DETAIL item list, and what keeps them out
+            // of subTotal. Before this they inherited the FORM row's cost tag and sat among the
+            // items waiting for a material that does not exist.
+            l.ExtCode = "DUTY";
             l.Desc = "Excise Tax";
             l.Amount = excise;
             l.Price = excise;
             lines.Insert(i + 1, new LineItem
             {
-                ExtCode = l.ExtCode, Desc = "Interior Tax", Qty = 1, Uom = l.Uom,
+                ExtCode = "DUTY", Desc = "Interior Tax", Qty = 1, Uom = l.Uom,
                 Price = interior, Amount = interior, VendorCode = l.VendorCode,
             });
         }
@@ -279,6 +380,36 @@ public static partial class VisionPrompt
         return new ParsedDocument { Header = h, Lines = lines, Confidence = confidence, Provider = provider, RawText = text };
     }
 
+    /// <summary>Whether a name read off an invoice belongs to the document's own vendor. Matched on
+    /// the vendor's distinctive words (legal-form words dropped), the same test the withholding
+    /// rows use — "PROMPT" matches "PROMPT FREIGHT CO., LTD." however the page prints it.</summary>
+    public static bool IsSameVendor(string? nameOrText, string? vendorName)
+    {
+        var words = DistinctiveVendorWords(vendorName ?? "");
+        var text = (nameOrText ?? "").Trim();
+        if (words.Count == 0 || text.Length == 0) return false;
+        return words.Any(w => text.Contains(w, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>Whether this vendor name has anything distinctive to match on at all. A caller
+    /// that drops rows on a failed match has to check this first, or a vendor named only with
+    /// common words would have every row dropped rather than none.</summary>
+    public static bool HasDistinctiveWords(string? vendorName) =>
+        DistinctiveVendorWords(vendorName ?? "").Count > 0;
+
+    // Words that appear in half the freight industry's names: matching on one of them would make
+    // any two shipping companies the same party. "The" is the dangerous one — it is inside
+    // "Northern", "Together", and any number of other words a name might contain.
+    private static readonly HashSet<string> GenericNameWords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "the", "and", "for", "thai", "thailand", "group", "holding", "holdings", "international",
+        "trading", "service", "services", "transport", "transportation", "logistics", "freight",
+        "express", "shipping", "forwarding", "department", "authority", "office",
+    };
+
+    private static List<string> DistinctiveVendorWords(string vendorName) =>
+        VendorWords(vendorName).Where(w => w.Length >= 4 && !GenericNameWords.Contains(w)).ToList();
+
     // Shipping agents that bill us the DO fee, and the form row that carries it.
     [GeneratedRegex(@"prompt|cheetah|พรอมท์|พร้อมท์|ชีต้าร์|ชีตาร์|ธีตาร์", RegexOptions.IgnoreCase)]
     private static partial Regex DoChargingShipper();
@@ -313,22 +444,74 @@ public static partial class VisionPrompt
     [GeneratedRegex(@"กงสุล|consul", RegexOptions.IgnoreCase)]
     private static partial Regex GovernmentVatDesc();
 
+    // The input-VAT report goes to SAP in English, so a government agency that prints its name
+    // only in Thai is mapped to its official English name. Companies keep whatever the document
+    // shows (their registered name, usually already English on the tax invoice) — only these
+    // agencies are translated, because they are the ones that never print an English name.
+    private static readonly (string Thai, string English)[] AgencyNames =
+    [
+        ("กรมศุลกากร", "The Customs Department"),
+        ("กรมสรรพสามิต", "The Excise Department"),
+        ("กรมสรรพากร", "The Revenue Department"),
+        ("กรมการค้าต่างประเทศ", "Department of Foreign Trade"),
+        ("กรมปศุสัตว์", "Department of Livestock Development"),
+        ("กรมวิชาการเกษตร", "Department of Agriculture"),
+        ("กรมโรงงานอุตสาหกรรม", "Department of Industrial Works"),
+        ("สำนักงานคณะกรรมการอาหารและยา", "Food and Drug Administration"),
+        ("การท่าเรือแห่งประเทศไทย", "Port Authority of Thailand"),
+        ("การนิคมอุตสาหกรรมแห่งประเทศไทย", "Industrial Estate Authority of Thailand"),
+        ("สถานกงสุล", "Consulate"),
+        ("สถานเอกอัครราชทูต", "Embassy"),
+    ];
+
+    private static string NormIssuerName(string value)
+    {
+        var v = (value ?? "").Trim();
+        if (v.Length == 0) return "";
+        foreach (var (thai, english) in AgencyNames)
+            if (v.Contains(thai, StringComparison.Ordinal)) return english;
+        return v;
+    }
+
+    // Tax IDs of the agencies above, confirmed off their own receipts. A government receipt prints
+    // the number in small type and the read does not always find it — and a missing number is far
+    // better than an invented one, so rather than let the model fill the gap it is filled here from
+    // a confirmed list. Only ever used when the read came back empty; a number that WAS read always
+    // wins. Add an entry only after checking it on the paper receipt.
+    private static readonly Dictionary<string, string> AgencyTaxIds = new(StringComparer.OrdinalIgnoreCase)
+    {
+        // Read off the agency's own line on the receipt and confirmed by Finance. A government
+        // number starts 099…; a 010… number on a customs receipt is the PAYER's (ours) — that
+        // mistake is how this list started, so check the name above the number before adding one.
+        ["The Customs Department"] = "0994000163011",   // 0 9940 00163 01 1
+    };
+
+    private static string ResolveIssuerTaxId(string readValue, string issuerName)
+    {
+        var v = (readValue ?? "").Trim();
+        if (v.Length > 0) return v;
+        return AgencyTaxIds.TryGetValue((issuerName ?? "").Trim(), out var known) ? known : "";
+    }
+
     // Tax IDs are printed with dashes and spaces ("0-1055-43000-12-3"); the input-VAT file wants
     // the 13 digits only.
     [GeneratedRegex(@"\D")]
     private static partial Regex DigitsOnly();
 
-    // Branch in the input-VAT file is 5 digits, head office = 00000. Accepts "HEAD OFFICE",
-    // "สำนักงานใหญ่", "0000", "1" and so on.
+    // Branch is FOUR digits, head office = 0000 — per Finance, and not negotiable: a five-digit
+    // branch is rejected. Accepts "HEAD OFFICE", "สำนักงานใหญ่", "00000", "1" and so on, and a
+    // five-digit value read off a document is trimmed to its last four rather than passed through.
     private static string NormBranch(string value)
     {
         var v = (value ?? "").Trim();
-        if (v.Length == 0) return "00000";
-        if (v.Contains("สำนักงานใหญ่") || v.Contains("head", StringComparison.OrdinalIgnoreCase)) return "00000";
+        if (v.Length == 0) return HeadOfficeBranch;
+        if (v.Contains("สำนักงานใหญ่") || v.Contains("head", StringComparison.OrdinalIgnoreCase)) return HeadOfficeBranch;
         var digits = DigitsOnly().Replace(v, "");
-        if (digits.Length == 0) return "00000";
-        return digits.Length >= 5 ? digits[^5..] : digits.PadLeft(5, '0');
+        if (digits.Length == 0) return HeadOfficeBranch;
+        return digits.Length >= 4 ? digits[^4..] : digits.PadLeft(4, '0');
     }
+
+    public const string HeadOfficeBranch = "0000";
 
     // Only the two values the UI and the input-VAT report understand; anything else is dropped.
     private static string NormTaxKind(string value) => value.Trim().ToUpperInvariant() switch

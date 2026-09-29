@@ -1,4 +1,4 @@
-using MgtOcr.Api.Auth;
+﻿using MgtOcr.Api.Auth;
 using MgtOcr.Core.Auth;
 using MgtOcr.Core.Json;
 using MgtOcr.Core.Config;
@@ -33,6 +33,15 @@ var authTenants = cfg.GetSection("AzureAd:Tenants").Get<AuthTenant[]>() ?? [];
 var defaultTesseractCmd = @"C:\Program Files\Tesseract-OCR\tesseract.exe";
 var tesseractCmd = Get("Ocr:TesseractCmd");
 if (tesseractCmd == "" && File.Exists(defaultTesseractCmd)) tesseractCmd = defaultTesseractCmd;
+// Where uploaded documents are kept. On a developer machine this is the repo's own uploads
+// folder, which is why it was hard-coded — but a deployment publishes the app somewhere else
+// entirely and that folder does not travel with it, so a published site would quietly write the
+// files under whatever ..\..\.. happens to resolve to and lose them. Storage:UploadDir in
+// appsettings (or Storage__UploadDir in the environment) now names a real, backed-up folder on
+// the server; the repo folder stays the fallback so nothing changes for local work.
+var uploadDir = Get("Storage:UploadDir");
+uploadDir = uploadDir.Length > 0 ? Path.GetFullPath(uploadDir) : Path.Combine(repoRoot, "uploads");
+
 var defaultTessdata = Path.Combine(repoRoot, "tessdata");
 var tessdataPrefix = Get("Ocr:TessdataPrefix");
 if (tessdataPrefix == "" && Directory.Exists(defaultTessdata)) tessdataPrefix = defaultTessdata;
@@ -46,8 +55,14 @@ var sapBpEnv = Get("Sap:ActiveEnvironment", "dev");
 // Sap:ActiveEnvironment for the POST path only (see AppConfig.SapWriteBaseUrl). Leave it unset
 // and writes go wherever reads go, which is how this behaved before the split.
 var sapWriteEnv = Get("Sap:WriteEnvironment", sapBpEnv);
+// Supplier-invoice posting and the PO lookup that feeds it keep their own environment keys, both
+// defaulting to dev. Everything else can be switched to prod together without those two following
+// along: this is the pair that would create documents in the live tenant.
+var sapSupplierInvoiceEnv = Get("Sap:SupplierInvoice:ActiveEnvironment", "dev");
+var sapPurchaseOrderEnv = Get("Sap:PurchaseOrder:ActiveEnvironment", sapSupplierInvoiceEnv);
 var zohoEnv = Get("ZohoConfig:ActiveEnvironment", "sandbox");
 startupLog.LogInformation("[CONFIG] Sap active environment (BusinessPartner/SalesOrder/Product/Billing) = {Env}", sapBpEnv);
+startupLog.LogInformation("[CONFIG] Sap SupplierInvoice environment (documents CREATED in SAP) = {Env}", sapSupplierInvoiceEnv);
 startupLog.LogInformation("[CONFIG] Sap WRITE environment (documents posted to SAP) = {Env}{Note}",
     sapWriteEnv,
     string.Equals(sapWriteEnv, sapBpEnv, StringComparison.OrdinalIgnoreCase)
@@ -93,6 +108,10 @@ var appConfig = new AppConfig
     SapBusinessPartnerAuthHeader = Get("Sap:BusinessPartner:AuthHeader"),
     SapSalesOrderBaseUrl = Get($"Sap:SalesOrder:BaseUrl_{Cap(sapBpEnv)}", Get("Sap:SalesOrder:BaseUrl")),
     // Same keys, resolved against the write environment — used only by SapClient.PostAsync.
+    ExportCompanyName = Get("Export:CompanyName", "GREEN LEAF CHEMICAL CO., LTD."),
+    InputVatLine1Account = Get("Export:InputVat:Line1Account", "11720000"),
+    InputVatLine2Account = Get("Export:InputVat:Line2Account", "11730000"),
+    JournalVoucherStartRunning = long.TryParse(Get("Export:JournalVoucher:StartRunning", "1000000"), out var jvRun) ? jvRun : 1000000,
     SapWriteEnvironment = sapWriteEnv,
     SapWriteBaseUrl = Get($"Sap:BaseUrl_{Cap(sapWriteEnv)}", Get("Sap:BaseUrl")),
     SapSalesOrderWriteBaseUrl = Get($"Sap:SalesOrder:BaseUrl_{Cap(sapWriteEnv)}", Get("Sap:SalesOrder:BaseUrl")),
@@ -104,6 +123,10 @@ var appConfig = new AppConfig
     SapProductAuthHeader = Get("Sap:Product:AuthHeader"),
     SapBillingBaseUrl = Get($"Sap:Billing:BaseUrl_{Cap(sapBpEnv)}", Get("Sap:Billing:BaseUrl")),
     SapBillingAuthHeader = Get("Sap:Billing:AuthHeader"),
+    SapSupplierInvoiceBaseUrl = Get($"Sap:SupplierInvoice:BaseUrl_{Cap(sapSupplierInvoiceEnv)}"),
+    SapSupplierInvoiceAuthHeader = Get("Sap:SupplierInvoice:AuthHeader", Get("Sap:BusinessPartner:AuthHeader")),
+    SapPurchaseOrderBaseUrl = Get($"Sap:PurchaseOrder:BaseUrl_{Cap(sapPurchaseOrderEnv)}"),
+    SapPurchaseOrderAuthHeader = Get("Sap:PurchaseOrder:AuthHeader", Get("Sap:BusinessPartner:AuthHeader")),
     // MGT/GLC: SalesOrganization/CompanyCode/DefaultPlant per company (see CompanyProfile).
     // Defaults match what was already hardcoded per-module before this existed, so an
     // appsettings.json without these sections still behaves exactly as before.
@@ -125,9 +148,10 @@ var appConfig = new AppConfig
     LocalAuthIssuer = Get("Auth:Issuer", "mgtocr"),
     LocalAuthAudience = Get("Auth:Audience", "mgtocr"),
     LocalAuthLifetimeMinutes = int.TryParse(Get("Auth:LifetimeMinutes", "480"), out var lm) ? lm : 480,
-    UploadDir = Path.Combine(repoRoot, "uploads"),
+    UploadDir = uploadDir,
 };
 Directory.CreateDirectory(appConfig.UploadDir);
+startupLog.LogInformation("Uploaded documents are stored in {UploadDir}", appConfig.UploadDir);
 
 builder.Services.AddSingleton(appConfig);
 builder.Services.AddSingleton<DbConnectionFactory>();
@@ -247,6 +271,17 @@ app.MapControllers();
 // Lowest priority — never intercepts /api/* (matched by controllers) or static assets.
 if (spaFiles != null)
 {
+    // /api/* must never reach the index.html fallback. It used to: a request to an endpoint this
+    // build does not have (an old binary, a renamed route) fell through to the fallback and came
+    // back as the SPA page with status 200 — so a file download happily saved an HTML page under
+    // an .xlsx name, and Excel refused to open it. A route this specific outranks the catch-all
+    // below, so an unknown API path now answers 404 and the caller sees a real error.
+    app.MapFallback("api/{**rest}", (HttpContext ctx) =>
+    {
+        ctx.Response.StatusCode = 404;
+        return Results.Json(new { error = "Endpoint not found" }, statusCode: 404);
+    }).AllowAnonymous();
+
     // Anonymous on purpose: this returns index.html, and the browser has no token until the app
     // inside index.html has run and signed the user in. The API endpoints stay protected.
     app.MapFallbackToFile("index.html", new StaticFileOptions { FileProvider = spaFiles })

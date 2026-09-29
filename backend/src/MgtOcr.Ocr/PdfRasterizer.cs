@@ -10,11 +10,28 @@ namespace MgtOcr.Ocr;
 // during Phase 2 verification, not assumed.
 public static class PdfRasterizer
 {
+    /// <summary>Every call into PDFium goes through here, one at a time.
+    ///
+    /// PDFtoImage wraps PDFium, which is native and NOT thread-safe, while the OCR queue reads up
+    /// to three documents at once. Two rasterisations overlapping corrupts PDFium's own state and
+    /// takes the whole process down with a System.ExecutionEngineException in "Unknown Module" —
+    /// an error no try/catch can stop, because the CLR itself is the casualty.
+    ///
+    /// Rendering is CPU-bound, so serialising it costs little: three documents rasterising in
+    /// parallel were competing for the same cores anyway. The waiting happens here rather than in
+    /// the queue worker so every caller is covered, including the vision providers that render a
+    /// single extra page on their own.</summary>
+    private static readonly object PdfiumGate = new();
+
     // JPEG variant for multi-page bundles sent inline to a vision model: a scanned A4 page as PNG
     // can be 1-2 MB, which blows past Gemini's ~20 MB inline-request limit on a 15-20 page file.
     public static int PageCount(string path)
     {
-        try { return Conversion.GetPageCount(File.ReadAllBytes(path), password: PdfPassword.Current); }
+        try
+        {
+            var bytes = File.ReadAllBytes(path);
+            lock (PdfiumGate) return Conversion.GetPageCount(bytes, password: PdfPassword.Current);
+        }
         catch { return 0; }
     }
 
@@ -22,22 +39,28 @@ public static class PdfRasterizer
     public static byte[]? RenderPageToJpeg(string path, int pageIndex, int dpi, int quality = 80)
     {
         var bytes = File.ReadAllBytes(path);
-        if (pageIndex < 0 || pageIndex >= Conversion.GetPageCount(bytes, password: PdfPassword.Current)) return null;
-        using var bmp = Conversion.ToImage(bytes, page: pageIndex, password: PdfPassword.Current, options: new RenderOptions(Dpi: dpi));
-        using var data = bmp.Encode(SKEncodedImageFormat.Jpeg, quality);
-        return data.ToArray();
+        lock (PdfiumGate)
+        {
+            if (pageIndex < 0 || pageIndex >= Conversion.GetPageCount(bytes, password: PdfPassword.Current)) return null;
+            using var bmp = Conversion.ToImage(bytes, page: pageIndex, password: PdfPassword.Current, options: new RenderOptions(Dpi: dpi));
+            using var data = bmp.Encode(SKEncodedImageFormat.Jpeg, quality);
+            return data.ToArray();
+        }
     }
 
     public static List<byte[]> RenderPagesToJpeg(string path, int maxPages, int dpi, int quality = 80)
     {
         var bytes = File.ReadAllBytes(path);
-        var n = Math.Min(maxPages, Conversion.GetPageCount(bytes, password: PdfPassword.Current));
         var results = new List<byte[]>();
-        for (var i = 0; i < n; i++)
+        lock (PdfiumGate)
         {
-            using var bmp = Conversion.ToImage(bytes, page: i, password: PdfPassword.Current, options: new RenderOptions(Dpi: dpi));
-            using var data = bmp.Encode(SKEncodedImageFormat.Jpeg, quality);
-            results.Add(data.ToArray());
+            var n = Math.Min(maxPages, Conversion.GetPageCount(bytes, password: PdfPassword.Current));
+            for (var i = 0; i < n; i++)
+            {
+                using var bmp = Conversion.ToImage(bytes, page: i, password: PdfPassword.Current, options: new RenderOptions(Dpi: dpi));
+                using var data = bmp.Encode(SKEncodedImageFormat.Jpeg, quality);
+                results.Add(data.ToArray());
+            }
         }
         return results;
     }
@@ -45,14 +68,16 @@ public static class PdfRasterizer
     public static List<byte[]> RenderPagesToPng(string path, int maxPages, int dpi)
     {
         var bytes = File.ReadAllBytes(path);
-        var pageCount = Conversion.GetPageCount(bytes, password: PdfPassword.Current);
-        var n = Math.Min(maxPages, pageCount);
         var results = new List<byte[]>();
-        for (var i = 0; i < n; i++)
+        lock (PdfiumGate)
         {
-            using var bmp = Conversion.ToImage(bytes, page: i, password: PdfPassword.Current, options: new RenderOptions(Dpi: dpi));
-            using var data = bmp.Encode(SKEncodedImageFormat.Png, 100);
-            results.Add(data.ToArray());
+            var n = Math.Min(maxPages, Conversion.GetPageCount(bytes, password: PdfPassword.Current));
+            for (var i = 0; i < n; i++)
+            {
+                using var bmp = Conversion.ToImage(bytes, page: i, password: PdfPassword.Current, options: new RenderOptions(Dpi: dpi));
+                using var data = bmp.Encode(SKEncodedImageFormat.Png, 100);
+                results.Add(data.ToArray());
+            }
         }
         return results;
     }

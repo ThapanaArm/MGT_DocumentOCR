@@ -3,7 +3,7 @@ import { fmtAmt, num } from '../../utils/format';
 import { qtyTxt } from './MappingCards';
 import type { DocLine, DocModel, MapResult } from '../../api/documents';
 import type { MastersData } from '../../api/masters';
-import { PO_LINE_EXTRA_FIELDS } from '../../constants/fields';
+import { PO_LINE_EXTRA_FIELDS, isDutyRow } from '../../constants/fields';
 import MaterialSearchSelect from './MaterialSearchSelect';
 
 /* Ports the DETAIL lines table from docHtml() incl. uomCell()/lineExtraCount(). */
@@ -178,7 +178,7 @@ export default function DetailTable({
   const vendorOf = (l: DocLine) => String(l.extra?.vendorCode ?? '').trim();
   // WHT / VAT / DUTY rows are taxes, not items: they live in the Tax and Withholding Tax tabs.
   const isTaxRow = (l: DocLine) =>
-    l.extCode === 'WHT' || l.extCode === 'VAT' || l.extCode === 'DUTY';
+    l.extCode === 'WHT' || l.extCode === 'VAT' || isDutyRow(l);
   const vendorGroups = doc.lines.reduce<Record<string, { rows: number; total: number }>>((acc, l) => {
     const code = vendorOf(l);
     if (!code || isTaxRow(l)) return acc;
@@ -202,9 +202,9 @@ export default function DetailTable({
   // total unreadable here. The unfiltered view stays the full picture (tax rows shown, withholding
   // left out of the total because it is deducted at payment, not billed).
   const hideRow = (l: DocLine) =>
-    l.extCode === 'DUTY' || (vendorFilter ? isTaxRow(l) || vendorOf(l) !== vendorFilter : false);
+    isDutyRow(l) || (vendorFilter ? isTaxRow(l) || vendorOf(l) !== vendorFilter : false);
   const sum = doc.lines
-    .filter((l) => l.extCode !== 'WHT' && l.extCode !== 'DUTY')
+    .filter((l) => l.extCode !== 'WHT' && !isDutyRow(l))
     .filter((l) => !hideRow(l))
     .reduce((a, l) => a + num(l.amount), 0);
 
@@ -271,7 +271,7 @@ export default function DetailTable({
                 <th style={{ width: 74 }}>Unit</th>
                 <th style={{ minWidth: 130 }}>Unit Price</th>
                 <th style={{ minWidth: 140 }}>Amount</th>
-                <th style={{ minWidth: 340 }}>{isMgt ? 'Material (Master Data)' : 'Material (SAP)'}</th>
+                <th style={{ minWidth: 340 }}>{isMgt ? 'Item (Master Data)' : 'Item (SAP)'}</th>
                 <th style={{ minWidth: 170 }}>{isMgt ? 'Unit → Master Data' : 'Unit → SAP'}</th>
                 <th>Status</th>
                 {showPoExtra && <th style={{ width: 120 }}>PO Detail</th>}
@@ -295,11 +295,18 @@ export default function DetailTable({
                     <tr key={i}>
                       <td style={{ textAlign: 'center' }}>{l.itemNo}</td>
                       <td>
-                        <input
-                          value={l.extCode ?? ''}
-                          readOnly={posted}
-                          onChange={(e) => onEditLine(i, 'extCode', e.target.value)}
-                        />
+                        {/* "COST" is the read's own tag for a charge off the FORM SHIPPING EXPENSE
+                            sheet, not a code the vendor gave us — showing it in a column labelled
+                            "Item Code (Partner)" would read as if the supplier had issued it. */}
+                        {l.extCode === 'COST' ? (
+                          <span className="hint">—</span>
+                        ) : (
+                          <input
+                            value={l.extCode ?? ''}
+                            readOnly={posted}
+                            onChange={(e) => onEditLine(i, 'extCode', e.target.value)}
+                          />
+                        )}
                       </td>
                       {showVendor && (
                         <td>
@@ -335,6 +342,10 @@ export default function DetailTable({
                       >
                         {!map ? (
                           <span className="badge b-idle">Pending Mapping</span>
+                        ) : r?.status === 'skip' ? (
+                          // Landed costs and tax rows have no material of their own — showing the
+                          // whole material list here invites picking a product for a customs fee.
+                          <span className="hint">{r.method || 'no item to match'}</span>
                         ) : (
                           <MaterialSearchSelect
                             options={matOpts}
@@ -352,7 +363,9 @@ export default function DetailTable({
                       </td>
                       <td style={{ whiteSpace: 'nowrap' }}>
                         {r &&
-                          (r.status === 'fail' ? (
+                          (r.status === 'skip' ? (
+                            <span className="badge b-idle">Delivery cost</span>
+                          ) : r.status === 'fail' ? (
                             <span className="badge b-fail"><i className="fa-solid fa-xmark" /> Not found</span>
                           ) : r.status === 'manual' ? (
                             <span className="badge b-warn"><i className="fa-solid fa-pen" /> Manual</span>

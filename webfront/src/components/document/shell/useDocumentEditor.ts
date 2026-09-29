@@ -143,7 +143,8 @@ export function useDocumentEditor(user: string) {
       if (k === 'whtCode') {
         const rate = WHT_CODE_RATE[v];
         const amt = Number(row.amtFc) || 0;
-        if (rate && amt > 0) row.baseFc = Math.round((amt / rate) * 100) / 100;
+        // WHT_CODE_RATE is a whole percent (3 = 3%), so divide by 100 before dividing the amount.
+        if (rate && amt > 0) row.baseFc = Math.round((amt / (rate / 100)) * 100) / 100;
       }
       items[i] = row;
       return { ...d, header: { ...d.header, whtItems: items } };

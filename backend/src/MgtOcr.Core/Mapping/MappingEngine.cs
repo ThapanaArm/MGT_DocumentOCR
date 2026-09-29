@@ -90,6 +90,57 @@ public static class MappingEngine
         return da.Length > 0 && da == Digits(b);
     }
 
+    /// <summary>A landed-cost line on a supplier invoice: freight, customs clearance, storage,
+    /// EDI transmission, permit fees and the like. In SAP these are the PO's <i>planned delivery
+    /// costs</i> (Reference Document Category 2 / 3), not goods — they have no material of their
+    /// own, so they must never be matched against the material master.
+    ///
+    /// Three signals, in order of reliability:
+    /// 1. extCode "COST" — the read tags every row it took from the FORM SHIPPING EXPENSE cost
+    ///    table with this. That sheet IS the list of charges, so the tag is exact and needs no
+    ///    guessing. This is the signal to rely on for documents read after 2026-09-25.
+    /// 2. A description starting with "OTHER :" — the form's own prefix for its miscellaneous
+    ///    charges ("OTHER : EDI", "OTHER : FDA", "OTHER : CUSTOMS FEE").
+    /// 3. A wording match, for documents read before the tag existed. Kept deliberately broad;
+    ///    it only applies to lines that carry no item code of their own.
+    /// </summary>
+    private static readonly string[] DeliveryCostWords =
+    [
+        "freight", "shipping", "trucking", "transport", "storage", "warehous", "customs", "clearance",
+        "handling", "port", "terminal", "demurrage", "detention", "lift on", "lift off", "liftoff",
+        "wharfage", "d/o", "delivery order", "courier", "insurance", "surcharge", "oversea",
+        // Document / permit charges that ride along with an import
+        "edi", "fda", "permit", "licence", "license", "certificate", "inspection", "document fee",
+        "service charge", "fee",
+        "ค่าขนส่ง", "ค่าระวาง", "ค่าเก็บรักษา", "ค่าคลังสินค้า", "พิธีการ", "ศุลกากร", "ค่าดำเนินการ", "ค่าประกันภัย",
+        "อ.ย.", "อย.", "ใบอนุญาต", "ค่าธรรมเนียม", "ค่าเอกสาร",
+    ];
+
+    private static bool IsDeliveryCost(Dictionary<string, object?> line)
+    {
+        var extCode = (line.GetStr("extCode") ?? "").Trim();
+        // 1. Tagged by the read as a row off the FORM SHIPPING EXPENSE cost table.
+        if (extCode.Equals("COST", StringComparison.OrdinalIgnoreCase)) return true;
+
+        var desc = (line.GetStr("desc") ?? "").Trim();
+        // 2. The form's own prefix for a miscellaneous charge.
+        if (desc.StartsWith("OTHER", StringComparison.OrdinalIgnoreCase)
+            && desc.Contains(':', StringComparison.Ordinal)) return true;
+
+        // 3. Wording, but only for a line with no item code of its own — a line that carries the
+        //    vendor's item code is something ordered, not a charge.
+        if (extCode.Length > 0) return false;
+        var d = desc.ToLowerInvariant();
+        return d.Length > 0 && DeliveryCostWords.Any(w => d.Contains(w, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>A line the read appended as a tax/duty record rather than something bought:
+    /// extCode "WHT" (withholding tax), "VAT" (one row per tax invoice) or "DUTY" (customs
+    /// charges). These belong to the Tax / Withholding Tax tabs and are never matched against the
+    /// material master.</summary>
+    private static bool IsTaxRow(Dictionary<string, object?> line) =>
+        (line.GetStr("extCode") ?? "").Trim().ToUpperInvariant() is "WHT" or "VAT" or "DUTY";
+
     public static (Dictionary<string, object?>? Hit, string Method, double Score, List<string> Cands) MatchPartner(
         List<Dictionary<string, object?>> rows, object? taxId, object? name, string codeKey, string[] nameKeys)
     {
@@ -368,6 +419,29 @@ public static class MappingEngine
         for (var i = 0; i < lines.Count; i++)
         {
             var ln = lines[i];
+
+            // Tax rows the read appends to a shipping bundle (extCode WHT / VAT / DUTY) are not
+            // things we bought — they are the withholding tax, the VAT of each invoice, and the
+            // customs duties, and they live in the Withholding Tax / Tax tabs. Matching them
+            // against the material master is meaningless and actively dangerous: "VAT 7% CHEETAH
+            // ..." has nothing in common with any product, so the fuzzy search happily offered
+            // nine unrelated chemicals and one click would have posted a VAT amount as a material.
+            // Skipped here, so they raise no error and get no Item card.
+            if (IsTaxRow(ln))
+            {
+                resLines.Add(R("skip", "", "", "tax row — recorded in the Tax / Withholding Tax tab, not an item"));
+                continue;
+            }
+
+            // Landed costs (freight, customs clearance, storage, ...) go onto the purchase order as
+            // planned delivery costs, so there is no material to look up and no reason to block the
+            // document. Supplier invoices only — a Sales Order always sells real goods.
+            if (module != "SO" && IsDeliveryCost(ln))
+            {
+                resLines.Add(R("skip", "", "", "planned delivery cost — no item to match"));
+                continue;
+            }
+
             var mv = mLineRaw.Get(i.ToString())?.ToString();
             Dictionary<string, object?> row;
             if (!string.IsNullOrEmpty(mv))
@@ -376,7 +450,7 @@ public static class MappingEngine
                     ? R("fail")
                     : R("manual", mv, matDesc.TryGetValue(mv, out var d) ? d?.ToString() ?? mv : mv, "manually selected");
                 if (row.GetStr("status") == "fail")
-                    errors.Add(new() { ["field"] = $"Material line {i + 1}", ["msg"] = "Material is not active for this customer and SalesOrg", ["fix"] = "Select or add CustomerMaterial for this customer" });
+                    errors.Add(new() { ["field"] = $"Item line {i + 1}", ["msg"] = "This item is not active for this customer and SalesOrg", ["fix"] = "Select or add CustomerMaterial for this customer" });
             }
             else if (string.IsNullOrEmpty(partner))
             {
@@ -384,8 +458,8 @@ public static class MappingEngine
                 if (i == 0)
                     errors.Add(new()
                     {
-                        ["field"] = "Material (all lines)",
-                        ["msg"] = $"Products cannot be matched yet because the {partnerLabel} has not been set",
+                        ["field"] = "Item (all lines)",
+                        ["msg"] = $"Items cannot be matched yet because the {partnerLabel} has not been set",
                         ["fix"] = $"Set the {partnerLabel} correctly first, then run Mapping again",
                     });
             }
@@ -399,9 +473,9 @@ public static class MappingEngine
                     row = R("fail", cands: cands);
                     errors.Add(new()
                     {
-                        ["field"] = $"Material line {i + 1}",
-                        ["msg"] = $"Product not found {Dash(ln.GetStr("extCode"))} / \"{Dash(ln.GetStr("desc"))}\" in the product list of {partnerLabel}",
-                        ["fix"] = $"Add in Master Mapping → products for {partnerLabel}",
+                        ["field"] = $"Item line {i + 1}",
+                        ["msg"] = $"Item not found {Dash(ln.GetStr("extCode"))} / \"{Dash(ln.GetStr("desc"))}\" in the item list of {partnerLabel}",
+                        ["fix"] = $"Add in Master Mapping → items for {partnerLabel}",
                     });
                 }
             }
@@ -435,6 +509,8 @@ public static class MappingEngine
         for (var i = 0; i < lines.Count; i++)
         {
             var ln = lines[i];
+            // A tax row carries an amount, not a sellable quantity/price — same reason as above.
+            if (IsTaxRow(ln)) continue;
             if (Num(ln.Get("qty")) <= 0)
                 errors.Add(new() { ["field"] = $"Quantity line {i + 1}", ["msg"] = "Quantity must be greater than 0", ["fix"] = "Edit the value in the Detail table" });
             if (Num(ln.Get("price")) <= 0)
@@ -592,8 +668,8 @@ public static class MappingEngine
             var dq = Num(ln.Get("qty")); var du = ln.GetStr("uom");
             r["doc"] = new List<object>
             {
-                Fld("Partner Material Code", ln.Get("extCode")),
-                Fld("Material Name (from document)", ln.Get("desc")),
+                Fld("Partner Item Code", ln.Get("extCode")),
+                Fld("Item Name (from document)", ln.Get("desc")),
                 Fld("Quantity", Qty3(dq)),
                 Fld("Unit (from document)", du),
                 Fld("Price/Unit", Money(Num(ln.Get("price")))),

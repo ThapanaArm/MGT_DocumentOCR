@@ -277,11 +277,33 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         var cat = (body.GetStr("apDocCategory")).Trim().ToUpperInvariant();
         if (cat.Length > 0 && !ApDocCategories.Any(c => c.Id == cat)) throw new HttpApiException(400, "Invalid document type");
         var docT = DocumentTables.ForId(docId).Doc;
+
+        // Changing the document type has to move the document between the two invoice modules, not
+        // just relabel it — they validate completely differently. EXPENSE lines are service charges
+        // (STORAGE CHARGE, TRUCKING, ...) posted against G/L accounts, so they belong to II (FB60)
+        // and must NOT be matched against the material master; the goods/asset categories are
+        // matched line by line against materials in AP (MIRO). Before this, the category was stored
+        // but the module never moved, so picking "Expense" on an already-uploaded document left it
+        // in AP and it kept demanding a Material for every cost line. Same rule as the upload path.
+        var current = await repo.GetDocumentAsync(docId);
+        var currentModule = current.GetStr("module");
+        var newModule = currentModule;
+        if (currentModule is "AP" or "II" && cat.Length > 0)
+            newModule = cat == "EXPENSE"
+                ? "II"
+                : ((Dictionary<string, object?>)current["header"]!).GetStr("poRef").Trim().Length > 0 ? "AP" : "II";
+
         await using (var conn = await GetDbAsync())
-            await conn.ExecuteAsync($"UPDATE {docT} SET ApDocCategory=@cat WHERE DocId=@docId", new { cat = cat.Length > 0 ? cat : null, docId });
+            await conn.ExecuteAsync(
+                $"UPDATE {docT} SET ApDocCategory=@cat, Module=@mod WHERE DocId=@docId",
+                new { cat = cat.Length > 0 ? cat : null, mod = newModule, docId });
+
         var doc = await repo.GetDocumentAsync(docId);
+        var moved = !string.Equals(newModule, currentModule, StringComparison.Ordinal)
+            ? $" (moved {currentModule} -> {newModule})"
+            : "";
         await repo.LogAuditAsync(docId, doc.GetStr("module"), "UPDATE", await ActorAsync(),
-            detail: "Changed document type to: " + (cat.Length > 0 ? cat : "-"), fileName: doc.GetStr("fileName"));
+            detail: "Changed document type to: " + (cat.Length > 0 ? cat : "-") + moved, fileName: doc.GetStr("fileName"));
         return Ok(doc);
     }
 
@@ -379,9 +401,18 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     [HttpGet("api/documents/{docId:int}/chat/{chatId:int}/image")]
     public async Task<IActionResult> ChatImage(int docId, int chatId)
     {
+
         var img = await repo.GetChatImageAsync(docId, chatId);
         if (img == null) throw new HttpApiException(404, "Image not found");
         return File(img.Value.Data, img.Value.Mime);
+
+        var chatT = DocumentTables.ForId(docId).Chat;
+        dynamic? r = await GetDbInstance().QueryOneAsync($"SELECT ImagePath FROM {chatT} WHERE DocId=@docId AND ChatId=@chatId", new { docId, chatId });
+        string? path = r?.ImagePath;
+        if (string.IsNullOrEmpty(path) || !System.IO.File.Exists(path)) throw new HttpApiException(404, "Image not found");
+        // Same reason as DocumentFile: an <img> needs a real image media type, not octet-stream.
+        return PhysicalFile(Path.GetFullPath(path), MediaTypeForFile(path));
+
     }
 
     [HttpPost("api/documents/{docId:int}/chat-fix")]
@@ -631,7 +662,15 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         // or reset its mapping status. Only persist header/lines when the AI actually made an edit.
         if (result.Action is null)
         {
-            await repo.UpdateHeaderAsync(docId, module, result.Header);
+            // MERGE, never replace. The AI is given (and returns) only the extraction schema's own
+            // header keys — invoice no, dates, vendor, totals. Everything the SAP tabs add lives in
+            // the same header dictionary (taxItems, whtItems, glItems, taxReportingDate,
+            // businessPlace, sapDocType, refDocType, …), so writing the AI's header straight over
+            // the stored one silently erased the whole Tax / Withholding Tax / G/L tab — one chat
+            // correction and the document had to be rebuilt by hand.
+            var mergedHeader = new Dictionary<string, object?>(header);
+            foreach (var kv in result.Header) mergedHeader[kv.Key] = kv.Value;
+            await repo.UpdateHeaderAsync(docId, module, mergedHeader);
             await repo.SaveLinesAsync(module, docId, result.Lines);
             var docT = DocumentTables.For(module).Doc;
             await using (var conn = await GetDbAsync())
@@ -667,7 +706,141 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         string? path = d?.StoredPath;
         if (d == null || string.IsNullOrEmpty(path) || !System.IO.File.Exists(path)) throw new HttpApiException(404, "Original file not found");
         string fileName = d.FileName ?? "";
-        return PhysicalFile(Path.GetFullPath(path), "application/octet-stream", fileName);
+        // Served INLINE, with the file's real media type. Passing a download name here (the third
+        // PhysicalFile argument) makes ASP.NET send Content-Disposition: attachment, and that plus
+        // "application/octet-stream" is why the "View document" modal's <iframe> came up blank —
+        // the browser treated the response as a download instead of something to render.
+        // ?download=1 still gets the attachment behaviour for a real Save-as.
+        var download = string.Equals(Request.Query["download"], "1", StringComparison.Ordinal);
+        var contentType = MediaTypeForFile(fileName);
+        return download
+            ? PhysicalFile(Path.GetFullPath(path), contentType, fileName)
+            : PhysicalFile(Path.GetFullPath(path), contentType);
+    }
+
+    // Media type from the file's extension. Only the types this app actually stores are listed;
+    // anything else falls back to octet-stream, which the browser offers as a download.
+    private static string MediaTypeForFile(string fileName) =>
+        (Path.GetExtension(fileName ?? "") ?? "").ToLowerInvariant() switch
+        {
+            ".pdf" => "application/pdf",
+            ".png" => "image/png",
+            ".jpg" or ".jpeg" => "image/jpeg",
+            ".gif" => "image/gif",
+            ".webp" => "image/webp",
+            ".bmp" => "image/bmp",
+            ".tif" or ".tiff" => "image/tiff",
+            ".txt" => "text/plain",
+            _ => "application/octet-stream",
+        };
+
+    // GET /api/documents/123/export/input-vat
+    // The Input VAT workbook Finance uploads into SAP — one row per tax invoice found in the
+    // bundle, laid out like 2000_Input Vat Template 1.xlsx. Reads what is on screen in the Tax tab,
+    // so whatever the person corrected there is what comes out.
+    [HttpGet("api/documents/{docId:int}/export/input-vat")]
+    public async Task<IActionResult> ExportInputVat(int docId)
+    {
+        var doc = await repo.GetDocumentAsync(docId);
+        var module = doc.GetStr("module");
+        if (module is not ("AP" or "II"))
+            throw new HttpApiException(400, "The input-VAT file is only produced for supplier invoices");
+
+        var header = (Dictionary<string, object?>)doc["header"]!;
+        // A supplier invoice is always GLC — see CompanyNameForPostAsync's note ("AP/II always
+        // means GLC"). Sap:CompanyCode defaults to MGT's 1000, so reading it here put the wrong
+        // company code on the sheet; resolve the GLC profile instead.
+        var company = config.Companies.FirstOrDefault(
+            c => string.Equals(c.Name, "GLC", StringComparison.OrdinalIgnoreCase));
+        var bytes = Export.InputVatExcel.Build(
+            doc,
+            companyName: config.ExportCompanyName,
+            companyCode: company?.CompanyCode ?? "2000",
+            accounts: new Export.InputVatExcel.Accounts(config.InputVatLine1Account, config.InputVatLine2Account));
+
+        await repo.LogAuditAsync(docId, module, "EXPORT", await ActorAsync(),
+            detail: "Exported the input-VAT file", fileName: doc.GetStr("fileName"));
+
+        var invoiceNo = new string(header.GetStr("invoiceNo").Where(char.IsLetterOrDigit).ToArray());
+        var name = $"InputVat_{docId}{(invoiceNo.Length > 0 ? "_" + invoiceNo : "")}.xlsx";
+        return File(bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", name);
+    }
+
+    // GET /api/documents/123/export/journal-voucher
+    // The Journal Voucher workbook (Control Sheet + one voucher sheet), built from the G/L Account
+    // Items table on screen. The running number starts at Export:JournalVoucher:StartRunning and
+    // is offset by the document id so two documents never collide; Finance renumbers when they
+    // merge files, which is why it is a plain configurable base rather than a stored counter.
+    [HttpGet("api/documents/{docId:int}/export/journal-voucher")]
+    public async Task<IActionResult> ExportJournalVoucher(int docId)
+    {
+        var doc = await repo.GetDocumentAsync(docId);
+        var module = doc.GetStr("module");
+        if (module is not ("AP" or "II"))
+            throw new HttpApiException(400, "The journal-voucher file is only produced for supplier invoices");
+
+        var company = config.Companies.FirstOrDefault(
+            c => string.Equals(c.Name, "GLC", StringComparison.OrdinalIgnoreCase));
+        var bytes = Export.JournalVoucherExcel.Build(
+            doc,
+            companyName: config.ExportCompanyName,
+            companyCode: company?.CompanyCode ?? "2000",
+            runningNumber: config.JournalVoucherStartRunning + docId);
+
+        await repo.LogAuditAsync(docId, module, "EXPORT", await ActorAsync(),
+            detail: "Exported the journal-voucher file", fileName: doc.GetStr("fileName"));
+
+        return File(bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            $"JournalVoucher_{docId}.xlsx");
+    }
+
+    // GET /api/documents/123/export/sap-import
+    // The workbook the SAP Fiori app "Import Supplier Invoices" takes. Same data the direct post
+    // would send, but as a file, so Finance can read it before anything reaches SAP — the two
+    // routes the user asked for (review-by-Excel, or post straight through the API).
+    [HttpGet("api/documents/{docId:int}/export/sap-import")]
+    public async Task<IActionResult> ExportSapImport(int docId)
+    {
+        var doc = await repo.GetDocumentAsync(docId);
+        var module = doc.GetStr("module");
+        if (module is not ("AP" or "II"))
+            throw new HttpApiException(400, "The SAP import file is only produced for supplier invoices");
+
+        var company = config.Companies.FirstOrDefault(
+            c => string.Equals(c.Name, "GLC", StringComparison.OrdinalIgnoreCase));
+        var bytes = Export.SapImportSupplierInvoiceExcel.Build(
+            doc,
+            // A bundle can carry costs from several suppliers, and one SAP supplier invoice takes
+            // exactly one; the export splits them and numbers the invoices inside the file itself.
+            companyCode: company?.CompanyCode ?? "2000",
+            // The document says payment terms in words ("30 days"); SAP wants the key (5004). The
+            // company's own list is the only place that mapping exists.
+            paymentTerms: await PaymentTermsMasterAsync());
+
+        await repo.LogAuditAsync(docId, module, "EXPORT", await ActorAsync(),
+            detail: "Exported the SAP import file", fileName: doc.GetStr("fileName"));
+
+        return File(bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            $"SapImportSupplierInvoice_{docId}.xlsx");
+    }
+
+    // The payment-terms code/text list from dbo.SysDataMapping, in the shape the export wants.
+    // Absent table or empty list is fine: nothing resolves, and the column is simply left blank.
+    private async Task<Export.SapImportSupplierInvoiceExcel.PaymentTerms> PaymentTermsMasterAsync()
+    {
+        var all = await masters.LoadAllAsync();
+        var rows = new List<(string, string)>();
+        if (all.TryGetValue("paymentterms", out var list) && list is System.Collections.IEnumerable items)
+        {
+            foreach (var item in items)
+            {
+                if (item is null) continue;
+                var d = DynamicRow.ToDict(item);
+                var code = d.GetStr("Code");
+                if (code.Length > 0) rows.Add((code, d.GetStr("Text")));
+            }
+        }
+        return new Export.SapImportSupplierInvoiceExcel.PaymentTerms(rows);
     }
 
     [HttpPost("api/documents/{docId:int}/map")]
@@ -705,6 +878,33 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             module == "SO" && IsGlcSalesOrg(header.GetStr("salesOrg")));
         var resLines = (List<Dictionary<string, object?>>)res["lines"]!;
         var resHeader = (Dictionary<string, object?>)res["header"]!;
+
+        // What the document does not print, the matched master supplies. A shipping bundle is
+        // headed by the FORM SHIPPING EXPENSE sheet, an internal cost summary that carries no tax
+        // id and no branch, so those fields came back empty and the person had to type in what
+        // the system already knows — the vendor has just been matched, and its master row holds
+        // the number Finance registered. Only empty fields are filled, so anything actually read
+        // off the document always wins, and nothing is invented: a field with no master value
+        // stays empty.
+        if (module is "AP" or "II"
+            && resHeader.Get("vendor") is Dictionary<string, object?> venRes
+            && venRes.GetStr("status") is "ok" or "manual"
+            && masterData.Vendors.FirstOrDefault(x => x.GetStr("VendorCode") == venRes.GetStr("code")) is { } venMaster)
+        {
+            var filled = new List<string>();
+            void FillFromMaster(string headerField, string masterField)
+            {
+                if (header.GetStr(headerField).Trim().Length > 0) return;
+                var value = venMaster.GetStr(masterField).Trim();
+                if (value.Length == 0) return;
+                header[headerField] = value;
+                filled.Add(headerField);
+            }
+            FillFromMaster("vendorTaxId", "TaxId");
+            FillFromMaster("branch", "Branch");
+            FillFromMaster("paymentTerms", "PaymentTerms");
+            if (filled.Count > 0) await repo.UpdateHeaderAsync(docId, module, header);
+        }
 
         await using (var conn = await GetDbAsync())
         await using (var tx = await conn.BeginTransactionAsync())
@@ -820,7 +1020,9 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         if (byVendor)
         {
             // Tax rows (WHT / VAT) belong to the document's own vendor, which is the one carrying
-            // the largest cost total — the shipping agent that re-bills everything else.
+            // the largest cost total — the shipping agent that re-bills everything else — unless
+            // the row names a vendor itself: the import VAT on a customs receipt is paid to the
+            // Customs Department and has to be posted on that vendor's own document.
             static string VendorOf(Dictionary<string, object?> l) =>
                 ((l.Get("extra") as Dictionary<string, object?>)?.GetStr("vendorCode") ?? "").Trim();
             static bool IsTaxRow(Dictionary<string, object?> l) =>
@@ -832,13 +1034,21 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
                               .ToList();
             if (byCode.Count < 2) throw new HttpApiException(400, "This document's lines carry fewer than 2 vendor codes, so there is nothing to split");
             var mainVendor = byCode[0].Key;
+            var vendorsWithCosts = byCode.Select(g => g.Key).ToHashSet(StringComparer.Ordinal);
             var gNo = 0;
             foreach (var g in byCode.OrderBy(g => g.Key, StringComparer.Ordinal))
             {
                 gNo++;
                 groupVendor[gNo] = g.Key;
                 var list = g.ToList();
-                if (g.Key == mainVendor) list.AddRange(lines.Where(IsTaxRow));
+                // A tax row follows its own vendor code when that vendor is one of the groups;
+                // a row with no code, or with one that has no costs of its own to be posted
+                // against, stays with the main vendor.
+                list.AddRange(lines.Where(IsTaxRow).Where(l =>
+                {
+                    var v = VendorOf(l);
+                    return v.Length > 0 && vendorsWithCosts.Contains(v) ? v == g.Key : g.Key == mainVendor;
+                }));
                 groups[gNo] = list;
             }
             var orphans = lines.Where(l => !IsTaxRow(l) && VendorOf(l).Length == 0).ToList();

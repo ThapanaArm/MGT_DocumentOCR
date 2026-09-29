@@ -1,4 +1,4 @@
-namespace MgtOcr.Core.Config;
+﻿namespace MgtOcr.Core.Config;
 
 // Ported from app/config.py — every field here mirrors a value read from .env there.
 // Keep field names close to the Python names so cross-referencing during the port stays easy.
@@ -62,6 +62,16 @@ public class AppConfig
     // Sap:WriteEnvironment the write one. With WriteEnvironment = "dev" and ActiveEnvironment =
     // "prod", master data is matched against live production while nothing is ever created there.
     // When Sap:WriteEnvironment is absent these fall back to the read URLs, i.e. the old behaviour.
+    // --- Excel export (Input VAT / Journal Voucher) ---
+    // Company name printed on row 1 of the workbook, and the two G/L accounts written into the
+    // "Line 1" / "Line 2" columns. Defaults are the values in the sample template Finance sent;
+    // they are configuration (Export:*) so the numbers can change without touching the code.
+    public string ExportCompanyName { get; init; } = "";
+    public string InputVatLine1Account { get; init; } = "";
+    public string InputVatLine2Account { get; init; } = "";
+    /// <summary>Base of the JOURNAL VOUCHER running number (Export:JournalVoucher:StartRunning).</summary>
+    public long JournalVoucherStartRunning { get; init; } = 1000000;
+
     public string SapWriteEnvironment { get; init; } = "";
     public string SapWriteBaseUrl { get; init; } = "";
     public string SapSalesOrderWriteBaseUrl { get; init; } = "";
@@ -96,6 +106,23 @@ public class AppConfig
     // null, never blocks the save flow). Point this at API_BILLING_DOCUMENT_SRV.
     public string SapBillingBaseUrl { get; init; } = "";
     public string SapBillingAuthHeader { get; init; } = "";
+
+    // Supplier Invoice posting — API_SUPPLIERINVOICE_PROCESS_SRV. This is the only route that can
+    // reference a purchase order: the Import Supplier Invoices spreadsheet has no PO column at all
+    // (its two bands are Header Data and G/L Account Items), so a freight invoice billed against a
+    // PO can only be created through this service, via to_SuplrInvcItemPurOrdRef.
+    //
+    // It has its own environment key rather than following Sap:ActiveEnvironment, and that key
+    // defaults to dev: this service CREATES documents, and posting a test invoice into the live
+    // tenant is not something a misread setting elsewhere should be able to cause.
+    public string SapSupplierInvoiceBaseUrl { get; init; } = "";
+    public string SapSupplierInvoiceAuthHeader { get; init; } = "";
+
+    // Purchase Order lookup — API_PURCHASEORDER_PROCESS_SRV, read-only. A supplier invoice has to
+    // name the PO ITEM it is billing (PurchaseOrderItem 10, 20, …), and that number exists only in
+    // SAP; the shipping form does not carry it. Blank BaseUrl = not configured = no lookup.
+    public string SapPurchaseOrderBaseUrl { get; init; } = "";
+    public string SapPurchaseOrderAuthHeader { get; init; } = "";
 
     // One row per legal entity (Sales Organization + Company Code + Plant) this system posts
     // Sales Orders for. Per user: Plant is what identifies the company in practice (e.g. 2100 =

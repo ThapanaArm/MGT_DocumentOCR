@@ -18,3 +18,8 @@ _to_delete/
 tmp/
 /sql
 /Claude outputs
+
+# Real API keys live here and must never be committed — GitHub push protection
+# blocks the push, and a key in the history is a key that has to be rotated.
+# appsettings.Development.json.example shows which fields to fill in.
+backend/src/MgtOcr.Api/appsettings.Development.json

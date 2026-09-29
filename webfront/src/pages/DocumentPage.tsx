@@ -26,6 +26,15 @@ import {
   SO_REMARK_H,
   SO_TOTALS_H,
   WHT_CODE_RATE,
+  agencyNameEn,
+  AGENCY_TAX_ID,
+  isDutyRow,
+  GL_FREIGHT_HANDLING,
+  GL_INPUT_TAX,
+  GL_DEFERRED_INPUT_TAX,
+  GL_DUTY,
+  GL_WITHHOLDING_TAX,
+  dutyLabelEn,
 } from '../constants/fields';
 import { SEND_DISABLED } from '../constants/flags';
 import { dt, fmt, fmtCost, intFmt, moduleLabel, statusBadge } from '../utils/format';
@@ -47,7 +56,10 @@ import LineExtraModal from '../components/document/LineExtraModal';
 import MasterEditModal, {
   type MasterEditState,
 } from '../components/master/MasterEditModal';
-import { createMaster } from '../api/masters';
+import { fetchBlobUrl,
+  ApiError,
+} from '../api/client';
+import { createMaster, updateMaster } from '../api/masters';
 import type { SapBusinessPartner, SapLastPrice, SapMaterial, SapMaterialDetail, SapPartnerFunctionLink, SapSalesEmployee, SapSalesEmployeeSuggestion } from '../api/sap';
 import { getSapLastPrice, getSapMaterialDetail, getSapSalesEmployees, getSapLastSalesEmployee } from '../api/sap';
 import type {
@@ -153,7 +165,10 @@ function seedWhtItems(d: DocModel): DocModel {
           // The description the read writes carries the rate ("Withholding Tax 1% ..."), so the
           // base of the invoice that was actually withheld can be worked back out of it. Falls
           // back to the document subtotal when the rate is unknown.
-          baseFc: rate && amtFc > 0 ? Math.round((amtFc / rate) * 100) / 100 : base,
+          // base = amount / (rate%). WHT_CODE_RATE holds whole percents (3 means 3%), so the rate
+          // has to be divided by 100 first — dividing by 3 instead of 0.03 made the base 100x too
+          // small (63.00 at 3% came out as 21.00 instead of 2,100.00).
+          baseFc: rate && amtFc > 0 ? Math.round((amtFc / (rate / 100)) * 100) / 100 : base,
           amtFc,
           vendorCode: String(l.extra?.vendorCode ?? ''),
         };
@@ -179,23 +194,79 @@ function seedWhtItems(d: DocModel): DocModel {
 // G/L account / cost center are not on the document, so they are left for the user to fill.
 // Only when glItems is still empty, so rows the user already edited/saved are never replaced.
 function seedGlItems(d: DocModel): DocModel {
-  if (d.module !== 'II') return d;
+  // Both invoice modules. It used to seed FB60 (II) only, so a PO-referenced invoice (AP/MIRO)
+  // showed an empty G/L Account Items table and there was nowhere to pick the G/L account, tax
+  // code or assignment before exporting — the file came out with those columns blank.
+  if (d.module !== 'II' && d.module !== 'AP') return d;
   if (d.header.glItems && d.header.glItems.length) return d;
-  const items = (d.lines || [])
-    // "VAT" rows are the per-invoice VAT the read appended; they belong to the Tax tab only.
-    .filter((l) => String(l.extCode || '').toUpperCase() !== 'VAT')
+
+  // The shape of a posted document (5100001269 and the MIRO examples Finance keyed by hand):
+  // the costs go in exempt, the VAT is its own line per tax invoice, and withholding tax is a
+  // credit line marked "WHT". Assignment carries the PO number on the cost lines and the tax
+  // invoice number on the tax lines, which is how Finance ties them back afterwards.
+  const poRef = String(d.header.poRef ?? '').trim();
+  const text = (v: unknown) => String(v ?? '').slice(0, 50); // SAP item text is 50 chars
+  const row = (o: Record<string, unknown>) => ({
+    glAccount: '', drCr: 'D', amount: 0, taxCode: 'VX',
+    assignment: '', itemText: '', costCenter: '', ...o,
+  });
+
+  // With a purchase order behind the invoice, the costs are posted against the PO — in SAP they
+  // sit under Purchasing Document References, which is what our PO Reference tab shows. Repeating
+  // them as G/L Account Items would post them a second time and throw the balance out, so the
+  // G/L table then carries only the taxes. Without a PO (FB60) there is nothing to post the costs
+  // against, so they stay here.
+  const hasPo = poRef.length > 0;
+
+  const costs = hasPo ? [] : (d.lines || [])
+    // VAT and withholding rows live in their own tabs; they come back below, reviewed, rather
+    // than twice — once raw from the read and once from the tab.
+    .filter((l) => !['VAT', 'WHT'].includes(String(l.extCode || '').toUpperCase()))
     .filter((l) => (Number(l.amount) || 0) !== 0)
-    .map((l) => ({
-      glAccount: '',
-      // Withholding-tax rows the OCR appended to a shipping bundle (extCode "WHT") are credits;
-      // the cost rows from the FORM SHIPPING EXPENSE table are debits.
-      drCr: l.extCode === 'WHT' ? 'C' : 'D', // GlItemsTable's values: D = S-Debit, C = H-Credit
-      amount: Number(l.amount) || 0,
-      taxCode: '',
-      assignment: '',
-      itemText: String(l.desc || '').slice(0, 50), // SAP item text is 50 chars
-      costCenter: '',
-    }));
+    .map((l) =>
+      row({
+        // Duty repeated from the customs paperwork is not a freight cost and has no account yet.
+        glAccount: isDutyRow(l) ? GL_DUTY : GL_FREIGHT_HANDLING,
+        amount: Number(l.amount) || 0,
+        assignment: poRef,
+        itemText: text(l.desc),
+      }),
+    );
+
+  // One line per tax invoice, to the account that matches it. Which account is decided by the
+  // Input Tax Type the person picked in the Tax tab — that dropdown IS the mapping, and it is
+  // what they reviewed. The tax code's first letter is only a fallback for a row read before
+  // anyone touched it: D1/D0/D2 are the deferred codes, so they imply deferred tax.
+  const taxes = ((d.header.taxItems as Array<Record<string, any>>) || [])
+    .filter((t) => (Number(t.docCurrencyAmt) || 0) !== 0)
+    .map((t) => {
+      const code = String(t.taxCode ?? '').trim();
+      const kind = String(t.taxKind ?? '').trim().toUpperCase();
+      const deferred = kind ? kind === 'DEFERRED' : code.toUpperCase().startsWith('D');
+      return row({
+        glAccount: deferred ? GL_DEFERRED_INPUT_TAX : GL_INPUT_TAX,
+        amount: Number(t.docCurrencyAmt) || 0,
+        taxCode: code,
+        assignment: String(t.taxDocNo ?? ''),
+        itemText: text(t.issuerName),
+      });
+    });
+
+  // Withholding tax on a PO-referenced invoice is carried by SAP's own Withholding Tax tab, which
+  // computes and posts it — a credit G/L line as well would deduct it twice.
+  const wht = (hasPo ? [] : ((d.header.whtItems as Array<Record<string, any>>) || []))
+    .filter((w) => (Number(w.amtFc) || 0) !== 0)
+    .map((w) =>
+      row({
+        glAccount: GL_WITHHOLDING_TAX,
+        drCr: 'C', // withholding is deducted from what we pay, so it is the credit side
+        amount: Number(w.amtFc) || 0,
+        assignment: poRef,
+        itemText: 'WHT',
+      }),
+    );
+
+  const items = [...costs, ...taxes, ...wht];
   if (!items.length) return d;
   return { ...d, header: { ...d.header, glItems: items } };
 }
@@ -213,23 +284,59 @@ const HEAD_OFFICE_BUSINESS_PLACE = '0000';
 function seedHeaderTaxCode(d: DocModel): DocModel {
   if (d.module !== 'AP' && d.module !== 'II') return d;
   const businessPlace = String(d.header.businessPlace ?? '').trim() || HEAD_OFFICE_BUSINESS_PLACE;
-  if (d.header.taxCode === HEADER_TAX_CODE && d.header.businessPlace === businessPlace) return d;
-  return { ...d, header: { ...d.header, taxCode: HEADER_TAX_CODE, businessPlace } };
+  // Per Finance, the vendor branch on these documents is always head office, so an empty Branch
+  // is filled rather than left for the person to type the same four characters every time.
+  const branch = String(d.header.branch ?? '').trim() || HEAD_OFFICE_BUSINESS_PLACE;
+  if (
+    d.header.taxCode === HEADER_TAX_CODE
+    && d.header.businessPlace === businessPlace
+    && d.header.branch === branch
+  ) {
+    return d;
+  }
+  return { ...d, header: { ...d.header, taxCode: HEADER_TAX_CODE, businessPlace, branch } };
 }
 
+// Branch is four digits, head office 0000 — per Finance. A five-digit value (an older document,
+// or a read that padded it) is trimmed to its last four rather than shown as it came.
 function padBranch(value: unknown): string {
   const digits = String(value ?? '').replace(/\D/g, '');
-  return digits.length ? digits.slice(-5).padStart(5, '0') : '00000';
+  return digits.length ? digits.slice(-4).padStart(4, '0') : HEAD_OFFICE_BUSINESS_PLACE;
 }
 
 function seedTaxItems(d: DocModel): DocModel {
   if (d.module !== 'AP' && d.module !== 'II') return d;
   // Rows the user already has stay as they are — only a row with no D/C at all gets the S default.
   if (d.header.taxItems && d.header.taxItems.length) {
-    const items = d.header.taxItems.map((t: Record<string, unknown>) =>
-      t.drCr ? t : { ...t, drCr: 'S' },
-    );
-    return { ...d, header: { ...d.header, taxItems: items } };
+    const items = d.header.taxItems.map((t: Record<string, unknown>) => {
+      const row: Record<string, unknown> = t.drCr ? { ...t } : { ...t, drCr: 'S' };
+      // A row read before the agency names were translated still holds the Thai name; swap it
+      // here so the screen and the exported file are in English without needing a re-read.
+      const en = agencyNameEn(row.issuerName);
+      if (en !== String(row.issuerName ?? '')) row.issuerName = en;
+      return row;
+    });
+    // Duty rows that are not on the Tax tab yet are appended rather than ignored: a document read
+    // before duties were recognised has its VAT row already, so the whole seed used to be skipped
+    // and Import Duty / Excise Tax / Interior Tax stayed stranded in the item list.
+    const missing = (d.lines || [])
+      .filter((l) => isDutyRow(l) && (Number(l.amount) || 0) !== 0)
+      .filter((l) => !items.some(
+        (t: Record<string, unknown>) => String(t.label ?? '').trim() === String(l.desc ?? '').trim(),
+      ))
+      .map((l) => ({
+        label: dutyLabelEn(l.desc),
+        drCr: 'S',
+        docCurrencyAmt: Number(l.amount) || 0,
+        taxCode: 'VX',
+        validFrom: '',
+        taxRate: '0',
+        taxKind: '',
+        vendorCode: String(l.extra?.vendorCode ?? ''),
+        issuerName: '', issuerTaxId: '', issuerBranch: '', taxDocNo: '', taxDocDate: '',
+        baseAmount: 0,
+      }));
+    return { ...d, header: { ...d.header, taxItems: linkDutyRows([...items, ...missing]) } };
   }
   const amt = Number(d.header.vatAmount) || 0;
   const rate = Number(d.header.vatRate) || 0;
@@ -260,7 +367,7 @@ function seedTaxItems(d: DocModel): DocModel {
     // Identity of the tax invoice behind this row. The Input VAT file Finance sends to SAP is one
     // row per tax invoice, so these ride on the tax row and are reviewable before export. The
     // read fills them; base amount falls back to VAT / rate when the document did not spell it out.
-    issuerName: String(src?.extra?.issuerName ?? ''),
+    issuerName: agencyNameEn(src?.extra?.issuerName),
     issuerTaxId: String(src?.extra?.issuerTaxId ?? ''),
     // Branch is 5 digits in the Input VAT file, head office = 00000. A read that returns 0 or "0"
     // must still show as 00000, so pad rather than take the value as it comes.
@@ -298,16 +405,66 @@ function seedTaxItems(d: DocModel): DocModel {
   // Customs charges (import duty, excise, interior tax) are not items on the FORM, so the read
   // returns them as "DUTY" rows and they are recorded here in the Tax tab, named per row.
   const dutyRows = (d.lines || [])
-    .filter((l) => String(l.extCode || '').toUpperCase() === 'DUTY')
+    .filter((l) => isDutyRow(l))
     .map((l) =>
-      mkRow(Number(l.amount) || 0, '', String(l.extra?.vendorCode ?? ''), String(l.desc ?? '')),
+      mkRow(Number(l.amount) || 0, '', String(l.extra?.vendorCode ?? ''), dutyLabelEn(l.desc)),
     )
     .filter((r) => r.docCurrencyAmt > 0)
     // Import duty / excise carry no input VAT of their own — booked with VX (Input VAT Exempt).
     .map((r) => ({ ...r, taxCode: 'VX', taxRate: '0' }));
-  const rows = [...vatRows, ...dutyRows];
+  const rows = linkDutyRows(fillMissingTaxIds([...vatRows, ...dutyRows]));
   if (!rows.length) return d;
   return { ...d, header: { ...d.header, taxItems: rows } };
+}
+
+// A tax invoice from the same issuer appears more than once in a bundle (a government receipt
+// especially), and the read does not always pick the tax ID off every copy — the number is often
+// printed small under the agency's name. When one row has it and another from the same issuer does
+// not, copy it across rather than exporting a blank cell. Only ever copies within the same
+// document, and never overwrites a value that was read.
+// A duty row has no tax invoice of its own — it is a line on the SAME customs receipt as that
+// vendor's VAT row. Take the receipt's issuer, tax ID, branch, number and date from that row so the
+// Tax tab shows one consistent document instead of a dated VAT row beside blank duty rows. Also
+// puts the label into English. Never overwrites a value that is already there.
+function linkDutyRows<T extends Record<string, unknown>>(rows: T[]): T[] {
+  const source = new Map<string, T>();
+  for (const r of rows) {
+    if (!String(r.taxDocDate ?? '').trim()) continue;
+    const key = String(r.vendorCode ?? '').trim();
+    if (!source.has(key)) source.set(key, r);
+  }
+  return rows.map((r) => {
+    const label = dutyLabelEn(r.label);
+    const next: Record<string, unknown> = label === r.label ? { ...r } : { ...r, label };
+    const isDuty = String(r.taxCode ?? '').toUpperCase() === 'VX';
+    if (isDuty && !String(r.taxDocDate ?? '').trim()) {
+      const from = source.get(String(r.vendorCode ?? '').trim());
+      if (from) {
+        for (const k of ['issuerName', 'issuerTaxId', 'issuerBranch', 'taxDocNo', 'taxDocDate']) {
+          if (!String(next[k] ?? '').trim()) next[k] = from[k];
+        }
+      }
+    }
+    return next as T;
+  });
+}
+
+function fillMissingTaxIds<T extends { issuerName?: string; issuerTaxId?: string }>(rows: T[]): T[] {
+  const byIssuer = new Map<string, string>();
+  for (const r of rows) {
+    const name = String(r.issuerName ?? '').trim().toLowerCase();
+    const id = String(r.issuerTaxId ?? '').trim();
+    if (name && id && !byIssuer.has(name)) byIssuer.set(name, id);
+  }
+  if (!byIssuer.size) return rows;
+  return rows.map((r) => {
+    if (String(r.issuerTaxId ?? '').trim()) return r;
+    const name = String(r.issuerName ?? '').trim();
+    // Another copy of the same issuer's invoice in this bundle, then the confirmed list of
+    // government-agency numbers. Never an invented value.
+    const found = byIssuer.get(name.toLowerCase()) ?? AGENCY_TAX_ID[name];
+    return found ? { ...r, issuerTaxId: found } : r;
+  });
 }
 
 // Merges person-confirmed AI material matches into a GET .../preview response for display only
@@ -379,6 +536,56 @@ export default function DocumentPage() {
 
   // modals
   const [reviewOpen, setReviewOpen] = useState(false);
+  // The original file lives behind the same Bearer-token auth as every other endpoint, and a plain
+  // <iframe src="/api/..."> cannot send that header — the request came back 401 and the viewer was
+  // simply blank. Fetch it with the token instead and hand the iframe/img a blob URL.
+  const [fileUrl, setFileUrl] = useState<string | null>(null);
+  const [fileErr, setFileErr] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
+  // Why the document could not be loaded, shown in place of a bare "Failed to load document".
+  const [failedReason, setFailedReason] = useState('');
+  // The three export files live behind one button so the header stays a single row — adding a
+  // fourth file later costs a line in the menu, not another button competing for the width.
+  const [exportOpen, setExportOpen] = useState(false);
+  const exportMenuRef = useRef<HTMLDivElement | null>(null);
+
+  // Close the export menu on a click anywhere outside it, and on Escape.
+  useEffect(() => {
+    if (!exportOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (!exportMenuRef.current?.contains(e.target as Node)) setExportOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setExportOpen(false); };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [exportOpen]);
+
+  // Load (and release) the original file whenever the viewer is opened.
+  useEffect(() => {
+    if (!reviewOpen || !doc || doc.provider === 'demo') return;
+    let url: string | null = null;
+    let alive = true;
+    setFileErr(null);
+    setFileUrl(null);
+    fetchBlobUrl(`/api/documents/${doc.docId}/file`)
+      .then((u) => {
+        url = u;
+        if (alive) setFileUrl(u);
+        else URL.revokeObjectURL(u);
+      })
+      .catch((e) => {
+        if (alive) setFileErr(e?.message || 'Could not open the original file');
+      });
+    return () => {
+      alive = false;
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [reviewOpen, doc?.docId, doc?.provider]);
+
   const [rawText, setRawText] = useState<string | null>(null);
   const [payload, setPayload] = useState<Record<string, any> | null>(null);
   const [splitOpen, setSplitOpen] = useState(false);
@@ -416,9 +623,23 @@ export default function DocumentPage() {
     loadOcrProviders();
     loadMasters();
     (async () => {
-      const d = await guard(() => getDocument(id));
+      let reason = '';
+      const d = await guard(async () => {
+        try {
+          return await getDocument(id);
+        } catch (e) {
+          // Keep why it failed. "Failed to load document" on its own sends people hunting
+          // through the API logs for what is usually a stale link to a document that is not
+          // there — the id and the status say it outright.
+          reason = e instanceof ApiError && e.status === 404
+            ? `Document #${id} does not exist. The link may be from an older session — open it from the Invoice List instead.`
+            : e instanceof Error ? e.message : String(e);
+          throw e;
+        }
+      });
       if (!alive) return;
       if (!d) {
+        setFailedReason(reason || `Document #${id} could not be loaded.`);
         setFailed(true);
         return;
       }
@@ -504,7 +725,17 @@ export default function DocumentPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isMgt, doc?.docId, map]);
 
-  if (failed) return <div className="card"><div className="empty">Failed to load document</div></div>;
+  if (failed)
+    return (
+      <div className="card">
+        <div className="empty">
+          <p>{failedReason || 'Failed to load document'}</p>
+          <button className="btn sm ghost" onClick={() => navigate('/list/AP')}>
+            <i className="fa-solid fa-list" /> Go to Invoice List
+          </button>
+        </div>
+      </div>
+    );
   if (!doc || !masters) return <div className="card"><div className="empty">Loading…</div></div>;
 
   const h = doc.header;
@@ -748,23 +979,86 @@ export default function DocumentPage() {
   // had to be typed in by hand. A supplier is an A_BusinessPartner in S/4HANA exactly like a
   // customer, so the same lookup serves both — VendorCode is the SAP Business Partner id, which
   // is what MIRO/FB60 need anyway.
+  // Download the Input VAT workbook for this document. The endpoint sits behind the same Bearer
+  // auth as everything else, so the file is fetched with the token and handed to the browser as a
+  // blob rather than linked to directly (a plain <a href> would come back 401).
+  const downloadExport = (kind: 'input-vat' | 'journal-voucher' | 'sap-import', fileName: string, toast: string) =>
+    guard(async () => {
+      setExporting(true);
+      try {
+        setExportOpen(false);
+        const url = await fetchBlobUrl(`/api/documents/${doc.docId}/export/${kind}`);
+        // Guard against saving something that is not a workbook. This bit once: the API route was
+        // missing from the running build, the SPA fallback answered with index.html under a plain
+        // 200, and the browser wrote that HTML to disk as an .xlsx that Excel then refused to
+        // open. Check what actually came back rather than trusting the status code.
+        const blob = await (await fetch(url)).blob();
+        if (!/sheet|excel|octet-stream/i.test(blob.type)) {
+          URL.revokeObjectURL(url);
+          throw new Error(
+            'The server did not return a spreadsheet — the API is most likely running an older ' +
+              'build without this export. Rebuild and restart the backend, then try again.',
+          );
+        }
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = fileName;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        // Give the browser a moment to start the download before the blob is released.
+        setTimeout(() => URL.revokeObjectURL(url), 10_000);
+        showToast(toast);
+      } finally {
+        setExporting(false);
+      }
+    });
+
+  const exportInputVat = () =>
+    downloadExport('input-vat', `InputVat_${doc.docId}.xlsx`, 'Input VAT file downloaded');
+
+  const exportJournalVoucher = () =>
+    downloadExport('journal-voucher', `JournalVoucher_${doc.docId}.xlsx`, 'Journal Voucher file downloaded');
+
+  // The file the SAP Fiori app "Import Supplier Invoices" reads. Same content the direct post
+  // sends, in the shape that app's Download Template produces, for whoever wants to check it
+  // before it goes in.
+  const exportSapImport = () =>
+    downloadExport(
+      'sap-import',
+      `SapImportSupplierInvoice_${doc.docId}.xlsx`,
+      'SAP import file downloaded',
+    );
+
   const useSapVendor = (bp: SapBusinessPartner) =>
     guard(async () => {
       const code = bp.businessPartnerId;
-      await createMaster('vendors', {
-        VendorCode: code,
-        SapVendorCode: code,
-        VendorName: bp.businessPartnerFullName || bp.businessPartnerName || h.vendorName || '',
+      // ocr.Vendor's columns are short (VendorCode/TaxId 20, VendorName 200, Branch 10,
+      // Currency 5), and SQL Server rejects the whole INSERT rather than trimming, so every value
+      // is cut to fit here. Branch especially: the document says "Head Office" but the master
+      // stores the 5-digit code, so it goes through the same normalizer the Tax tab uses.
+      const cut = (v: unknown, n: number) => String(v ?? '').trim().slice(0, n);
+      const row = {
+        VendorCode: cut(code, 20),
+        SapVendorCode: cut(code, 20),
+        VendorName: cut(bp.businessPartnerFullName || bp.businessPartnerName || h.vendorName, 200),
         // SAP's own Tax ID wins when it has one; the document's is the fallback, same rule as
         // useSapCustomer — SAP is the source of truth and the document may carry a stale one.
-        TaxId: bp.taxId || h.vendorTaxId || '',
-        Branch: h.branch || '',
-        Currency: h.currency || 'THB',
+        TaxId: cut(bp.taxId || h.vendorTaxId, 20),
+        Branch: padBranch(h.branch),
+        Currency: cut(h.currency || 'THB', 5),
         IsActive: 1,
-      });
+      };
+      // VendorCode is the primary key, so a second "Use" on a supplier already in the master used
+      // to fail with a duplicate-key error instead of simply matching. Refresh the list first so
+      // the check is not made against a stale copy, then update in place rather than insert.
+      await loadMasters(true);
+      const already = (masters?.vendors ?? []).some((v) => String(v.VendorCode).trim() === row.VendorCode);
+      if (already) await updateMaster('vendors', row.VendorCode, row);
+      else await createMaster('vendors', row);
       await loadMasters(true);
       setManualHeader('vendor', code);
-      showToast('Vendor added from SAP and matched');
+      showToast(already ? 'Vendor refreshed from SAP and matched' : 'Vendor added from SAP and matched');
     });
 
   // MGT uses the real Zoho Account Code stored in Customer.ComcompyCodeSAP.
@@ -1353,6 +1647,22 @@ export default function DocumentPage() {
   // withholding tax sit on the main vendor's invoices (the shipping agent that re-bills the
   // rest), so they only show up when that vendor is the one selected. Read-only while filtered —
   // the stored header totals still cover the whole document.
+  // The vendor carrying the largest cost total is the one the bundle is paid to — the shipping
+  // agent that re-bills everything else. A tax row with no vendor code of its own belongs to it:
+  // the supporting pages of a long bundle are read without the form in view, so their VAT rows
+  // come back untagged, and the split already keeps untagged rows with this vendor.
+  const mainVendorCode = (() => {
+    if (doc.module !== 'AP' && doc.module !== 'II') return '';
+    const totals = new Map<string, number>();
+    for (const l of doc.lines) {
+      if (l.extCode === 'WHT' || l.extCode === 'VAT' || l.extCode === 'DUTY') continue;
+      const c = String(l.extra?.vendorCode ?? '').trim();
+      if (!c) continue;
+      totals.set(c, (totals.get(c) ?? 0) + (Number(l.amount) || 0));
+    }
+    return [...totals.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? '';
+  })();
+
   const vendorTotals = (() => {
     if (!vendorFilter || (doc.module !== 'AP' && doc.module !== 'II')) return null;
     const codeOf = (l: DocLine) => String(l.extra?.vendorCode ?? '').trim();
@@ -1365,22 +1675,18 @@ export default function DocumentPage() {
       if (!c) continue;
       costByVendor.set(c, (costByVendor.get(c) ?? 0) + (Number(l.amount) || 0));
     }
-    const mainVendor = [...costByVendor.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? '';
+    const mainVendor = mainVendorCode;
     const subTotal = costByVendor.get(vendorFilter) ?? 0;
-    // Tax rows carry their own vendor code when the read could match them to a form row; only
-    // when none of them do does the whole tax fall back to the main vendor.
-    const taxSum = (code: string) => {
-      const rows = doc.lines.filter((l) => l.extCode === code);
-      const tagged = rows.filter((l) => codeOf(l).length > 0);
-      if (tagged.length > 0) {
-        return tagged
-          .filter((l) => codeOf(l) === vendorFilter)
-          .reduce((a, l) => a + (Number(l.amount) || 0), 0);
-      }
-      return vendorFilter === mainVendor
-        ? rows.reduce((a, l) => a + (Number(l.amount) || 0), 0)
-        : 0;
-    };
+    // A tax row carries its own vendor code when the read could match it to a form row; one that
+    // does not belongs to the main vendor. Deciding this row by row — rather than letting a
+    // single tagged row decide it for all of them — is what keeps these totals and the Tax tab
+    // showing the same thing: a bundle whose duty rows were tagged and whose VAT rows were not
+    // put the whole VAT here and nothing at all in the tab.
+    const taxSum = (code: string) =>
+      doc.lines
+        .filter((l) => l.extCode === code)
+        .filter((l) => (codeOf(l) || mainVendor) === vendorFilter)
+        .reduce((a, l) => a + (Number(l.amount) || 0), 0);
     const vatAmount = taxSum('VAT');
     // Customs duty is not billed as an item but it is still paid to this vendor, so it counts
     // towards the net total even though it sits in the Tax tab.
@@ -1459,9 +1765,10 @@ export default function DocumentPage() {
     if (!vendorFilter) return { items: rows, at: rows.map((_, i) => i) };
     const at: number[] = [];
     rows.forEach((r, i) => {
-      if (String(r.vendorCode ?? '') === vendorFilter) at.push(i);
+      // Untagged rows belong to the main vendor, the same rule the totals above use.
+      if ((String(r.vendorCode ?? '').trim() || mainVendorCode) === vendorFilter) at.push(i);
     });
-    if (at.length === 0 && !rows.some((r) => String(r.vendorCode ?? ''))) {
+    if (at.length === 0 && !mainVendorCode) {
       return { items: rows, at: rows.map((_, i) => i) };
     }
     return { items: at.map((i) => rows[i]), at };
@@ -1608,7 +1915,10 @@ export default function DocumentPage() {
           )}
           <span className="filechip"><i className="fa-solid fa-file-lines" /> {doc.fileName}</span>
           <span className={'badge ' + sb.cls}>{sb.label}</span>
-          <div className="sp" />
+          {/* Every action in one nowrap group on its own row, left aligned under the title. The
+              buttons never split across rows, so nobody has to hunt for "Change Document" on a
+              line of its own, and the row starts where the eye already is. */}
+          <div className="card-h-actions">
           {!posted && !isSplit && !doc.sourceDocId && (
             <OcrProviderSelect
               providers={providers}
@@ -1626,6 +1936,33 @@ export default function DocumentPage() {
           <button className="btn sm ghost" onClick={openRaw}>
             <i className="fa-solid fa-file-lines" /> Extracted Text
           </button>
+          {(doc.module === 'AP' || doc.module === 'II') && (
+            <div className="btnmenu" ref={exportMenuRef}>
+              <button
+                className="btn sm ghost"
+                onClick={() => setExportOpen((v) => !v)}
+                disabled={exporting}
+                aria-haspopup="menu"
+                aria-expanded={exportOpen}
+              >
+                <i className="fa-solid fa-file-excel" /> {exporting ? 'Preparing…' : 'Export'}
+                <i className="fa-solid fa-chevron-down btnmenu-caret" />
+              </button>
+              {exportOpen && (
+                <div className="btnmenu-list" role="menu">
+                  <button role="menuitem" onClick={exportInputVat} disabled={exporting}>
+                    <i className="fa-solid fa-file-excel" /> Input VAT
+                  </button>
+                  <button role="menuitem" onClick={exportJournalVoucher} disabled={exporting}>
+                    <i className="fa-solid fa-file-excel" /> Journal Voucher
+                  </button>
+                  <button role="menuitem" onClick={exportSapImport} disabled={exporting}>
+                    <i className="fa-solid fa-file-excel" /> SAP Import
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
           <button className="btn sm ghost" onClick={() => setReviewOpen(true)}>
             <i className="fa-solid fa-eye" /> View document
           </button>
@@ -1637,9 +1974,13 @@ export default function DocumentPage() {
           <button className="btn sm ghost" onClick={() => navigate('/import/' + doc.module)}>
             Change Document
           </button>
+          </div>
         </div>
         <div className="card-b">
-          {doc.module === 'AP' && (
+          {/* Shown for both invoice modules: picking "Expense" moves the document from AP (MIRO,
+              matched against materials) to II (FB60, posted to G/L accounts), so the dropdown has
+              to stay reachable afterwards to move it back. */}
+          {(doc.module === 'AP' || doc.module === 'II') && (
             <div className="f" style={{ maxWidth: 320, marginBottom: 14 }}>
               <label>Document Type</label>
               <select
@@ -1907,22 +2248,29 @@ export default function DocumentPage() {
 
       {/* ---- Modals ---- */}
       <Modal open={reviewOpen} onClose={() => setReviewOpen(false)} wide>
-        <ModalHeader title={`<i className="fa-solid fa-eye" /> View document — ${doc.fileName}`} onClose={() => setReviewOpen(false)} />
+        <ModalHeader
+          title={<><i className="fa-solid fa-eye" /> View document — {doc.fileName}</>}
+          onClose={() => setReviewOpen(false)}
+        />
         <div className="card-b">
           <p className="hint">Compare the original file with the data extracted in the HEADER/DETAIL sections</p>
           {doc.provider === 'demo' ? (
             <p className="hint">This document was generated from sample data (demo) — no original file to view</p>
+          ) : fileErr ? (
+            <p className="hint">Could not open the original file: {fileErr}</p>
+          ) : !fileUrl ? (
+            <p className="hint">Loading the original file…</p>
           ) : ['jpg', 'jpeg', 'png', 'tif', 'tiff', 'bmp', 'webp'].includes(
               (doc.fileName || '').split('.').pop()?.toLowerCase() || '',
             ) ? (
             <img
-              src={`/api/documents/${doc.docId}/file`}
+              src={fileUrl}
               style={{ maxWidth: '100%', borderRadius: 'var(--r3)', border: '1px solid var(--line)' }}
               alt=""
             />
           ) : (
             <iframe
-              src={`/api/documents/${doc.docId}/file`}
+              src={fileUrl}
               style={{ width: '100%', height: '78vh', border: '1px solid var(--line)', borderRadius: 'var(--r3)' }}
               title="document"
             />

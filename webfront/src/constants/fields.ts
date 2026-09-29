@@ -32,6 +32,28 @@ export const SO_REMARK_H: FieldDef[] = [['remark', 'Remark']];
 // Tax on Sales/Purchases codes from SAP (procedure 0TXTH, T007A — 22 entries). S/4HANA Cloud
 // public edition has no released API that lists tax codes, so this mirrors the F4 help in
 // MIRO/FB60 — keep it in sync if Finance adds a code.
+// G/L accounts the G/L Account Items table is seeded with, read off documents Finance actually
+// posted for company 2000 rather than guessed from account names:
+//
+//   5100001269  21229108 Local Hand&Fr   VX   <- the freight / handling costs of a shipping bundle
+//               11730000 Deferred Input tax  D1   <- the VAT, as its own line, one per tax invoice
+//               52110001 Purchase Variance   VX   <- rounding
+//
+// The tax does NOT come from a rate on the cost line: the cost line is exempt (VX) and the VAT is
+// keyed as separate lines. 11720000 / 11730000 are the same pair the Input VAT export already
+// calls Line 1 / Line 2 — plain input tax and deferred input tax.
+//
+// These are starting values, not rules. Every one of them is editable in the table, because the
+// chart of accounts is Finance's to change and a wrong account should be fixable on the document
+// rather than in a release.
+export const GL_FREIGHT_HANDLING = '21229108'; // Local Hand&Fr
+export const GL_INPUT_TAX = '11720000';        // Input tax          (V1 and the other V* codes)
+export const GL_DEFERRED_INPUT_TAX = '11730000'; // Deferred input tax (D1 and the other D* codes)
+// Duty (Excise / Interior) and withholding tax: the account is not confirmed for company 2000
+// yet, so the row is seeded with everything except the number and the person fills that one cell.
+export const GL_DUTY = '';
+export const GL_WITHHOLDING_TAX = '';
+
 export const TAX_CODES: Array<[string, string]> = [
   // Input tax
   ['V1', 'V1 — Input VAT 7%'],
@@ -58,6 +80,70 @@ export const TAX_CODES: Array<[string, string]> = [
   ['DL', 'DL — Output Deferred Tax 0%'],
   ['WS', 'WS — Non-taxable Sales: 0%'],
 ];
+
+// Government agencies that only ever print their name in Thai on a receipt. The input-VAT report
+// and every screen in this app are in English, so the name is swapped to the agency's official
+// English name. Company names are left alone — a tax invoice already carries their English name.
+// Mirrors the same list in the backend's VisionPrompt so an already-read document is fixed on
+// screen without waiting for a re-read. Add a pair here and in VisionPrompt.cs together.
+export const AGENCY_NAME_EN: Array<[string, string]> = [
+  ['กรมศุลกากร', 'The Customs Department'],
+  ['กรมสรรพสามิต', 'The Excise Department'],
+  ['กรมสรรพากร', 'The Revenue Department'],
+  ['กรมการค้าต่างประเทศ', 'Department of Foreign Trade'],
+  ['กรมปศุสัตว์', 'Department of Livestock Development'],
+  ['กรมวิชาการเกษตร', 'Department of Agriculture'],
+  ['กรมโรงงานอุตสาหกรรม', 'Department of Industrial Works'],
+  ['สำนักงานคณะกรรมการอาหารและยา', 'Food and Drug Administration'],
+  ['การท่าเรือแห่งประเทศไทย', 'Port Authority of Thailand'],
+  ['การนิคมอุตสาหกรรมแห่งประเทศไทย', 'Industrial Estate Authority of Thailand'],
+  ['สถานกงสุล', 'Consulate'],
+  ['สถานเอกอัครราชทูต', 'Embassy'],
+];
+
+/** Tax IDs of the agencies above, confirmed off their own receipts. Used only to fill a blank —
+ *  a number the read actually found always wins. Mirrors AgencyTaxIds in VisionPrompt.cs; add an
+ *  entry in both, and only after checking it on the paper receipt. */
+export const AGENCY_TAX_ID: Record<string, string> = {
+  // A government number starts 099…; a 010… number on a customs receipt is the PAYER's (ours).
+  // Check the name printed above the number before adding an entry here.
+  'The Customs Department': '0994000163011',
+};
+
+/** The English name of a government agency written in Thai, or the value unchanged. */
+export function agencyNameEn(value: unknown): string {
+  const v = String(value ?? '').trim();
+  if (!v) return '';
+  for (const [thai, english] of AGENCY_NAME_EN) if (v.includes(thai)) return english;
+  return v;
+}
+
+// Customs duties and the excise/interior pair. They are taxes, not things we bought, so they
+// belong in the Tax tab and never in the DETAIL item list. The read tags them extCode "DUTY", but
+// a document read before that tag existed — or one whose EXCISE FEE row the split produced from a
+// cost line — carries the wording only, so the name is checked too. Matching on the name means an
+// already-read document is put right by a refresh instead of a re-read.
+const DUTY_DESCRIPTIONS = /^\s*(import duty|excise tax|interior tax|customs duty|อากรขาเข้า|ภาษีสรรพสามิต|ภาษีเก็บเพิ่มเพื่อมหาดไทย)\s*$/i;
+
+/** English name of a duty line. The read is asked for English, but a row produced by the
+ *  excise/interior split — or read before that rule — can still carry the Thai wording. */
+const DUTY_LABEL_EN: Array<[RegExp, string]> = [
+  [/อากรขาเข้า|import duty|customs duty/i, 'Import Duty'],
+  [/ภาษีเก็บเพิ่มเพื่อมหาดไทย|ภาษีมหาดไทย|interior tax/i, 'Interior Tax'],
+  [/ภาษีสรรพสามิต|excise/i, 'Excise Tax'],
+];
+
+export function dutyLabelEn(value: unknown): string {
+  const v = String(value ?? '').trim();
+  if (!v) return '';
+  for (const [re, en] of DUTY_LABEL_EN) if (re.test(v)) return en;
+  return v;
+}
+
+export function isDutyRow(line: { extCode?: unknown; desc?: unknown }): boolean {
+  if (String(line.extCode ?? '').trim().toUpperCase() === 'DUTY') return true;
+  return DUTY_DESCRIPTIONS.test(String(line.desc ?? ''));
+}
 
 // ---- Withholding tax master data (SAP · from KUT-FI-AP-204) ----
 // Withholding Tax Type: X1-X2 where the pair says when the tax is posted.

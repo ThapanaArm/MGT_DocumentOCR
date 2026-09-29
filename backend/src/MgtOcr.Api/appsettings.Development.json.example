@@ -1,0 +1,9 @@
+{
+  "Ocr": {
+    "GeminiApiKey": "",
+    "OpenAiApiKey": "",
+    "AnthropicApiKey": "",
+    "TyphoonApiKey": "",
+    "AzureDiKey": ""
+  }
+}
