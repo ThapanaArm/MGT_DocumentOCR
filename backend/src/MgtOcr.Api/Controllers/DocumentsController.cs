@@ -33,6 +33,24 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     private async Task<string> ActorAsync(CancellationToken ct = default) =>
         (await currentUser.RequireAsync(ct)).AuditName;
 
+    /// <summary>The company whose documents this person may see — "1000" MGT, "2000" GLC, or ""
+    /// for Admin and for a user record that names no company (see CompanyScope). Read from the user
+    /// master, never from the request.</summary>
+    private async Task<string> CompanyScopeAsync(CancellationToken ct = default) =>
+        CompanyScope.For(await currentUser.RequireAsync(ct), config);
+
+    /// <summary>The company a document imported right now belongs to — the importer's own, Admin
+    /// included. Admin sees both companies but still files under theirs, so an MGT invoice an Admin
+    /// imports does not end up on GLC's list as well.</summary>
+    private async Task<string> OwnCompanyAsync(CancellationToken ct = default) =>
+        CompanyScope.Own(await currentUser.RequireAsync(ct), config);
+
+    /// <summary>The company an import screen asked to file under. Only an Admin may choose; for
+    /// everyone else the value is ignored and their own company wins (see CompanyScope.ImportFor),
+    /// so the switch on the Import page can never be used to file into another company's list.</summary>
+    private async Task<string> ImportCompanyAsync(string? requested, CancellationToken ct = default) =>
+        CompanyScope.ImportFor(await currentUser.RequireAsync(ct), config, requested);
+
     private async Task<string> SalesOrgAsync(Dictionary<string, object?> header)
     {
         var org = header.GetStr("salesOrg");
@@ -136,9 +154,15 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         return Ok(await repo.GetDocumentAsync(docId));
     }
 
+    // Same ceiling as the batch endpoint below. Without these the single-file upload fell back to
+    // the ~28.6 MB Kestrel/IIS default while ten files at once were allowed 200 MB, so one detailed
+    // scan of a long bundle failed with a bare 413 that the screen could not explain.
+    [RequestSizeLimit(209_715_200)]
+    [RequestFormLimits(MultipartBodyLengthLimit = 209_715_200)]
     [HttpPost("api/documents/upload")]
     public async Task<IActionResult> Upload([FromForm] string module, [FromForm] string ocr_,
-        [FromForm(Name = "apDocCategory")] string? apDocCategory, [FromForm] IFormFile file, [FromForm] string? password)
+        [FromForm(Name = "apDocCategory")] string? apDocCategory, [FromForm] IFormFile file, [FromForm] string? password,
+        [FromForm(Name = "company")] string? company = null)
     {
         var user = await ActorAsync();
         // AP = the single liability-recording (การตั้งหนี้) reading page: read the document first,
@@ -167,7 +191,8 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         // Category applies to both post-routing invoice modules (AP with PO, II without), so it can
         // be validated up front against the pre-routing module before OCR decides AP vs II.
         var apCat = ValidateApDocCategory(mod == "AP" ? "AP" : mod, apDocCategory);
-        var (docId, _, note) = await ingest.IngestAsync(mod, stored, fname, size, ocr_, apCat, user, password);
+        var (docId, _, note) = await ingest.IngestAsync(mod, stored, fname, size, ocr_, apCat, user, password,
+            await ImportCompanyAsync(company));
         var outDoc = await repo.GetDocumentAsync(docId);
         outDoc["ocrNote"] = note ?? "";
         return Ok(outDoc);
@@ -183,7 +208,8 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     [RequestFormLimits(MultipartBodyLengthLimit = 209_715_200)]
     [HttpPost("api/documents/upload-batch")]
     public async Task<IActionResult> UploadBatch([FromForm] string module, [FromForm] string ocr_,
-        [FromForm(Name = "apDocCategory")] string? apDocCategory, [FromForm] List<IFormFile> files)
+        [FromForm(Name = "apDocCategory")] string? apDocCategory, [FromForm] List<IFormFile> files,
+        [FromForm(Name = "company")] string? company = null)
     {
         var mod = ValidateModule(module);
         var user = await ActorAsync();
@@ -194,6 +220,8 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
 
         var batchId = Guid.NewGuid();
         var result = new List<object>();
+        // Resolved once: every file in one batch is filed under the same company.
+        var importCompany = await ImportCompanyAsync(company);
         foreach (var file in files)
         {
             var stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
@@ -208,12 +236,14 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             {
                 try { System.IO.File.Delete(stored); } catch { /* best effort */ }
                 const string msg = "Password-protected PDF — import this file on its own to enter the password";
-                var failId = await jobs.EnqueueAsync(batchId, mod, apCat, engine, fname, "", size, user, "FAILED", msg);
+                var failId = await jobs.EnqueueAsync(batchId, mod, apCat, engine, fname, "", size, user, "FAILED", msg,
+                    importCompany);
                 result.Add(new { jobId = failId, fileName = fname, status = "FAILED", error = msg });
                 continue;
             }
 
-            var jobId = await jobs.EnqueueAsync(batchId, mod, apCat, engine, fname, stored, size, user);
+            var jobId = await jobs.EnqueueAsync(batchId, mod, apCat, engine, fname, stored, size, user,
+                salesOrg: importCompany);
             result.Add(new { jobId, fileName = fname, status = "QUEUED", error = (string?)null });
         }
         return Ok(new { batchId, module = mod, jobs = result });
@@ -239,7 +269,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         page = page < 1 ? 1 : page;
         pageSize = Math.Clamp(pageSize, 1, 200);
         var r = await repo.ListDocumentsPagedAsync(module, status, apDocCategory, search, dateFrom, dateTo,
-            invModule, page, pageSize, allowed);
+            invModule, page, pageSize, allowed, await CompanyScopeAsync());
         return Ok(new
         {
             results = r.Rows,
@@ -1217,12 +1247,15 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         await using (var tx = await conn.BeginTransactionAsync())
         {
             await conn.ExecuteAsync("""
-                INSERT ocr.PostLog(DocId,Module,SapDocNo,Endpoint,PayloadJson,Success,Message,PostedBy)
-                VALUES(@docId,@module,@sapDocNo,@endpoint,@payloadJson,@success,@message,@user)
+                INSERT ocr.PostLog(DocId,Module,SapDocNo,Endpoint,PayloadJson,Success,Message,PostedBy,SalesOrg)
+                VALUES(@docId,@module,@sapDocNo,@endpoint,@payloadJson,@success,@message,@user,@salesOrg)
                 """, new
             {
                 docId, module, sapDocNo = r.SapDocNo, endpoint = r.Endpoint,
                 payloadJson = JsonSerializer.Serialize(payload, PyJson.Options), success = r.Success ? 1 : 0, message = r.Message, user,
+                // Which company's submission history this belongs to — the poster's own, Admin
+                // included, for the same reason a document is filed under the importer's company.
+                salesOrg = await OwnCompanyAsync() is { Length: > 0 } own ? own : null,
             }, tx);
             if (r.Success)
                 await conn.ExecuteAsync($"UPDATE {docT} SET Status='POSTED', SapDocNo=@sapDocNo, CompanyCode=@companyCode, PostedAt=SYSDATETIME(), PostedBy=@user, UpdatedAt=SYSDATETIME() WHERE DocId=@docId",

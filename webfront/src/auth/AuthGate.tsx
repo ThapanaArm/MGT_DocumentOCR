@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { AUTH_ENABLED as MS_ENABLED, COMPANIES, attemptSilentSignIn, consumeFreshSignIn, getAccount, initAuth, signIn } from './msal';
+import { AUTH_ENABLED as MS_ENABLED, COMPANIES, attemptSilentSignIn, companyForLogin, consumeFreshSignIn, getAccount, initAuth, signIn } from './msal';
 import { claimSession, hasLocalSession, loginWithPassword, takeSignOutReason } from '../api/auth';
 import { MOCK_ALWAYS } from '../api/mocks';
 
@@ -99,6 +99,8 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
   const [remember, setRemember] = useState(true);
   const [busy, setBusy] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  // Only shown when the typed name does not say which company it belongs to.
+  const [pickCompany, setPickCompany] = useState(false);
 
   useEffect(() => {
     if (MOCK_ALWAYS) return; // mock mode: already 'ready', no auth to initialise
@@ -236,20 +238,32 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
               {MS_ENABLED && (
                 <>
                   <div className="login-divider">OR</div>
-                  {COMPANIES.length <= 1 ? (
-                    <button type="button" className="login-ms" onClick={() => void signIn(COMPANIES[0]?.id)}>
-                      <MicrosoftMark /> Continue with Microsoft
-                    </button>
-                  ) : (
-                    // MGT and GLC are separate Entra registrations on the same URL — the person picks
-                    // which company to sign in with, and msal.ts remembers the choice.
+                  {/* MGT and GLC are separate Entra registrations on the same URL, so the button has
+                      to know which one to redirect to. It reads that from the name already typed
+                      above (e-mail domain, or the company prefix of a staff username) — one button,
+                      either company. Only when the name says nothing does it ask, and then the
+                      per-company buttons appear in place of this one. */}
+                  {pickCompany && COMPANIES.length > 1 ? (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                      <div className="login-help" style={{ margin: 0 }}>Which company is your account with?</div>
                       {COMPANIES.map((c) => (
-                        <button key={c.id} type="button" className="login-ms" onClick={() => void signIn(c.id)}>
+                        <button key={c.id} type="button" className="login-ms" onClick={() => void signIn(c.id, username)}>
                           <MicrosoftMark /> Continue with Microsoft — {c.label}
                         </button>
                       ))}
                     </div>
+                  ) : (
+                    <button
+                      type="button"
+                      className="login-ms"
+                      onClick={() => {
+                        const c = companyForLogin(username);
+                        if (c) void signIn(c.id, username);
+                        else setPickCompany(true);
+                      }}
+                    >
+                      <MicrosoftMark /> Continue with Microsoft
+                    </button>
                   )}
                 </>
               )}

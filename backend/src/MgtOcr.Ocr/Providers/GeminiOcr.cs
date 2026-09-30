@@ -1,6 +1,7 @@
 ﻿using System.Linq;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using MgtOcr.Core.Config;
 
 namespace MgtOcr.Ocr.Providers;
@@ -8,9 +9,26 @@ namespace MgtOcr.Ocr.Providers;
 // New in the .NET port (no Python equivalent) — Google Gemini Vision, same raw-HTTP/no-SDK
 // pattern as the existing Claude/Azure/Typhoon clients. Uses the Generative Language API's
 // generateContent endpoint with inline base64 image parts.
-public static class GeminiOcr
+public static partial class GeminiOcr
 {
-    private static readonly HttpClient Http = new();
+    // Gemini is called DIRECTLY, never through the machine's configured web proxy.
+    //
+    // Every request hung for the full timeout and never came back — 135s even for a three-page
+    // request, on every attempt — while curl reached the same host in 0.2s. curl does not read the
+    // Windows proxy settings and HttpClient does, which is the one difference between them, so the
+    // requests were going out through a proxy that accepts the connection and then never answers.
+    // Nothing here needs one: generativelanguage.googleapis.com is a plain public HTTPS endpoint,
+    // and if this machine ever truly required a proxy the call would fail fast with a connection
+    // error instead of hanging, which is a far better failure than a silent 135-second stall.
+    //
+    // A server that genuinely reaches the internet only through a proxy can put it back with the
+    // environment variable OCR_USE_SYSTEM_PROXY=1 — no rebuild, no code change. It is read here
+    // rather than from AppConfig because this client is created before configuration exists.
+    private static readonly HttpClient Http = new(new SocketsHttpHandler
+    {
+        UseProxy = Environment.GetEnvironmentVariable("OCR_USE_SYSTEM_PROXY") == "1",
+        PooledConnectionLifetime = TimeSpan.FromMinutes(5),
+    });
 
     public static async Task<(ParsedDocument? Doc, string? Error)> VisionExtractAsync(string path, string module, AppConfig config)
     {
@@ -96,7 +114,12 @@ public static class GeminiOcr
             if (isPdf && imgs.Count > ChunkThreshold)
                 return await ChunkedAsync(imgs, formCount, mime, prompt, module, config, dpi);
 
-            return await OneShotAsync(imgs, mime, prompt, module, config, dpi, TimeoutFor(imgs.Count));
+            // A file short enough to read in one request still needs the customs rows pointed at the
+            // customs vendor: the model fills vendorCode from the form when it can, but it leaves it
+            // blank often enough that the tax would otherwise land on the shipping agent.
+            var oneShot = await OneShotAsync(imgs, mime, prompt, module, config, dpi, TimeoutFor(imgs.Count));
+            if (oneShot.Doc != null && module is "AP" or "II") AssignTaxRowVendors(oneShot.Doc);
+            return oneShot;
         }
         catch (Exception ex)
         {
@@ -211,10 +234,18 @@ public static class GeminiOcr
                 {
                     // HttpClient timeout (TaskCanceledException) — treat as transient.
                     timedOut++;
-                    lastErr = $"Gemini request timed out after {timeout.TotalSeconds:0}s "
-                        + $"(model={config.GeminiModel}, {pageCount} page(s) at {dpi} dpi, attempt {attempt}/{maxAttempts}) "
-                        + "— the file is likely too large to read in one request. Split the bundle into "
-                        + "smaller files, or read it with a different engine.";
+                    // Deliberately no longer blames the file size. It said that for a long time, and
+                    // it was wrong: the requests that hung carried three pages, and the whole point of
+                    // the chunked reader is that no request is ever large. A request that never answers
+                    // is a connection problem, and saying otherwise sends the next person to split
+                    // files that were never too big.
+                    lastErr = $"Gemini did not answer within {timeout.TotalSeconds:0}s "
+                        + $"(model={config.GeminiModel}, {pageCount} page(s) at {dpi} dpi, attempt {attempt}/{maxAttempts}). "
+                        + (pageCount <= 8
+                            ? "This request was small, so the file size is not the problem — check the connection "
+                              + "to generativelanguage.googleapis.com (a web proxy that accepts the connection and "
+                              + "never answers looks exactly like this), or read the document with another engine."
+                            : "Try splitting the bundle into smaller files, or read it with another engine.");
                     Log(lastErr);
                     if (attempt == maxAttempts || timedOut >= maxTimeoutAttempts) return (null, lastErr);
                 }
@@ -285,6 +316,7 @@ public static class GeminiOcr
             MergeTaxRows(doc, part, mainVendorName);
         }
 
+        AssignTaxRowVendors(doc);
         RecountTaxTotals(doc);
         if (skipped > 0)
         {
@@ -316,14 +348,6 @@ public static class GeminiOcr
     /// rather than simply left alone.</summary>
     private static void MergeTaxRows(ParsedDocument doc, ParsedDocument part, string mainVendorName)
     {
-        // Duty is always paid to the customs department, whose code the form already put on the
-        // duty rows the lead request produced; a duty row found on a supporting page is the same
-        // party's and keeps that code rather than falling to the main vendor.
-        var dutyVendor = doc.Lines
-            .Where(l => string.Equals((l.ExtCode ?? "").Trim(), "DUTY", StringComparison.OrdinalIgnoreCase))
-            .Select(l => (l.VendorCode ?? "").Trim())
-            .FirstOrDefault(v => v.Length > 0) ?? "";
-
         foreach (var line in part.Lines)
         {
             var code = (line.ExtCode ?? "").Trim().ToUpperInvariant();
@@ -342,13 +366,12 @@ public static class GeminiOcr
                 continue;
             }
 
-            // A supporting group never sees the form, so it reads no vendor codes and a guessed
-            // one would put the row under the wrong vendor's tab. Two kinds of row are not a
-            // guess, though: duty, and the import VAT on the customs receipt, are both paid to
-            // the Customs Department and belong to that vendor's own document — the 60,049.00 of
-            // import VAT in bundle #707 is not the shipping agent's. Everything else falls to the
-            // main vendor, which is where an invoice's own VAT and withholding belong.
-            line.VendorCode = code == "DUTY" || IsCustomsIssuer(line) ? dutyVendor : "";
+            // A supporting group never sees the form, so it reads no vendor codes and a guessed one
+            // would put the row under the wrong vendor's tab. Which rows belong to the customs
+            // vendor is settled once, after every group has been merged (AssignTaxRowVendors) —
+            // doing it here failed, because the duty rows that carry that vendor's code often
+            // arrive in a LATER group than the customs VAT row that needs it.
+            line.VendorCode = "";
 
             var twin = doc.Lines.FirstOrDefault(existing => SameTax(existing, line, code));
             if (twin != null)
@@ -370,6 +393,40 @@ public static class GeminiOcr
     // to (VisionPrompt.AgencyNames). A customs receipt is the one supporting page whose VAT is not
     // the supplier's.
     private const string CustomsTaxId = "0994000163011";
+
+    /// <summary>Puts the duty rows, and the import VAT that comes with them, under the customs
+    /// vendor instead of the shipping agent.
+    ///
+    /// Import duty and the VAT on the customs receipt are paid to the Customs Department, not to
+    /// the agent who fronts the money — bundle #709 showed 60,049.00 of import VAT sitting in the
+    /// agent's tax tab, which is the wrong supplier's document to post it on. The vendor code is
+    /// the form's own: it is on the CUSTOMS FEE / EXCISE FEE cost row that the first request read.
+    ///
+    /// This runs once, after every supporting group has been merged, because the row that carries
+    /// the code and the row that needs it routinely arrive in different requests.</summary>
+    private static void AssignTaxRowVendors(ParsedDocument doc)
+    {
+        static string Vendor(LineItem l) => (l.VendorCode ?? "").Trim();
+        static bool Is(LineItem l, string code) =>
+            string.Equals((l.ExtCode ?? "").Trim(), code, StringComparison.OrdinalIgnoreCase);
+
+        // Whichever duty row already carries the code, else the government fee row on the form.
+        var govVendor = doc.Lines.Where(l => Is(l, "DUTY")).Select(Vendor).FirstOrDefault(v => v.Length > 0)
+            ?? doc.Lines.Where(l => GovernmentFeeDesc().IsMatch(l.Desc ?? "")).Select(Vendor).FirstOrDefault(v => v.Length > 0)
+            ?? "";
+        if (govVendor.Length == 0) return; // nothing to point at: leave the rows with the main vendor
+
+        foreach (var l in doc.Lines)
+        {
+            if (Vendor(l).Length > 0) continue;
+            if (Is(l, "DUTY") || (Is(l, "VAT") && IsCustomsIssuer(l)))
+                l.VendorCode = govVendor;
+        }
+    }
+
+    // The form's own row for what is paid to customs — the one that carries that vendor's code.
+    [GeneratedRegex(@"customs|ศุลกากร|excise|สรรพสามิต|import\s*duty|อากรขาเข้า", RegexOptions.IgnoreCase)]
+    private static partial Regex GovernmentFeeDesc();
 
     private static bool IsCustomsIssuer(LineItem line) =>
         (line.IssuerTaxId ?? "").Trim() == CustomsTaxId

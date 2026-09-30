@@ -34,6 +34,9 @@ export interface AuthCompany {
   clientId: string;
   authority: string;
   apiScope: string;
+  // E-mail domains that belong to this company, so one "Continue with Microsoft" button can send
+  // the person to the right registration instead of making them pick the company by hand.
+  domains: string[];
 }
 
 // Build a company from its env vars, or null when its client id isn't set (so it's simply absent).
@@ -45,12 +48,17 @@ function envCompany(
   clientId: string | undefined,
   authorityEnv: string | undefined,
   scopeEnv: string | undefined,
+  domainsEnv?: string | undefined,
 ): AuthCompany | null {
   const cid = (clientId ?? '').trim();
   if (!cid) return null;
   const authority = (authorityEnv || 'https://login.microsoftonline.com/organizations').trim();
   const apiScope = (scopeEnv || `api://${cid}/access_as_user`).trim();
-  return { id, label, clientId: cid, authority, apiScope };
+  const domains = (domainsEnv ?? '')
+    .split(/[,;\s]+/)
+    .map((d) => d.trim().toLowerCase().replace(/^@/, ''))
+    .filter((d) => d.length > 0);
+  return { id, label, clientId: cid, authority, apiScope, domains };
 }
 
 // The configured companies, in display order. MGT uses the original VITE_AZURE_* vars (unchanged);
@@ -62,6 +70,7 @@ export const COMPANIES: AuthCompany[] = [
     import.meta.env.VITE_AZURE_CLIENT_ID as string,
     import.meta.env.VITE_AZURE_AUTHORITY as string,
     import.meta.env.VITE_AZURE_API_SCOPE as string,
+    import.meta.env.VITE_AZURE_EMAIL_DOMAINS as string,
   ),
   envCompany(
     'GLC',
@@ -69,8 +78,37 @@ export const COMPANIES: AuthCompany[] = [
     import.meta.env.VITE_AZURE_CLIENT_ID_GLC as string,
     import.meta.env.VITE_AZURE_AUTHORITY_GLC as string,
     import.meta.env.VITE_AZURE_API_SCOPE_GLC as string,
+    import.meta.env.VITE_AZURE_EMAIL_DOMAINS_GLC as string,
   ),
 ].filter((c): c is AuthCompany => c !== null);
+
+/** Which company a typed sign-in name belongs to, or null when it cannot be told.
+ *
+ * MGT and GLC are separate single-tenant registrations, so the button has to know WHICH one to
+ * redirect to before it can redirect at all — that is the only reason the company picker existed.
+ * Nearly always the person has already typed who they are in the sign-in field above, so read it:
+ * an e-mail matches on its domain, and a bare staff username matches on its company prefix
+ * ("GLC18035"). Anything else returns null and the caller falls back to asking. */
+export function companyForLogin(input: string): AuthCompany | null {
+  if (COMPANIES.length === 0) return null;
+  if (COMPANIES.length === 1) return COMPANIES[0];
+
+  const v = (input ?? '').trim().toLowerCase();
+  if (v.length === 0) return null;
+
+  const at = v.lastIndexOf('@');
+  if (at >= 0) {
+    const domain = v.slice(at + 1);
+    // Sub-domains count as the same company (user@mail.megachem.co.th).
+    const byDomain = COMPANIES.find((c) =>
+      c.domains.some((d) => domain === d || domain.endsWith(`.${d}`)));
+    return byDomain ?? null;
+  }
+
+  // No "@": staff usernames carry the company as a prefix, which is how people actually type here.
+  const byPrefix = COMPANIES.find((c) => v.startsWith(c.id.toLowerCase()));
+  return byPrefix ?? null;
+}
 
 // No company configured = the Entra app registrations don't exist yet, so the app runs exactly as it
 // did before sign-in was added (no login screen, no Authorization header). The backend has the
@@ -226,7 +264,7 @@ export async function getAccessToken(): Promise<string | null> {
 
 // Start an interactive sign-in for a specific company. companyId is required when more than one
 // company is configured (the picker passes it); with a single company it may be omitted.
-export async function signIn(companyId?: string): Promise<void> {
+export async function signIn(companyId?: string, loginHint?: string): Promise<void> {
   if (!AUTH_ENABLED) return;
   const c = companyId
     ? COMPANIES.find((x) => x.id === companyId)
@@ -235,7 +273,11 @@ export async function signIn(companyId?: string): Promise<void> {
   writeActiveCompany(c.id);
   markManuallySignedOut(false);
   const inst = await ensureInit(c);
-  await inst.loginRedirect({ scopes: [c.apiScope] });
+  // The e-mail the person already typed is passed on, so Microsoft opens on their account instead
+  // of the account picker. Only a real e-mail is worth sending; a staff username means nothing there.
+  const hint = (loginHint ?? '').trim();
+  await inst.loginRedirect(
+    hint.includes('@') ? { scopes: [c.apiScope], loginHint: hint } : { scopes: [c.apiScope] });
 }
 
 export async function signOut(): Promise<void> {

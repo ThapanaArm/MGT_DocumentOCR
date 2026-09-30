@@ -17,6 +17,14 @@ import OcrProviderSelect from '../components/OcrProviderSelect';
 // `user` parameters in api/documents.ts.
 const USER = '(ignored by the server)';
 
+// The two post rooms sharing this installation. The value is the SalesOrg the document is stamped
+// with (ocr.Document.SalesOrg) — the same key the Invoice List, Master Mapping and SAP Submission
+// History filter on.
+const COMPANY_CHOICES = [
+  { value: '1000', label: 'MGT \u00b7 1000' },
+  { value: '2000', label: 'GLC \u00b7 2000' },
+];
+
 export default function ImportPage() {
   const { module } = useParams<{ module: ModuleCode }>();
   const mod = (module ?? 'AP') as ModuleCode;
@@ -24,9 +32,12 @@ export default function ImportPage() {
   const isInvoice = mod === 'AP';
   const navigate = useNavigate();
   const { guard, showToast } = useAppState();
-  const { ocrProviders, loadOcrProviders, apDocCategories, loadApDocCategories } = useMeta();
+  const { ocrProviders, loadOcrProviders, apDocCategories, loadApDocCategories, me, loadMe } = useMeta();
 
   const [provider, setProvider] = useState('auto');
+  // Which company this import is filed under. Only an Admin sees the switch; for everyone else the
+  // server ignores whatever is sent and stamps their own company (CompanyScope.ImportFor).
+  const [company, setCompany] = useState('');
   const [category, setCategory] = useState('');
   const [dragOver, setDragOver] = useState(false);
   const [progress, setProgress] = useState<{ text: string; pct: number } | null>(null);
@@ -36,9 +47,22 @@ export default function ImportPage() {
 
   useEffect(() => {
     loadOcrProviders();
+    loadMe();
     if (isInvoice) loadApDocCategories();
     setCategory('');
-  }, [mod, loadOcrProviders, loadApDocCategories]);
+  }, [mod, loadOcrProviders, loadApDocCategories, loadMe]);
+
+  // An Admin works both post rooms, so they choose; the switch starts on their own company so a
+  // distracted click never files an invoice for the other side by accident.
+  const isAdmin = (me?.role ?? '').trim().toLowerCase() === 'admin';
+  const ownCompany =
+    me?.primaryCompany?.companyId === 1 ? '1000'
+    : me?.primaryCompany?.companyId === 2 ? '2000'
+    : me?.salesOrganization === '1000' || me?.salesOrganization === '2000' ? me.salesOrganization
+    : '';
+  useEffect(() => {
+    if (ownCompany) setCompany(ownCompany);
+  }, [ownCompany]);
 
   const needCategory = isInvoice && !category;
   const providers = ocrProviders ?? [];
@@ -55,6 +79,7 @@ export default function ImportPage() {
     fd.append('ocr_', provider);
     fd.append('file', file);
     fd.append('apDocCategory', category || '');
+    if (isAdmin && company) fd.append('company', company);
     if (password) fd.append('password', password);
     setProgress({ text: 'Uploading ' + file.name + ' …', pct: 35 });
     try {
@@ -88,6 +113,7 @@ export default function ImportPage() {
     fd.append('module', mod);
     fd.append('ocr_', provider);
     fd.append('apDocCategory', category || '');
+    if (isAdmin && company) fd.append('company', company);
     files.forEach((f) => fd.append('files', f));
     setProgress({ text: `Uploading ${files.length} files …`, pct: 45 });
     try {
@@ -168,6 +194,40 @@ export default function ImportPage() {
           <p className="hint" style={{ margin: '-8px 0 16px' }}>
             {active ? active.desc : ''}
           </p>
+
+          {isAdmin && isInvoice && (
+            <>
+              <div
+                className="row"
+                style={{ marginBottom: 16, ...(needCategory ? { opacity: 0.45, pointerEvents: 'none' } : {}) }}
+              >
+                <label className="hint" style={{ fontWeight: 600 }}>
+                  <i className="fa-solid fa-building" /> Company
+                </label>
+                {COMPANY_CHOICES.map((c) => (
+                  <button
+                    key={c.value}
+                    type="button"
+                    className={'btn sm' + (company === c.value ? ' primary' : '')}
+                    onClick={() => setCompany(c.value)}
+                  >
+                    {c.label}
+                  </button>
+                ))}
+              </div>
+              <p className="hint" style={{ margin: '-8px 0 16px' }}>
+                {company && ownCompany && company !== ownCompany ? (
+                  <>
+                    <i className="fa-solid fa-triangle-exclamation" /> This document will be filed under{' '}
+                    <b>{COMPANY_CHOICES.find((c) => c.value === company)?.label}</b> — not your own company. Only that
+                    company's users will see it on the Invoice List.
+                  </>
+                ) : (
+                  <>Only an Admin can choose; everyone else's imports are always filed under their own company.</>
+                )}
+              </p>
+            </>
+          )}
 
           <div
             className={'drop' + (dragOver ? ' over' : '')}

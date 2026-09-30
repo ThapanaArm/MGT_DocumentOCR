@@ -15,6 +15,7 @@ import {
   type MastersData,
   type OcrProvider,
 } from '../api/masters';
+import { getMe, type Me } from '../api/me';
 
 /* Shared reference data — the React replacement for S.masters / S.ocrProviders
    / S.apDocCategories caching in app.js. Loads lazily and caches; masters can
@@ -27,6 +28,10 @@ interface MetaValue {
   loadApDocCategories: () => Promise<ApDocCategory[]>;
   masters: MastersData | null;
   loadMasters: (force?: boolean) => Promise<MastersData>;
+  /** The signed-in person as the backend sees them (role + company). Screens that behave
+      differently for an Admin read it from here so /api/me is fetched once, not per page. */
+  me: Me | null;
+  loadMe: () => Promise<Me>;
 }
 
 const MetaContext = createContext<MetaValue | null>(null);
@@ -35,9 +40,11 @@ export function MetaProvider({ children }: { children: ReactNode }) {
   const [ocrProviders, setOcrProviders] = useState<OcrProvider[] | null>(null);
   const [apDocCategories, setApDocCategories] = useState<ApDocCategory[] | null>(null);
   const [masters, setMasters] = useState<MastersData | null>(null);
+  const [me, setMe] = useState<Me | null>(null);
 
   const provPromise = useRef<Promise<OcrProvider[]> | null>(null);
   const catPromise = useRef<Promise<ApDocCategory[]> | null>(null);
+  const mePromise = useRef<Promise<Me> | null>(null);
 
   const loadOcrProviders = useCallback(async () => {
     if (ocrProviders) return ocrProviders;
@@ -65,6 +72,14 @@ export function MetaProvider({ children }: { children: ReactNode }) {
     [masters],
   );
 
+  const loadMe = useCallback(async () => {
+    if (me) return me;
+    if (!mePromise.current) mePromise.current = getMe();
+    const data = await mePromise.current;
+    setMe(data);
+    return data;
+  }, [me]);
+
   const value = useMemo<MetaValue>(
     () => ({
       ocrProviders,
@@ -73,8 +88,10 @@ export function MetaProvider({ children }: { children: ReactNode }) {
       loadApDocCategories,
       masters,
       loadMasters,
+      me,
+      loadMe,
     }),
-    [ocrProviders, loadOcrProviders, apDocCategories, loadApDocCategories, masters, loadMasters],
+    [ocrProviders, loadOcrProviders, apDocCategories, loadApDocCategories, masters, loadMasters, me, loadMe],
   );
 
   return <MetaContext.Provider value={value}>{children}</MetaContext.Provider>;

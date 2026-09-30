@@ -1,10 +1,10 @@
-using Dapper;
+﻿using Dapper;
 
 namespace MgtOcr.Data;
 
 // A job the queue worker has claimed and will OCR now.
 public record OcrJobClaim(int JobId, string Module, string ApDocCategory, string Engine,
-    string FileName, string StoredPath, int FileSize, string CreatedBy);
+    string FileName, string StoredPath, int FileSize, string CreatedBy, string? SalesOrg);
 
 // A job row as the frontend polls it (typed record -> serialized camelCase, unlike raw Dapper rows).
 public record OcrJobStatus(int JobId, string FileName, string Status, string? Error, int? ResultDocId, string Module);
@@ -14,15 +14,17 @@ public record OcrJobStatus(int JobId, string FileName, string Status, string? Er
 public class OcrJobRepository(DbConnectionFactory factory)
 {
     public async Task<int> EnqueueAsync(Guid batchId, string module, string apDocCategory, string engine,
-        string fileName, string storedPath, int size, string createdBy, string status = "QUEUED", string? error = null)
+        string fileName, string storedPath, int size, string createdBy, string status = "QUEUED", string? error = null,
+        string? salesOrg = null)
     {
         await using var conn = await factory.OpenAsync();
         var id = await conn.ExecuteScalarAsync<decimal>("""
-            INSERT ocr.OcrJob(BatchId,Module,ApDocCategory,Engine,FileName,StoredPath,FileSize,Status,Error,CreatedBy,FinishedAt)
-            VALUES(@batchId,@module,@apDocCategory,@engine,@fileName,@storedPath,@size,@status,@error,@createdBy,
+            INSERT ocr.OcrJob(BatchId,Module,ApDocCategory,Engine,FileName,StoredPath,FileSize,Status,Error,CreatedBy,SalesOrg,FinishedAt)
+            VALUES(@batchId,@module,@apDocCategory,@engine,@fileName,@storedPath,@size,@status,@error,@createdBy,@salesOrg,
                    CASE WHEN @status='QUEUED' THEN NULL ELSE SYSDATETIME() END);
             SELECT SCOPE_IDENTITY();
-            """, new { batchId, module, apDocCategory, engine, fileName, storedPath, size, status, error, createdBy });
+            """, new { batchId, module, apDocCategory, engine, fileName, storedPath, size, status, error, createdBy,
+                       salesOrg = string.IsNullOrWhiteSpace(salesOrg) ? null : salesOrg.Trim() });
         return (int)id;
     }
 
@@ -38,7 +40,7 @@ public class OcrJobRepository(DbConnectionFactory factory)
             )
             UPDATE nxt SET Status='PROCESSING', StartedAt=SYSDATETIME()
             OUTPUT inserted.JobId, inserted.Module, inserted.ApDocCategory, inserted.Engine,
-                   inserted.FileName, inserted.StoredPath, inserted.FileSize, inserted.CreatedBy;
+                   inserted.FileName, inserted.StoredPath, inserted.FileSize, inserted.CreatedBy, inserted.SalesOrg;
             """);
     }
 

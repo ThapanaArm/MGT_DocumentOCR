@@ -147,10 +147,24 @@ public partial class DocumentRepository(Db db)
         });
     }
 
+    /// <summary>The company a document belongs to, or "" when it has none yet (imported before
+    /// company isolation existed). Null when there is no such document.</summary>
+    public async Task<string?> GetCompanyAsync(int docId)
+    {
+        // Sales Orders are another developer's flow and ocr.SalesOrder has no company column, so
+        // they are reported as unscoped instead of being queried for one.
+        if (docId >= DocumentTables.SoIdBase) return "";
+        var t = DocumentTables.ForId(docId).Doc;
+        var row = await db.QueryOneAsync($"SELECT SalesOrg FROM {t} WHERE DocId=@docId", new { docId });
+        if (row == null) return null;
+        return (string?)row.SalesOrg ?? "";
+    }
+
     // ext: {header, lines, provider, confidence, confidenceNote, tokensIn, tokensOut, cost, costIn,
     // costOut, costCurrency, rawText} — the same shape app/ocr_engine.py's extract() returns.
     public async Task<int> CreateDocumentAsync(string module, Dictionary<string, object?> ext, string fileName,
-        string stored, int size, string user, string apDocCategory, int? durationMs = null)
+        string stored, int size, string user, string apDocCategory, int? durationMs = null,
+        string? salesOrg = null)
     {
         var header = (Dictionary<string, object?>)ext["header"]!;
         var filled = await ApplyVendorMemoryAsync(module, header);
@@ -172,11 +186,11 @@ public partial class DocumentRepository(Db db)
                   OcrTokensIn,OcrTokensOut,OcrCost,OcrInputCost,OcrOutputCost,OcrCostCurrency,OcrDurationMs,
                   ApDocCategory,Status,
                   DocNo,DocDate,PostingDate,PartnerName,PartnerTaxId,Currency,SubTotal,VatRate,VatAmount,
-                  WhtAmount,TotalAmount,HeaderJson,RawText,CreatedBy)
+                  WhtAmount,TotalAmount,HeaderJson,RawText,CreatedBy,SalesOrg)
             VALUES(@module,@fileName,@stored,@size,@provider,@confidence,@confidenceNote,
                   @tokensIn,@tokensOut,@cost,@costIn,@costOut,@costCurrency,@durationMs,
                   @apDocCategory,'NEW', @docNo,@docDate,@postingDate,@partnerName,@partnerTaxId,@currency,
-                  @subTotal,@vatRate,@vatAmount,@whtAmount,@totalAmount,@headerJson,@rawText,@user);
+                  @subTotal,@vatRate,@vatAmount,@whtAmount,@totalAmount,@headerJson,@rawText,@user,@salesOrg);
             SELECT SCOPE_IDENTITY();
             """, new
         {
@@ -191,6 +205,9 @@ public partial class DocumentRepository(Db db)
             subTotal = d.Get("SubTotal"), vatRate = d.Get("VatRate"), vatAmount = d.Get("VatAmount"),
             whtAmount = d.Get("WhtAmount"), totalAmount = d.Get("TotalAmount"),
             headerJson = JsonSerializer.Serialize(header, PyJson.Options), rawText, user,
+            // Which company may see this document. Taken from the person importing it, never from
+            // the request: a document's company decides who can open it at all.
+            salesOrg = string.IsNullOrWhiteSpace(salesOrg) ? null : salesOrg.Trim(),
         });
 
         await SaveLinesAsync(module, docId, (List<Dictionary<string, object?>>)ext["lines"]!);
@@ -244,15 +261,17 @@ public partial class DocumentRepository(Db db)
     // company decided yet, since nothing was actually posted) leaves it unset. See
     // sql/22_document_company_code.sql for the column itself and the fuller rationale.
     public async Task RecordExternalPostAsync(string module, int docId, string? extDocNo, string? endpoint,
-        string payloadJson, bool success, string? message, string user, string? companyCode = null)
+        string payloadJson, bool success, string? message, string user, string? companyCode = null,
+        string? salesOrg = null)
     {
         var docT = DocumentTables.For(module).Doc;
         await using var conn = await db.OpenAsync();
         await using var tx = await conn.BeginTransactionAsync();
         await conn.ExecuteAsync("""
-            INSERT ocr.PostLog(DocId,Module,SapDocNo,Endpoint,PayloadJson,Success,Message,PostedBy)
-            VALUES(@docId,@module,@extDocNo,@endpoint,@payloadJson,@success,@message,@user)
-            """, new { docId, module, extDocNo, endpoint, payloadJson, success = success ? 1 : 0, message, user }, tx);
+            INSERT ocr.PostLog(DocId,Module,SapDocNo,Endpoint,PayloadJson,Success,Message,PostedBy,SalesOrg)
+            VALUES(@docId,@module,@extDocNo,@endpoint,@payloadJson,@success,@message,@user,@salesOrg)
+            """, new { docId, module, extDocNo, endpoint, payloadJson, success = success ? 1 : 0, message, user,
+                       salesOrg = string.IsNullOrWhiteSpace(salesOrg) ? null : salesOrg.Trim() }, tx);
         if (success)
             await conn.ExecuteAsync($"UPDATE {docT} SET Status='POSTED', SapDocNo=@extDocNo, CompanyCode=@companyCode, PostedAt=SYSDATETIME(), PostedBy=@user, UpdatedAt=SYSDATETIME() WHERE DocId=@docId",
                 new { extDocNo, companyCode, user, docId }, tx);
@@ -388,11 +407,22 @@ public partial class DocumentRepository(Db db)
     public async Task<DocumentsPage> ListDocumentsPagedAsync(
         string module, string status, string apDocCategory, string search,
         string dateFrom, string dateTo, string invModule, int page, int pageSize,
-        IReadOnlyCollection<string>? allowedModules = null)
+        IReadOnlyCollection<string>? allowedModules = null, string? companyScope = null)
     {
         var mod = module.ToUpperInvariant();
         var p = new DynamicParameters();
         var common = new List<string>();
+        // MGT and GLC share one installation and must not see each other's invoices. This clause
+        // goes only on the ocr.Document queries: Sales Orders are another developer's flow and that
+        // table has no company column. A document whose SalesOrg was never filled in (everything
+        // imported before this existed) stays visible to both rather than disappearing from
+        // someone's list overnight — sql/27_company_scope.sql has the backfill that ends that.
+        var docScope = new List<string>();
+        if (!string.IsNullOrWhiteSpace(companyScope))
+        {
+            docScope.Add("(SalesOrg = @companyScope OR SalesOrg IS NULL)");
+            p.Add("companyScope", companyScope.Trim());
+        }
         if (status.Length > 0) { common.Add("Status=@status"); p.Add("status", status.ToUpperInvariant()); }
         if (apDocCategory.Length > 0) { common.Add("ApDocCategory=@apDocCategory"); p.Add("apDocCategory", apDocCategory.ToUpperInvariant()); }
         if (!string.IsNullOrWhiteSpace(search))
@@ -418,8 +448,8 @@ public partial class DocumentRepository(Db db)
             var extra = new List<string> { "Module IN ('AP','II')" };
             var inv = invModule.ToUpperInvariant();
             if (inv == "AP" || inv == "II") { extra.Add("Module=@invModule"); p.Add("invModule", inv); }
-            srcSql = "SELECT " + DocListCols + " FROM ocr.Document" + Where(extra);
-            var countWhere = Where(new List<string> { "Module IN ('AP','II')" });
+            srcSql = "SELECT " + DocListCols + " FROM ocr.Document" + Where(extra.Concat(docScope));
+            var countWhere = Where(new List<string> { "Module IN ('AP','II')" }.Concat(docScope));
             var grp = await db.QueryAsync("SELECT Module, COUNT(*) AS Cnt FROM ocr.Document" + countWhere + " GROUP BY Module", p);
             cAp = 0; cIi = 0;
             foreach (var r in grp)
@@ -436,7 +466,7 @@ public partial class DocumentRepository(Db db)
         else if (mod.Length > 0)
         {
             p.Add("module", mod);
-            srcSql = "SELECT " + DocListCols + " FROM ocr.Document" + Where(new[] { "Module=@module" });
+            srcSql = "SELECT " + DocListCols + " FROM ocr.Document" + Where(new[] { "Module=@module" }.Concat(docScope));
         }
         else
         {
@@ -448,7 +478,7 @@ public partial class DocumentRepository(Db db)
             if (docMods.Length > 0)
             {
                 p.Add("docMods", docMods);
-                parts.Add("SELECT " + DocListCols + " FROM ocr.Document" + Where(new[] { "Module IN @docMods" }));
+                parts.Add("SELECT " + DocListCols + " FROM ocr.Document" + Where(new[] { "Module IN @docMods" }.Concat(docScope)));
             }
             if (includeSo)
                 parts.Add("SELECT " + DocListCols + " FROM ocr.SalesOrder" + Where(Array.Empty<string>()));

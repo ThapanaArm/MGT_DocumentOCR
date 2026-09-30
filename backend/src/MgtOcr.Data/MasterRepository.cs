@@ -1,4 +1,4 @@
-using System.Data.Common;
+﻿using System.Data.Common;
 using Dapper;
 using MgtOcr.Core;
 using MgtOcr.Core.Mapping;
@@ -52,10 +52,16 @@ public class MasterRepository(Db db)
             "FROM ocr.CustomerMaterial cm " +
             "WHERE cm.Isactive=1 AND NULLIF(cm.MaterialCodeSAP,'''') IS NOT NULL " +
             "GROUP BY cm.MaterialCodeSAP ORDER BY cm.MaterialCodeSAP')");
-        result["vendors"] = await db.QueryAsync("SELECT * FROM ocr.Vendor WHERE IsActive=1 ORDER BY VendorCode");
+        // Vendors and vendor materials got their SalesOrg in sql/27_company_scope.sql; a row that
+        // has not been assigned to a company yet stays visible to both.
+        var scopedVendor = string.IsNullOrWhiteSpace(companyCode)
+            ? "" : " AND (SalesOrg=@companyCode OR SalesOrg IS NULL)";
+        var scopedVendorMaterial = string.IsNullOrWhiteSpace(companyCode)
+            ? "" : " WHERE (SalesOrg=@companyCode OR SalesOrg IS NULL)";
+        result["vendors"] = await db.QueryAsync("SELECT * FROM ocr.Vendor WHERE IsActive=1" + scopedVendor + " ORDER BY VendorCode", scopeParam);
         // ocr.Material (the old "apmaterials" master) has been dropped and is no longer loaded —
         // material data now comes solely from CustomerMaterial (the "materials" list above).
-        result["venmaterials"] = await db.QueryAsync("SELECT * FROM ocr.VendorMaterial ORDER BY VendorCode, ExtCode");
+        result["venmaterials"] = await db.QueryAsync("SELECT * FROM ocr.VendorMaterial" + scopedVendorMaterial + " ORDER BY VendorCode, ExtCode", scopeParam);
         result["uoms"] = await db.QueryAsync(
             "SELECT * FROM ocr.UomConversion ORDER BY CASE WHEN SalesOrg IS NULL THEN 0 ELSE 1 END, SalesOrg, CASE WHEN MaterialCode IS NULL THEN 0 ELSE 1 END, MaterialCode, ExtUom");
         // Payment-terms code -> display-text mapping. SAP returns only the code (e.g. "5009") on the
@@ -92,10 +98,30 @@ public class MasterRepository(Db db)
     }
 
     // masters_list(): unfiltered (no IsActive check) + optional OR-across-all-columns LIKE search.
-    public async Task<IEnumerable<dynamic>> ListAsync(MasterDefinition m, string? q)
+    /// <summary>The column that ties a master row to one company, or null when the table has none.
+    ///
+    /// MGT and GLC share this installation and must not see each other's master data. The
+    /// customer-side tables were built with SalesOrg from the start; the vendor tables got theirs in
+    /// sql/27_company_scope.sql.</summary>
+    public static string? CompanyColumn(MasterDefinition m) =>
+        m.Cols.FirstOrDefault(c => string.Equals(c, "SalesOrg", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>The company a single master row belongs to: "" when the row has none yet, null when
+    /// there is no such row (or the table is not company-scoped at all).</summary>
+    public async Task<string?> RowCompanyAsync(MasterDefinition m, string key)
+    {
+        var col = CompanyColumn(m);
+        if (col is null) return null;
+        var row = await db.QueryOneAsync($"SELECT {col} AS Company FROM {m.Table} WHERE {m.Key}=@key", new { key });
+        if (row == null) return null;
+        return (string?)row.Company ?? "";
+    }
+
+    public async Task<IEnumerable<dynamic>> ListAsync(MasterDefinition m, string? q, string? companyScope = null)
     {
         var sql = $"SELECT * FROM {m.Table}";
         var p = new DynamicParameters();
+        var where = new List<string>();
         if (!string.IsNullOrEmpty(q))
         {
             var clauses = new List<string>();
@@ -104,8 +130,17 @@ public class MasterRepository(Db db)
                 clauses.Add($"CAST({m.Cols[i]} AS nvarchar(400)) LIKE @q{i}");
                 p.Add($"q{i}", $"%{q}%");
             }
-            sql += " WHERE (" + string.Join(" OR ", clauses) + ")";
+            where.Add("(" + string.Join(" OR ", clauses) + ")");
         }
+        // A row with no company set is shown to both, the same rule the document list uses: the
+        // unit-conversion table uses NULL deliberately for a rule that applies group-wide, and
+        // everything else that is still NULL is data waiting to be assigned, not another company's.
+        if (CompanyColumn(m) is { } scopeCol && !string.IsNullOrWhiteSpace(companyScope))
+        {
+            where.Add($"({scopeCol} = @companyScope OR {scopeCol} IS NULL)");
+            p.Add("companyScope", companyScope.Trim());
+        }
+        if (where.Count > 0) sql += " WHERE " + string.Join(" AND ", where);
         sql += " ORDER BY " + m.OrderBy;
         return await db.QueryAsync(sql, p);
     }

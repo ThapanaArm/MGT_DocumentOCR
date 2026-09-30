@@ -1,4 +1,4 @@
-using MgtOcr.Data;
+﻿using MgtOcr.Data;
 
 namespace MgtOcr.Api.Services;
 
@@ -48,7 +48,8 @@ public class OcrQueueWorker(OcrJobRepository jobs, DocumentIngestService ingest,
         try
         {
             var (docId, mod, _) = await ingest.IngestAsync(
-                job.Module, job.StoredPath, job.FileName, job.FileSize, job.Engine, job.ApDocCategory, job.CreatedBy);
+                job.Module, job.StoredPath, job.FileName, job.FileSize, job.Engine, job.ApDocCategory, job.CreatedBy,
+                password: null, salesOrg: job.SalesOrg);
             await jobs.MarkDoneAsync(job.JobId, docId);
             log.LogInformation("OCR job {JobId} ({File}) -> doc {DocId} ({Module})", job.JobId, job.FileName, docId, mod);
         }

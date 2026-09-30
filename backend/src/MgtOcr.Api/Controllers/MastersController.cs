@@ -1,4 +1,4 @@
-using MgtOcr.Core.Auth;
+﻿using MgtOcr.Core.Auth;
 using MgtOcr.Core.Config;
 using MgtOcr.Core.Json;
 using MgtOcr.Data;
@@ -12,6 +12,25 @@ namespace MgtOcr.Api.Controllers;
 [Route("api/masters")]
 public class MastersController(MasterRepository repo, ICurrentUserAccessor currentUser, AppConfig config) : ControllerBase
 {
+    /// <summary>The company whose master data this person may see — "1000" MGT, "2000" GLC, or ""
+    /// for Admin and for a user record that names no company (see CompanyScope).</summary>
+    private async Task<string> CompanyScopeAsync() =>
+        CompanyScope.For(await currentUser.RequireAsync(), config);
+
+    /// <summary>Refuses to touch a master row that belongs to the other company. A row with no
+    /// company yet is editable by both, which is what keeps the existing data workable until
+    /// sql/27_company_scope.sql's backfill assigns it.</summary>
+    private async Task<IActionResult?> DenyIfOtherCompanyAsync(MasterDefinition m, string key)
+    {
+        var scope = await CompanyScopeAsync();
+        if (scope.Length == 0) return null;
+        var owner = await repo.RowCompanyAsync(m, key);
+        if (string.IsNullOrWhiteSpace(owner)) return null; // shared/legacy row, or table without a company
+        return string.Equals(owner, scope, StringComparison.OrdinalIgnoreCase)
+            ? null
+            : StatusCode(403, new { detail = "This record belongs to another company" });
+    }
+
     [HttpGet]
     public async Task<IActionResult> GetAll([FromQuery] bool includeInactive = false)
     {
@@ -27,7 +46,7 @@ public class MastersController(MasterRepository repo, ICurrentUserAccessor curre
             return NotFound(new { detail = "Unknown master table" });
         try
         {
-            return Ok(await repo.ListAsync(m, q));
+            return Ok(await repo.ListAsync(m, q, await CompanyScopeAsync()));
         }
         catch (SqlException ex) when (ex.Number == 208)
         {
@@ -41,6 +60,11 @@ public class MastersController(MasterRepository repo, ICurrentUserAccessor curre
         if (!MasterRepository.TryGetKind(kind, out var m))
             return NotFound(new { detail = "Unknown master table" });
         var values = JsonBodyHelpers.Unwrap(body);
+        // The new row belongs to the company of whoever is creating it. Stamped here rather than
+        // trusted from the body, so nobody can file a record under the other company.
+        if (MasterRepository.CompanyColumn(m) is { } createCol
+            && CompanyScope.Own(await currentUser.RequireAsync(), config) is { Length: > 0 } scope)
+            values[createCol] = scope;
         var error = Validate(kind, values, isCreate: true);
         if (error != null) return BadRequest(new { detail = error });
         try
@@ -60,7 +84,19 @@ public class MastersController(MasterRepository repo, ICurrentUserAccessor curre
     {
         if (!MasterRepository.TryGetKind(kind, out var m))
             return NotFound(new { detail = "Unknown master table" });
+        if (await DenyIfOtherCompanyAsync(m, key) is { } denied) return denied;
         var values = JsonBodyHelpers.Unwrap(body);
+        // A row cannot be moved to the other company by editing it either: the company is taken
+        // from the row itself — or from the editor when the row has none yet — never from the body.
+        // It is pinned rather than dropped because SalesOrg is a required field on these forms.
+        if (MasterRepository.CompanyColumn(m) is { } editCol)
+        {
+            var owner = await repo.RowCompanyAsync(m, key);
+            var pinned = string.IsNullOrWhiteSpace(owner)
+                ? CompanyScope.Own(await currentUser.RequireAsync(), config)
+                : owner;
+            if (!string.IsNullOrWhiteSpace(pinned)) values[editCol] = pinned;
+        }
         var error = Validate(kind, values, isCreate: false);
         if (error != null) return BadRequest(new { detail = error });
         try
@@ -89,6 +125,7 @@ public class MastersController(MasterRepository repo, ICurrentUserAccessor curre
         if (MasterRepository.ActiveColumn(m) is null)
             return BadRequest(new { detail = "This master table has no active/inactive status" });
         await currentUser.RequireAsync();
+        if (await DenyIfOtherCompanyAsync(m, key) is { } denied) return denied;
         try
         {
             var ok = await repo.SetActiveAsync(m, key, req.Active);
@@ -105,6 +142,7 @@ public class MastersController(MasterRepository repo, ICurrentUserAccessor curre
     {
         if (!MasterRepository.TryGetKind(kind, out var m))
             return NotFound(new { detail = "Unknown master table" });
+        if (await DenyIfOtherCompanyAsync(m, key) is { } denied) return denied;
         try
         {
             var (ok, fkError) = await repo.DeleteAsync(m, key);

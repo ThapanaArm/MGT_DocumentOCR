@@ -1,4 +1,4 @@
-using MgtOcr.Core;
+﻿using MgtOcr.Core;
 using MgtOcr.Data;
 using MgtOcr.Ocr;
 
@@ -12,7 +12,7 @@ public class DocumentIngestService(OcrEngine ocr, DocumentRepository repo)
 {
     public async Task<(int DocId, string Module, string? Note)> IngestAsync(
         string module, string storedPath, string fileName, int size, string engine,
-        string apDocCategory, string user, string? password = null)
+        string apDocCategory, string user, string? password = null, string? salesOrg = null)
     {
         var mod = module.ToUpperInvariant();
         var detect = mod == "AP";
@@ -30,7 +30,7 @@ public class DocumentIngestService(OcrEngine ocr, DocumentRepository repo)
                 ? "II"
                 : pd.Header.GetStr("poRef").Trim().Length > 0 ? "AP" : "II";
         var ext = ExtConversion.ToExtDict(pd);
-        var docId = await repo.CreateDocumentAsync(mod, ext, fileName, storedPath, size, user, apDocCategory, durationMs);
+        var docId = await repo.CreateDocumentAsync(mod, ext, fileName, storedPath, size, user, apDocCategory, durationMs, salesOrg);
         return (docId, mod, pd.Note);
     }
 }
