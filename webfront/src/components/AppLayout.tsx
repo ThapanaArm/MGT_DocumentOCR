@@ -20,6 +20,7 @@ function pageTitle(pathname: string): string {
   if (pathname.startsWith('/master')) return 'Master Mapping';
   if (pathname.startsWith('/audit-log')) return 'Log';
   if (pathname.startsWith('/log')) return 'SAP Submission History';
+  if (pathname.startsWith('/admin/sharepoint')) return 'SharePoint Archive';
   return '';
 }
 
@@ -31,6 +32,7 @@ function pageDescription(pathname: string): string {
   if (pathname.startsWith('/master')) return 'Maintain reusable mappings for faster, more accurate processing.';
   if (pathname.startsWith('/audit-log')) return 'Review important activity and changes across the system.';
   if (pathname.startsWith('/log')) return 'Track submissions and responses from SAP.';
+  if (pathname.startsWith('/admin/sharepoint')) return 'Check the SharePoint connection and the files archived after posting.';
   return 'MGT Document OCR workspace';
 }
 

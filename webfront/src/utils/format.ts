@@ -36,8 +36,9 @@ export const statusBadge = (s: string): StatusBadge => {
   const map: Record<string, [string, string]> = {
     NEW: ['b-idle', 'Pending Mapping'],
     INCOMPLETE: ['b-fail', 'Mapping Incomplete'],
-    MAPPED: ['b-ok', 'Pending SAP Connection'],
-    POSTED: ['b-ok', 'SAP Connected Successfully'],
+    // Neutral wording: a document is posted to SAP (GLC, liability modules) or Zoho CRM (MGT SO).
+    MAPPED: ['b-ok', 'Ready to Post'],
+    POSTED: ['b-ok', 'Post Success'],
     SPLIT: ['b-warn', 'Split into multiple SOs'],
   };
   const [cls, label] = map[s] || ['b-idle', s];

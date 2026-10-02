@@ -159,12 +159,12 @@ export default function InboxPage() {
                 <th className="reg-col-docno">{invColHead}</th>
                 {!isSalesOrder && <th className="reg-col-type">Type</th>}
                 <th className="reg-col-date">PO Date</th>
-                <th className="reg-col-supplier">Supplier</th>
+                <th className="reg-col-supplier">{isSalesOrder ? 'Customer' : 'Supplier'}</th>
                 <th className="reg-col-total" style={{ textAlign: 'right' }}>Total</th>
                 {isInvoice && <th className="reg-col-category">Document Type</th>}
                 <th className="reg-col-status">Status</th>
                 <th className="reg-col-ocr">Model OCR</th>
-                <th className="reg-col-sap">SAP Doc</th>
+                <th className="reg-col-sap">Posted Doc No.</th>
                 <th className="reg-col-created">Create Date</th>
                 <th className="reg-col-actions" aria-label="Actions" />
               </tr>

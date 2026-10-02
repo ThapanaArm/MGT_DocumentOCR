@@ -71,8 +71,24 @@ public class CurrentUserAccessor(
                 return _resolved = null;
             }
             var emailKey = email;
-            cacheKey = "mgtocr:user:email:" + email.ToLowerInvariant();
-            load = c => users.FindByEmailAsync(emailKey, c);
+            // Multi-tenant: AuthExtensions' OnTokenValidated stamped the CompanyID that the token's
+            // tenant maps to. The person must ALSO belong to that company in Ms_UserCompany, otherwise
+            // a valid GLC-tenant account whose e-mail happens to exist as an MGT user would get in.
+            var tenantCompany = authed ? principal!.FindFirst(AuthExtensions.CompanyIdClaim)?.Value : null;
+            cacheKey = "mgtocr:user:email:" + email.ToLowerInvariant() + ":c" + (tenantCompany ?? "");
+            load = async c =>
+            {
+                var u = await users.FindByEmailAsync(emailKey, c);
+                if (u is null || string.IsNullOrWhiteSpace(tenantCompany)) return u;
+                if (!u.BelongsTo(tenantCompany))
+                {
+                    log.LogWarning("Sign-in refused: {Email} is not registered for company {Company} (Ms_UserCompany).",
+                        emailKey, tenantCompany);
+                    return null;
+                }
+                u.ActiveCompanyId = tenantCompany;
+                return u;
+            };
         }
 
         if (cache.TryGetValue(cacheKey, out CurrentUser? cached)) return _resolved = cached;

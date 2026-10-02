@@ -12,6 +12,7 @@ export interface NavItem {
   to: string;
   icon: string; // unicode glyph, matches the old .ic spans
   module?: ModuleCode;
+  adminOnly?: boolean; // shown only to UserRole = Admin (the API checks it too)
 }
 
 export interface NavSection {
@@ -32,6 +33,7 @@ const OVERVIEW = 'fa-solid fa-gauge-high';
 const MASTER = 'fa-solid fa-flag';
 const LOG = 'fa-solid fa-clock-rotate-left';
 const AUDIT = 'fa-solid fa-clipboard-check';
+const ARCHIVE = 'fa-solid fa-cloud-arrow-up';
 
 export const navSections: NavSection[] = [
   {
@@ -62,6 +64,7 @@ export const navSections: NavSection[] = [
     items: [
       { label: 'SAP Submission History', to: '/log', icon: LOG },
       { label: 'Activity Log', to: '/audit-log', icon: AUDIT },
+      { label: 'SharePoint Archive', to: '/admin/sharepoint', icon: ARCHIVE, adminOnly: true },
     ],
   },
 ];
@@ -92,7 +95,11 @@ export function allowedModules(me: Access): ModuleCode[] {
 export function visibleNavSections(me: Access | null): NavSection[] {
   if (!me) return navSections; // still resolving — routes stay API-guarded regardless
   const allow = new Set<ModuleCode>(allowedModules(me));
+  const admin = (me.role || '').trim().toLowerCase() === 'admin';
   return navSections
-    .map((s) => ({ ...s, items: s.items.filter((it) => !it.module || allow.has(it.module)) }))
+    .map((s) => ({
+      ...s,
+      items: s.items.filter((it) => (!it.module || allow.has(it.module)) && (!it.adminOnly || admin)),
+    }))
     .filter((s) => s.items.length > 0);
 }

@@ -1066,3 +1066,17 @@ input,select,textarea,.btn,.nav a{-webkit-tap-highlight-color:transparent}
 .btnmenu-list button:hover:not(:disabled){background:var(--brand-soft)}
 .btnmenu-list button:disabled{opacity:.5;cursor:default}
 .btnmenu-list button i{width:14px;opacity:.75}
+/* Register table, mid-size screens (901–1800px) — overrides the fixed-% layouts above.
+   Those rules used table-layout:fixed with % widths for columns that are later hidden, so the
+   leftover width went to the Actions column while Status badges were cut off ("SAP Connected Succes…").
+   Auto layout: Status/Total/Doc No. size to their content, Supplier takes the remaining space
+   and truncates with "…", Actions shrinks to its button. */
+@media (min-width:901px) and (max-width:1800px){
+  .tw table.reg{table-layout:auto;width:100%;min-width:0}
+  .reg th,.reg td{width:auto}
+  .reg .reg-col-supplier{width:100%;max-width:0;overflow:hidden;text-overflow:ellipsis}
+  .reg .reg-col-status{white-space:nowrap;overflow:visible}
+  .reg .reg-col-status .badge{max-width:none;overflow:visible}
+  .reg .reg-col-total,.reg .reg-col-docno{white-space:nowrap}
+  .reg .reg-col-actions{width:1%;overflow:visible}
+}

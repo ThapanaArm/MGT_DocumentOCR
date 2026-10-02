@@ -1840,12 +1840,23 @@ export default function DocumentPage() {
         ))}
 
       {posted && (
-        <div className="result ok">
-          <h3><i className="fa-solid fa-check" /> Sent to SAP S/4HANA successfully</h3>
-          <div>
-            SAP Document: <code>{doc.sapDocNo}</code> | {moduleLabel(doc.module)} | {dt(doc.postedAt)}
-          </div>
-        </div>
+        // Where it actually went: CompanyCode is stamped at post time (MGT Sales Order = Zoho CRM,
+        // everything else = SAP); older rows without it fall back to the current routing.
+        (() => {
+          const toZoho =
+            doc.module === 'SO' && (doc.companyCode ? String(doc.companyCode).toUpperCase() === 'MGT' : isMgt);
+          return (
+            <div className="result ok">
+              <h3>
+                <i className="fa-solid fa-check" /> {toZoho ? 'Sent to Zoho CRM successfully' : 'Sent to SAP S/4HANA successfully'}
+              </h3>
+              <div>
+                {toZoho ? 'Zoho Sales Order' : 'SAP Document'}: <code>{doc.sapDocNo}</code> | {moduleLabel(doc.module)} |{' '}
+                {dt(doc.postedAt)}
+              </div>
+            </div>
+          );
+        })()
       )}
 
       {isSplit && (

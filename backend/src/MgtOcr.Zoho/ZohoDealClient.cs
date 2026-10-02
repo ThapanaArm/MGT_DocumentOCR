@@ -143,6 +143,10 @@ public class ZohoDealClient(ZohoClient zoho)
     /// picked (from the Deal-comparison card) and doesn't need the open/by-account-code search
     /// above. Returns null if the id doesn't resolve to a record (deleted, wrong module, ...).
     /// </summary>
+    /// <summary>The raw Deal record (all fields) - e.g. its Owner ("Deal Owner", the sales person who
+    /// opened the Deal). Used as the fallback when the Account has no Sales Employee.</summary>
+    public async Task<JsonObject?> GetRecordAsync(string dealId) => await zoho.GetByIdAsync(await ResolveModuleAsync(), dealId);
+
     public async Task<ZohoDeal?> GetByIdAsync(string dealId)
     {
         var module = await ResolveModuleAsync();

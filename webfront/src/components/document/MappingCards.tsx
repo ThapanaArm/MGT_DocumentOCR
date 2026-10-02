@@ -1273,6 +1273,7 @@ function ZohoShipToPanel({
   onUse,
   docShipToName,
   docShipToAddress,
+  docCustomerTaxId,
 }: {
   customerCode?: string;
   masters: MastersData;
@@ -1281,11 +1282,40 @@ function ZohoShipToPanel({
   /** The document's own Ship-to name/address, used only as the doc side of the AI compare. */
   docShipToName?: string;
   docShipToAddress?: string;
+  /** Fallback Tax ID (from the document) when the master row has none. */
+  docCustomerTaxId?: string;
 }) {
   // The compatibility alias contains Customer.ComcompyCodeSAP (Zoho Account Code for MGT).
-  const accountId: string | undefined = masters.customers.find(
-    (c) => c.CustomerCode === customerCode,
-  )?.ComcompyCodeSAP;
+  const custRow = masters.customers.find((c) => c.CustomerCode === customerCode);
+  const accountId: string | undefined = custRow?.ComcompyCodeSAP;
+  const custTaxId = String(custRow?.TaxId ?? docCustomerTaxId ?? '').replace(/\D/g, '');
+
+  // ── Same company, other customer codes ─────────────────────────────────────────────────────
+  // Per request: one company can have several Zoho Accounts under the same Tax ID (e.g. head office
+  // vs factory, each with its own address). The Customer step shows all of them; the Ship-to step
+  // must offer their addresses too, not just the picked account's. Same Account search by Tax ID as
+  // the Customer step, then each other account's Ship-to list. Picking one carries that account's code.
+  const [siblings, setSiblings] = useState<{ acc: ZohoAccount; shipTos: ZohoShipToInfo[] | null; error?: string }[]>([]);
+  const [sibLoading, setSibLoading] = useState(false);
+  useEffect(() => {
+    if (custTaxId.length < 10) { setSiblings([]); return; }
+    let cancelled = false;
+    setSibLoading(true);
+    searchZohoAccount({ taxId: custTaxId })
+      .then(async (r) => {
+        const others = (Array.isArray(r?.results) ? r.results : []).filter(
+          (a) => (a.accountCode || a.accountId) !== accountId && a.accountId !== accountId,
+        );
+        const loaded = await Promise.all(others.map(async (acc) => {
+          try { return { acc, shipTos: (await getZohoAccountShipTos(acc.accountId))?.shipTos ?? [] }; }
+          catch (e: any) { return { acc, shipTos: null, error: e?.message || 'Zoho CRM lookup failed' }; }
+        }));
+        if (!cancelled) setSiblings(loaded);
+      })
+      .catch(() => { if (!cancelled) setSiblings([]); })
+      .finally(() => { if (!cancelled) setSibLoading(false); });
+    return () => { cancelled = true; };
+  }, [custTaxId, accountId]);
 
   const [shipTos, setShipTos] = useState<ZohoShipToInfo[] | null>(null);
   const [hasMultiple, setHasMultiple] = useState(false);
@@ -1469,6 +1499,20 @@ function ZohoShipToPanel({
           )}
           {shipTos.map((info, i) => shipToBlock(info, i, accountId))}
         </>
+      )}
+      {sibLoading && hint('Looking for other customer codes with the same Tax ID…')}
+      {siblings.length > 0 && (
+        <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--line-soft)' }}>
+          <div className="hint">Other customer codes with the same Tax ID ({custTaxId}) — their addresses can be used as Ship-to:</div>
+          {siblings.map(({ acc, shipTos: st, error: err }) => (
+            <div key={acc.accountId} style={{ marginTop: 8 }}>
+              <div><b>{acc.accountCode || acc.accountId}</b> — {acc.accountName}{acc.branchName ? ` (${acc.branchName})` : ''}</div>
+              {err && <div className="hint">Load failed: {err}</div>}
+              {st && st.length === 0 && <div className="hint">No address on this account</div>}
+              {st && st.map((info, i) => shipToBlock(info, i, acc.accountCode || acc.accountId))}
+            </div>
+          ))}
+        </div>
       )}
       {renderNameSearch()}
       <CompareModal<ZohoShipToInfo>
@@ -2632,6 +2676,7 @@ export default function MappingCards({
                   }}
                   docShipToName={doc.header.shipToName}
                   docShipToAddress={doc.header.shipToAddress}
+                  docCustomerTaxId={doc.header.customerTaxId}
                 />
               ) : shipToSapOpen && !isMgt && onUseSapShipTo ? (
                 <SapShipToPanel

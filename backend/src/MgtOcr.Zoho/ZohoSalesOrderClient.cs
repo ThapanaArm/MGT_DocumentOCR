@@ -111,6 +111,10 @@ public class ZohoSalesOrderClient(ZohoClient zoho)
         return _module;
     }
 
+    /// <summary>One Sales Order record by its Zoho id (all fields) - read back after creating it, e.g.
+    /// to learn its Owner (the responsible sales person) and Account for the SharePoint folder.</summary>
+    public async Task<JsonObject?> GetByIdAsync(string id) => await zoho.GetByIdAsync(await ResolveModuleAsync(), id);
+
     private async Task<string> ResolveOrderedItemsFieldAsync()
     {
         if (_orderedItemsField is not null) return _orderedItemsField;

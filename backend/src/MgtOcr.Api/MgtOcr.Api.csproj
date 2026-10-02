@@ -4,6 +4,8 @@
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <!-- Dev secrets (e.g. Archive:Targets:0:ClientSecret): right-click the project > Manage User Secrets -->
+    <UserSecretsId>mgtocr-api-fcf4ba88-bc2f-4aec-91ff-b324fb212197</UserSecretsId>
   </PropertyGroup>
 
   <ItemGroup>

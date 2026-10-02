@@ -26,6 +26,9 @@ public static class AuthExtensions
     public const string Smart = "smart";
     public const string MicrosoftScheme = "MicrosoftJwt";
     public const string LocalScheme = "LocalJwt";
+    // Claim added after a Microsoft token validates: the CompanyID mapped from the token's tenant (tid).
+    // Defined in EntraMultiTenantAuth; aliased here so existing callers keep working.
+    public const string CompanyIdClaim = EntraMultiTenantAuth.CompanyIdClaim;
 
     public static IServiceCollection AddMgtOcrAuth(
         this IServiceCollection services, AppConfig cfg, IWebHostEnvironment env, ILogger logger)
@@ -59,23 +62,6 @@ public static class AuthExtensions
         services.AddScoped<PasswordService>();
 
         var msEnabled = cfg.AuthConfigured;
-        // Entra can issue either a v2 access token (login.microsoftonline.com/.../v2.0) or a v1
-        // access token (sts.windows.net/.../) depending on the API app registration's token-version
-        // setting. Both are valid Microsoft issuers; tenant IDs still come exclusively from our
-        // allow-list, so supporting v1 does not broaden access to another tenant.
-        var microsoftIssuers = cfg.ConfiguredTenants
-            .SelectMany(t =>
-            {
-                var tenantId = t.TenantId.Trim();
-                return new[]
-                {
-                    $"https://login.microsoftonline.com/{tenantId}/v2.0",
-                    $"https://sts.windows.net/{tenantId}/",
-                };
-            })
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-
         var auth = services.AddAuthentication(o =>
         {
             o.DefaultScheme = Smart;
@@ -90,30 +76,7 @@ public static class AuthExtensions
                 return LocalScheme;
             });
 
-        if (msEnabled)
-        {
-            var audiences = new[] { cfg.AuthAudience }
-                .Concat(cfg.ConfiguredTenants.SelectMany(t => new[] { t.ClientId, $"api://{t.ClientId}" }))
-                .Select(a => (a ?? "").Trim())
-                .Where(a => a.Length > 0 && a != "api://").Distinct().ToArray();
-
-            auth.AddJwtBearer(MicrosoftScheme, o =>
-            {
-                o.Authority = "https://login.microsoftonline.com/organizations/v2.0";
-                o.MapInboundClaims = false;
-                o.TokenValidationParameters = new TokenValidationParameters
-                {
-                    ValidateIssuer = true, ValidIssuers = microsoftIssuers,
-                    ValidateAudience = true, ValidAudiences = audiences,
-                    ValidateLifetime = true, ValidateIssuerSigningKey = true,
-                    ClockSkew = TimeSpan.FromMinutes(2),
-                };
-                o.Events = new JwtBearerEvents
-                {
-                    OnAuthenticationFailed = c => { logger.LogWarning("MS token rejected: {M}", c.Exception.Message); return Task.CompletedTask; },
-                };
-            });
-        }
+        if (msEnabled) auth.AddEntraMultiTenant(MicrosoftScheme, cfg, logger);
 
         auth.AddJwtBearer(LocalScheme, o =>
         {
@@ -134,7 +97,7 @@ public static class AuthExtensions
             o.FallbackPolicy = new AuthorizationPolicyBuilder().RequireAuthenticatedUser().Build());
 
         logger.LogInformation("Auth ready — password login: on; Microsoft SSO: {Ms}",
-            msEnabled ? $"on ({microsoftIssuers.Length} tenant(s))" : "off (no tenant configured yet)");
+            msEnabled ? $"on ({cfg.ConfiguredTenants.Length} tenant(s), multi-tenant)" : "off (no tenant configured yet)");
         return services;
     }
 

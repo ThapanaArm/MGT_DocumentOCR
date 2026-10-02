@@ -46,7 +46,7 @@ export default function LogPage() {
               <tr>
                 <th>Time</th>
                 <th>Module</th>
-                <th>SAP Doc</th>
+                <th>Posted Doc No.</th>
                 <th>Reference Document</th>
                 <th>Partner</th>
                 <th style={{ textAlign: 'right' }}>Total</th>
@@ -86,7 +86,7 @@ export default function LogPage() {
                     <td style={{ textAlign: 'center' }}>{l.Lines || 0}</td>
                     <td>
                       {l.Success ? (
-                        <span className="badge b-ok"><i className="fa-solid fa-check" /> SAP Connected Successfully</span>
+                        <span className="badge b-ok"><i className="fa-solid fa-check" /> Post Success</span>
                       ) : (
                         <span className="badge b-fail"><i className="fa-solid fa-xmark" /> Unable to Connect to SAP</span>
                       )}

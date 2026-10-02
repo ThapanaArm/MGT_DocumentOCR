@@ -6,6 +6,12 @@ using MgtOcr.Data;
 using MgtOcr.Ocr;
 
 var builder = WebApplication.CreateBuilder(args);
+// User Secrets (right-click project > Manage User Secrets) are normally loaded only when the
+// environment is "Development". Load them always, so a secret such as
+// Archive:Targets:0:ClientSecret works however the app is started on this machine. On a server
+// without a secrets.json this does nothing; environment variables still override it.
+builder.Configuration.AddUserSecrets(typeof(Program).Assembly, optional: true);
+builder.Configuration.AddEnvironmentVariables();
 
 // Configuration now comes from appsettings.json (+ appsettings.{Environment}.json and
 // environment variables, merged by the .NET config system — env vars use "__" for nesting,
@@ -15,6 +21,8 @@ var cfg = builder.Configuration;
 var repoRoot = Path.GetFullPath(Path.Combine(builder.Environment.ContentRootPath, "..", "..", ".."));
 
 string Get(string key, string fallback = "") => (cfg[key] ?? fallback).Trim();
+bool GetBool(string key, bool fallback) => bool.TryParse(Get(key), out var b) ? b : fallback;
+int GetInt(string key, int fallback) => int.TryParse(Get(key), out var n) ? n : fallback;
 // "dev" -> "Dev", "prod" -> "Prod" — matches the BaseUrl_Dev/BaseUrl_Prod key casing regardless
 // of how the environment name is cased in config.
 string Cap(string s) => s.Length == 0 ? s : char.ToUpperInvariant(s[0]) + s[1..].ToLowerInvariant();
@@ -142,6 +150,7 @@ var appConfig = new AppConfig
     ZohoRefreshToken = Get($"ZohoConfig:{zohoEnv}:RefreshToken"),
     AuthTenants = authTenants,
     AuthAudience = Get("AzureAd:Audience"),
+    AuthRequiredScope = Get("AzureAd:RequiredScope", "access_as_user"),
     UserDatabase = Get("AzureAd:UserDatabase", "MGT_Datawarehouse"),
     DevFallbackEmail = Get("AzureAd:DevFallbackEmail"),
     LocalAuthSigningKey = Get("Auth:JwtSigningKey"),
@@ -149,6 +158,25 @@ var appConfig = new AppConfig
     LocalAuthAudience = Get("Auth:Audience", "mgtocr"),
     LocalAuthLifetimeMinutes = int.TryParse(Get("Auth:LifetimeMinutes", "480"), out var lm) ? lm : 480,
     UploadDir = uploadDir,
+    ArchiveEnabled = GetBool("Archive:Enabled", false),
+    ArchiveIntervalSeconds = GetInt("Archive:IntervalSeconds", 60),
+    ArchiveBatchSize = GetInt("Archive:BatchSize", 20),
+    ArchiveMaxAttempts = GetInt("Archive:MaxAttempts", 5),
+    ArchiveTargets = cfg.GetSection("Archive:Targets").Get<SharePointTarget[]>() ?? [],
+    CompressEnabled = GetBool("Archive:CompressEnabled", false),
+    CompressDpi = GetInt("Archive:CompressDpi", 150),
+    CompressQuality = GetInt("Archive:CompressQuality", 75),
+    CompressImageMaxPx = GetInt("Archive:CompressImageMaxPx", 2000),
+    CompressMinAgeMinutes = GetInt("Archive:CompressMinAgeMinutes", 0),
+    CompressMinBytes = GetInt("Archive:CompressMinBytes", 150000),
+    CompressMinSavingPercent = GetInt("Archive:CompressMinSavingPercent", 15),
+    CleanupEnabled = GetBool("Archive:CleanupEnabled", false),
+    CleanupDryRun = GetBool("Archive:CleanupDryRun", true),
+    CleanupIntervalMinutes = GetInt("Archive:CleanupIntervalMinutes", 60),
+    CleanupGraceHours = GetInt("Archive:CleanupGraceHours", 24),
+    CleanupDraftDays = GetInt("Archive:CleanupDraftDays", 30),
+    CleanupFailedDays = GetInt("Archive:CleanupFailedDays", 7),
+    CleanupOrphanDays = GetInt("Archive:CleanupOrphanDays", 0),
 };
 Directory.CreateDirectory(appConfig.UploadDir);
 startupLog.LogInformation("Uploaded documents are stored in {UploadDir}", appConfig.UploadDir);
@@ -166,6 +194,15 @@ builder.Services.AddSingleton<MgtOcr.Api.Auth.SingleSessionService>();
 builder.Services.AddSingleton<OcrJobRepository>();
 builder.Services.AddSingleton<MgtOcr.Api.Services.DocumentIngestService>();
 builder.Services.AddHostedService<MgtOcr.Api.Services.OcrQueueWorker>();
+// Upload lifecycle: archive posted documents' files to SharePoint, then remove the local copy.
+// Both workers exit immediately unless Archive:Enabled / Archive:CleanupEnabled are true.
+builder.Services.AddHttpClient(nameof(MgtOcr.Api.Services.GraphArchiveClient));
+builder.Services.AddSingleton<FileArchiveRepository>();
+builder.Services.AddSingleton<MgtOcr.Api.Services.GraphArchiveClient>();
+builder.Services.AddSingleton<MgtOcr.Api.Services.CompressionState>();
+builder.Services.AddHostedService<MgtOcr.Api.Services.FileCompressWorker>();
+builder.Services.AddHostedService<MgtOcr.Api.Services.FileArchiveWorker>();
+builder.Services.AddHostedService<MgtOcr.Api.Services.FileCleanupWorker>();
 builder.Services.AddScoped<MgtOcr.Api.Auth.DepartmentAccessFilter>();
 builder.Services.AddHttpClient<MgtOcr.Sap.SapClient>();
 builder.Services.AddHttpClient<MgtOcr.Sap.SapBusinessPartnerClient>();

@@ -5,27 +5,23 @@ import {
 } from '@azure/msal-browser';
 
 /* =====================================================================
-   Microsoft Entra ID sign-in — multi-registration.
+   Microsoft Entra ID sign-in — ONE multi-tenant app registration (MGT-OCR-SSO).
 
-   MGT and GLC are in SEPARATE Entra tenants, each with its OWN single-tenant
-   app registration (not one shared multi-tenant app). Both companies use the
-   SAME app URL, so this module holds one MSAL PublicClientApplication PER
-   company (keyed by clientId — MSAL namespaces its localStorage cache by
-   clientId, so the two never collide), and the person picks their company on
-   the sign-in screen. The chosen company is remembered so silent sign-in and
-   token refresh keep using the right registration.
+   MGT and GLC sit in separate Entra tenants but use the SAME app registration
+   (multi-tenant, admin consent granted in the GLC tenant). The authority is
+   "organizations", so a person signs in with whichever work account they pick and
+   Entra routes them to their own tenant. There is no company picker any more.
 
-   The backend already accepts either registration: AzureAd:Tenants lists each
-   tenant's TenantId + ClientId, and AuthExtensions validates the issuer and
-   audience per tenant. Ms_User is still the real gate (unknown e-mail = 403).
+   The backend is the gate: it accepts a token only when its tenant id (tid) is in
+   AzureAd:Tenants, maps that tenant to a CompanyID, and requires the e-mail to exist
+   in Ms_User AND Ms_UserCompany for that company (otherwise 403).
 
-   Backward compatible: with only VITE_AZURE_CLIENT_ID set (no GLC vars), there
-   is exactly one company and the flow is identical to the single-registration
-   version — one "Continue with Microsoft" button, one instance.
+   Because the authority is "organizations", a silent sign-in needs a hint about WHO to
+   sign in, so the last account's username is remembered and passed as loginHint. Token
+   requests use the account's own tenant authority so the right cached token is found.
 
-   Deliberately plain @azure/msal-browser (not the React bindings): the fetch
-   wrapper in api/client.ts is not a component and still needs a token, so the
-   instances live in a module both layers can reach.
+   Deliberately plain @azure/msal-browser (not the React bindings): the fetch wrapper in
+   api/client.ts is not a component and still needs a token.
    ===================================================================== */
 
 export interface AuthCompany {
@@ -34,153 +30,90 @@ export interface AuthCompany {
   clientId: string;
   authority: string;
   apiScope: string;
-  // E-mail domains that belong to this company, so one "Continue with Microsoft" button can send
-  // the person to the right registration instead of making them pick the company by hand.
-  domains: string[];
 }
 
-// Build a company from its env vars, or null when its client id isn't set (so it's simply absent).
-// authority: a single-tenant app needs its OWN tenant authority (…/login.microsoftonline.com/<tenantId>);
-// "organizations" is the multi-tenant default and only works for a multi-tenant registration.
-function envCompany(
-  id: string,
-  label: string,
-  clientId: string | undefined,
-  authorityEnv: string | undefined,
-  scopeEnv: string | undefined,
-  domainsEnv?: string | undefined,
-): AuthCompany | null {
-  const cid = (clientId ?? '').trim();
-  if (!cid) return null;
-  const authority = (authorityEnv || 'https://login.microsoftonline.com/organizations').trim();
-  const apiScope = (scopeEnv || `api://${cid}/access_as_user`).trim();
-  const domains = (domainsEnv ?? '')
-    .split(/[,;\s]+/)
-    .map((d) => d.trim().toLowerCase().replace(/^@/, ''))
-    .filter((d) => d.length > 0);
-  return { id, label, clientId: cid, authority, apiScope, domains };
-}
+const clientId = ((import.meta.env.VITE_AZURE_CLIENT_ID as string) || '').trim();
+const authority = ((import.meta.env.VITE_AZURE_AUTHORITY as string) || 'https://login.microsoftonline.com/organizations').trim();
+const apiScope = ((import.meta.env.VITE_AZURE_API_SCOPE as string) || `api://${clientId}/access_as_user`).trim();
 
-// The configured companies, in display order. MGT uses the original VITE_AZURE_* vars (unchanged);
-// GLC uses the _GLC-suffixed vars. Add more here if the group ever grows.
-export const COMPANIES: AuthCompany[] = [
-  envCompany(
-    'MGT',
-    (import.meta.env.VITE_AZURE_COMPANY_LABEL as string) || 'MGT',
-    import.meta.env.VITE_AZURE_CLIENT_ID as string,
-    import.meta.env.VITE_AZURE_AUTHORITY as string,
-    import.meta.env.VITE_AZURE_API_SCOPE as string,
-    import.meta.env.VITE_AZURE_EMAIL_DOMAINS as string,
-  ),
-  envCompany(
-    'GLC',
-    (import.meta.env.VITE_AZURE_COMPANY_LABEL_GLC as string) || 'GLC',
-    import.meta.env.VITE_AZURE_CLIENT_ID_GLC as string,
-    import.meta.env.VITE_AZURE_AUTHORITY_GLC as string,
-    import.meta.env.VITE_AZURE_API_SCOPE_GLC as string,
-    import.meta.env.VITE_AZURE_EMAIL_DOMAINS_GLC as string,
-  ),
-].filter((c): c is AuthCompany => c !== null);
+// Kept as a one-element list so the sign-in screen renders its single "Continue with Microsoft" button.
+export const COMPANIES: AuthCompany[] = clientId
+  ? [{ id: 'MS', label: 'Microsoft', clientId, authority, apiScope }]
+  : [];
 
-/** Which company a typed sign-in name belongs to, or null when it cannot be told.
- *
- * MGT and GLC are separate single-tenant registrations, so the button has to know WHICH one to
- * redirect to before it can redirect at all — that is the only reason the company picker existed.
- * Nearly always the person has already typed who they are in the sign-in field above, so read it:
- * an e-mail matches on its domain, and a bare staff username matches on its company prefix
- * ("GLC18035"). Anything else returns null and the caller falls back to asking. */
-export function companyForLogin(input: string): AuthCompany | null {
-  if (COMPANIES.length === 0) return null;
-  if (COMPANIES.length === 1) return COMPANIES[0];
-
-  const v = (input ?? '').trim().toLowerCase();
-  if (v.length === 0) return null;
-
-  const at = v.lastIndexOf('@');
-  if (at >= 0) {
-    const domain = v.slice(at + 1);
-    // Sub-domains count as the same company (user@mail.megachem.co.th).
-    const byDomain = COMPANIES.find((c) =>
-      c.domains.some((d) => domain === d || domain.endsWith(`.${d}`)));
-    return byDomain ?? null;
-  }
-
-  // No "@": staff usernames carry the company as a prefix, which is how people actually type here.
-  const byPrefix = COMPANIES.find((c) => v.startsWith(c.id.toLowerCase()));
-  return byPrefix ?? null;
-}
-
-// No company configured = the Entra app registrations don't exist yet, so the app runs exactly as it
-// did before sign-in was added (no login screen, no Authorization header). The backend has the
-// matching switch (blank AzureAd:Tenants, Development only), so the two halves cannot disagree.
+// No client id = the app registration isn't configured, so the app runs exactly as it did before
+// sign-in existed. The backend has the matching switch (blank AzureAd:Tenants, Development only).
 export const AUTH_ENABLED = COMPANIES.length > 0;
+
+// The sign-in screen (AuthGate) asks which company a typed name belongs to before redirecting.
+// With the one multi-tenant registration there is nothing to choose: every name goes to it, and
+// the backend's AzureAd:Tenants decides from the token's tenant which company the person is in.
+export function companyForLogin(_input: string): AuthCompany | null {
+  return COMPANIES[0] ?? null;
+}
 
 // App-local sign-out must not sign the person out of Microsoft 365 in the browser. Remember the
 // explicit choice so a later page refresh does not immediately ssoSilent them back into OCR.
 const MANUAL_SIGN_OUT_KEY = 'mgtocr.microsoft.manuallySignedOut';
-// Which company the person signed in with — so a refresh restores the RIGHT registration.
-const ACTIVE_COMPANY_KEY = 'mgtocr.microsoft.activeCompany';
+// Last signed-in account (username), used as the ssoSilent loginHint on the next visit.
+const LAST_HINT_KEY = 'mgtocr.microsoft.lastLoginHint';
 
-const wasManuallySignedOut = () => {
-  try { return window.localStorage.getItem(MANUAL_SIGN_OUT_KEY) === '1'; } catch { return false; }
+const readLS = (k: string): string | null => {
+  try { return window.localStorage.getItem(k); } catch { return null; }
 };
-const markManuallySignedOut = (value: boolean) => {
+const writeLS = (k: string, v: string | null) => {
   try {
-    if (value) window.localStorage.setItem(MANUAL_SIGN_OUT_KEY, '1');
-    else window.localStorage.removeItem(MANUAL_SIGN_OUT_KEY);
-  } catch { /* private mode/storage disabled: sign-out still works for the current page */ }
+    if (v === null) window.localStorage.removeItem(k);
+    else window.localStorage.setItem(k, v);
+  } catch { /* private mode/storage disabled: the current page still works */ }
 };
+const wasManuallySignedOut = () => readLS(MANUAL_SIGN_OUT_KEY) === '1';
+const markManuallySignedOut = (value: boolean) => writeLS(MANUAL_SIGN_OUT_KEY, value ? '1' : null);
 
-function readActiveCompany(): AuthCompany | null {
-  if (COMPANIES.length === 0) return null;
-  if (COMPANIES.length === 1) return COMPANIES[0];
-  try {
-    const id = window.localStorage.getItem(ACTIVE_COMPANY_KEY);
-    const found = COMPANIES.find((c) => c.id === id);
-    if (found) return found;
-  } catch { /* fall through */ }
-  // No explicit choice yet: default to the first company so an already-signed-in MGT user is still
-  // restored after this multi-company change was deployed. A fresh user of another company just has
-  // no account under this default and lands on the picker.
-  return COMPANIES[0];
-}
-function writeActiveCompany(id: string | null) {
-  try {
-    if (id) window.localStorage.setItem(ACTIVE_COMPANY_KEY, id);
-    else window.localStorage.removeItem(ACTIVE_COMPANY_KEY);
-  } catch { /* ignore */ }
-}
+let instance: PublicClientApplication | null = null;
+let initialized = false;
 
-// One MSAL instance per company, created (and initialized) lazily.
-const instances = new Map<string, PublicClientApplication>();
-const initialized = new Set<string>();
-
-function instanceFor(c: AuthCompany): PublicClientApplication {
-  let inst = instances.get(c.id);
-  if (!inst) {
-    inst = new PublicClientApplication({
-      auth: {
-        clientId: c.clientId,
-        authority: c.authority,
-        // Whatever origin the app is served from — must be a SPA redirect URI in EACH company's app
-        // registration or Entra refuses to return the token.
-        redirectUri: window.location.origin,
-        postLogoutRedirectUri: window.location.origin,
-      },
-      cache: { cacheLocation: 'localStorage', storeAuthStateInCookie: false },
-    });
-    instances.set(c.id, inst);
-  }
-  return inst;
+function getInstance(): PublicClientApplication {
+  instance ??= new PublicClientApplication({
+    auth: {
+      clientId,
+      authority,
+      // Whatever origin the app is served from — must be a SPA redirect URI on the app registration.
+      redirectUri: window.location.origin,
+      postLogoutRedirectUri: window.location.origin,
+      navigateToLoginRequestUrl: false,
+    },
+    cache: { cacheLocation: 'localStorage', storeAuthStateInCookie: false },
+  });
+  return instance;
 }
 
-async function ensureInit(c: AuthCompany): Promise<PublicClientApplication> {
-  const inst = instanceFor(c);
-  if (!initialized.has(c.id)) {
+async function ensureInit(): Promise<PublicClientApplication> {
+  const inst = getInstance();
+  if (!initialized) {
     await inst.initialize();
-    initialized.add(c.id);
+    initialized = true;
   }
   return inst;
+}
+
+// The account's own tenant authority — so the token lookup/refresh targets the right tenant when the
+// cache holds accounts from more than one (e.g. a MGT and a GLC account on the same browser).
+const tenantAuthority = (a: AccountInfo) => `https://login.microsoftonline.com/${a.tenantId}`;
+
+// Remember who signed in, and make them the active account.
+function remember(inst: PublicClientApplication, account: AccountInfo) {
+  inst.setActiveAccount(account);
+  writeLS(LAST_HINT_KEY, account.username);
+}
+
+// Prefer the account matching the last hint, then the active one, then the first.
+function pickAccount(inst: PublicClientApplication): AccountInfo | null {
+  const accounts = inst.getAllAccounts();
+  if (accounts.length === 0) return null;
+  const hint = readLS(LAST_HINT_KEY)?.toLowerCase();
+  return (hint ? accounts.find((a) => a.username.toLowerCase() === hint) : undefined)
+    ?? inst.getActiveAccount() ?? accounts[0];
 }
 
 let ready: Promise<void> | null = null;
@@ -194,101 +127,106 @@ export function consumeFreshSignIn(): boolean {
   return v;
 }
 
-// MSAL v3+ must be initialised before use, and the redirect coming back from Microsoft has to be
-// handled on the SAME instance that started it — which is the remembered active company (signIn saves
-// it before redirecting). Only that instance is touched here; others init lazily when chosen.
+// MSAL v3+ must be initialised before use, and the redirect coming back from Microsoft has to be handled.
 export function initAuth(): Promise<void> {
   if (!AUTH_ENABLED) return Promise.resolve();
   ready ??= (async () => {
-    const c = readActiveCompany();
-    if (!c) return;
-    const inst = await ensureInit(c);
+    const inst = await ensureInit();
     const redirectResult = await inst.handleRedirectPromise();
     if (redirectResult?.account) {
+      remember(inst, redirectResult.account);
       markManuallySignedOut(false);
       freshSignIn = true;
+    } else {
+      const account = pickAccount(inst);
+      if (account && !inst.getActiveAccount()) inst.setActiveAccount(account);
     }
-    const accounts = inst.getAllAccounts();
-    if (accounts.length > 0 && !inst.getActiveAccount()) inst.setActiveAccount(accounts[0]);
   })();
   return ready;
 }
 
-// Best-effort silent sign-in against the remembered company's Microsoft 365 session. Runs in the
-// BACKGROUND after the form is visible — never blocked on.
+// Best-effort silent sign-in. Runs in the BACKGROUND after the form is visible — never blocked on.
+// Any failure (no session, third-party cookies blocked, iframe timeout) just leaves the sign-in screen.
 export async function attemptSilentSignIn(): Promise<boolean> {
   if (!AUTH_ENABLED) return false;
   if (wasManuallySignedOut()) return false;
-  const c = readActiveCompany();
-  if (!c) return false;
-  const inst = await ensureInit(c);
-  if (inst.getActiveAccount()) return true;
   try {
-    const result = await inst.ssoSilent({ scopes: [c.apiScope] });
-    if (result.account) {
-      inst.setActiveAccount(result.account);
-      freshSignIn = true;
-      return true;
+    const inst = await ensureInit();
+    if (inst.getActiveAccount()) return true;
+
+    // 1) an account is already cached: refresh a token for it
+    const cached = pickAccount(inst);
+    if (cached) {
+      try {
+        await inst.acquireTokenSilent({ account: cached, scopes: [apiScope], authority: tenantAuthority(cached) });
+        remember(inst, cached);
+        return true;
+      } catch (err) {
+        if (!(err instanceof InteractionRequiredAuthError)) console.warn('acquireTokenSilent failed', err);
+      }
+    }
+
+    // 2) nothing cached, but we know who signed in last time: ssoSilent needs that hint on /organizations
+    const hint = readLS(LAST_HINT_KEY);
+    if (hint) {
+      const result = await inst.ssoSilent({ scopes: [apiScope], loginHint: hint });
+      if (result.account) {
+        remember(inst, result.account);
+        freshSignIn = true;
+        return true;
+      }
     }
   } catch { /* no silent session — the sign-in screen handles it */ }
   return false;
 }
 
 export function getAccount(): AccountInfo | null {
-  if (!AUTH_ENABLED) return null;
-  const c = readActiveCompany();
-  if (!c) return null;
-  return instanceFor(c).getActiveAccount();
+  if (!AUTH_ENABLED || !instance) return null;
+  return instance.getActiveAccount();
 }
 
 // Returns null when sign-in is off, no active account, or a redirect had to be started (page is on
-// its way to Microsoft). Uses the active company's instance + its own api scope.
+// its way to Microsoft).
 export async function getAccessToken(): Promise<string | null> {
   if (!AUTH_ENABLED) return null;
-  const c = readActiveCompany();
-  if (!c) return null;
-  const inst = await ensureInit(c);
+  const inst = await ensureInit();
   const account = inst.getActiveAccount();
   if (!account) return null;
+  const request = { account, scopes: [apiScope], authority: tenantAuthority(account) };
   try {
-    const result = await inst.acquireTokenSilent({ account, scopes: [c.apiScope] });
+    const result = await inst.acquireTokenSilent(request);
     return result.accessToken;
   } catch (err) {
     if (err instanceof InteractionRequiredAuthError) {
-      await inst.acquireTokenRedirect({ account, scopes: [c.apiScope] });
+      await inst.acquireTokenRedirect(request);
       return null;
     }
     throw err;
   }
 }
 
-// Start an interactive sign-in for a specific company. companyId is required when more than one
-// company is configured (the picker passes it); with a single company it may be omitted.
-export async function signIn(companyId?: string, loginHint?: string): Promise<void> {
+// Interactive sign-in. The account picker is forced: one browser may hold both an MGT and a GLC account.
+// (The companyId argument is kept only so the existing sign-in screen compiles; it is ignored.)
+// loginHint: the e-mail typed on the sign-in screen, used only to pre-fill the Microsoft page; the
+// account picker is still shown.
+export async function signIn(_companyId?: string, loginHint?: string): Promise<void> {
   if (!AUTH_ENABLED) return;
-  const c = companyId
-    ? COMPANIES.find((x) => x.id === companyId)
-    : (COMPANIES.length === 1 ? COMPANIES[0] : readActiveCompany());
-  if (!c) return; // multi-company and none chosen — the caller must pass a companyId
-  writeActiveCompany(c.id);
   markManuallySignedOut(false);
-  const inst = await ensureInit(c);
-  // The e-mail the person already typed is passed on, so Microsoft opens on their account instead
-  // of the account picker. Only a real e-mail is worth sending; a staff username means nothing there.
+  const inst = await ensureInit();
   const hint = (loginHint ?? '').trim();
   await inst.loginRedirect(
-    hint.includes('@') ? { scopes: [c.apiScope], loginHint: hint } : { scopes: [c.apiScope] });
+    hint.includes('@')
+      ? { scopes: [apiScope], prompt: 'select_account', loginHint: hint }
+      : { scopes: [apiScope], prompt: 'select_account' });
 }
 
 export async function signOut(): Promise<void> {
   if (!AUTH_ENABLED) return;
   markManuallySignedOut(true);
-  const c = readActiveCompany();
-  if (c) {
-    const inst = instanceFor(c);
-    const account = inst.getActiveAccount() ?? undefined;
-    await inst.clearCache({ account });
-    inst.setActiveAccount(null);
-  }
-  writeActiveCompany(null);
+  // Forget the hint too, otherwise the next visit would silently sign straight back in.
+  writeLS(LAST_HINT_KEY, null);
+  const inst = await ensureInit();
+  const account = inst.getActiveAccount() ?? undefined;
+  await inst.clearCache({ account });
+  inst.setActiveAccount(null);
 }

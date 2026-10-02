@@ -174,6 +174,8 @@ public class AppConfig
     public AuthTenant[] AuthTenants { get; init; } = [];
     // Optional extra accepted audience; the tenants' ClientIds are accepted automatically.
     public string AuthAudience { get; init; } = "";
+    // Delegated scope the Microsoft token must carry (multi-tenant: rejects app-only tokens).
+    public string AuthRequiredScope { get; init; } = "access_as_user";
     // Database holding the shared user master (Ms_User / Ms_UserCompany / Ms_Company). Same SQL
     // Server instance as the OCR database, reached with a three-part name.
     public string UserDatabase { get; init; } = "MGT_Datawarehouse";
@@ -194,6 +196,30 @@ public class AppConfig
     public int LocalAuthLifetimeMinutes { get; init; } = 480;
 
     public required string UploadDir { get; init; }
+
+    // ---- Upload lifecycle: archive to SharePoint after a successful post, then clean up locally ----
+    // Everything is off by default. See FileArchiveWorker / FileCleanupWorker / sql/27_file_archive.sql.
+    public bool ArchiveEnabled { get; init; }
+    public int ArchiveIntervalSeconds { get; init; } = 60;
+    public int ArchiveBatchSize { get; init; } = 20;
+    public int ArchiveMaxAttempts { get; init; } = 5;
+    public SharePointTarget[] ArchiveTargets { get; init; } = [];
+    // In-place compression right after OCR (FileCompressWorker -> MgtOcr.Ocr.FileCompressor:
+    // PDF pages re-rendered as JPEG via PDFtoImage/SkiaSharp; JPG/PNG resized). Off by default.
+    public bool CompressEnabled { get; init; }
+    public int CompressDpi { get; init; } = 150;
+    public int CompressQuality { get; init; } = 75;           // JPEG quality 1-100
+    public int CompressImageMaxPx { get; init; } = 2000;      // JPG/PNG uploads: longest side
+    public int CompressMinAgeMinutes { get; init; } = 0;      // 0 = right after OCR
+    public long CompressMinBytes { get; init; } = 150_000;    // smaller files are left alone
+    public int CompressMinSavingPercent { get; init; } = 15;  // keep the original unless at least this much smaller
+    public bool CleanupEnabled { get; init; }
+    public bool CleanupDryRun { get; init; } = true;     // log only, delete nothing, until switched to false
+    public int CleanupIntervalMinutes { get; init; } = 60;
+    public int CleanupGraceHours { get; init; } = 24;    // keep the local copy this long after archiving
+    public int CleanupDraftDays { get; init; } = 30;     // never-posted drafts (0 = never delete)
+    public int CleanupFailedDays { get; init; } = 7;     // failed OCR uploads (0 = never delete)
+    public int CleanupOrphanDays { get; init; } = 0;     // files nothing in the DB refers to (0 = off)
 
     // Note: app/config.py builds an ODBC connection string (Driver={ODBC Driver 17...}) for pyodbc.
     // Microsoft.Data.SqlClient talks TDS directly and uses ADO.NET connection string syntax instead —
@@ -222,3 +248,27 @@ public sealed record CompanyProfile(
     string CompanyCode,
     string DefaultPlant,
     string AuthorizationGroup);
+
+// One SharePoint document library that archived files go to. Company = "MGT" / "GLC" to give a
+// company its own library (possibly in a different tenant), or "*" as the shared fallback for
+// companies without an entry. Module = "SO" / "AP" / "II" / "PODP" limits the target to one module
+// (so each department can get its own site later), or "*" for every module. Only documents that
+// match a usable target are archived at all - with a single MGT+SO target, nothing else is touched.
+// DriveId is the Graph drive id of the library; the app registration needs Sites.Selected (grant
+// on that site) or Files.ReadWrite.All. Keep ClientSecret out of appsettings.json (user-secrets /
+// environment variable Archive__Targets__0__ClientSecret).
+public sealed record SharePointTarget(
+    string Company = "*",
+    string Module = "*",
+    string TenantId = "",
+    string ClientId = "",
+    string ClientSecret = "",
+    string DriveId = "",
+    string RootFolder = "OCR",
+    string SiteUrl = "",          // informational only (shown on the admin test page)
+    // Folder order. false (MGT): {Root}/{subPath}/{yyyy}/{MM}/file. true (GLC, per Megachem 2 Oct
+    // 2026): {Root}/{yyyy}/{MM}/{subPath}/file - year and month first, then the customer folder.
+    bool DateFirst = false)
+{
+    public bool IsUsable => TenantId != "" && ClientId != "" && ClientSecret != "" && DriveId != "";
+}

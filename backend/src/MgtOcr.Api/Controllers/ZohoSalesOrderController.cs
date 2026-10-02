@@ -1,4 +1,5 @@
 using MgtOcr.Api.Auth;
+using MgtOcr.Api.Services;
 using System.Text.Json;
 using MgtOcr.Core;
 using MgtOcr.Core.Auth;
@@ -36,7 +37,9 @@ public class ZohoSalesOrderController(
     ZohoDealClient dealClient,
     ZohoAccountClient accountClient,
     AppConfig config,
-    ICurrentUserAccessor currentUser) : ControllerBase
+    ICurrentUserAccessor currentUser,
+    FileArchiveRepository archive,
+    ILogger<ZohoSalesOrderController> log) : ControllerBase
 {
     // MaterialId, when present, is a person confirming (via the AI-assisted "suggest a match"
     // tool on a line the automatic code/description match skipped) which of this Deal's own Items
@@ -445,6 +448,16 @@ public class ZohoSalesOrderController(
         await repo.RecordExternalPostAsync("SO", docId, result.ZohoId, "Zoho:Sales_Orders",
             payloadJson, result.Status == "success", result.Message, actor, companyCode: "MGT");
 
+        // Queue the source file for SharePoint (ocr.FileArchive, Status=PENDING). The folder comes
+        // from reading the Sales Order back from Zoho (its Account's sales person + customer).
+        // Best effort - the post above is already recorded, so nothing here can undo it.
+        if (result.Status == "success" && !string.IsNullOrEmpty(result.ZohoId))
+        {
+            var folder = await ArchiveFolderAsync(docId, result.ZohoId, a.Deal.Id, a.Deal.AccountCode);
+            try { await archive.EnqueueAsync(docId, DocumentTables.ForId(docId).Doc, "MGT", "SO", folder); }
+            catch (Exception e) { log.LogWarning(e, "Could not queue doc {DocId} for SharePoint (run sql/27 + sql/29?)", docId); }
+        }
+
         return Ok(new
         {
             success = result.Status == "success",
@@ -455,6 +468,38 @@ public class ZohoSalesOrderController(
             skipped = a.StillSkipped,
             document = await repo.GetDocumentAsync(docId),
         });
+    }
+
+    // SharePoint folder "{Sales}/{CustomerCode}_{CustomerName}": read the created Sales Order back
+    // from Zoho to find its Account, then take the Account's Owner ("Sales Employee" - the sales
+    // person responsible for this customer). Fallback: the Deal Owner, then "_Unknown".
+    private async Task<string?> ArchiveFolderAsync(int docId, string zohoId, string dealId, string? dealAccountCode)
+    {
+        try
+        {
+            var so = await soClient.GetByIdAsync(zohoId);
+            var accountId = so is null ? null : ZohoArchiveFolder.LookupId(so["Account_Name"]);
+            var acc = accountId is null ? null : await accountClient.GetRecordAsync(accountId);
+
+            var sales = ZohoArchiveFolder.Text(acc?["Owner"]);
+            var salesFrom = "Account Owner (Sales Employee)";
+            if (string.IsNullOrWhiteSpace(sales))
+            {
+                var deal = await dealClient.GetRecordAsync(dealId);
+                sales = ZohoArchiveFolder.Text(deal?["Owner"]);
+                salesFrom = "Deal Owner";
+            }
+            var code = ZohoArchiveFolder.Text(acc?["Account_Code"]) ?? ZohoArchiveFolder.Text(so?["Account_Code"]) ?? dealAccountCode;
+            var name = ZohoArchiveFolder.Text(acc?["Account_Name"]) ?? ZohoArchiveFolder.Text(so?["Account_Name"]);
+            var sub = ZohoArchiveFolder.Build(sales, code, name).SubPath;
+            log.LogInformation("Archive folder for doc {DocId}: {Folder} (sales from {From})", docId, sub, salesFrom);
+            return sub;
+        }
+        catch (Exception e)
+        {
+            log.LogWarning(e, "Archive folder: could not read Sales Order {Id} / its Account from Zoho for doc {DocId} - default folder used", zohoId, docId);
+            return null;
+        }
     }
 
     // POST /api/zoho/sales-order/payload/{docId} { dealId, ...edited fields } — the SAP "View

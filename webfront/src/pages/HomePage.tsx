@@ -69,8 +69,8 @@ export default function HomePage() {
     { icon: 'fa-solid fa-file-lines', bg: 'var(--info-bg)', fg: 'var(--info)', label: 'Total Documents', value: total, pct: tr.total },
     { icon: 'fa-solid fa-hourglass-half', bg: 'var(--orange-bg)', fg: 'var(--orange)', label: 'Pending Review', value: pendingReview, pct: tr.NEW },
     { icon: 'fa-solid fa-circle-xmark', bg: 'var(--red-bg)', fg: 'var(--red)', label: 'Mapping Failed', value: mappingFailed, pct: tr.INCOMPLETE },
-    { icon: 'fa-solid fa-paper-plane', bg: 'var(--info-bg)', fg: 'var(--info)', label: 'Ready to Send to SAP', value: readyToSend, pct: tr.MAPPED },
-    { icon: 'fa-solid fa-circle-check', bg: 'var(--green-bg)', fg: 'var(--green)', label: 'Sent to SAP Successfully', value: sentOk, pct: tr.POSTED },
+    { icon: 'fa-solid fa-paper-plane', bg: 'var(--info-bg)', fg: 'var(--info)', label: 'Ready to Send', value: readyToSend, pct: tr.MAPPED },
+    { icon: 'fa-solid fa-circle-check', bg: 'var(--green-bg)', fg: 'var(--green)', label: 'Sent Successfully (SAP / Zoho)', value: sentOk, pct: tr.POSTED },
   ];
 
   const donutSegs: DonutSeg[] = (

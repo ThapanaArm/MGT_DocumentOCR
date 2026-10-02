@@ -286,6 +286,11 @@ public static class MappingEngine
         if (module == "SO")
         {
             var manualCust = mHead.Get("customer")?.ToString();
+            // What was saved on the document last time (DocumentsController adds these): a person's
+            // earlier pick survives a reload instead of being replaced by the automatic match, which
+            // matters when two customer codes share one Tax ID.
+            var savedCust = mHead.Get("savedCustomer")?.ToString();
+            var savedShipTo = mHead.Get("savedShipTo")?.ToString();
             if (!string.IsNullOrEmpty(manualCust))
             {
                 var c = masters.Customers.FirstOrDefault(x => x.GetStr("CustomerCode") == manualCust);
@@ -294,7 +299,10 @@ public static class MappingEngine
             else
             {
                 var (hit, method, _, cands) = MatchPartner(masters.Customers, header.Get("customerTaxId"), header.Get("customerName"), "CustomerCode", ["NameTh", "NameEn"]);
-                if (hit != null)
+                var saved = string.IsNullOrEmpty(savedCust) ? null : masters.Customers.FirstOrDefault(x => x.GetStr("CustomerCode") == savedCust);
+                if (saved != null && saved.GetStr("CustomerCode") != hit?.GetStr("CustomerCode"))
+                    resHeader["customer"] = R("manual", saved.GetStr("CustomerCode"), saved.GetStr("NameTh"), "previously selected");
+                else if (hit != null)
                     resHeader["customer"] = R("ok", hit.GetStr("CustomerCode"), hit.GetStr("NameTh"), method);
                 else
                 {
@@ -329,7 +337,11 @@ public static class MappingEngine
                     var sc = Math.Max(Sim(header.Get("shipToName"), x.Get("ShipToName")), Sim(header.Get("shipToAddress"), x.Get("Address")));
                     if (sc > bs) { best = x; bs = sc; }
                 }
-                if (best != null && bs >= ThShipTo)
+                var savedSt = string.IsNullOrEmpty(savedShipTo) || cust != savedCust ? null
+                    : scope.FirstOrDefault(x => x.GetStr("SapShipToCode") == savedShipTo);
+                if (savedSt != null && savedSt.GetStr("SapShipToCode") != (bs >= ThShipTo ? best?.GetStr("SapShipToCode") : null))
+                    resHeader["shipTo"] = R("manual", savedSt.GetStr("SapShipToCode"), savedSt.GetStr("ShipToName"), "previously selected");
+                else if (best != null && bs >= ThShipTo)
                     resHeader["shipTo"] = R("ok", best.GetStr("SapShipToCode"), best.GetStr("ShipToName"), $"Name/Address ({(int)Math.Round(bs * 100)}%)");
                 else if (shipToOptional)
                 {

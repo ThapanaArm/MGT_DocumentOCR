@@ -68,12 +68,65 @@ public class ZohoAccountClient(ZohoClient zoho)
     // combining syntax, search on just the ONE word most likely to be unique to this company and
     // let the results -- close, not necessarily exact -- go to the chat-driven AI compare
     // already built into the Customer card, which is better at the final disambiguation anyway.
+    //
+    // Accuracy fix (2 Oct 2026): "T.O. CHEMICALS" searched only on "CHEMICALS" and returned every
+    // chemicals company in alphabetical order (A.T.S. CHEMICALS first), so the wanted account was
+    // off the list. Now: (1) try the whole phrase as typed first (still ONE like-condition), and
+    // (2) whatever comes back is ranked against the full query - punctuation/spacing ignored, so
+    // "T.O. CHEMICALS" ranks "T.O. CHEMICALS(1979) CO.,LTD." first - before taking the top N.
     public async Task<List<ZohoAccount>> FindByNameAsync(string nameContains, int top = 20)
     {
-        var word = MostDistinctiveWord(nameContains);
-        if (word is null) return [];
-        var rows = await zoho.QueryCoqlAsync(Module, SelectFields, $"Account_Name like '%{Escape(word)}%'", "Account_Name");
-        return rows.Take(top).Select(ToAccount).ToList();
+        var query = Regex.Replace(nameContains ?? "", @"\s+", " ").Trim();
+        if (query.Length == 0) return [];
+
+        var rows = new List<JsonObject>();
+        if (Regex.Matches(query, @"[\p{L}\p{N}]+").Count > 1 && query.Length >= 3)
+        {
+            try { rows = await zoho.QueryCoqlAsync(Module, SelectFields, $"Account_Name like '%{Escape(query)}%'", "Account_Name"); }
+            catch { rows = []; }   // odd characters in the phrase - fall back to the one-word search
+        }
+        if (rows.Count == 0)
+        {
+            var word = MostDistinctiveWord(query);
+            if (word is null) return [];
+            rows = await zoho.QueryCoqlAsync(Module, SelectFields, $"Account_Name like '%{Escape(word)}%'", "Account_Name");
+        }
+
+        return rows.Select(ToAccount)
+            .Select(a => (a, score: NameScore(query, a.AccountName)))
+            .OrderByDescending(x => x.score)
+            .ThenBy(x => x.a.AccountName.Length)
+            .Take(top)
+            .Select(x => x.a)
+            .ToList();
+    }
+
+    private static string Compact(string s) => Regex.Replace(s.ToLowerInvariant(), @"[^\p{L}\p{N}]", "");
+
+    private static List<string> Words(string s) =>
+        Regex.Matches(s.ToLowerInvariant(), @"[\p{L}\p{N}]+").Select(m => m.Value).ToList();
+
+    // How well an account name fits what was typed (higher = better). Legal suffixes are ignored
+    // so "T.O. Chemicals Co., Ltd." and "T.O. CHEMICALS(1979) CO.,LTD." compare on "tochemicals".
+    internal static double NameScore(string query, string name)
+    {
+        var qWords = Words(query).Where(w => !StopWords.Contains(w)).ToList();
+        if (qWords.Count == 0) qWords = Words(query);
+        var q = string.Concat(qWords);
+        var n = Compact(name);
+        if (q.Length == 0 || n.Length == 0) return 0;
+
+        double score;
+        if (n.StartsWith(q)) score = 100;
+        else if (n.Contains(q)) score = 80;
+        else
+        {
+            var nWords = Words(name).ToHashSet();
+            var hit = qWords.Count(w => nWords.Contains(w) || (w.Length >= 4 && n.Contains(w)));
+            score = 60.0 * hit / qWords.Count;
+        }
+        // small bonus for names close in length (fewer extra words)
+        return score + 10.0 * Math.Min(q.Length, n.Length) / Math.Max(q.Length, n.Length);
     }
 
     private static readonly HashSet<string> StopWords = new(StringComparer.OrdinalIgnoreCase)
@@ -117,6 +170,10 @@ public class ZohoAccountClient(ZohoClient zoho)
     /// to confirm each field's api_name up front (the mistake made earlier with SAP's TH3
     /// field). New fields added to the Zoho layout later show up here automatically.
     /// </summary>
+    /// <summary>The raw Account record (all fields) - e.g. its Owner, labelled "Sales Employee" on
+    /// Megachem's layout (manual AO-CRM-UM-2026-003 p.84): the sales person responsible for the customer.</summary>
+    public Task<JsonObject?> GetRecordAsync(string id) => zoho.GetByIdAsync(Module, id);
+
     public async Task<List<(string Label, string? Value)>> GetFullAccountFieldsAsync(string id)
     {
         var row = await zoho.GetByIdAsync(Module, id);

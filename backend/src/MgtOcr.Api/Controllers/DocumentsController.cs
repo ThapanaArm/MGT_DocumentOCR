@@ -22,7 +22,7 @@ namespace MgtOcr.Api.Controllers;
 public class DocumentsController(DocumentRepository repo, MasterRepository masters, OcrEngine ocr,
     SapClient sap, SapBusinessPartnerClient sapBp, AppConfig config, ICurrentUserAccessor currentUser,
     OcrJobRepository jobs, MgtOcr.Api.Services.DocumentIngestService ingest,
-    SapProductClient sapProduct) : ControllerBase
+    SapProductClient sapProduct, FileArchiveRepository archive, MgtOcr.Api.Services.GraphArchiveClient graph) : ControllerBase
 {
     // Who to stamp on CreatedBy / PerformedBy / PostedBy.
     //
@@ -732,10 +732,33 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     public async Task<IActionResult> DocumentFile(int docId)
     {
         var docT = DocumentTables.ForId(docId).Doc;
-        dynamic? d = await GetDbInstance().QueryOneAsync($"SELECT StoredPath, FileName FROM {docT} WHERE DocId=@docId", new { docId });
+        dynamic? d = await GetDbInstance().QueryOneAsync($"SELECT StoredPath, FileName, Module FROM {docT} WHERE DocId=@docId", new { docId });
         string? path = d?.StoredPath;
-        if (d == null || string.IsNullOrEmpty(path) || !System.IO.File.Exists(path)) throw new HttpApiException(404, "Original file not found");
+        if (d == null || string.IsNullOrEmpty(path)) throw new HttpApiException(404, "Original file not found");
         string fileName = d.FileName ?? "";
+        string docModule = (string?)d.Module ?? "";
+        if (!System.IO.File.Exists(path))
+        {
+            // Local copy is gone (removed after archiving) - stream it back from SharePoint if it was archived.
+            var arch = await archive.FindAsync(path);
+            var target = arch is { Status: "DONE", RemoteItemId: not null } ? graph.TargetFor(arch.CompanyCode, docModule) : null;
+            if (arch?.RemoteItemId == null || target == null) throw new HttpApiException(404, "Original file not found");
+            try
+            {
+                var res = await graph.OpenAsync(target, arch.RemoteItemId, HttpContext.RequestAborted);
+                Response.RegisterForDispose(res);
+                var stream = await res.Content.ReadAsStreamAsync(HttpContext.RequestAborted);
+                // same inline / ?download=1 behaviour as the local file below
+                return string.Equals(Request.Query["download"], "1", StringComparison.Ordinal)
+                    ? File(stream, MediaTypeForFile(fileName), fileName)
+                    : File(stream, MediaTypeForFile(fileName));
+            }
+            catch (Exception e) when (e is not HttpApiException)
+            {
+                throw new HttpApiException(502, "Original file is archived in SharePoint but could not be retrieved: " + e.Message);
+            }
+        }
+
         // Served INLINE, with the file's real media type. Passing a download name here (the third
         // PhysicalFile argument) makes ASP.NET send Content-Disposition: attachment, and that plus
         // "application/octet-stream" is why the "View document" modal's <iframe> came up blank —
@@ -889,7 +912,28 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
 
         var module = doc.GetStr("module");
         var docT = DocumentTables.For(module).Doc; var lineT = DocumentTables.For(module).Line;
+
+        // A posted (or split-parent) document is read-only: mapping may still run so the page can
+        // show the result, but nothing is written back - otherwise reopening it after posting would
+        // silently replace the customer / ship-to / materials that were actually sent.
+        var locked = doc.GetStr("status") is "POSTED" or "SPLIT";
+
+        // Keep the customer / ship-to saved on the document (the person's earlier pick) unless this
+        // call picks a new one or the header text itself was edited. Without this, a reload re-ran
+        // the automatic match and, when two customer codes share one Tax ID, jumped back to the
+        // first code.
+        var headerEdited = newHeader != null && !DictEquals(newHeader, oldHeader);
+        if (module == "SO" && (locked || !headerEdited))
+        {
+            if (manual.Get("header") is not Dictionary<string, object?> mh) { mh = new(); manual["header"] = mh; }
+            if (string.IsNullOrEmpty(mh.Get("customer")?.ToString()) && doc.GetStr("partnerCode") is { Length: > 0 } savedP)
+                mh["savedCustomer"] = savedP;
+            if (string.IsNullOrEmpty(mh.Get("shipTo")?.ToString()) && doc.GetStr("shipToCode") is { Length: > 0 } savedS)
+                mh["savedShipTo"] = savedS;
+        }
+
         var header = oldHeader; var lines = oldLines;
+        if (locked) { newHeader = null; newLines = null; }
         if (newHeader != null) { await repo.UpdateHeaderAsync(docId, module, newHeader); header = newHeader; }
         if (newLines != null)
         {
@@ -897,7 +941,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             lines = (List<Dictionary<string, object?>>)(await repo.GetDocumentAsync(docId))["lines"]!;
         }
 
-        if (module == "SO")
+        if (module == "SO" && !locked)
         {
             header["salesOrg"] = await SalesOrgAsync(header);
             await repo.UpdateHeaderAsync(docId, module, header);
@@ -916,7 +960,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         // the number Finance registered. Only empty fields are filled, so anything actually read
         // off the document always wins, and nothing is invented: a field with no master value
         // stays empty.
-        if (module is "AP" or "II"
+        if (!locked && module is "AP" or "II"
             && resHeader.Get("vendor") is Dictionary<string, object?> venRes
             && venRes.GetStr("status") is "ok" or "manual"
             && masterData.Vendors.FirstOrDefault(x => x.GetStr("VendorCode") == venRes.GetStr("code")) is { } venMaster)
@@ -934,6 +978,12 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             FillFromMaster("branch", "Branch");
             FillFromMaster("paymentTerms", "PaymentTerms");
             if (filled.Count > 0) await repo.UpdateHeaderAsync(docId, module, header);
+        }
+
+        if (locked)
+        {
+            res["document"] = doc;
+            return Ok(res);
         }
 
         await using (var conn = await GetDbAsync())
@@ -1261,6 +1311,31 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
                 await conn.ExecuteAsync($"UPDATE {docT} SET Status='POSTED', SapDocNo=@sapDocNo, CompanyCode=@companyCode, PostedAt=SYSDATETIME(), PostedBy=@user, UpdatedAt=SYSDATETIME() WHERE DocId=@docId",
                     new { sapDocNo = r.SapDocNo, companyCode, user, docId }, tx);
             await tx.CommitAsync();
+        }
+        // Queue the source file for SharePoint (real posts only, not simulation). Best effort:
+        // the post is already committed above. Waits in the queue until a target covers it.
+        if (r.Success && !r.Simulated)
+        {
+            try
+            {
+                // GLC Sales Order: folder "{CustomerCode}_{CustomerName}" (the GLC target puts year/month
+                // in front of it - DateFirst). Other GLC documents keep the default {Company}/{Module}.
+                string? subPath = null;
+                if (module == "SO" && companyCode == "GLC")
+                {
+                    var code = doc.GetStr("partnerCode");
+                    var hdr = (Dictionary<string, object?>)doc["header"]!;
+                    dynamic? cust = code.Length == 0 ? null : await GetDbInstance().QueryOneAsync(
+                        "SELECT TOP 1 CompanyNameSAP, CompanyName FROM ocr.Customer WHERE ComcompyCodeSAP=@code " +
+                        "ORDER BY CASE WHEN SalesOrg=@org THEN 0 ELSE 1 END", new { code, org = hdr.GetStr("salesOrg") });
+                    string name = (string?)cust?.CompanyNameSAP is { Length: > 0 } en ? en
+                        : (string?)cust?.CompanyName is { Length: > 0 } th ? th : hdr.GetStr("customerName");
+                    subPath = MgtOcr.Api.Services.ZohoArchiveFolder.Build(null, code, name).Customer;
+                }
+                await archive.EnqueueAsync(docId, docT, companyCode ?? "", module, subPath);
+            }
+            catch (Exception e) { HttpContext.RequestServices.GetRequiredService<ILogger<DocumentsController>>()
+                .LogWarning(e, "Could not queue doc {DocId} for SharePoint (run sql/27 + sql/29?)", docId); }
         }
         return Ok(new { success = r.Success, simulated = r.Simulated, sapDocNo = r.SapDocNo, endpoint = r.Endpoint, message = r.Message, document = await repo.GetDocumentAsync(docId) });
     }

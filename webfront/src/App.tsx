@@ -10,6 +10,7 @@ import InboxPage from './pages/InboxPage';
 import MasterPage from './pages/MasterPage';
 import LogPage from './pages/LogPage';
 import AuditLogPage from './pages/AuditLogPage';
+import ArchivePage from './pages/ArchivePage';
 import NotFoundPage from './pages/NotFoundPage';
 
 /* Routes mirror the old go(page, module) navigation:
@@ -34,6 +35,7 @@ export default function App() {
               <Route path="master" element={<MasterPage />} />
               <Route path="log" element={<LogPage />} />
               <Route path="audit-log" element={<AuditLogPage />} />
+              <Route path="admin/sharepoint" element={<ArchivePage />} />
               <Route path="404" element={<NotFoundPage />} />
               <Route path="*" element={<Navigate to="/404" replace />} />
             </Route>

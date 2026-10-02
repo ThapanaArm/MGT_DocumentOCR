@@ -27,9 +27,14 @@ public sealed class CurrentUser
     public string TokenVersion { get; init; } = "";
     public required IReadOnlyList<UserCompany> Companies { get; init; }
 
+    // Set for Microsoft SSO sign-ins: the company that the token's tenant (tid) maps to. When present
+    // it wins over IsPrimary, so a person who signed in through the GLC tenant works as GLC.
+    public string ActiveCompanyId { get; set; } = "";
+
     // Ms_UserCompany.IsPrimary marks the home company for people who belong to more than one.
     public UserCompany? PrimaryCompany =>
-        Companies.FirstOrDefault(c => c.IsPrimary) ?? Companies.FirstOrDefault();
+        (ActiveCompanyId.Length > 0 ? Companies.FirstOrDefault(c => c.CompanyId == ActiveCompanyId) : null)
+        ?? Companies.FirstOrDefault(c => c.IsPrimary) ?? Companies.FirstOrDefault();
 
     // What gets written to CreatedBy / PerformedBy / PostedBy. Username is preferred over the
     // e-mail address because those columns are nvarchar(100) and a login name survives a mailbox
