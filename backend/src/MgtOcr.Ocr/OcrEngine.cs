@@ -115,10 +115,12 @@ public class OcrEngine(AppConfig config)
     // extract(): wraps ExtractDispatchAsync to add confidenceNote + estimated cost uniformly for
     // every provider, mirroring ocr_engine.py's extract() (lines 1627-1644) without duplicating
     // this logic into every dispatch branch's return statement.
-    public async Task<ParsedDocument> ExtractAsync(string path, string module, string? providerOverride = null, string? password = null)
+    /// <param name="salesOrg">Which company's accounting rules to read by — "1000" MGT, "2000" GLC.
+    /// Empty reads as GLC (see CompanyRules), so nothing changes for a document with no company.</param>
+    public async Task<ParsedDocument> ExtractAsync(string path, string module, string? providerOverride = null, string? password = null, string? salesOrg = null)
     {
         PdfPassword.Current = password;
-        var doc = await ExtractDispatchAsync(path, module, providerOverride);
+        var doc = await ExtractDispatchAsync(path, module, providerOverride, salesOrg ?? "");
         doc.Note = doc.Provider switch
         {
             "demo" => string.IsNullOrEmpty(doc.Note) ? "Using sample data (demo) — did not read a real file" : doc.Note,
@@ -141,7 +143,7 @@ public class OcrEngine(AppConfig config)
     // provider_override: the engine id chosen in the UI — if given, "forces" that provider with
     // no silent fallback to another one. Empty/"auto" uses the normal text->local-OCR chain (does
     // NOT call Azure/Claude/Gemini/OpenAI automatically, since those cost money — must be chosen explicitly).
-    private async Task<ParsedDocument> ExtractDispatchAsync(string path, string module, string? providerOverride = null)
+    private async Task<ParsedDocument> ExtractDispatchAsync(string path, string module, string? providerOverride = null, string salesOrg = "")
     {
         var provider = (providerOverride ?? config.OcrProvider ?? "auto").ToLowerInvariant();
         if (provider == "") provider = "auto";
@@ -155,19 +157,19 @@ public class OcrEngine(AppConfig config)
         }
         if (provider == "claude")
         {
-            var outDoc = await ClaudeOcr.VisionExtractAsync(path, module, config);
+            var outDoc = await ClaudeOcr.VisionExtractAsync(path, module, config, salesOrg);
             if (outDoc != null) return outDoc;
             return FailedResult(module, "Could not connect to Claude Vision, or ANTHROPIC_API_KEY is not set in .env");
         }
         if (provider == "gemini")
         {
-            var (outDoc, gErr) = await GeminiOcr.VisionExtractAsync(path, module, config);
+            var (outDoc, gErr) = await GeminiOcr.VisionExtractAsync(path, module, config, salesOrg);
             if (outDoc != null) return outDoc;
             return FailedResult(module, gErr ?? "Could not connect to Google Gemini Vision");
         }
         if (provider == "openai")
         {
-            var (outDoc, oErr) = await OpenAiOcr.VisionExtractAsync(path, module, config);
+            var (outDoc, oErr) = await OpenAiOcr.VisionExtractAsync(path, module, config, salesOrg);
             if (outDoc != null) return outDoc;
             return FailedResult(module, oErr ?? "Could not connect to OpenAI Vision");
         }
@@ -178,7 +180,7 @@ public class OcrEngine(AppConfig config)
                 preText = await TesseractOcr.ExtractTextAsync(path, config);
             if (string.IsNullOrWhiteSpace(preText))
                 return FailedResult(module, "OCR could not read text from the file, so it could not be sent to Claude for structuring (try Claude Vision instead)");
-            var outDoc = await ClaudeOcr.TextExtractAsync(module, preText, config);
+            var outDoc = await ClaudeOcr.TextExtractAsync(module, preText, config, salesOrg);
             if (outDoc != null) return outDoc;
             return FailedResult(module, "Could not connect to Claude (structuring from text), or ANTHROPIC_API_KEY is not set in .env");
         }

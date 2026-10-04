@@ -13,7 +13,10 @@ public static partial class VisionPrompt
 {
     // mode="image": ask the model to read the page image itself (Claude/Gemini/OpenAI Vision).
     // mode="text": ask the model to structure OCR'd text handed to it (claude_text 2-tier mode).
-    public static string Build(string module, string mode = "image")
+    /// <param name="salesOrg">The company the document is filed under — "1000" MGT, "2000" GLC.
+    /// Anything else (including empty) reads as GLC, which is how every document behaved before
+    /// MGT came into scope.</param>
+    public static string Build(string module, string mode = "image", string salesOrg = "")
     {
         string fields = module == "SO" ? """
         {
@@ -85,7 +88,9 @@ public static partial class VisionPrompt
             "ภาษีสรรพสามิต = Excise Tax, ภาษีเก็บเพิ่มเพื่อมหาดไทย = Interior Tax, ค่าขนส่ง = Transportation, " +
             "ค่าพิธีการศุลกากร = Customs Clearance Fee, ค่าคลังสินค้า = Storage Charge " +
             "ยกเว้นชื่อบริษัท/ชื่อบุคคล และเลขที่เอกสาร ให้คงไว้ตามที่ปรากฏในเอกสาร" +
-            (module is "AP" or "II" ? IiBundleRules : ""); // AP: uploads are read as AP, routed to II afterwards
+            (module is "AP" or "II"
+                ? CompanyRules.IsMgt(salesOrg) ? MgtBundleRules : IiBundleRules
+                : ""); // AP: uploads are read as AP, routed to II afterwards
     }
 
     /// <summary>The prompt for the SUPPORTING pages of a bundle, used when the file is too long to
@@ -98,12 +103,15 @@ public static partial class VisionPrompt
     /// keeps each request small and stops the model from mistaking an invoice’s own item table for
     /// the document’s line items — the exact confusion the single-request prompt has to work
     /// around by pushing the form page to the front.</summary>
-    public static string BuildSupporting(string module, string mainVendorName = "")
+    public static string BuildSupporting(string module, string mainVendorName = "", string salesOrg = "")
     {
-        if (module is not ("AP" or "II")) return Build(module);
+        if (module is not ("AP" or "II")) return Build(module, "image", salesOrg);
 
+        // Only the sheet's name differs here; what is wanted from the supporting pages (the tax) is
+        // the same for both companies, and vendorCode is left blank on this path either way.
+        var formName = CompanyRules.IsMgt(salesOrg) ? "ฟอร์มสรุปค่าใช้จ่ายนำเข้า" : "FORM SHIPPING EXPENSE";
         return "ภาพเหล่านี้คือเอกสารประกอบของชุดเอกสารค่าขนส่งชุดเดียวกัน "
-            + "ตารางรายการค่าใช้จ่ายอ่านจากหน้า FORM SHIPPING EXPENSE ไปแล้ว "
+            + $"ตารางรายการค่าใช้จ่ายอ่านจากหน้า {formName} ไปแล้ว "
             + "สิ่งที่ต้องการจากภาพเหล่านี้คือ \"ภาษี\" เท่านั้น\n\n"
             + "ตอบกลับเป็น JSON ล้วน ๆ ตามโครงสร้างนี้เท่านั้น ห้ามมีข้อความอื่นนอก JSON:\n"
             + SupportingSchema + "\n\n"
@@ -166,7 +174,9 @@ public static partial class VisionPrompt
     // the line items come from that form's cost table, and the withholding tax — which the form's
     // cost table does not include — is taken from the individual invoices and appended as extra
     // lines (extCode "WHT"; the UI seeds those as credit G/L rows).
-    private const string IiBundleRules =
+    // The parts shared by both companies. GLC and MGT read the same kinds of attached tax
+    // documents, so only the FORM sheet rules differ — those live in GlcFormRules / MgtFormRules.
+    private const string BundleHeaderRules =
         "\n- ไฟล์อาจมีหลายหน้าและรวมเอกสารหลายใบ ให้ดูทุกหน้า" +
         // The form sheet is an internal cost summary: it names the agent but prints no tax id, no
         // invoice date and no payment terms. All three ARE in the file, together on the vendor's
@@ -178,6 +188,19 @@ public static partial class VisionPrompt
         "vendorTaxId = เลขประจำตัวผู้เสียภาษี 13 หลักของผู้ขาย (ตัวเลขล้วน ไม่ใช่ของ MEGACHEM/GREEN LEAF ที่เป็นผู้ซื้อ), " +
         "invoiceDate = วันที่ของใบนั้น YYYY-MM-DD, paymentTerms = เงื่อนไขการชำระเงินตามที่พิมพ์ในใบ เช่น \"30 days\" " +
         "ส่วน branch ให้ใส่ \"0000\" เสมอ (สำนักงานใหญ่)" +
+        // The PO decides MIRO vs FB60, and the supplier's invoice often does not print one —
+        // our own PURCHASE ORDER sheet is attached behind it instead, which a read centred on
+        // page 1 walks straight past (the V-WISE bundle filed as "without PO" with its PO on
+        // page 2). Say where to look, and what the number looks like.
+        "\n- poRef = เลขที่ใบสั่งซื้อ (PO) ของเราที่เอกสารชุดนี้อ้างถึง ต้องไล่ดูทุกหน้า ไม่ใช่เฉพาะหน้าใบแจ้งหนี้ "
+        + "เพราะใบแจ้งหนี้ของผู้ขายมักไม่พิมพ์เลข PO ไว้ แต่ในไฟล์จะมีหน้าใบสั่งซื้อของเราเอง (หัวเอกสาร PURCHASE ORDER ของ MEGACHEM/MGT) แนบมาด้วย "
+        + "ให้อ่านเลขจากช่อง PO Number / PO No. / P/O No. / Purchase Order No. / เลขที่ใบสั่งซื้อ ในหน้านั้น "
+        + "เลข PO ของเราเป็นตัวเลข 10 หลักขึ้นต้นด้วย 21 41 45 หรือ 46 เช่น 2110000036 "
+        + "ห้ามใส่เลขที่ใบแจ้งหนี้/ใบกำกับภาษีของผู้ขาย (เช่น INV2026030058) หรือเลขผู้เสียภาษีลงในช่องนี้ "
+        + "ถ้าในไฟล์ไม่มีหน้าใบสั่งซื้อและไม่มีเลข PO พิมพ์อยู่จริง ๆ ให้ใส่สตริงว่าง ห้ามเดา";
+
+    // GLC's "FORM SHIPPING EXPENSE": one AMOUNT column and a VENDOR column on every row.
+    private const string GlcFormRules =
         "\n- ถ้ามีหน้า \"FORM SHIPPING EXPENSE\" ให้ lines มาจากตารางในฟอร์มนั้นเท่านั้น: 1 แถวต่อ 1 รายการ, " +
         "desc = คอลัมน์ DESCRIPTION, amount = price = คอลัมน์ AMOUNT, qty = 1, extCode = \"COST\", " +
         "vendorCode = คอลัมน์ VENDOR ของแถวนั้น (ถ้าว่างหรือเป็น #N/A ให้ใส่ \"\") " +
@@ -195,7 +218,9 @@ public static partial class VisionPrompt
         "ถ้าหาอัตราแลกเปลี่ยนในไฟล์ไม่เจอ ให้คงยอดเดิมไว้และเขียน desc ว่า \"... (USD, no FX rate found)\"" +
         "\n- (เฉพาะกรณีที่มีหน้า FORM SHIPPING EXPENSE) แถว EXCISE FEE ในฟอร์มเป็นยอดรวมของภาษีสรรพสามิตกับภาษีเก็บเพิ่มเพื่อมหาดไทย " +
         "ให้แยกเป็น 2 แถวตามใบเสร็จกรมสรรพสามิตที่แนบมาในไฟล์: desc = \"ภาษีสรรพสามิต\" และ desc = \"ภาษีเก็บเพิ่มเพื่อมหาดไทย\" " +
-        "ใช้ vendorCode เดียวกับแถว EXCISE FEE เดิม ห้ามใส่แถวยอดรวมซ้ำอีก" +
+        "ใช้ vendorCode เดียวกับแถว EXCISE FEE เดิม ห้ามใส่แถวยอดรวมซ้ำอีก";
+
+    private const string BundleTaxRules =
         "\n- (เฉพาะกรณีที่มีหน้า FORM SHIPPING EXPENSE) ค่าธรรมเนียมและภาษีในใบเสร็จกรมศุลกากร/ใบขนสินค้าขาเข้าที่แนบมาในไฟล์ " +
         "ให้ใส่เป็นแถวต่อท้าย lines โดยใช้ extCode = \"DUTY\" (ไม่ใช่รายการค่าใช้จ่ายในฟอร์ม) แถวละรายการ ได้แก่ " +
         "อากรขาเข้า (desc = \"Import Duty\"), ภาษีสรรพสามิต (\"Excise Tax\"), ภาษีเก็บเพิ่มเพื่อมหาดไทย (\"Interior Tax\") " +
@@ -231,6 +256,74 @@ public static partial class VisionPrompt
         "ข้อมูลเหล่านี้ให้อ่านจากหัวของใบกำกับภาษีใบนั้นโดยตรง ห้ามคัดลอกของใบอื่นหรือของบริษัทผู้ซื้อ" +
         "ส่วนภาษีมูลค่าเพิ่มในใบเสร็จกรมศุลกากร (ภาษีซื้อขาเข้า) ให้ใส่เป็นแถว VAT ด้วย โดยใช้ vendorCode ของกรมศุลกากรตามที่ปรากฏในฟอร์ม " +
         "(แถวเดียวกับ CUSTOMS FEE / EXCISE FEE) เพื่อให้ไปอยู่กับเอกสาร MIRO ของ vendor รายนั้น";
+
+    // GLC is the default: everything written before MGT came into scope was GLC's rules, and a
+    // document with no company stamped on it keeps reading exactly as it did before.
+    private const string IiBundleRules = BundleHeaderRules + GlcFormRules + BundleTaxRules;
+
+    // The MGT import-cost form is NOT the GLC "FORM SHIPPING EXPENSE". It carries four amount
+    // columns (two estimates, the broker's figure and the invoice actually received) and has no
+    // per-row VENDOR column at all — the vendor codes sit in a small mapping block at the foot of
+    // the sheet, which is why MGT's local handling lands on ONE vendor while GLC's splits per row.
+    // Everything here was read off the form shown in the MGT OCR workshop (30-Sep-2026).
+    private const string MgtFormRules =
+        "\n- ฟอร์มสรุปค่าใช้จ่ายนำเข้าของ MGT คือหน้าที่มีตารางหัวคอลัมน์ DESCRIPTION, MGT'S PURCHASE EST. HANDLING, " +
+        "SHIPPING BROKER HANDLING, MGT'S GR EST. HANDLING, ACTUAL INVOICE, DIFF ถ้ามีหน้านี้ ให้ lines มาจากตารางนั้นเท่านั้น" +
+        // The posting column, confirmed by MGT accounting: the amount that goes to SAP is the
+        // ACTUAL INVOICE figure (22,094.33 on the sample form) — what the agent actually
+        // billed. The three estimate columns are never posted, and ROUNDUP is only the other
+        // half of the DIFF calculation.
+        "\n- (ฟอร์ม MGT) ยอดเงินของทุก line ให้ใช้คอลัมน์ ACTUAL INVOICE เท่านั้น (ยอดที่ผู้ขายเรียกเก็บจริง) " +
+        "ห้ามใช้ยอดจากคอลัมน์ MGT'S PURCHASE EST. HANDLING, SHIPPING BROKER HANDLING, MGT'S GR EST. HANDLING หรือแถว ROUNDUP " +
+        "เพราะสามคอลัมน์แรกเป็นยอดประมาณการ ส่วน ROUNDUP ใช้แค่คำนวณ DIFF " +
+        "ข้ามรายการที่คอลัมน์ ACTUAL INVOICE ว่าง เป็น \"-\" หรือ 0 (ประมาณการไว้แต่ยังไม่มีใบเรียกเก็บ ยังไม่ต้องตั้งหนี้)" +
+        // Confirmed by MGT accounting (Rattana, 30-Sep-2026): "Handling costs will be grouped
+        // together on one line, but if there are insurance costs, an additional line will be
+        // added." So MGT does NOT get a line per DESCRIPTION row the way GLC does — the whole
+        // handling block collapses into one, and the items billed by another party stand alone.
+        "\n- (ฟอร์ม MGT) สำคัญ: ห้ามแตกเป็น 1 แถวต่อ 1 บรรทัดใน DESCRIPTION เหมือนฟอร์มของอีกบริษัท " +
+        "ค่าใช้จ่าย handling ทั้งหมดของ MGT ต้องรวมเป็น line เดียว: desc = \"Local Handling\", extCode = \"COST\", qty = 1, " +
+        "amount = price = ยอดแถว TOTAL LOCAL HANDLING ของคอลัมน์ ACTUAL INVOICE (เช่น 22,094.33) " +
+        "ถ้าแถว TOTAL LOCAL HANDLING ไม่มียอดในคอลัมน์นั้น ให้บวกยอดในคอลัมน์เดียวกันของทุกบรรทัดตั้งแต่ต้นตารางจนถึงก่อนแถวนั้นเอง " +
+        "(DO, CONTAINER IMBALANCE CHARGE, OT CHARGE, CUSTOMS FEE, STORAGE CHARGE, SHIPPING SERVICE, TRUCKING, LABOUR, GATE CHARGE, LIFT OFF CHARGE, CLEANING CHARGE, OTHER ฯลฯ) " +
+        "แล้วห้ามใส่บรรทัดย่อยเหล่านั้นเป็น line แยกอีก เพราะรวมไปแล้ว" +
+        "\n- (ฟอร์ม MGT) จากนั้นให้เพิ่ม line แยกออกมาอีก 1 แถวต่อ 1 รายการ เฉพาะรายการที่อยู่ใต้แถว TOTAL LOCAL HANDLING และมียอดจริงในคอลัมน์ ACTUAL INVOICE ได้แก่ " +
+        "INSURANCE (desc = \"Insurance\"), PALLET CHARGE (desc = \"Pallet Charge\"), INTERTEK SERVICE CHARGE (desc = \"Intertek Service Charge\") " +
+        "และ FREIGHT ถ้ามียอดแยกต่างหาก (desc = \"Freight\") ทุกแถวใช้ extCode = \"COST\", qty = 1 " +
+        "รายการใดไม่มียอดจริงในคอลัมน์ ACTUAL INVOICE ก็ไม่ต้องใส่ เช่น ชุดที่ไม่มีค่าประกันก็จะมีแต่ line \"Local Handling\" ใบเดียว" +
+        "\n- (ฟอร์ม MGT) ห้ามใส่แถวสรุป TOTAL AMOUNT และ ROUNDUP เป็น line " +
+        // DIFF confirmed by MGT accounting (Rattana, 03-Oct-2026) with the worked figure on the
+        // form: 22,700.00 (ROUNDUP) - 22,094.33 (TOTAL AMOUNT, actual) = 605.67. It is the
+        // rounding difference, not the estimate-vs-actual variance.
+        "ส่วนคอลัมน์ DIFF คือผลต่างระหว่างแถว ROUNDUP กับแถว TOTAL AMOUNT ของคอลัมน์ ACTUAL INVOICE "
+        + "(DIFF = ROUNDUP \u2212 TOTAL AMOUNT เช่น 22,700.00 \u2212 22,094.33 = 605.67) ไม่ใช่ผลต่างของยอดประมาณการ "
+        + "เป็นตัวเลขไว้ให้บัญชีตรวจสอบ ห้ามใส่เป็น line และห้ามนำไปรวมในยอดใด ๆ " +
+        "และ header.totalAmount ให้ใช้ยอดแถว TOTAL AMOUNT ของคอลัมน์ ACTUAL INVOICE (ยอดเดียวกับผลรวมของ lines) ไม่ใช่แถว ROUNDUP และไม่ใช่ยอดประมาณการ" +
+        // Confirmed by MGT accounting: one vendor number for the whole document. The separate
+        // lines above exist because accounting wants insurance (and the like) shown apart, NOT
+        // because a second vendor is involved — so every line carries the same code. This is the
+        // meeting's rule 1 ("the MGT Shipping Form will contain only one Vendor Number").
+        "\n- (ฟอร์ม MGT) ฟอร์มนี้ไม่มีคอลัมน์ VENDOR รายแถว และชุดเอกสารของ MGT มีรหัสผู้ขายเพียงรหัสเดียวต่อ 1 ชุด " +
+        "ให้อ่านรหัสนั้นจากตารางเล็กท้ายฟอร์มที่จับคู่ประเภทค่าใช้จ่ายกับ VENDOR CODE " +
+        "(บรรทัด IMPORT TAX, FREIGHT, LOCAL HANDLING, INSURANCE, PALLET CHARGE, LOCAL HANDLING (INTERTEK)) " +
+        "โดยปกติจะมีรหัสเขียนไว้บรรทัดเดียวคือ LOCAL HANDLING แล้วใส่รหัสนั้นเป็น vendorCode ของ \"ทุก line\" ในชุดนี้ให้เหมือนกันหมด " +
+        "ทั้ง Local Handling, Insurance, Pallet Charge, Intertek Service Charge และ Freight " +
+        "ที่แยกเป็นคนละ line ก็เพราะบัญชีต้องการให้แสดงแยกบรรทัด ไม่ใช่เพราะเป็นผู้ขายคนละราย ห้ามแยก vendor " +
+        "ยกเว้นกรณีเดียว: ถ้าในตารางท้ายฟอร์มมีรหัสผู้ขายเขียนไว้ที่บรรทัดอื่นต่างหากจริง ๆ ให้ใช้รหัสของบรรทัดนั้นกับรายการประเภทนั้น" +
+        "\n- (ฟอร์ม MGT) ถ้ามีรายการสกุลเงินต่างประเทศ ให้แปลงเป็นเงินบาทก่อนนำไปรวมหรือใส่ใน amount/price โดยใช้อัตราในช่อง EX-RATE BASED ON THE ARRIVAL DATE " +
+        "ที่หัวฟอร์ม (บรรทัด 1 USD / 100 JPY / 1 EUR / 1 GBP) แล้วเขียนอัตราที่ใช้ต่อท้าย desc เช่น \"Local Handling (incl. USD 188.00 x 33.4416)\" เพื่อให้ตรวจสอบย้อนกลับได้ " +
+        "ถ้าหาอัตราในไฟล์ไม่เจอ ให้คงยอดเดิมไว้และเขียน desc ว่า \"... (USD, no FX rate found)\"";
+
+    // The shared tax rules are written for GLC's form, which names a vendor on every row. MGT's
+    // does not, so this restates the vendor question for the tax rows and nothing else.
+    private const string MgtTaxVendorRules =
+        "\n- (ฟอร์ม MGT) ข้อความข้างบนที่พูดถึง \"คอลัมน์ VENDOR ของฟอร์ม\" ใช้กับฟอร์มของอีกบริษัท ฟอร์มของ MGT ไม่มีคอลัมน์นั้น " +
+        "สำหรับชุดเอกสารของ MGT ให้ใส่ vendorCode ของแถว VAT และ WHT เป็นรหัสผู้ขายรหัสเดียวกับที่ใช้กับแถวค่าใช้จ่าย (รหัสเดียวทั้งชุด) " +
+        "ยกเว้นแถว DUTY และภาษีจากใบเสร็จกรมศุลกากร ถ้าตารางท้ายฟอร์มมีรหัสที่บรรทัด IMPORT TAX เขียนไว้ต่างหาก ให้ใช้รหัสนั้น " +
+        "ถ้าไม่มีเขียนไว้ ให้ใช้รหัสเดียวกับแถวค่าใช้จ่ายเช่นกัน ห้ามเว้นว่างและห้ามแต่งรหัสขึ้นเอง";
+
+    private const string MgtBundleRules = BundleHeaderRules + MgtFormRules + BundleTaxRules + MgtTaxVendorRules;
+
 
 
     // Parses a model's raw text response (expected to contain one JSON object, possibly with

@@ -30,7 +30,7 @@ public static partial class GeminiOcr
         PooledConnectionLifetime = TimeSpan.FromMinutes(5),
     });
 
-    public static async Task<(ParsedDocument? Doc, string? Error)> VisionExtractAsync(string path, string module, AppConfig config)
+    public static async Task<(ParsedDocument? Doc, string? Error)> VisionExtractAsync(string path, string module, AppConfig config, string salesOrg = "")
     {
         if (string.IsNullOrEmpty(config.GeminiApiKey))
             return (null, "GeminiApiKey is empty in config \u2014 appsettings Ocr:GeminiApiKey was not loaded by the running app (check which appsettings.json/appsettings.{Env}.json the process reads, and that it was restarted)");
@@ -69,7 +69,7 @@ public static partial class GeminiOcr
             // A prompt rule alone ("take lines from the FORM SHIPPING EXPENSE page") was not enough:
             // with 17 pages Gemini still took the first invoice's lines. When the text layer shows
             // which page the form is, put that page FIRST and say so explicitly up front.
-            var prompt = VisionPrompt.Build(module);
+            var prompt = VisionPrompt.Build(module, "image", salesOrg);
             // How many of the images at the FRONT of the list are FORM SHIPPING EXPENSE pages.
             // Zero when the file has no form sheet. This is what the chunked reader splits on.
             var formCount = 0;
@@ -112,7 +112,7 @@ public static partial class GeminiOcr
             // a minute, and the first one is MORE accurate on its own than it was buried in twenty
             // other pages.
             if (isPdf && imgs.Count > ChunkThreshold)
-                return await ChunkedAsync(imgs, formCount, mime, prompt, module, config, dpi);
+                return await ChunkedAsync(imgs, formCount, mime, prompt, module, config, dpi, salesOrg);
 
             // A file short enough to read in one request still needs the customs rows pointed at the
             // customs vendor: the model fills vendorCode from the form when it can, but it leaves it
@@ -278,7 +278,7 @@ public static partial class GeminiOcr
     /// since without it there is no document at all.</summary>
     private static async Task<(ParsedDocument? Doc, string? Error)> ChunkedAsync(
         List<byte[]> imgs, int formCount, string mime, string mainPrompt,
-        string module, AppConfig config, int dpi)
+        string module, AppConfig config, int dpi, string salesOrg = "")
     {
         // The form pages carry the cost table, but not the header: the vendor's tax id, invoice
         // date and payment terms are printed on the vendor's own invoice, which the reorder above
@@ -301,7 +301,7 @@ public static partial class GeminiOcr
         // issuer's invoice in the bundle was already deducted and remitted by the shipping agent,
         // and is not ours to record.
         var mainVendorName = doc.Header.TryGetValue("vendorName", out var vn) ? vn?.ToString() ?? "" : "";
-        var supporting = VisionPrompt.BuildSupporting(module, mainVendorName);
+        var supporting = VisionPrompt.BuildSupporting(module, mainVendorName, salesOrg);
         var skipped = 0;
         for (var i = 0; i < rest.Count; i += ChunkSize)
         {

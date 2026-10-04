@@ -51,6 +51,15 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     private async Task<string> ImportCompanyAsync(string? requested, CancellationToken ct = default) =>
         CompanyScope.ImportFor(await currentUser.RequireAsync(ct), config, requested);
 
+    /// <summary>The company profile an exported file should carry — resolved from the document's
+    /// own SalesOrg, falling back to GLC for a document that predates the company column.</summary>
+    private async Task<MgtOcr.Core.Config.CompanyProfile?> ExportCompanyAsync(int docId)
+    {
+        var salesOrg = (await repo.GetCompanyAsync(docId) ?? "").Trim();
+        return (salesOrg.Length > 0 ? config.CompanyForSalesOrg(salesOrg) : null)
+            ?? config.Companies.FirstOrDefault(c => string.Equals(c.Name, "GLC", StringComparison.OrdinalIgnoreCase));
+    }
+
     private async Task<string> SalesOrgAsync(Dictionary<string, object?> header)
     {
         var org = header.GetStr("salesOrg");
@@ -377,7 +386,9 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         }
         // Locked to Gemini (per Megachem): empty / "auto" re-OCR uses Gemini (the UI sends "gemini").
         var reocrEngine = body.GetStr("ocr") is { Length: > 0 } o && o != "auto" ? o : "gemini";
-        var pd = await ocr.ExtractAsync(storedPath, module, reocrEngine, reocrPw);
+        // Re-reading follows the company the document is already filed under, so a second read
+        // never silently swaps MGT's rules for GLC's (CompanyRules treats an empty value as GLC).
+        var pd = await ocr.ExtractAsync(storedPath, module, reocrEngine, reocrPw, await repo.GetCompanyAsync(docId));
         var durationMs = (int)(DateTime.UtcNow - t0).TotalMilliseconds;
         var filled = await repo.ApplyVendorMemoryAsync(module, pd.Header);
         if (filled.Count > 0)
@@ -800,11 +811,11 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             throw new HttpApiException(400, "The input-VAT file is only produced for supplier invoices");
 
         var header = (Dictionary<string, object?>)doc["header"]!;
-        // A supplier invoice is always GLC — see CompanyNameForPostAsync's note ("AP/II always
-        // means GLC"). Sap:CompanyCode defaults to MGT's 1000, so reading it here put the wrong
-        // company code on the sheet; resolve the GLC profile instead.
-        var company = config.Companies.FirstOrDefault(
-            c => string.Equals(c.Name, "GLC", StringComparison.OrdinalIgnoreCase));
+        // Supplier invoices used to be GLC's alone, and the company code was pinned to GLC here.
+        // MGT files them now too, so it comes from the document's own SalesOrg; a document with no
+        // company stamped on it (anything imported before that column existed) still falls back to
+        // GLC, which is what every one of those rows actually was.
+        var company = await ExportCompanyAsync(docId);
         var bytes = Export.InputVatExcel.Build(
             doc,
             companyName: config.ExportCompanyName,
@@ -832,8 +843,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         if (module is not ("AP" or "II"))
             throw new HttpApiException(400, "The journal-voucher file is only produced for supplier invoices");
 
-        var company = config.Companies.FirstOrDefault(
-            c => string.Equals(c.Name, "GLC", StringComparison.OrdinalIgnoreCase));
+        var company = await ExportCompanyAsync(docId);
         var bytes = Export.JournalVoucherExcel.Build(
             doc,
             companyName: config.ExportCompanyName,
@@ -859,8 +869,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         if (module is not ("AP" or "II"))
             throw new HttpApiException(400, "The SAP import file is only produced for supplier invoices");
 
-        var company = config.Companies.FirstOrDefault(
-            c => string.Equals(c.Name, "GLC", StringComparison.OrdinalIgnoreCase));
+        var company = await ExportCompanyAsync(docId);
         var bytes = Export.SapImportSupplierInvoiceExcel.Build(
             doc,
             // A bundle can carry costs from several suppliers, and one SAP supplier invoice takes

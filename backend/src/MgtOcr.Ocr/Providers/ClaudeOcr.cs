@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using System.Text.Json;
 using MgtOcr.Core.Config;
 
@@ -11,7 +11,7 @@ public static class ClaudeOcr
 {
     private static readonly HttpClient Http = new();
 
-    public static async Task<ParsedDocument?> VisionExtractAsync(string path, string module, AppConfig config)
+    public static async Task<ParsedDocument?> VisionExtractAsync(string path, string module, AppConfig config, string salesOrg = "")
     {
         if (string.IsNullOrEmpty(config.AnthropicApiKey)) return null;
         try
@@ -22,7 +22,7 @@ public static class ClaudeOcr
                 : [await File.ReadAllBytesAsync(path)];
             if (imgs.Count == 0) return null;
 
-            var content = new List<object> { new { type = "text", text = VisionPrompt.Build(module) } };
+            var content = new List<object> { new { type = "text", text = VisionPrompt.Build(module, "image", salesOrg) } };
             content.AddRange(imgs.Select(b => (object)new
             {
                 type = "image",
@@ -50,12 +50,12 @@ public static class ClaudeOcr
         }
     }
 
-    public static async Task<ParsedDocument?> TextExtractAsync(string module, string text, AppConfig config)
+    public static async Task<ParsedDocument?> TextExtractAsync(string module, string text, AppConfig config, string salesOrg = "")
     {
         if (string.IsNullOrEmpty(config.AnthropicApiKey) || string.IsNullOrWhiteSpace(text)) return null;
         try
         {
-            var prompt = VisionPrompt.Build(module, "text") + "\n\n--- ข้อความจาก OCR ---\n" +
+            var prompt = VisionPrompt.Build(module, "text", salesOrg) + "\n\n--- ข้อความจาก OCR ---\n" +
                          (text.Length > 12000 ? text[..12000] : text) + "\n";
             var body = new { model = config.AnthropicModel, max_tokens = 3000, messages = new[] { new { role = "user", content = prompt } } };
             using var req = new HttpRequestMessage(HttpMethod.Post, "https://api.anthropic.com/v1/messages")
