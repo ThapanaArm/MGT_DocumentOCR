@@ -61,7 +61,8 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     readStored<ThemeMode>(THEME_KEY, 'light', (v) => (v === 'dark' ? 'dark' : 'light')),
   );
   const [navCollapsed, setNavCollapsed] = useState<boolean>(() =>
-    readStored<boolean>(NAV_KEY, false, (v) => v === '1'),
+    // No saved choice yet: start collapsed on narrow desktops so the content gets the room.
+    readStored<boolean>(NAV_KEY, typeof window !== 'undefined' && window.innerWidth >= 761 && window.innerWidth < 1280, (v) => v === '1'),
   );
   const [busy, setBusyState] = useState(false);
   const [toast, setToast] = useState<ToastState>({ open: false, message: '', type: 'info' });

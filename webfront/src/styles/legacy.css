@@ -204,7 +204,7 @@
   .f.ok input,.f.ok select{border-color:var(--brand-line)}
 
   /* ---------- Table ---------- */
-  .tw{overflow-x:auto;border:1px solid var(--line);border-radius:var(--r4);max-width:1600px}
+  .tw{overflow-x:auto;border:1px solid var(--line);border-radius:var(--r4)}
   /* Register actions column (Open / delete) pinned as the first column — keep it snug and
      visually separated from the data so a row does not start with a loose button cluster. */
   .reg-col-actions{width:1%;white-space:nowrap;text-align:center;border-left:1px solid var(--line-soft)}
@@ -824,7 +824,8 @@
 .page-heading h1{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .page-heading p{margin:0;color:var(--muted);font-size:12.5px;line-height:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .start-document{text-decoration:none}
-.content-inner{width:100%;max-width:1680px;margin-inline:auto}
+/* Full width (5 Oct 2026, per user): content uses the whole pane; wide tables keep their own .tw scrollbar. */
+.content-inner{width:100%;max-width:none;margin-inline:0}
 .card,.cmp-card,.result{transition:border-color .18s ease,box-shadow .18s ease}
 .card-h{min-width:0}
 .card-h h2{min-width:0;overflow-wrap:anywhere}
@@ -981,6 +982,18 @@ input,select,textarea,.btn,.nav a{-webkit-tap-highlight-color:transparent}
 .master-table .master-col-isactive{min-width:150px}
 .master-table .master-col-note{min-width:260px;white-space:normal;overflow-wrap:anywhere;line-height:22px}
 .master-table .master-col-materialcodesap,.master-table .master-col-isocode{min-width:180px}
+/* Master table balance (5 Oct 2026): widths come from the <colgroup> in MasterPage; headers wrap to
+   two lines instead of being cut ("CUSTOMER NAM..."); long text wraps to at most 2 lines (full value
+   in the tooltip); short values stay on one line; SAP codes at body size, not tiny. */
+.paged-table>table.master-table th{white-space:normal;line-height:16px;text-overflow:clip;vertical-align:middle;overflow-wrap:anywhere}
+.paged-table>table.master-table td{vertical-align:middle;line-height:20px}
+.master-table .master-cell-text{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;white-space:normal;overflow-wrap:anywhere}
+.master-table .master-col-taxid .master-cell-text,.master-table .master-col-salesorg,.master-table .sapcode{white-space:nowrap}
+.master-table .master-col-taxid .master-cell-text{font-variant-numeric:tabular-nums}
+.master-table .sapcode{font-size:13.5px;font-weight:600}
+.master-table .master-org .hint{font-size:11.5px;margin-left:2px}
+.master-table .master-col-isactive,.master-table .master-col-isactive *{min-width:0}
+.paged-table>table.master-table td.master-col-isactive,.paged-table>table.master-table th.master-col-isactive{text-align:center}
 .master-active-switch{display:inline-flex;align-items:center;gap:8px;padding:4px;border:0;border-radius:var(--pill);background:var(--line-soft);color:var(--muted);font-size:13px;font-weight:600;line-height:22px;cursor:pointer;transition:.15s}
 .master-active-switch:hover:not(:disabled){background:var(--g200);color:var(--text)}
 .master-active-switch.on{background:var(--green-bg);color:var(--green)}
@@ -1155,3 +1168,65 @@ input,select,textarea,.btn,.nav a{-webkit-tap-highlight-color:transparent}
 .english-calendar-footer{display:flex;justify-content:space-between;margin-top:10px;padding-top:10px;border-top:1px solid var(--line-soft)}
 .english-calendar-footer button{padding:5px 8px;border-radius:7px;color:var(--brand);font-size:12px;font-weight:600}
 .english-calendar-footer button:hover{background:var(--brand-soft)}
+
+/* =====================================================================
+   Density & responsive pass (5 Oct 2026) — the app is designed for the browser at 100% zoom.
+   Before this, people zoomed the browser out to 80–90% to fit tables on notebook screens
+   (1366–1536 px wide). Desktop (>=761px) now uses a compact type/spacing scale, steps down once
+   more on narrow desktops, and the sidebar narrows. Mobile (<=760px) keeps its own rules above.
+   ===================================================================== */
+@media (min-width:761px){
+  body{font-size:14px;line-height:22px}
+  button,input,select,textarea{font-size:14px}
+  .hint{font-size:13px;line-height:20px}
+
+  /* shell */
+  .sidebar{width:248px}
+  .sidebar.collapsed{width:72px}
+  .sidebar-header .brand b{font-size:15px;line-height:21px}
+  .sidebar .nav a{min-height:38px;padding:7px 12px;font-size:14px;gap:10px}
+  .sidebar:not(.collapsed) .nav a{min-height:38px}
+  .sidebar .nav a .ic{font-size:14px}
+  .nav-title{font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .topbar{min-height:60px;padding:10px 22px}
+  .topbar h1,.page-heading h1{font-size:18px;line-height:25px}
+  .page-heading p{font-size:12px;line-height:16px}
+  .content{padding:18px 22px 64px}
+
+  /* cards, buttons, fields */
+  .card-h{padding:13px 18px}
+  .card-h h2{font-size:16px;line-height:23px}
+  .card-b{padding:18px}
+  .btn{min-height:36px;padding:7px 15px;font-size:14px;line-height:20px}
+  .btn.sm{min-height:32px;padding:5px 12px;font-size:13px;line-height:19px}
+  .f label{font-size:12.5px;line-height:17px;margin-bottom:5px}
+  .f input,.f select,.f textarea{padding:8px 11px;font-size:14px;line-height:20px}
+  .modal-header h2{font-size:18px;line-height:25px}
+  .result h3{font-size:15px}
+  .step .t b{font-size:14px;line-height:20px}
+
+  /* tables */
+  table{font-size:13.5px}
+  th{padding:9px 12px;font-size:11.5px;line-height:16px}
+  td{padding:8px 12px;line-height:20px}
+  td input,td select{font-size:13.5px;padding:5px 8px}
+  .master-table th{height:40px;font-size:11px}
+  .master-table td{height:46px}
+  .master-record-summary b{font-size:16px;line-height:23px}
+  .master-subtabs button{min-height:32px;padding:5px 11px;font-size:13px}
+  .master-group-tabs button{min-height:42px;font-size:14px}
+  .master-search input{padding:7px 0!important}
+}
+
+/* narrow desktop / notebook (1366 and below): one more step down, sidebar narrower still */
+@media (min-width:761px) and (max-width:1439px){
+  body{font-size:13.5px;line-height:21px}
+  .sidebar{width:224px}
+  .content{padding:16px 18px 56px}
+  .card-b{padding:16px}
+  th{padding:8px 10px}
+  td{padding:7px 10px}
+  table{font-size:13px}
+}
+/* Master: checkbox column — no ellipsis dot next to the checkbox when the cell is tight. */
+.paged-table>table.master-table td:first-child,.paged-table>table.master-table th:first-child{padding-inline:6px;text-overflow:clip}

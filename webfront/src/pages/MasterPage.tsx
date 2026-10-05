@@ -119,17 +119,37 @@ export default function MasterPage() {
       ) : (
         <span className="badge b-fail"><i className="fa-solid fa-xmark" /> Not specified</span>
       );
-    if (activeTab === 'uoms' && c.k === 'SalesOrg')
+    if (c.k === 'SalesOrg')
       return r[c.k]
-        ? <>{r[c.k]} — {String(r[c.k]) === '1000' ? 'MGT' : String(r[c.k]) === '2000' ? 'GLC' : '?'}</>
-        : <span className="badge b-idle">All companies</span>;
+        ? <span className="master-org">{r[c.k]} <span className="hint">{String(r[c.k]) === '1000' ? 'MGT' : String(r[c.k]) === '2000' ? 'GLC' : ''}</span></span>
+        : activeTab === 'uoms' ? <span className="badge b-idle">All companies</span> : <span className="hint">—</span>;
     if (activeTab === 'uoms' && c.k === 'MaterialCode' && !r[c.k])
       return <span className="badge b-idle">All materials (global rule)</span>;
     if (activeTab === 'uoms' && c.k === 'Factor')
       return <b>{num(r[c.k]).toLocaleString('en-US', { maximumFractionDigits: 6 })}</b>;
-    return r[c.k];
+    const v = r[c.k];
+    if (v == null || String(v).trim() === '') return <span className="hint">—</span>;
+    // Long text (names, addresses) wraps to at most 2 lines; the full value is in the tooltip.
+    return <span className="master-cell-text" title={String(v)}>{String(v)}</span>;
   };
 
+  // Table layout. Columns that are empty on EVERY record of this tab (e.g. Branch / Distribution
+  // Channel / Division / Currency / Payment Terms that nobody filled) are hidden so the table isn't
+  // half blank columns; they come back as soon as one record has a value. Required, SAP-code and
+  // status columns always show. Each column gets a width by what it holds instead of the browser's
+  // equal split (the paged table uses table-layout: fixed).
+  const visibleCols = rows.length === 0 ? def.cols : def.cols.filter((c) =>
+    c.required || c.sap || c.source === 'system' || c.k === def.key || c.k === 'SalesOrg'
+    || rows.some((r) => r[c.k] != null && String(r[c.k]).trim() !== ''));
+  const colWidth = (k: string): number => {
+    if (['IsActive', 'Isactive'].includes(k)) return 96;
+    if (['ShipToAddress', 'Note', 'Address'].includes(k)) return 240;
+    if (['CompanyName', 'CompanyNameSAP', 'ShipToName', 'MaterialCodeName', 'Description', 'VendorName', 'ExtDesc'].includes(k)) return 180;
+    if (k === 'TaxId') return 150;
+    if (['SalesOrg', 'Branch', 'DistChannel', 'Division', 'Currency', 'Uom', 'ExtUom', 'SapUom', 'SapUomIso', 'Factor', 'Plant', 'MatGroup'].includes(k)) return 120;
+    if (k === 'PaymentTerms') return 140;
+    return 160; // codes
+  };
   const rowKeys = pagedRows.map((r) => String(r[def.key]));
   const allSelected = rowKeys.length > 0 && rowKeys.every((k) => selected.has(k));
   const toggleRow = (key: string) =>
@@ -237,15 +257,19 @@ export default function MasterPage() {
         </div>
 
         <div className={`tw master-table-wrap paged-table paged-table-master page-size-${pageSize}`}>
-          <table className="master-table">
+          <table className="master-table" style={{ minWidth: 44 + visibleCols.reduce((a, c) => a + colWidth(c.k), 0) }}>
+            <colgroup>
+              <col style={{ width: 44 }} />
+              {visibleCols.map((c) => <col key={c.k} style={{ width: colWidth(c.k) }} />)}
+            </colgroup>
             <thead>
               <tr>
-                <th style={{ width: 34, textAlign: 'center' }}>
+                <th style={{ textAlign: 'center' }}>
                   <input type="checkbox" aria-label="Select all rows on this page" checked={allSelected}
                     onChange={toggleAll} disabled={pagedRows.length === 0} />
                 </th>
-                {def.cols.map((c) => (
-                  <th key={c.k} className={`master-col-${c.k.toLowerCase()}`}>{columnLabel(c)}</th>
+                {visibleCols.map((c) => (
+                  <th key={c.k} className={`master-col-${c.k.toLowerCase()}`} title={columnLabel(c)}>{columnLabel(c)}</th>
                 ))}
               </tr>
             </thead>
@@ -270,7 +294,7 @@ export default function MasterPage() {
                       <input type="checkbox" aria-label="Select row" checked={selected.has(key)}
                         onClick={(e) => e.stopPropagation()} onChange={() => toggleRow(key)} />
                     </td>
-                    {def.cols.map((c) => (
+                    {visibleCols.map((c) => (
                       <td key={c.k} className={`master-col-${c.k.toLowerCase()}`}>{cell(r, c)}</td>
                     ))}
                   </tr>
@@ -278,7 +302,7 @@ export default function MasterPage() {
                 })
               ) : (
                 <tr>
-                  <td colSpan={def.cols.length + 1} className="empty">
+                  <td colSpan={visibleCols.length + 1} className="empty">
                     {search ? 'No matching records found' : 'No records yet'}
                   </td>
                 </tr>

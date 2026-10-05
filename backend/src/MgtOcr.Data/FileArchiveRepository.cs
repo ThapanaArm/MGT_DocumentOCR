@@ -118,10 +118,17 @@ public class FileArchiveRepository(DbConnectionFactory factory)
     public async Task<IEnumerable<dynamic>> RecentAsync(int top, CancellationToken ct = default)
     {
         await using var conn = await factory.OpenAsync(ct);
+        // Latest `top` files PER COMPANY (the admin page lists MGT and GLC separately), so a busy
+        // company can't push the other one's files off the list.
         return await conn.QueryAsync("""
-            SELECT TOP(@top) FileName, CompanyCode, Status, Attempts, LastError, RemotePath, RemoteUrl,
-                   ArchivedAt, LocalDeletedAt, COALESCE(UpdatedAt, CreatedAt) AS UpdatedAt
-            FROM ocr.FileArchive ORDER BY COALESCE(UpdatedAt, CreatedAt) DESC
+            ;WITH x AS (
+                SELECT FileName, CompanyCode, Status, Attempts, LastError, RemotePath, RemoteUrl,
+                       ArchivedAt, LocalDeletedAt, COALESCE(UpdatedAt, CreatedAt) AS UpdatedAt,
+                       ROW_NUMBER() OVER (PARTITION BY CompanyCode ORDER BY COALESCE(UpdatedAt, CreatedAt) DESC) AS rn
+                FROM ocr.FileArchive
+            )
+            SELECT FileName, CompanyCode, Status, Attempts, LastError, RemotePath, RemoteUrl, ArchivedAt, LocalDeletedAt, UpdatedAt
+            FROM x WHERE rn <= @top ORDER BY CompanyCode, UpdatedAt DESC
             """, new { top });
     }
 
