@@ -2,6 +2,8 @@ import { useState } from 'react';
 import type { DocHeader, DocLine, DocModel, MapResult } from '../../api/documents';
 import { SEND_DISABLED } from '../../constants/flags';
 import { fmt, num } from '../../utils/format';
+import type { SoGroupState } from '../../api/documents';
+import SoGroupPanel, { groupStatus } from './SoGroupPanel';
 
 // GLC only (this whole editor is the SAP-side, GLC-only "check before you send" screen -- see the
 // module doc comment below): the Subtotal/VAT/Grand Total block below is purely an OCR-review
@@ -21,24 +23,33 @@ const round2 = (n: number) => Math.round(n * 100) / 100;
    date (per-line date, else the header date, else "unspecified"), preserving first-seen order so the
    group numbers are stable. Exported so the page can build the same split assignment the editor shows. */
 export interface DeliveryDateGroup {
+  /** Grouping key exactly as the backend uses it (SoDeliveryGroups): the date, or '' when none. */
+  key: string;
+  /** Display label: the date, or a concise fallback when no date is available. */
   date: string;
   itemNos: number[];
   count: number;
 }
 
 export function deliveryDateGroups(doc: DocModel, headerDate: string): DeliveryDateGroup[] {
+  // Mirrors MgtOcr.Core.Mapping.SoDeliveryGroups — keep the two in step.
   const order: string[] = [];
-  const byDate = new Map<string, number[]>();
+  const byKey = new Map<string, number[]>();
   (doc.lines || []).forEach((l, i) => {
     const raw = ((l.extra as Record<string, string> | undefined)?.deliveryDate || '').trim();
-    const date = raw || (headerDate || '').trim() || '(ไม่ระบุวันส่ง)';
-    if (!byDate.has(date)) {
-      byDate.set(date, []);
-      order.push(date);
+    const key = raw || (headerDate || '').trim();
+    if (!byKey.has(key)) {
+      byKey.set(key, []);
+      order.push(key);
     }
-    byDate.get(date)!.push(Number(l.itemNo ?? i + 1));
+    byKey.get(key)!.push(Number(l.itemNo ?? (i + 1) * 10));
   });
-  return order.map((date) => ({ date, itemNos: byDate.get(date)!, count: byDate.get(date)!.length }));
+  return order.map((key) => ({
+    key,
+    date: key || 'Delivery date not specified',
+    itemNos: byKey.get(key)!,
+    count: byKey.get(key)!.length,
+  }));
 }
 
 /* The SAP Sales Order review step, lifted onto the page as one card -- the SAP-side counterpart
@@ -58,7 +69,8 @@ export default function SapSalesOrderEditor({
   posted,
   onSend,
   onViewPayload,
-  onSplitByDate,
+  posts = [],
+  partial = false,
 }: {
   doc: DocModel;
   map: MapResult | null;
@@ -71,18 +83,20 @@ export default function SapSalesOrderEditor({
   onViewPayload: () => void;
   /** Split this document into one Sales Order per delivery date, then send each. Called only when the
    *  lines carry more than one distinct delivery date. */
-  onSplitByDate: () => void;
+  /** Send results per delivery-date group (ocr.SalesOrderPost) — shown in the group panel. */
+  posts?: SoGroupState[];
+  /** Some groups already posted (status PARTIAL): only the remaining ones can be sent. */
+  partial?: boolean;
 }) {
   const lines: DocLine[] = doc.lines || [];
   const lineStatus = (i: number) => map?.lines?.[i]?.status;
   const willSendCount = map ? lines.filter((_, i) => lineStatus(i) !== 'fail').length : 0;
   const notMatchedCount = map ? lines.filter((_, i) => lineStatus(i) === 'fail').length : 0;
 
-  // Delivery-date grouping: when the lines carry more than one distinct delivery date this order must
-  // be split into one Sales Order per date before sending (Megachem rule). One date -> send as a single
-  // order as before.
+  // Delivery-date grouping (Megachem rule): one SAP Sales Order per delivery date, all sent from this
+  // document by one Send. Groups already posted are skipped on the next Send (retry = the rest).
   const dateGroups = deliveryDateGroups(doc, header.deliveryDate || '');
-  const multiDate = dateGroups.length > 1;
+  const remaining = dateGroups.filter((g) => !groupStatus(g, posts).ok).length;
 
   // The VAT amount the document ITSELF stated (OCR'd header — the "Totals" card's VAT field). When
   // the customer already broke VAT out on their document, this is filled and we should just show
@@ -287,52 +301,23 @@ export default function SapSalesOrderEditor({
           </p>
         )}
 
-        {multiDate && (
-          <div
-            className="result"
-            style={{
-              marginTop: 16,
-              border: '1px solid var(--warn, #e0a800)',
-              background: 'var(--warn-soft, #fef8e6)',
-              borderRadius: 'var(--r3, 10px)',
-              padding: '14px 16px',
-            }}
-          >
-            <h3 style={{ margin: '0 0 6px' }}>
-              <span className="badge b-warn">
-                <i className="fa-solid fa-calendar-days" /> วันส่งไม่เหมือนกัน
-              </span>{' '}
-              รายการในเอกสารนี้มีวันส่ง {dateGroups.length} วันที่แตกต่างกัน
-            </h3>
-            <p className="hint" style={{ marginTop: 0 }}>
-              ตามนโยบาย สินค้าที่ส่งคนละวันต้องแยกเป็นคนละ Sales Order — ระบบจะแยกเอกสารนี้ออกเป็น{' '}
-              <b>{dateGroups.length} Sales Orders</b> ตามวันส่ง แล้วให้คุณกดส่งเข้า SAP ทีละใบ
-            </p>
-            <ul style={{ margin: '4px 0 12px' }}>
-              {dateGroups.map((g, gi) => (
-                <li key={gi}>
-                  <b>ใบที่ {gi + 1}</b> — วันส่ง {g.date} · {g.count} รายการ (Item{' '}
-                  {g.itemNos.join(', ')})
-                </li>
-              ))}
-            </ul>
-            <button className="btn primary" onClick={onSplitByDate} disabled={sending || posted}>
-              <i className="fa-solid fa-scissors" /> แยกเป็น {dateGroups.length} Sales Orders ตามวันส่ง
-            </button>
-          </div>
-        )}
+        <SoGroupPanel groups={dateGroups} posts={posts} target="SAP" />
 
         <div className="so-send" style={{ justifyContent: 'flex-end' }}>
           <div className="row" style={{ gap: 10 }}>
-            {multiDate ? (
-              <span className="hint" style={{ alignSelf: 'center' }}>
-                แยกตามวันส่งก่อนจึงจะส่งเข้า SAP ได้
-              </span>
-            ) : (
-              <button className="btn success" onClick={onSend} disabled={SEND_DISABLED || sending || posted || !map.pass}>
-                {sending ? 'Sending…' : posted ? 'Sent ✓' : 'Send'}
-              </button>
-            )}
+            <button
+              className="btn success"
+              onClick={onSend}
+              disabled={SEND_DISABLED || sending || posted || (!partial && !map.pass) || remaining === 0}
+            >
+              {sending
+                ? 'Sending…'
+                : posted
+                  ? 'Sent ✓'
+                  : dateGroups.length > 1
+                    ? `Send ${remaining} Sales Order${remaining === 1 ? '' : 's'}`
+                    : 'Send'}
+            </button>
             <button className="btn" onClick={onViewPayload}>
               {'{}'} View Payload
             </button>

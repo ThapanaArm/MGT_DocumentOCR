@@ -3,6 +3,7 @@ using MgtOcr.Core.Config;
 using MgtOcr.Data;
 using MgtOcr.Sap;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Caching.Memory;
 
 namespace MgtOcr.Api.Controllers;
 
@@ -15,7 +16,7 @@ namespace MgtOcr.Api.Controllers;
 [Route("api/sap")]
 public class SapProductController(
     SapProductClient client, SapBillingClient billingClient, SapSalesOrderClient salesOrderClient,
-    UserRepository users, AppConfig config, ICurrentUserAccessor currentUser) : ControllerBase
+    UserRepository users, AppConfig config, ICurrentUserAccessor currentUser, IMemoryCache cache) : ControllerBase
 {
     [HttpGet("materials")]
     public async Task<IActionResult> SearchMaterials([FromQuery] string? description, [FromQuery] string? plant, [FromQuery] int top = 30)
@@ -60,7 +61,15 @@ public class SapProductController(
         if (string.IsNullOrWhiteSpace(product))
             return BadRequest(new { detail = "Provide 'product'" });
 
-        var detail = await client.GetMaterialDetailAsync(product);
+        // Cached per material for 30 min: this now also feeds the UoM dropdowns (Master → Unit
+        // Conversion and each document line), which can ask for the same material many times.
+        // Only a successful lookup is cached — a null (SAP down / not found) is retried next time.
+        var key = "sap-material-detail:" + product.Trim().ToUpperInvariant();
+        if (!cache.TryGetValue(key, out SapMaterialDetail? detail))
+        {
+            detail = await client.GetMaterialDetailAsync(product);
+            if (detail != null) cache.Set(key, detail, TimeSpan.FromMinutes(30));
+        }
         return Ok(new { detail });
     }
 

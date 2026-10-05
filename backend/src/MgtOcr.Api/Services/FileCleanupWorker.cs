@@ -22,11 +22,12 @@ public class FileCleanupWorker(AppConfig config, FileArchiveRepository repo, ILo
         log.LogInformation("File cleanup enabled (DryRun={DryRun}, every {Min} min)", config.CleanupDryRun, config.CleanupIntervalMinutes);
 
         try { await Task.Delay(TimeSpan.FromMinutes(1), ct); } catch (OperationCanceledException) { return; }
+        var outage = new DbOutage("File cleanup", log);
         while (!ct.IsCancellationRequested)
         {
-            try { await RunOnceAsync(ct); }
+            try { await RunOnceAsync(ct); outage.Succeeded(); }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
-            catch (Exception e) { log.LogError(e, "File cleanup run failed"); }
+            catch (Exception e) { outage.Failed(e, "File cleanup run"); }
 
             try { await Task.Delay(TimeSpan.FromMinutes(Math.Max(5, config.CleanupIntervalMinutes)), ct); }
             catch (OperationCanceledException) { break; }

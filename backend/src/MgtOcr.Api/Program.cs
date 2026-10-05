@@ -198,6 +198,8 @@ builder.Services.AddHostedService<MgtOcr.Api.Services.OcrQueueWorker>();
 // Both workers exit immediately unless Archive:Enabled / Archive:CleanupEnabled are true.
 builder.Services.AddHttpClient(nameof(MgtOcr.Api.Services.GraphArchiveClient));
 builder.Services.AddSingleton<FileArchiveRepository>();
+// Per-delivery-date Sales Order posting results (sql/31_so_post_group.sql).
+builder.Services.AddSingleton<SalesOrderPostRepository>();
 builder.Services.AddSingleton<MgtOcr.Api.Services.GraphArchiveClient>();
 builder.Services.AddSingleton<MgtOcr.Api.Services.CompressionState>();
 builder.Services.AddHostedService<MgtOcr.Api.Services.FileCompressWorker>();
@@ -257,8 +259,13 @@ app.Use(async (context, next) =>
     {
         await next(context);
     }
-    catch (Exception)
+    catch (Exception ex)
     {
+        var logger = context.RequestServices.GetRequiredService<ILoggerFactory>()
+            .CreateLogger("MgtOcr.Api.UnhandledException");
+        logger.LogError(ex,
+            "Unhandled exception while processing {Method} {Path}; TraceId={TraceId}",
+            context.Request.Method, context.Request.Path, context.TraceIdentifier);
         context.Response.Clear();
         context.Response.StatusCode = 500;
         context.Response.ContentType = "text/plain; charset=utf-8";

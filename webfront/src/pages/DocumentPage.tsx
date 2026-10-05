@@ -13,7 +13,6 @@ import {
   postToSap,
   reocrDocument,
   setDocCategory,
-  splitDocument,
   type ChatMessage,
   type DocModel,
 } from '../api/documents';
@@ -23,7 +22,6 @@ import {
   AP_TRADE_GROUPS,
   headerDefFor,
   PODP_TOTALS_H,
-  SO_REMARK_H,
   SO_TOTALS_H,
   WHT_CODE_RATE,
   agencyNameEn,
@@ -51,7 +49,6 @@ import WhtTable from '../components/document/WhtTable';
 import IncomingInvoiceCard from '../components/document/IncomingInvoiceCard';
 import MappingCards from '../components/document/MappingCards';
 import ChatFixCard from '../components/document/ChatFixCard';
-import SplitModal from '../components/document/SplitModal';
 import LineExtraModal from '../components/document/LineExtraModal';
 import MasterEditModal, {
   type MasterEditState,
@@ -77,7 +74,6 @@ import SapSalesOrderStep, {
   type SalesOrderStepHandle,
 } from '../components/document/steps/SapSalesOrderStep';
 import ZohoSalesOrderStep from '../components/document/steps/ZohoSalesOrderStep';
-import { deliveryDateGroups } from '../components/document/SapSalesOrderEditor';
 
 // Deprecated. The backend no longer reads any "user" value sent by the client — it stamps the
 // identity from the validated Entra ID token instead, so whatever is passed here is discarded.
@@ -588,7 +584,6 @@ export default function DocumentPage() {
 
   const [rawText, setRawText] = useState<string | null>(null);
   const [payload, setPayload] = useState<Record<string, any> | null>(null);
-  const [splitOpen, setSplitOpen] = useState(false);
   const [vendorFilter, setVendorFilter] = useState('');
   const [lineExtraIdx, setLineExtraIdx] = useState<number | null>(null);
   const [postOpen, setPostOpen] = useState(false);
@@ -750,13 +745,14 @@ export default function DocumentPage() {
   const companyCode = doc.module === 'SO' ? salesOrg : (me?.sapCompanyCode || salesOrg);
   const posted = doc.status === 'POSTED';
   const isSplit = doc.status === 'SPLIT';
+  // Some of this document's delivery-date Sales Orders are already in SAP/Zoho: locked like a posted
+  // document (editing would diverge from what was sent) — only "send the remaining ones" is allowed.
+  const partial = doc.status === 'PARTIAL';
   // A split parent must be read-only: its lines now live in the child Sales Orders, so editing it
   // would diverge from what was actually created. `locked` gates every editing surface (header/detail/
   // mapping/tax/wht/gl) for BOTH posted and split, while `posted` alone still drives the posted-only
   // UI (the "sent to SAP" banner, step 3). Split shows its own banner + status below.
-  const locked = posted || isSplit;
-  const canSplit =
-    doc.module === 'SO' && doc.lines.length > 1 && !posted && !isSplit && !doc.sourceDocId;
+  const locked = posted || isSplit || partial;
   const glItems = h.glItems || [];
   const showDetail = doc.module !== 'II' && doc.module !== 'PODP';
   const showGlItems = doc.module === 'AP' || doc.module === 'II';
@@ -806,7 +802,7 @@ export default function DocumentPage() {
 
   const learn = (i: number) =>
     guard(async () => {
-      const code = map?.lines[i].code;
+      const code = map?.lines[i]?.code;
       const l = doc.lines[i];
       if (!code) return;
       await learnMaterial(doc.docId, {
@@ -873,44 +869,6 @@ export default function DocumentPage() {
       } finally {
         setPosting(false);
       }
-    });
-
-  const doSplit = (assign: Record<string, number>) =>
-    guard(async () => {
-      const res = await splitDocument(doc.docId, assign, USER);
-      setSplitOpen(false);
-      setDoc(res.source);
-      setMap(null);
-      showToast(`Split successful — created ${res.created.length} new Sales Orders`, 'success');
-    });
-
-  // GLC Sales Order: split this document into one Sales Order per delivery date. Groups the lines by
-  // their effective delivery date (per-line extra.deliveryDate, else the header date) using the same
-  // helper the SAP review card shows, builds the split assignment from those groups, and reuses the
-  // existing /split flow — every line is assigned so nothing is left behind. Each child then carries
-  // its own lines (with their delivery date), so posting each one creates a SAP Sales Order with the
-  // right RequestedDeliveryDate (see SapPayloadBuilder). No-op when the lines share a single date.
-  const splitByDeliveryDate = () =>
-    guard(async () => {
-      const groups = deliveryDateGroups(doc, h.deliveryDate || '');
-      if (groups.length < 2) {
-        showToast('ทุกบรรทัดมีวันส่งเดียวกัน — ไม่ต้องแยกเป็นหลาย Sales Order');
-        return;
-      }
-      const assign: Record<string, number> = {};
-      groups.forEach((g, gi) => {
-        g.itemNos.forEach((itemNo) => {
-          assign[String(itemNo)] = gi + 1;
-        });
-      });
-      const res = await splitDocument(doc.docId, assign, USER);
-      setDoc(res.source);
-      setMap(null);
-      showToast(
-        `<i className="fa-solid fa-check" /> แยกตามวันส่งสำเร็จ — สร้าง ${res.created.length} Sales Orders (เปิดแต่ละใบเพื่อส่งเข้า SAP)`,
-      );
-      document.querySelector('.content')?.scrollTo({ top: 0, behavior: 'smooth' });
-      window.scrollTo({ top: 0, behavior: 'smooth' });
     });
 
   const changeCategory = (v: string) =>
@@ -1405,12 +1363,22 @@ export default function DocumentPage() {
 
   const addUomRule = (i: number) => {
     const l = doc.lines[i];
-    const code = map?.lines[i].code;
+    const code = map?.lines[i]?.code;
     const mat = masters.materials.find((m) => m.MaterialCode === code) || {};
+    // Open the rule this line actually uses (this company's first, then an all-company one) so a
+    // wrong rule can be corrected in place; only when there is none is a new one pre-filled.
+    const docUnit = (l.uom || '').trim().toLowerCase();
+    const sameRule = (u: Record<string, any>) =>
+      String(u.MaterialCode ?? u.MaterialCodeSAP ?? '') === String(code || '')
+        && String(u.ExtUom || '').trim().toLowerCase() === docUnit;
+    const existingRule =
+      masters.uoms.find((u) => sameRule(u) && String(u.SalesOrg || '') === companyCode)
+      ?? masters.uoms.find((u) => sameRule(u) && !u.SalesOrg);
     setMasterEdit({
       tab: 'uoms',
-      rowKey: null,
-      prefill: {
+      rowKey: existingRule?.Id ?? null,
+      prefill: existingRule ? undefined : {
+        SalesOrg: companyCode,
         MaterialCode: code || '',
         ExtUom: l.uom || '',
         SapUom: mat.Uom || '',
@@ -1573,6 +1541,11 @@ export default function DocumentPage() {
             : undefined,
         });
         setDoc(r.document);
+        // The AI can add or remove lines (e.g. "it's 2 lines, not 1"). The old mapping result still
+        // has the OLD line count until the re-map below returns, and every card/table indexes
+        // map.lines[i] by document line — so line 2 had no mapping row and the page crashed into
+        // the error screen. Drop a mapping whose line count no longer matches; runMap refills it.
+        setMap((m) => (m && m.lines.length !== (r.document?.lines?.length ?? 0) ? null : m));
         // The AI asked the screen to run the Zoho customer search for it (MGT documents) — open the
         // Customer card's Search Zoho panel and search the AI's query; the person picks + saves.
         if (r.action?.type === 'searchZoho' && r.action.query) {
@@ -1716,7 +1689,6 @@ export default function DocumentPage() {
     ) : doc.module === 'SO' ? (
       <>
         <FieldGrid fields={SO_TOTALS_H} values={h} posted={locked} numeric onEdit={editHeader} />
-        <FieldGrid fields={SO_REMARK_H} values={h} posted={locked} onEdit={editHeader} />
       </>
     ) : doc.module === 'PODP' ? (
       <FieldGrid fields={PODP_TOTALS_H} values={h} posted={locked} numeric onEdit={editHeader} />
@@ -1925,6 +1897,16 @@ export default function DocumentPage() {
             </span>
           )}
           <span className="filechip"><i className="fa-solid fa-file-lines" /> {doc.fileName}</span>
+          {doc.createdBy && (
+            <span className="badge" title={`Uploaded ${dt(doc.createdAt)}`}>
+              <i className="fa-solid fa-user" /> Uploaded by {doc.createdBy}
+            </span>
+          )}
+          {doc.postedBy && (
+            <span className="badge" title={`Posted ${dt(doc.postedAt)}`}>
+              <i className="fa-solid fa-paper-plane" /> Posted by {doc.postedBy}
+            </span>
+          )}
           <span className={'badge ' + sb.cls}>{sb.label}</span>
           {/* Every action in one nowrap group on its own row, left aligned under the title. The
               buttons never split across rows, so nobody has to hunt for "Change Document" on a
@@ -1977,11 +1959,6 @@ export default function DocumentPage() {
           <button className="btn sm ghost" onClick={() => setReviewOpen(true)}>
             <i className="fa-solid fa-eye" /> View document
           </button>
-          {canSplit && (
-            <button className="btn sm ghost" onClick={() => setSplitOpen(true)}>
-              <i className="fa-solid fa-code-branch" /> Split into Multiple SOs
-            </button>
-          )}
           <button className="btn sm ghost" onClick={() => navigate('/import/' + doc.module)}>
             Change Document
           </button>
@@ -2185,7 +2162,6 @@ export default function DocumentPage() {
           salesOrg={salesOrg}
           posted={posted}
           onPosted={setDoc}
-          onSplitByDate={splitByDeliveryDate}
         />
       )}
 
@@ -2300,9 +2276,7 @@ export default function DocumentPage() {
       <Modal open={payload != null} onClose={() => setPayload(null)}>
         <ModalHeader title={isMgt ? 'Payload to Send to Zoho CRM' : 'Payload to Send to SAP'} onClose={() => setPayload(null)} />
         <div className="card-b">
-          <p className="hint">
-            Endpoint: <code>{payload?._target}</code>
-          </p>
+          <p className="hint">Review the data prepared for submission.</p>
           <pre className="json">{JSON.stringify(payload, null, 2)}</pre>
         </div>
       </Modal>
@@ -2374,9 +2348,6 @@ export default function DocumentPage() {
         </div>
       </Modal>
 
-      {splitOpen && (
-        <SplitModal doc={doc} onClose={() => setSplitOpen(false)} onConfirm={doSplit} />
-      )}
       {lineExtraIdx != null && (
         <LineExtraModal
           line={doc.lines[lineExtraIdx]}

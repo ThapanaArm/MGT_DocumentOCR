@@ -26,14 +26,16 @@ public class FileArchiveWorker(AppConfig config, FileArchiveRepository repo, Gra
         log.LogInformation("File archive enabled (waits for compression: {Wait})", _waitForCompression);
 
         var idle = TimeSpan.FromSeconds(Math.Max(10, config.ArchiveIntervalSeconds));
+        var outage = new DbOutage("File archive", log);
         while (!ct.IsCancellationRequested)
         {
             var worked = 0;
-            try { worked = await RunBatchAsync(ct); }
+            var backoff = TimeSpan.Zero;
+            try { worked = await RunBatchAsync(ct); outage.Succeeded(); }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
-            catch (Exception e) { log.LogError(e, "File archive batch failed"); }
+            catch (Exception e) { backoff = outage.Failed(e, "File archive batch"); }
 
-            try { await Task.Delay(worked > 0 ? TimeSpan.FromSeconds(2) : idle, ct); }
+            try { await Task.Delay(backoff > TimeSpan.Zero ? backoff : worked > 0 ? TimeSpan.FromSeconds(2) : idle, ct); }
             catch (OperationCanceledException) { break; }
         }
     }

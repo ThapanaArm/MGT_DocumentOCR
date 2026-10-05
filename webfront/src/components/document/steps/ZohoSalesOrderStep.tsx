@@ -1,5 +1,5 @@
 import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
-import type { DocModel, MapResult } from '../../../api/documents';
+import { getSoPosts, type DocModel, type MapResult, type SoGroupState } from '../../../api/documents';
 import type { OcrProvider } from '../../../api/masters';
 import {
   createZohoSalesOrder,
@@ -15,6 +15,7 @@ import {
 import { useAppState } from '../../../state/AppState';
 import Modal, { ModalHeader } from '../../Modal';
 import ZohoSalesOrderEditor, { type ZohoSalesOrderEditorHeader } from '../ZohoSalesOrderEditor';
+import { deliveryDateGroups } from '../SapSalesOrderEditor';
 import type { SalesOrderStepHandle } from './SapSalesOrderStep';
 
 type LineEdit = {
@@ -159,6 +160,21 @@ const ZohoSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function Zoho
     setResult(null);
   }, [doc.docId, selectedDealId]);
 
+  // The preview is computed server-side from the SAVED document lines (their mapped materialCode,
+  // qty, unit, price). It used to load only when the document or Deal changed, so after a re-map
+  // (e.g. the AI chat split one line into two, then Mapping matched both) it kept showing the old
+  // answer: "Not matched" even though Step 2 shows both lines auto-matched. Reload whenever the
+  // saved lines change too.
+  // Send results per delivery-date group (one Zoho Sales Order per date, all from this document).
+  const [posts, setPosts] = useState<SoGroupState[]>([]);
+  const reloadPosts = () => getSoPosts(doc.docId).then((r) => setPosts(r.groups)).catch(() => setPosts([]));
+  useEffect(() => { void reloadPosts(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [doc.docId, doc.status]);
+
+  const linesKey = useMemo(
+    () => doc.lines.map((l) => [l.itemNo, l.materialCode ?? '', l.qty, l.uom, l.price, l.desc].join('|')).join(';'),
+    [doc.lines],
+  );
+
   useEffect(() => {
     if (!selectedDealId) {
       setPreview(null);
@@ -182,7 +198,7 @@ const ZohoSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function Zoho
         if (!cancelled) setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [doc.docId, selectedDealId]);
+  }, [doc.docId, selectedDealId, linesKey]);
 
   useEffect(() => {
     if (!preview) return;
@@ -252,14 +268,18 @@ const ZohoSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function Zoho
     try {
       const response = await createZohoSalesOrder(doc.docId, selectedDealId, buildEdits());
       setResult(response);
+      // POSTED or PARTIAL (some delivery-date Sales Orders created): reflect it right away and
+      // refresh the per-group results so a retry only sends the rest.
+      if (response.document) onPosted(response.document);
+      await reloadPosts();
+      const created = (response.groups || []).filter((g) => g.success && !g.skipped).length;
       if (response.success) {
         const dealReference = response.dealName ? ` — linked to Deal “${response.dealName}”` : '';
-        const lineSummary = response.linesSent != null ? ` (${response.linesSent} line(s) sent)` : '';
-        showToast(`Sales Order created in Zoho CRM${dealReference}${lineSummary}`, 'success');
-        // Reflect the now-POSTED status immediately (disables re-send + inputs) instead of waiting
-        // for a manual refresh -- the backend returns the updated document (F09).
-        if (response.document) onPosted(response.document);
+        const what = (response.groups?.length ?? 1) > 1 ? `${response.groups!.length} Sales Orders` : 'Sales Order';
+        showToast(`${what} created in Zoho CRM${dealReference} (${response.linesSent} line(s) sent)`, 'success');
         document.querySelector('.content')?.scrollTo({ top: 0, behavior: 'smooth' }); window.scrollTo({ top: 0, behavior: 'smooth' });
+      } else if (created > 0) {
+        showToast(`${created} Sales Order${created === 1 ? '' : 's'} created. Some orders require attention. Submit again to retry the remaining orders.`, 'error');
       }
     } finally {
       setSending(false);
@@ -281,13 +301,15 @@ const ZohoSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function Zoho
             onHeaderChange={(patch) => setHeader((current) => ({ ...current, ...patch }))}
             lineEdits={lineEdits} onLineChange={editLine} onUseAiMatch={useAiMatch}
             sending={sending} result={result} onSend={send} onViewPayload={viewPayload} posted={posted}
+            dateGroups={deliveryDateGroups(doc, String(doc.header.deliveryDate || ''))}
+            posts={posts}
           />
         </div>
       )}
       <Modal open={payload != null} onClose={() => setPayload(null)}>
         <ModalHeader title="Payload to Send to Zoho CRM" onClose={() => setPayload(null)} />
         <div className="card-b">
-          <p className="hint">Endpoint: <code>{String(payload?._target ?? '')}</code></p>
+          <p className="hint">Review the data prepared for submission.</p>
           <pre className="json">{JSON.stringify(payload, null, 2)}</pre>
         </div>
       </Modal>

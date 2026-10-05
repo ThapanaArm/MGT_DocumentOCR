@@ -72,7 +72,7 @@ export default function ArchivePage() {
               </div>
               {data.dbError && (
                 <div className="hint" style={{ color: 'var(--red)', marginBottom: 12 }}>
-                  Cannot read ocr.FileArchive (run sql/27_file_archive.sql): {data.dbError}
+                  Archive information is temporarily unavailable. Please try again later.
                 </div>
               )}
 

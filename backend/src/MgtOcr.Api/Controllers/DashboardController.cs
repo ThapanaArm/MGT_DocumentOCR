@@ -11,7 +11,7 @@ namespace MgtOcr.Api.Controllers;
 [ApiController]
 public class DashboardController(Db db) : ControllerBase
 {
-    private static readonly string[] Statuses = ["NEW", "INCOMPLETE", "MAPPED", "POSTED", "SPLIT"];
+    private static readonly string[] Statuses = ["NEW", "INCOMPLETE", "MAPPED", "PARTIAL", "POSTED", "SPLIT"];
 
     [HttpGet("api/dashboard")]
     public async Task<IActionResult> Dashboard([FromQuery] int days = 7)

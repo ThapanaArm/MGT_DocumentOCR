@@ -1080,3 +1080,78 @@ input,select,textarea,.btn,.nav a{-webkit-tap-highlight-color:transparent}
   .reg .reg-col-total,.reg .reg-col-docno{white-space:nowrap}
   .reg .reg-col-actions{width:1%;overflow:visible}
 }
+
+/* Confirmation popup (components/ConfirmModal.tsx) */
+.confirm-body{min-width:min(420px,90vw)}
+.confirm-msg{display:flex;gap:12px;align-items:flex-start;line-height:1.6}
+.confirm-icon{color:var(--red);font-size:20px;margin-top:2px}
+.confirm-list{margin:8px 0 0;padding-left:18px;max-height:180px;overflow:auto;font-size:13px}
+.confirm-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
+.btn.danger{background:var(--red);border-color:var(--red);color:#fff}
+.btn.danger:hover:not(:disabled){filter:brightness(.92)}
+.btn.danger:disabled{opacity:.6}
+
+/* Document register: row checkboxes for bulk delete */
+.reg .reg-col-select{width:34px;text-align:center;padding-left:6px;padding-right:6px}
+.reg .reg-col-select input{cursor:pointer}
+.reg tr.reg-row.selected td{background:var(--brand-soft)}
+.register-bulkbar{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+@media (max-width:600px){.reg .reg-col-select{display:none}}
+
+/* Register: loading skeleton + empty state (InboxPage) */
+.reg-skeleton td{padding:14px 16px;border-bottom:1px solid var(--line-soft)}
+.reg-skel-bar{display:block;height:14px;border-radius:7px;background:linear-gradient(90deg,var(--line-soft) 0%,var(--line) 50%,var(--line-soft) 100%);background-size:200% 100%;animation:reg-shimmer 1.2s ease-in-out infinite}
+.reg-skeleton:nth-child(2n) .reg-skel-bar{width:82%}
+.reg-skeleton:nth-child(3n) .reg-skel-bar{width:64%}
+@keyframes reg-shimmer{0%{background-position:100% 0}100%{background-position:-100% 0}}
+@media (prefers-reduced-motion:reduce){.reg-skel-bar{animation:none}}
+.reg tr.reg-empty-row:hover td{background:transparent}
+.reg tr.reg-empty-row td{padding:0;border:0;white-space:normal}
+.reg-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;padding:72px 24px;text-align:center}
+.reg-empty-icon{display:grid;place-items:center;width:56px;height:56px;margin-bottom:6px;border-radius:50%;background:var(--brand-soft);color:var(--brand);font-size:22px}
+.reg-empty-title{font-size:16px;font-weight:600;color:var(--text)}
+.reg-empty-text{max-width:360px;font-size:13.5px;color:var(--muted);line-height:1.6;margin-bottom:8px}
+@media (min-width:901px){.paged-table-register.is-empty{min-height:0}}
+
+/* Register: who uploaded the document */
+.reg .reg-col-by{max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+@media (max-width:900px){.reg .reg-col-by{display:none}}
+
+/* Sales Order delivery groups */
+.so-group-panel{margin-top:18px;border:1px solid var(--line);border-radius:14px;background:var(--card,#fff);overflow:hidden;box-shadow:0 1px 2px rgba(15,23,42,.04)}
+.so-group-header{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;padding:18px 20px;border-bottom:1px solid var(--line-soft);background:linear-gradient(135deg,var(--brand-soft),transparent 62%)}
+.so-group-heading{display:flex;align-items:flex-start;gap:12px;min-width:0}
+.so-group-heading h3{margin:0 0 4px;font-size:15px;color:var(--text)}
+.so-group-heading p{margin:0;color:var(--muted);font-size:13px;line-height:1.5}
+.so-group-icon{display:grid;place-items:center;flex:0 0 36px;height:36px;border-radius:10px;background:var(--brand);color:#fff}
+.so-group-summary{display:flex;flex-direction:column;align-items:flex-end;flex:0 0 auto}
+.so-group-summary strong{font-size:18px;line-height:1.1;color:var(--text)}
+.so-group-summary span{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+.so-group-notice{display:flex;align-items:center;gap:8px;margin:14px 18px 0;padding:10px 12px;border-radius:9px;background:var(--brand-soft);color:var(--text);font-size:12.5px}
+.so-group-table-wrap{margin:0;padding:10px 18px 16px}
+.so-group-table{min-width:620px}
+.so-group-table th{font-size:11px;text-transform:uppercase;letter-spacing:.045em;color:var(--muted)}
+.so-group-number{display:inline-grid;place-items:center;width:26px;height:26px;border-radius:8px;background:var(--brand-soft);color:var(--brand);font-weight:700}
+@media (max-width:700px){.so-group-header{padding:16px;gap:12px}.so-group-notice{margin:12px 14px 0}.so-group-table-wrap{padding:8px 14px 14px}}
+
+/* Locale-independent date range: always presents MM/DD/YYYY while retaining ISO API values. */
+.english-date-input{position:relative;display:inline-flex;align-items:center}
+.english-date-input>input[type=text]{width:132px;padding-right:34px;font-variant-numeric:tabular-nums}
+.english-date-picker-button{position:absolute;right:7px;display:grid;place-items:center;width:24px;height:28px;padding:0;border:0;background:transparent;color:var(--muted);cursor:pointer}
+.english-date-picker-button:hover{color:var(--brand)}
+.english-calendar{position:absolute;z-index:80;top:calc(100% + 8px);left:0;width:286px;padding:12px;border:1px solid var(--line);border-radius:12px;background:var(--card,#fff);box-shadow:0 16px 40px rgba(15,23,42,.18);color:var(--text)}
+.english-calendar-header{display:grid;grid-template-columns:34px 1fr 34px;align-items:center;margin-bottom:10px}
+.english-calendar-header strong{text-align:center;font-size:14px}
+.english-calendar-header button,.english-calendar-days button,.english-calendar-footer button{border:0;background:transparent;color:inherit;cursor:pointer}
+.english-calendar-header button{display:grid;place-items:center;width:32px;height:32px;border-radius:8px}
+.english-calendar-header button:hover{background:var(--brand-soft);color:var(--brand)}
+.english-calendar-weekdays,.english-calendar-days{display:grid;grid-template-columns:repeat(7,1fr);gap:3px}
+.english-calendar-weekdays span{padding:4px 0 6px;text-align:center;color:var(--muted);font-size:11px;font-weight:600;text-transform:uppercase}
+.english-calendar-days button{display:grid;place-items:center;aspect-ratio:1;border-radius:8px;font-size:12.5px;font-variant-numeric:tabular-nums}
+.english-calendar-days button:hover{background:var(--brand-soft);color:var(--brand)}
+.english-calendar-days button.outside{color:var(--muted);opacity:.48}
+.english-calendar-days button.today{box-shadow:inset 0 0 0 1px var(--brand)}
+.english-calendar-days button.selected{background:var(--brand);color:#fff;box-shadow:none;font-weight:700}
+.english-calendar-footer{display:flex;justify-content:space-between;margin-top:10px;padding-top:10px;border-top:1px solid var(--line-soft)}
+.english-calendar-footer button{padding:5px 8px;border-radius:7px;color:var(--brand);font-size:12px;font-weight:600}
+.english-calendar-footer button:hover{background:var(--brand-soft)}

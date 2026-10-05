@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import Modal, { ModalHeader } from '../Modal';
 import { MASTER_DEF, M_LABEL } from '../../constants/fields';
 import { createMaster, deleteMaster, updateMaster, type MasterRow, type MastersData } from '../../api/masters';
@@ -6,6 +6,8 @@ import { searchSapBusinessPartner, type SapBusinessPartner, type SapLastPrice } 
 import { searchZohoAccount, type ZohoAccount } from '../../api/zoho';
 import { useAppState } from '../../state/AppState';
 import type { Dupe } from '../../utils/dupes';
+import { useSapUnits, type SapUnitChoice } from '../../hooks/useSapUnits';
+import UomPicker from '../common/UomPicker';
 
 /* Ports editRow()/saveRow()/useDupe() — the add/edit master row modal, shared
    by MasterPage and the document quick-add flow. */
@@ -47,6 +49,9 @@ export default function MasterEditModal({
   const { guard, showToast } = useAppState();
   const [form, setForm] = useState<MasterRow>({});
   const [saving, setSaving] = useState(false);
+  // Delete asks inside this popup (no browser confirm box, no popup-on-popup).
+  const [confirmingDel, setConfirmingDel] = useState(false);
+  useEffect(() => { setConfirmingDel(false); }, [state]);
   useEffect(() => {
     if (!state) return;
     const def = MASTER_DEF[state.tab];
@@ -55,6 +60,33 @@ export default function MasterEditModal({
       : state.prefill || {};
     setForm({ SalesOrg: isMgt ? '1000' : '2000', IsActive: 1, Isactive: 1, ...existing });
   }, [state, masters, isMgt]);
+
+  // Unit Conversion (GLC/SAP): the Order Unit field becomes a dropdown of the units SAP has for
+  // the chosen material (base + alternative units). A rule for "all materials" has no material to
+  // ask SAP about, so it offers the order units already used in this master plus common codes.
+  // MGT (Zoho) keeps the plain text box — its unit comes from the Zoho Deal, not SAP.
+  const uomSapEnabled = state?.tab === 'uoms' && !isMgt && String(form.SalesOrg ?? '') !== '1000';
+  const uomMaterial = (() => {
+    const code = (form.MaterialCode ?? '').toString().trim();
+    if (!code) return '';
+    const m = (masters.materials || []).find((x) => String(x.MaterialCode) === code);
+    return ((m?.SapMaterialCode as string) || code).toString().trim();
+  })();
+  const { units: sapUnits, loading: sapUnitsLoading } = useSapUnits(uomMaterial, uomSapEnabled && !!uomMaterial);
+  const commonUnits = useMemo<SapUnitChoice[]>(() => {
+    const seen = new Set<string>();
+    const out: SapUnitChoice[] = [];
+    const push = (u: unknown) => {
+      const c = (u ?? '').toString().trim().toUpperCase();
+      if (!c || c.length > 3 || /[\s/\\]/.test(c) || seen.has(c)) return;
+      seen.add(c);
+      out.push({ unit: c, isBase: false, hint: '' });
+    };
+    ['KG', 'G', 'DR', 'PAC', 'BAG', 'L', 'EA', 'PC'].forEach(push);
+    (masters.uoms || []).filter((u) => String(u.SalesOrg ?? '') !== '1000').forEach((u) => push(u.SapUom));
+    return out;
+  }, [masters.uoms]);
+  const orderUnitChoices = !uomSapEnabled ? [] : uomMaterial ? sapUnits : commonUnits;
 
   // Live customer lookup — only for a brand-new Customer row (quick-add flow), seeded with the
   // document's customer name. Search is best-effort: any failure (backend not configured yet,
@@ -219,8 +251,29 @@ export default function MasterEditModal({
               );
             })}
           </select>
+        ) : state!.tab === 'uoms' && c.k === 'SapUom' && uomSapEnabled ? (
+          <UomPicker
+            id={'master-' + c.k}
+            value={(form[c.k] ?? '').toString()}
+            onChange={(v) => setField(c.k, v)}
+            units={orderUnitChoices}
+            loading={sapUnitsLoading}
+            maxLength={c.maxLen}
+            emptyLabel={uomMaterial ? '— Select a SAP unit —' : '— Select unit —'}
+          />
         ) : (
           <input id={'master-' + c.k} maxLength={c.maxLen} value={form[c.k] ?? ''} onChange={(e) => setField(c.k, e.target.value)} />
+        )}
+        {state!.tab === 'uoms' && c.k === 'SapUom' && uomSapEnabled && (
+          <small className="master-field-help">
+            {sapUnitsLoading
+              ? 'Loading units from SAP…'
+              : uomMaterial
+                ? sapUnits.length
+                  ? `Units SAP has for ${uomMaterial}`
+                  : `Couldn't read units for ${uomMaterial} from SAP — type the unit instead`
+                : 'No material chosen — showing common units; pick a material to see its SAP units'}
+          </small>
         )}
       </div>
       {/* GLC material-confirm popup only (uoms) — reference context beside the Material field, never saved. */}
@@ -302,7 +355,6 @@ export default function MasterEditModal({
 
   async function del() {
     if (state!.rowKey == null || saving) return;
-    if (!window.confirm('Delete this record? This cannot be undone.')) return;
     setSaving(true);
     const ok = await guard(async () => { await deleteMaster(state!.tab, String(state!.rowKey)); return true; });
     setSaving(false);
@@ -533,10 +585,20 @@ export default function MasterEditModal({
           <button className="btn" onClick={onClose}>
             Cancel
           </button>
-          {editing && !state.onSaved && (
-            <button className="btn ghost master-edit-delete" disabled={saving} onClick={del}>
+          {editing && !state.onSaved && !confirmingDel && (
+            <button className="btn ghost master-edit-delete" disabled={saving} onClick={() => setConfirmingDel(true)}>
               <i className="fa-solid fa-trash-can" /> Delete
             </button>
+          )}
+          {editing && !state.onSaved && confirmingDel && (
+            <span className="master-edit-delete" style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+              <i className="fa-solid fa-triangle-exclamation confirm-icon" aria-hidden="true" style={{ fontSize: 16 }} />
+              <span>Delete this record? This cannot be undone.</span>
+              <button className="btn sm danger" disabled={saving} onClick={del}>
+                {saving ? 'Deleting…' : 'Yes, delete'}
+              </button>
+              <button className="btn sm" disabled={saving} onClick={() => setConfirmingDel(false)}>Keep</button>
+            </span>
           )}
         </div>
       </div>

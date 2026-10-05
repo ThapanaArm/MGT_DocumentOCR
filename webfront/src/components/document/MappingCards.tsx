@@ -313,7 +313,7 @@ function SapCustomerPanel({
     return <div className="hint" style={{ padding: '6px 0' }}><div>Enter a search term to look up the {partyLabel.toLowerCase()} in SAP</div>{renderManualSearchBox()}</div>;
   if (loading) return hint('Searching SAP…');
   if (error)
-    return <div className="hint" style={{ padding: '6px 0' }}><div>SAP search failed: {error}</div>{renderManualSearchBox()}</div>;
+    return <div className="hint" style={{ padding: '6px 0' }}><div>SAP search is temporarily unavailable.</div>{renderManualSearchBox()}</div>;
   if (searched && results.length === 0)
     return (
       <div className="hint" style={{ padding: '6px 0' }}>
@@ -577,7 +577,7 @@ function SapMaterialPanel({
     return <div className="hint" style={{ padding: '6px 0' }}><div>Type a search term to look up Material in SAP</div>{renderSearchBox()}</div>;
   if (loading) return hint('Searching SAP…');
   if (error)
-    return <div className="hint" style={{ padding: '6px 0' }}><div>SAP search failed: {error}</div>{renderSearchBox()}</div>;
+    return <div className="hint" style={{ padding: '6px 0' }}><div>SAP search is temporarily unavailable.</div>{renderSearchBox()}</div>;
   if (searched && results.length === 0)
     return (
       <div className="hint" style={{ padding: '6px 0' }}>
@@ -920,7 +920,7 @@ function ZohoCustomerPanel({
     return <div className="hint" style={{ padding: '6px 0' }}><div>Enter a search term to look up the customer in Zoho CRM</div>{renderManualSearchBox()}</div>;
   if (loading) return hint('Searching Zoho CRM…');
   if (error)
-    return <div className="hint" style={{ padding: '6px 0' }}><div>Zoho CRM search failed: {error}</div>{renderManualSearchBox()}</div>;
+    return <div className="hint" style={{ padding: '6px 0' }}><div>Zoho CRM search is temporarily unavailable.</div>{renderManualSearchBox()}</div>;
   if (searched && results.length === 0)
     return <div className="hint" style={{ padding: '6px 0' }}><div>No match found in Zoho CRM — use "+ Add New Customer" to enter it manually</div>{renderManualSearchBox()}</div>;
 
@@ -1454,7 +1454,7 @@ function ZohoShipToPanel({
         <div style={{ marginTop: 8 }}>
           <div className="hint">Ship-to for {pickedAcc.accountName}:</div>
           {pickedLoading && <div className="hint">Loading Ship-to…</div>}
-          {pickedError && <div className="hint">Load failed: {pickedError}</div>}
+          {pickedError && <div className="hint">This information is temporarily unavailable.</div>}
           {pickedShipTos && pickedShipTos.length === 0 && <div className="hint">This company has no Ship-to in Zoho</div>}
           {pickedShipTos && pickedShipTos.map((info, i) =>
             shipToBlock(info, i, pickedAcc.accountCode || pickedAcc.accountId),
@@ -1507,7 +1507,7 @@ function ZohoShipToPanel({
           {siblings.map(({ acc, shipTos: st, error: err }) => (
             <div key={acc.accountId} style={{ marginTop: 8 }}>
               <div><b>{acc.accountCode || acc.accountId}</b> — {acc.accountName}{acc.branchName ? ` (${acc.branchName})` : ''}</div>
-              {err && <div className="hint">Load failed: {err}</div>}
+              {err && <div className="hint">This information is temporarily unavailable.</div>}
               {st && st.length === 0 && <div className="hint">No address on this account</div>}
               {st && st.map((info, i) => shipToBlock(info, i, acc.accountCode || acc.accountId))}
             </div>
@@ -1572,7 +1572,7 @@ function ZohoSoldToAddressPanel({ customerCode, masters }: { customerCode?: stri
 
   if (!accountId) return <span className="hint">This customer is not linked to a Zoho account</span>;
   if (loading) return <span className="hint">Reading Sold-to address from Zoho CRM…</span>;
-  if (error) return <span className="hint">Could not read Zoho CRM: {error}</span>;
+  if (error) return <span className="hint">Zoho CRM information is temporarily unavailable.</span>;
   if (!info) return <span className="hint">(no address on file)</span>;
   return <AddressFieldRows info={info} />;
 }
@@ -1615,7 +1615,7 @@ function ZohoCreditInfoPanel({ customerCode, masters }: { customerCode?: string;
 
   if (!accountId) return <span className="hint">This customer is not linked to a Zoho account</span>;
   if (loading) return <span className="hint">Reading credit/payment info from Zoho CRM…</span>;
-  if (error) return <span className="hint">Could not read Zoho CRM: {error}</span>;
+  if (error) return <span className="hint">Zoho CRM information is temporarily unavailable.</span>;
 
   const pick = (labelContains: string) =>
     fields?.find((f) => f.label.toLowerCase().includes(labelContains.toLowerCase()))?.value;
@@ -2091,7 +2091,7 @@ function ZohoDealCard({
                       <i className="fa-solid fa-magnifying-glass" /> {manualSearching ? 'Searching…' : 'Search'}
                     </button>
                   </div>
-                  {manualError && <div className="hint" style={{ padding: '6px 0' }}>Zoho CRM search failed: {manualError}</div>}
+                  {manualError && <div className="hint" style={{ padding: '6px 0' }}>Zoho CRM search is temporarily unavailable.</div>}
                   {manualResults && manualResults.length === 0 && hint('No Deal matches that name in Zoho CRM')}
                   {manualResults && manualResults.length > 0 && (
                     <table className="cmp" style={{ marginTop: 6 }}>
@@ -2762,6 +2762,8 @@ export default function MappingCards({
   // Conversion sub-section is hidden for MGT (an MGT Sales Order goes to Zoho, not SAP).
   const matCards = doc.lines.map((l, i) => {
     const r = map.lines[i];
+    // Mapping result from before lines were added (stale until the next Run Mapping) — no card yet.
+    if (!r) return null;
     const u = r.unit || { doc: [], sap: [], status: 'idle' };
 
     // Withholding tax / VAT / customs-duty rows are taxes, not items — they are recorded in the
@@ -2853,14 +2855,18 @@ export default function MappingCards({
               <b>Relate Unit — Unit Conversion</b>
               <StatusChip st={u.status === 'fail' ? 'unitfail' : u.status} />
               <div className="sp" />
-              {u.status === 'fail' && !posted && onFetchSapUom && (
+              {/* Shown for every status, not only "fail": a rule that resolves but is WRONG
+                  (e.g. KG→KG on a material SAP sells in AU) otherwise left no way to fix it here. */}
+              {!posted && onFetchSapUom && (
                 <button className="btn sm" onClick={() => onFetchSapUom(i)}>
                   Fetch unit conversion from SAP
                 </button>
               )}
-              {u.status === 'fail' && !posted && (
+              {!posted && (
                 <button className="btn sm" onClick={() => onAddUomRule(i)}>
-                  + Add Unit Conversion Rule
+                  {u.status === 'fail'
+                    ? '+ Add Unit Conversion Rule'
+                    : <><i className="fa-solid fa-pen" /> Edit Unit Conversion</>}
                 </button>
               )}
             </div>

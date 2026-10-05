@@ -1,5 +1,5 @@
 import { api } from './client';
-import type { DocModel } from './documents';
+import type { DocModel, SoGroupResult } from './documents';
 
 /* Live Zoho CRM "Accounts" (customer) lookup — the Zoho-side counterpart to sap.ts, used for
    the MGT-side Sales Order flow (Green Leaf keeps using sap.ts / SAP Business Partner).
@@ -254,6 +254,10 @@ export interface ZohoSalesOrderResult {
   /** The updated document after the send (status flips to POSTED on success), so the page can
    *  reflect the posted state without a manual refresh -- mirrors the SAP /post response. */
   document?: DocModel;
+  /** POSTED (every delivery-date Sales Order created) / PARTIAL (some) / '' (none). */
+  status?: string;
+  /** One entry per delivery-date group = one Zoho Sales Order. */
+  groups?: SoGroupResult[];
 }
 
 export const createZohoSalesOrder = (docId: number, dealId: string, edits?: ZohoSalesOrderEdits) =>

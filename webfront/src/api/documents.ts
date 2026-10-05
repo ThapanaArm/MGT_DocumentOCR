@@ -40,6 +40,9 @@ export interface DocModel {
   partnerCode?: string;
   sapDocNo?: string;
   postedAt?: string;
+  createdAt?: string;
+  createdBy?: string;
+  postedBy?: string;
   sourceDocId?: number;
   splitChildren?: Array<Record<string, any>>;
   mapStatus?: string;
@@ -143,6 +146,44 @@ export const postToSap = (id: number, user: string) =>
     { user },
   );
 
+/* Sales Order: one Sales Order PER DELIVERY DATE, all sent from this one document (replaces the
+   old split into child documents). One entry per delivery-date group (key = date YYYY-MM-DD,
+   '' = none): posted = every line of the group carries the SO it went into (SalesOrderLine.PostedSoNo),
+   docNo = that SAP SO no. / Zoho id, error = the group's last send error. */
+export interface SoGroupState {
+  key: string;
+  itemNos: string[];
+  posted: boolean;
+  docNo?: string | null;
+  postedAt?: string | null;
+  error?: string | null;
+}
+export interface SoGroupResult {
+  key: string;
+  itemNos: string[];
+  success: boolean;
+  skipped?: boolean;
+  docNo?: string | null;
+  zohoId?: string | null;
+  message?: string | null;
+  simulated?: boolean;
+}
+
+export const getSoPosts = (id: number) =>
+  api.get<{ groups: SoGroupState[] }>('/api/documents/' + id + '/so-posts');
+
+export const getSoPayloads = (id: number) =>
+  api.get<{ pass: boolean; payloads: { key: string; itemNos: string[]; payload: Record<string, any> }[] }>(
+    '/api/documents/' + id + '/payload-so',
+  );
+
+/** GLC: send every delivery-date group not yet posted as its own SAP Sales Order. */
+export const postSalesOrderGroups = (id: number) =>
+  api.post<{ status: string; simulated: boolean; results: SoGroupResult[]; document: DocModel }>(
+    '/api/documents/' + id + '/post-so',
+    {},
+  );
+
 export const splitDocument = (id: number, assign: Record<string, number>, user: string) =>
   api.post<{ source: DocModel; created: unknown[] }>('/api/documents/' + id + '/split', {
     assign,
@@ -208,6 +249,9 @@ export interface InboxRow {
   OcrCostCurrency: string | null;
   SapDocNo: string | null;
   CreatedAt: string | null;
+  CreatedBy?: string | null;
+  PostedAt?: string | null;
+  PostedBy?: string | null;
   [k: string]: unknown;
 }
 

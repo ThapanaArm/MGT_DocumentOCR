@@ -1,10 +1,12 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { fmtAmt, num } from '../../utils/format';
 import { qtyTxt } from './MappingCards';
 import type { DocLine, DocModel, MapResult } from '../../api/documents';
 import type { MastersData } from '../../api/masters';
 import { PO_LINE_EXTRA_FIELDS, isDutyRow } from '../../constants/fields';
 import MaterialSearchSelect from './MaterialSearchSelect';
+import UomPicker from '../common/UomPicker';
+import { useSapUnits } from '../../hooks/useSapUnits';
 
 /* Ports the DETAIL lines table from docHtml() incl. uomCell()/lineExtraCount(). */
 
@@ -26,6 +28,7 @@ function UomCell({
 }) {
   if (!map) return <span className="badge b-idle">Pending Mapping</span>;
   const r = map.lines[i];
+  if (!r) return <span className="badge b-idle">Pending Mapping</span>; // line added after the last mapping
   const u = r.uom || ({} as NonNullable<typeof r.uom>);
   if (!r.code) return <span className="hint">—</span>;
   if (u.status === 'fail')
@@ -62,6 +65,42 @@ function UomCell({
       </b>
       <div className="hint">{u.method}</div>
     </>
+  );
+}
+
+// Document "Unit" cell. GLC Sales Orders: once the line has a SAP material, the unit becomes a
+// dropdown of the units SAP has for that material, so a picked unit is always one SAP accepts
+// (with no rule for it, MappingEngine.ConvertUom forwards a clean document unit as-is, factor 1).
+// The original OCR value stays selectable ("current — not in SAP") and "Other…" still allows
+// typing, so a Thai label that a Unit Conversion rule handles keeps working. Everything else
+// (MGT/Zoho, AP, no material yet, SAP lookup failed) gets the old plain text box.
+function LineUomCell({
+  value,
+  materialCode,
+  enabled,
+  posted,
+  onChange,
+}: {
+  value: string;
+  materialCode: string;
+  enabled: boolean;
+  posted: boolean;
+  onChange: (v: string) => void;
+}) {
+  const { units, loading } = useSapUnits(materialCode, enabled && !!materialCode);
+  if (!enabled || !materialCode || (!units.length && !loading)) {
+    return <input value={value} readOnly={posted} onChange={(e) => onChange(e.target.value)} style={{ width: 64 }} />;
+  }
+  return (
+    <UomPicker
+      value={value}
+      onChange={onChange}
+      units={units}
+      loading={loading}
+      disabled={posted}
+      upper={false}
+      width={120}
+    />
   );
 }
 
@@ -147,6 +186,17 @@ export default function DetailTable({
   // different product names for what's actually the same selection. AP/II keep the original
   // generic Material master unchanged (no CustomerMaterial concept there).
   const currentCustomerCode = map?.header.customer?.code;
+  // SAP unit dropdown per line: GLC Sales Orders only. Editing any line clears the mapping result
+  // (useDocumentEditor.patchDoc → setMap(null)), so remember each line's last mapped material —
+  // otherwise picking a unit would make the dropdown vanish until Mapping is re-run.
+  const sapUnitLines = doc.module === 'SO' && !isMgt;
+  // Keyed by itemNo (not row index) so deleting a line doesn't shift codes onto the wrong rows.
+  const lastLineCode = useRef<Record<string, string>>({});
+  if (map) {
+    const next: Record<string, string> = {};
+    map.lines.forEach((ml, idx) => { if (ml?.code && doc.lines[idx]) next[String(doc.lines[idx].itemNo)] = String(ml.code); });
+    lastLineCode.current = next;
+  }
   const matOpts = doc.module === 'SO'
     ? masters.custmaterials
         .filter((cm) => String(cm.SalesOrg) === (doc.header.salesOrg || (isMgt ? '1000' : '2000')))
@@ -327,11 +377,12 @@ export default function DetailTable({
                       </td>
                       <td className="num">{numInput(l.qty, (v) => onEditLine(i, 'qty', v))}</td>
                       <td>
-                        <input
-                          value={l.uom ?? ''}
-                          readOnly={posted}
-                          onChange={(e) => onEditLine(i, 'uom', e.target.value)}
-                          style={{ width: 64 }}
+                        <LineUomCell
+                          value={(l.uom ?? '').toString()}
+                          materialCode={(r?.status === 'skip' ? '' : r?.code) || (map ? '' : lastLineCode.current[String(l.itemNo)] || '')}
+                          enabled={sapUnitLines}
+                          posted={posted}
+                          onChange={(v) => onEditLine(i, 'uom', v)}
                         />
                       </td>
                       <td className="num">{numInput(l.price, (v) => onEditLine(i, 'price', v))}</td>

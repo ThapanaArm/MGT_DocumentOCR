@@ -26,9 +26,11 @@ public class FileCompressWorker(AppConfig config, FileArchiveRepository repo, Co
         log.LogInformation("File compression enabled ({Dpi} dpi, JPEG quality {Q}, images max {Px}px)",
             config.CompressDpi, config.CompressQuality, config.CompressImageMaxPx);
 
+        var outage = new DbOutage("File compression", log);
         while (!ct.IsCancellationRequested)
         {
             var n = 0;
+            var backoff = TimeSpan.Zero;
             try
             {
                 foreach (var stored in await repo.FindToCompressAsync(Math.Max(0, config.CompressMinAgeMinutes), 10, config.UploadDir, ct))
@@ -37,11 +39,13 @@ public class FileCompressWorker(AppConfig config, FileArchiveRepository repo, Co
                     n++;
                     await Task.Run(() => ProcessAsync(stored), ct);
                 }
+                outage.Succeeded();
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
-            catch (Exception e) { log.LogError(e, "File compression batch failed"); }
+            catch (Exception e) { backoff = outage.Failed(e, "File compression batch"); }
 
-            try { await Task.Delay(n > 0 ? TimeSpan.FromSeconds(1) : TimeSpan.FromSeconds(10), ct); }
+            var wait = backoff > TimeSpan.Zero ? backoff : n > 0 ? TimeSpan.FromSeconds(1) : TimeSpan.FromSeconds(10);
+            try { await Task.Delay(wait, ct); }
             catch (OperationCanceledException) { break; }
         }
     }

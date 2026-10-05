@@ -118,7 +118,7 @@ export default function LogPage() {
       </div>
 
       <Modal open={payload != null} onClose={() => setPayload(null)}>
-        <ModalHeader title={`Payload (Log #${payload?.id})`} onClose={() => setPayload(null)} />
+        <ModalHeader title={`Submission Details #${payload?.id}`} onClose={() => setPayload(null)} />
         <div className="card-b">
           <pre className="json">{JSON.stringify(payload?.data, null, 2)}</pre>
         </div>

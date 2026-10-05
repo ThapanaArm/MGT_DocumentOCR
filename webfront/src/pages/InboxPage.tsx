@@ -7,6 +7,7 @@ import { dt, fmt, moduleLabel, statusBadge } from '../utils/format';
 import { OCR_PROVIDER_SHORT } from '../constants/fields';
 import type { ModuleCode } from '../api/types';
 import Pager, { DateRange } from '../components/Pager';
+import ConfirmModal from '../components/ConfirmModal';
 import { usePagedList } from '../hooks/usePagedList';
 
 // Deprecated. The backend stamps identity from the validated token; whatever is passed here is
@@ -79,21 +80,71 @@ export default function InboxPage() {
   );
 
   const invCounts = data?.counts ?? { all: total, AP: 0, II: 0 };
+
+  // Empty state: tell "nothing here yet" apart from "your filters hide everything".
+  const isEmpty = rows != null && rows.length === 0;
+  const hasFilters = !!(search.trim() || from || to || category || invTab !== 'all');
+  const clearFilters = () => {
+    setSearch(''); setSearchQ(''); setFrom(''); setTo(''); setCategory(''); setInvTab('all');
+  };
+  const importPath = isSalesOrder ? '/import/SO' : isInvoice ? '/import/AP' : null;
+  const emptyNoun = isSalesOrder ? 'sales orders' : isInvoice ? 'invoices' : 'documents';
   const catLabel = (id: string | null) =>
     (apDocCategories ?? []).find((c) => c.id === id)?.label || id || '';
 
-  const delDoc = (id: number) => {
-    if (!window.confirm('Delete document #' + id + ' ?')) return;
-    guard(async () => {
-      await deleteDocument(id, USER);
-      showToast('Document deleted');
-      reload();
+  // ---- Delete: one row (trash icon) or many (ticked rows), confirmed in an in-app popup ----
+  // Posted documents can't be deleted (already in SAP/Zoho), so they can't be ticked either.
+  // The selection survives paging (like Master Mapping) and is cleared when the list changes.
+  const [selected, setSelected] = useState<Map<number, InboxRow>>(() => new Map());
+  const [confirmRows, setConfirmRows] = useState<InboxRow[] | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  useEffect(() => { setSelected(new Map()); }, [mod, category, from, to, invTab, searchQ]);
+
+  const deletable = (r: InboxRow) => r.Status !== 'POSTED' && r.Status !== 'PARTIAL';
+  const pageRows = (rows ?? []).filter(deletable);
+  const allOnPage = pageRows.length > 0 && pageRows.every((r) => selected.has(r.DocId));
+  const toggleRow = (r: InboxRow) =>
+    setSelected((prev) => {
+      const next = new Map(prev);
+      if (next.has(r.DocId)) next.delete(r.DocId); else next.set(r.DocId, r);
+      return next;
     });
+  const toggleAll = () =>
+    setSelected((prev) => {
+      const next = new Map(prev);
+      if (allOnPage) pageRows.forEach((r) => next.delete(r.DocId));
+      else pageRows.forEach((r) => next.set(r.DocId, r));
+      return next;
+    });
+
+  const delDoc = (r: InboxRow) => setConfirmRows([r]);
+  const doDelete = async () => {
+    const list = confirmRows ?? [];
+    if (list.length === 0) return;
+    setDeleting(true);
+    let ok = 0;
+    const failed: number[] = [];
+    for (const r of list) {
+      try { await deleteDocument(r.DocId, USER); ok++; }
+      catch { failed.push(r.DocId); }
+    }
+    setDeleting(false);
+    setConfirmRows(null);
+    setSelected((prev) => {
+      const next = new Map(prev);
+      list.forEach((r) => { if (!failed.includes(r.DocId)) next.delete(r.DocId); });
+      return next;
+    });
+    if (failed.length === 0) showToast(ok === 1 ? 'Document deleted' : `Deleted ${ok} documents`, 'success');
+    else showToast(`Deleted ${ok}, could not delete ${failed.length}: #${failed.join(', #')}`, 'error');
+    reload();
   };
+  const docLabel = (r: InboxRow) =>
+    `#${r.DocId}` + (r.DocNo ? ` · ${r.DocNo}` : '') + (r.PartnerName ? ` · ${r.PartnerName}` : '');
 
   const invColHead = ['AP', 'II', 'PODP'].includes(mod ?? '') ? 'Invoice Number' : 'PO Number';
   // Sales Orders hide only the Type column now; Model OCR is shown for every module
-  const colCount = 12 + (!mod ? 1 : 0) + (isInvoice ? 1 : 0) - (isSalesOrder ? 1 : 0);
+  const colCount = 14 + (!mod ? 1 : 0) + (isInvoice ? 1 : 0) - (isSalesOrder ? 1 : 0);
 
   return (
     <div className="card">
@@ -130,6 +181,15 @@ export default function InboxPage() {
         </div>
       </div>
       <div className="card-b">
+        {selected.size > 0 && (
+          <div className="register-bulkbar">
+            <span className="hint">{selected.size} selected</span>
+            <button className="btn sm danger" onClick={() => setConfirmRows([...selected.values()])}>
+              <i className="fa-solid fa-trash" /> Delete selected ({selected.size})
+            </button>
+            <button className="btn sm ghost" onClick={() => setSelected(new Map())}>Clear selection</button>
+          </div>
+        )}
         {isInvoice && (
           <div className="row" style={{ gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
             {(
@@ -149,10 +209,14 @@ export default function InboxPage() {
             ))}
           </div>
         )}
-        <div className={`tw register-table-wrap paged-table paged-table-register page-size-${pageSize}`}>
+        <div className={`tw register-table-wrap paged-table paged-table-register page-size-${pageSize}` + (isEmpty ? ' is-empty' : '')}>
           <table className="reg">
             <thead>
               <tr>
+                <th className="reg-col-select">
+                  <input type="checkbox" aria-label="Select all deletable documents on this page"
+                    checked={allOnPage} onChange={toggleAll} disabled={pageRows.length === 0} />
+                </th>
                 <th className="reg-col-id">#</th>
                 {!mod && <th className="reg-col-module">Module</th>}
                 <th className="reg-col-file">File</th>
@@ -166,26 +230,36 @@ export default function InboxPage() {
                 <th className="reg-col-ocr">Model OCR</th>
                 <th className="reg-col-sap">Posted Doc No.</th>
                 <th className="reg-col-created">Create Date</th>
+                <th className="reg-col-by">Uploaded By</th>
                 <th className="reg-col-actions" aria-label="Actions" />
               </tr>
             </thead>
             <tbody>
               {!rows ? (
-                <tr>
-                  <td colSpan={colCount} className="empty">
-                    Loading…
-                  </td>
-                </tr>
+                Array.from({ length: Math.min(pageSize, 6) }, (_, i) => (
+                  <tr key={'sk' + i} className="reg-skeleton" aria-hidden="true">
+                    <td colSpan={colCount}><span className="reg-skel-bar" /></td>
+                  </tr>
+                ))
               ) : rows.length ? (
                 rows.map((r) => {
                   const sb = statusBadge(r.Status);
                   return (
                     <tr
                       key={r.DocId}
-                      className="reg-row"
+                      className={'reg-row' + (selected.has(r.DocId) ? ' selected' : '')}
                       style={{ cursor: 'pointer' }}
                       onClick={() => navigate('/doc/' + r.DocId)}
                     >
+                      <td className="reg-col-select" onClick={(e) => e.stopPropagation()}>
+                        {deletable(r) ? (
+                          <input type="checkbox" aria-label={'Select document ' + r.DocId}
+                            checked={selected.has(r.DocId)} onChange={() => toggleRow(r)} />
+                        ) : (
+                          <input type="checkbox" aria-label="Posted documents cannot be deleted"
+                            title="Posted documents cannot be deleted" disabled />
+                        )}
+                      </td>
                       <td className="reg-col-id">{r.DocId}</td>
                       {!mod && (
                         <td className="reg-col-module">
@@ -230,6 +304,15 @@ export default function InboxPage() {
                       </td>
                       <td className="reg-col-sap">{r.SapDocNo || ''}</td>
                       <td className="hint reg-col-created">{dt(r.CreatedAt)}</td>
+                      <td
+                        className="reg-col-by"
+                        title={
+                          `Uploaded by ${r.CreatedBy || '—'} · ${dt(r.CreatedAt)}` +
+                          (r.PostedBy ? `\nPosted by ${r.PostedBy} · ${dt(r.PostedAt ?? null)}` : '')
+                        }
+                      >
+                        {r.CreatedBy || <span className="hint">—</span>}
+                      </td>
                       <td className="reg-col-actions" style={{ whiteSpace: 'nowrap' }}>
                         {r.Status === 'POSTED' ? (
                           // Posted docs can't be deleted (already sent to SAP/Zoho), so instead of
@@ -253,7 +336,7 @@ export default function InboxPage() {
                             aria-label="Delete"
                             onClick={(e) => {
                               e.stopPropagation();
-                              delDoc(r.DocId);
+                              delDoc(r);
                             }}
                           >
                             <i className="fa-solid fa-trash-can" />
@@ -264,9 +347,32 @@ export default function InboxPage() {
                   );
                 })
               ) : (
-                <tr>
-                  <td colSpan={colCount} className="empty">
-                    No documents found
+                <tr className="reg-empty-row">
+                  <td colSpan={colCount}>
+                    <div className="reg-empty">
+                      <div className="reg-empty-icon" aria-hidden="true">
+                        <i className={hasFilters ? 'fa-solid fa-magnifying-glass' : 'fa-regular fa-folder-open'} />
+                      </div>
+                      <div className="reg-empty-title">
+                        {hasFilters ? 'No matching documents' : `No ${emptyNoun} yet`}
+                      </div>
+                      <div className="reg-empty-text">
+                        {hasFilters
+                          ? 'Try a different search term or date range.'
+                          : importPath
+                            ? `Import a document to start — it will appear here once it has been read.`
+                            : 'Documents you import will appear here.'}
+                      </div>
+                      {hasFilters ? (
+                        <button className="btn sm" onClick={clearFilters}>
+                          <i className="fa-solid fa-xmark" /> Clear filters
+                        </button>
+                      ) : importPath ? (
+                        <button className="btn sm primary" onClick={() => navigate(importPath)}>
+                          <i className="fa-solid fa-file-import" /> {isSalesOrder ? 'Import Sales Order' : 'Import Invoice'}
+                        </button>
+                      ) : null}
+                    </div>
                   </td>
                 </tr>
               )}
@@ -275,6 +381,27 @@ export default function InboxPage() {
         </div>
         <Pager page={page} setPage={setPage} pageSize={pageSize} setPageSize={setPageSize} total={total} />
       </div>
+
+      <ConfirmModal
+        open={confirmRows != null}
+        title={confirmRows && confirmRows.length > 1 ? `Delete ${confirmRows.length} documents` : 'Delete document'}
+        message={
+          confirmRows && confirmRows.length === 1 ? (
+            <>Delete document <b>{docLabel(confirmRows[0])}</b>?<br /><span className="hint">This cannot be undone.</span></>
+          ) : (
+            <>
+              Delete these <b>{confirmRows?.length ?? 0}</b> documents? <span className="hint">This cannot be undone.</span>
+              <ul className="confirm-list">
+                {(confirmRows ?? []).map((r) => <li key={r.DocId}>{docLabel(r)}</li>)}
+              </ul>
+            </>
+          )
+        }
+        confirmLabel={confirmRows && confirmRows.length > 1 ? `Delete ${confirmRows.length}` : 'Delete'}
+        busy={deleting}
+        onConfirm={() => void doDelete()}
+        onCancel={() => setConfirmRows(null)}
+      />
     </div>
   );
 }

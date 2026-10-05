@@ -164,6 +164,71 @@ public static class MappingEngine
         return (null, "", bs, cands);
     }
 
+    /// <summary>The Customer master row for a customer code. One SAP/Zoho code can sit on several
+    /// rows (branches, duplicates, or a row mapped to the wrong code), so the row whose Tax ID
+    /// matches the document is preferred; only then the first row in master order. Without this
+    /// the card showed whichever row happened to sort first — e.g. another company's name.</summary>
+    public static Dictionary<string, object?>? CustomerRow(MasterData masters, string? code, object? docTaxId)
+    {
+        if (string.IsNullOrEmpty(code)) return null;
+        var rows = masters.Customers.Where(x => x.GetStr("CustomerCode") == code).ToList();
+        var t = Digits(docTaxId);
+        return (t.Length >= 10 ? rows.FirstOrDefault(x => Digits(x.Get("TaxId")) == t) : null)
+            ?? rows.FirstOrDefault();
+    }
+
+    public record CustomerTaxPick(Dictionary<string, object?>? Hit, string Method, List<string> Codes);
+
+    /// <summary>
+    /// Sales Order customer match when the document's Tax ID is on master rows of MORE THAN ONE
+    /// customer code (master data mistakes, or a company with several accounts). Instead of taking
+    /// whichever row sorts first, every candidate code is scored:
+    ///   1. Consistency (50%) — a code whose master rows all carry this same Tax ID scores 1; a code
+    ///      also used by rows of a DIFFERENT Tax ID (i.e. shared with another company) scores 0.
+    ///   2. Ship-to (35%) — best name/address similarity between the document's ship-to and the
+    ///      Ship-to masters under that code.
+    ///   3. Name (15%) — best similarity of the document's customer name to that code's rows.
+    /// The top code wins only with a clear lead (≥ 0.15); otherwise Hit is null and the caller asks
+    /// the person to choose. Returns null when the Tax ID is missing or on at most one code (the
+    /// normal path in MatchPartner handles that).
+    /// </summary>
+    public static CustomerTaxPick? PickCustomerByTax(MasterData masters, Dictionary<string, object?> header)
+    {
+        var t = Digits(header.Get("customerTaxId"));
+        if (t.Length < 10) return null;
+        var taxRows = masters.Customers.Where(x => Digits(x.Get("TaxId")) == t).ToList();
+        var codes = taxRows.Select(x => x.GetStr("CustomerCode")).Where(c => c.Length > 0).Distinct().ToList();
+        if (codes.Count <= 1) return null;
+
+        var docName = header.Get("customerName");
+        var stName = header.Get("shipToName"); var stAddr = header.Get("shipToAddress");
+        var hasShipTo = !string.IsNullOrWhiteSpace(stName?.ToString()) || !string.IsNullOrWhiteSpace(stAddr?.ToString());
+
+        var scored = codes.Select(code =>
+        {
+            var all = masters.Customers.Where(x => x.GetStr("CustomerCode") == code).ToList();
+            var consistent = all.All(x => { var d = Digits(x.Get("TaxId")); return d.Length == 0 || d == t; }) ? 1.0 : 0.0;
+            var shipTo = !hasShipTo ? 0.0 : masters.ShipTos.Where(x => x.GetStr("CustomerCode") == code)
+                .Select(x => Math.Max(Sim(stName, x.Get("ShipToName")), Sim(stAddr, x.Get("Address"))))
+                .DefaultIfEmpty(0.0).Max();
+            var mine = taxRows.Where(x => x.GetStr("CustomerCode") == code).ToList();
+            var row = mine.OrderByDescending(x => Math.Max(Sim(docName, x.Get("NameTh")), Sim(docName, x.Get("NameEn")))).First();
+            var name = Math.Max(Sim(docName, row.Get("NameTh")), Sim(docName, row.Get("NameEn")));
+            return (Code: code, Row: row, Score: 0.5 * consistent + 0.35 * shipTo + 0.15 * name, Consistent: consistent, ShipTo: shipTo);
+        }).OrderByDescending(x => x.Score).ToList();
+
+        var best = scored[0]; var second = scored[1];
+        if (best.Score - second.Score >= 0.15)
+        {
+            var why = new List<string>();
+            if (best.Consistent > second.Consistent) why.Add("code not shared with another Tax ID");
+            if (best.ShipTo > 0 && best.ShipTo > second.ShipTo) why.Add($"ship-to {(int)Math.Round(best.ShipTo * 100)}%");
+            if (why.Count == 0) why.Add("closest name");
+            return new(best.Row, $"Tax ID (matched {codes.Count} codes; chose {best.Code}: {string.Join(", ", why)})", codes);
+        }
+        return new(null, "", scored.Select(x => x.Code).ToList());
+    }
+
     public static (string Code, string Method, List<string> Cands) MatchMaterial(
         string? partnerCode, object? extCode, object? extDesc,
         List<Dictionary<string, object?>> mapRows, string keyField, List<Dictionary<string, object?>> materials)
@@ -293,17 +358,30 @@ public static class MappingEngine
             var savedShipTo = mHead.Get("savedShipTo")?.ToString();
             if (!string.IsNullOrEmpty(manualCust))
             {
-                var c = masters.Customers.FirstOrDefault(x => x.GetStr("CustomerCode") == manualCust);
+                var c = CustomerRow(masters, manualCust, header.Get("customerTaxId"));
                 resHeader["customer"] = c != null ? R("manual", c.GetStr("CustomerCode"), c.GetStr("NameTh"), "manually selected") : R("fail");
             }
             else
             {
                 var (hit, method, _, cands) = MatchPartner(masters.Customers, header.Get("customerTaxId"), header.Get("customerName"), "CustomerCode", ["NameTh", "NameEn"]);
-                var saved = string.IsNullOrEmpty(savedCust) ? null : masters.Customers.FirstOrDefault(x => x.GetStr("CustomerCode") == savedCust);
+                // One Tax ID on several customer codes: score the codes instead of taking the first.
+                var taxPick = PickCustomerByTax(masters, header);
+                if (taxPick != null) { hit = taxPick.Hit; method = taxPick.Method; cands = taxPick.Codes; }
+                var saved = CustomerRow(masters, savedCust, header.Get("customerTaxId"));
                 if (saved != null && saved.GetStr("CustomerCode") != hit?.GetStr("CustomerCode"))
                     resHeader["customer"] = R("manual", saved.GetStr("CustomerCode"), saved.GetStr("NameTh"), "previously selected");
                 else if (hit != null)
                     resHeader["customer"] = R("ok", hit.GetStr("CustomerCode"), hit.GetStr("NameTh"), method);
+                else if (taxPick != null)
+                {
+                    resHeader["customer"] = R("fail", cands: cands);
+                    errors.Add(new()
+                    {
+                        ["field"] = "Customer",
+                        ["msg"] = $"Tax No {Dash(header.GetStr("customerTaxId"))} belongs to {cands.Count} customer codes ({string.Join(", ", cands)}) and none is clearly the right one",
+                        ["fix"] = "Search and select the correct customer below (or fix the duplicate codes in Master Mapping → Customer)",
+                    });
+                }
                 else
                 {
                     resHeader["customer"] = R("fail", cands: cands);
@@ -389,7 +467,7 @@ public static class MappingEngine
                     });
                 }
             }
-            var selectedCustomer = masters.Customers.FirstOrDefault(x => x.GetStr("CustomerCode") == cust);
+            var selectedCustomer = CustomerRow(masters, cust, header.Get("customerTaxId"));
             partner = cust;
             mapRows = masters.CustomerMaterials.Where(x => x.GetStr("CustomerCode") == cust
                 && x.GetStr("SalesOrg") == selectedCustomer.GetStr("SalesOrg")).ToList();
@@ -574,7 +652,7 @@ public static class MappingEngine
         if (module == "SO")
         {
             var custRow = resHeader.Get("customer") as Dictionary<string, object?>;
-            var c = masters.Customers.FirstOrDefault(x => x.GetStr("CustomerCode") == custRow.GetStr("code"));
+            var c = CustomerRow(masters, custRow.GetStr("code"), null); // only checks the code exists
             Need(custRow, c, "SapCustomerCode", "Customer SAP code", "Customer", "Fill 'External Code (Sold-to)' in Master Mapping → 2. Customer");
             var stRow = resHeader.Get("shipTo") as Dictionary<string, object?>;
             var st = masters.ShipTos.FirstOrDefault(x => x.GetStr("CustomerCode") == custRow.GetStr("code") && x.GetStr("SapShipToCode") == stRow.GetStr("code"));
@@ -613,7 +691,7 @@ public static class MappingEngine
             var r = (Dictionary<string, object?>)resHeader["customer"]!;
             var dn = header.Get("customerName"); var dt = header.Get("customerTaxId");
             r["doc"] = new List<object> { Fld("Customer Name", dn), Fld("Tax Registration No", dt) };
-            var c = masters.Customers.FirstOrDefault(x => x.GetStr("CustomerCode") == r.GetStr("code"));
+            var c = CustomerRow(masters, r.GetStr("code"), dt);
             // "SAP Code (Sold-to)" and "Customer Code (internal)" dropped from this list per
             // Megachem's request -- both are already redundant with the "SAP: ..." badge in the
             // card header (AttachSapKeys below), and the internal code isn't meaningful to a

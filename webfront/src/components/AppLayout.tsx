@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link, NavLink, Navigate, Outlet, useLocation } from 'react-router-dom';
 import { visibleNavSections, allowedModules } from '../navConfig';
 import { useAppState } from '../state/AppState';
-import { api } from '../api/client';
+import { api, ApiError } from '../api/client';
 import { getMe, type Me } from '../api/me';
 import { signOut } from '../api/auth';
 import type { HealthStatus, ModuleCode } from '../api/types';
@@ -164,6 +164,61 @@ function SidebarFoot({ me, denied }: { me: Me | null; denied: string | null }) {
   );
 }
 
+// Full-page screen shown INSTEAD of the app when the signed-in session can't be confirmed.
+// Before, a failed /api/me (e.g. HTTP 502 while the API or database is down) only showed a small
+// "Sign-in blocked" card in the sidebar while every page still rendered — empty lists that looked
+// like "no documents" and buttons that could not work. Nothing is usable without a confirmed user,
+// so the whole app is blocked until it is: 403 = this account has no access; anything else
+// (5xx / network) = the server is unavailable, try again.
+function BlockedScreen({ message, status, onRetry }: { message: string; status: number | null; onRetry: () => void }) {
+  const noAccess = status === 403;
+  return (
+    <div
+      role="alert"
+      style={{
+        minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center',
+        padding: 16, background: 'var(--bg, var(--g50))',
+      }}
+    >
+      <div className="card" style={{ maxWidth: 520, width: '100%' }}>
+        <div className="card-b" style={{ textAlign: 'center', padding: '32px 28px' }}>
+          <div
+            className="avatar"
+            style={{ margin: '0 auto 16px', width: 56, height: 56, fontSize: 24, background: 'var(--red-bg)', color: 'var(--red)', borderColor: 'transparent' }}
+          >
+            <i className={noAccess ? 'fa-solid fa-lock' : 'fa-solid fa-triangle-exclamation'} />
+          </div>
+          <h2 style={{ margin: '0 0 8px' }}>{noAccess ? 'No access to MGT Document OCR' : 'System unavailable'}</h2>
+          <p className="hint" style={{ margin: '0 0 6px' }}>
+            {noAccess
+              ? 'Your account signed in, but it is not set up for this system. Please contact IT to be added.'
+              : 'The server or database cannot be reached right now, so the system cannot be used. Please try again in a moment, or contact IT if it keeps happening.'}
+          </p>
+          <p className="hint" style={{ margin: '0 0 20px', fontSize: 12 }}>{message}</p>
+          <div className="row" style={{ gap: 10, justifyContent: 'center' }}>
+            {!noAccess && (
+              <button type="button" className="btn primary" onClick={onRetry}>
+                <i className="fa-solid fa-arrow-rotate-right" /> Try again
+              </button>
+            )}
+            <button type="button" className="btn" onClick={() => void signOut()}>
+              <i className="fa-solid fa-arrow-right-from-bracket" /> Sign out
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function LoadingScreen() {
+  return (
+    <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--bg, var(--g50))' }}>
+      <span className="hint"><i className="fa-solid fa-spinner fa-spin" /> Checking your account…</span>
+    </div>
+  );
+}
+
 export default function AppLayout() {
   const { navCollapsed, toggleNav } = useAppState();
   const location = useLocation();
@@ -183,17 +238,26 @@ export default function AppLayout() {
   // department-based nav both read it, so it should not be fetched twice.
   const [me, setMe] = useState<Me | null>(null);
   const [denied, setDenied] = useState<string | null>(null);
+  const [deniedStatus, setDeniedStatus] = useState<number | null>(null);
   const [meLoaded, setMeLoaded] = useState(false);
+  const [meAttempt, setMeAttempt] = useState(0);
 
   useEffect(() => {
     let alive = true;
+    setMeLoaded(false);
+    setDenied(null);
+    setDeniedStatus(null);
     getMe()
       .then((m) => { if (alive) setMe(m); })
-      // 403 here means the account signed in fine but has no active row in Ms_User.
-      .catch((e: unknown) => { if (alive) setDenied(e instanceof Error ? e.message : 'No access'); })
+      // 403 = signed in fine but no active row in Ms_User; 5xx / network = server or DB down.
+      .catch((e: unknown) => {
+        if (!alive) return;
+        setDenied(e instanceof Error ? e.message : 'No access');
+        setDeniedStatus(e instanceof ApiError ? e.status : null);
+      })
       .finally(() => { if (alive) setMeLoaded(true); });
     return () => { alive = false; };
-  }, []);
+  }, [meAttempt]);
 
   const sections = visibleNavSections(me);
 
@@ -201,6 +265,10 @@ export default function AppLayout() {
   // Backstop for the hidden nav: opening a module route the department may not see (typed URL,
   // old bookmark) sends the user home. The API is guarded regardless. Wait for /api/me first so
   // we do not redirect during the initial load.
+  // Block the whole app (no sidebar, no pages, no API calls from pages) until the user is confirmed.
+  if (!meLoaded) return <LoadingScreen />;
+  if (denied || !me) return <BlockedScreen message={denied || 'Could not confirm your account'} status={deniedStatus} onRetry={() => setMeAttempt((n) => n + 1)} />;
+
   const routeModule = moduleOfPath(location.pathname);
   if (meLoaded && me != null && routeModule != null && !allowedModules(me).includes(routeModule))
     return <Navigate to="/" replace />;

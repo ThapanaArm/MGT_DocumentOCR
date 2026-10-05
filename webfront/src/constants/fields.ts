@@ -514,9 +514,9 @@ export const MASTER_DEF: Record<string, MasterDef> = {
     label: 'Unit Conversion (UoM)', mod: 'ALL', key: 'Id', cols: [
       { k: 'SalesOrg', l: 'Company', help: 'Leave blank to use this rule for every company · MGT = 1000 / GLC = 2000' },
       { k: 'MaterialCode', l: 'Material code (blank = all materials)', ref: 'materials', blank: true },
-      { k: 'ExtUom', l: 'Document Unit', required: true, help: 'The unit exactly as the customer wrote it on the document — the lookup key. Free text, Thai is fine (e.g. "กก.", "กรัม")' },
+      { k: 'ExtUom', l: 'Document Unit', required: true, help: 'The unit exactly as the customer wrote it on the document. Free text and localized units are supported.' },
       { k: 'SapUom', l: 'Order Unit', sap: true, required: true, maxLen: 3, help: 'The valid unit code actually sent on the order, at most 3 chars (KG, G, DR). Usually the same unit, just cleaned up' },
-      { k: 'Factor', l: 'Factor (1 document unit = ? order units)', help: 'The quantity is multiplied by this. 1 = same quantity (KG→KG, G→G). Use ≠1 only when the unit changes, e.g. 1 ตัน = 1000 KG → 1000' },
+      { k: 'Factor', l: 'Factor (1 document unit = ? order units)', help: 'The quantity is multiplied by this value. Use 1 when the units match, or the appropriate conversion factor when they differ.' },
       { k: 'SapUomIso', l: 'ISO code (SAP only)', sap: true, maxLen: 3, help: 'Optional ISO unit code, used by SAP only' },
       { k: 'Note', l: 'Note' }],
   },

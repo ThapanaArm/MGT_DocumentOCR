@@ -38,6 +38,8 @@ export const statusBadge = (s: string): StatusBadge => {
     INCOMPLETE: ['b-fail', 'Mapping Incomplete'],
     // Neutral wording: a document is posted to SAP (GLC, liability modules) or Zoho CRM (MGT SO).
     MAPPED: ['b-ok', 'Ready to Post'],
+    // Sales Order sent as one SO per delivery date and only some went through — retry the rest.
+    PARTIAL: ['b-warn', 'Partially Posted'],
     POSTED: ['b-ok', 'Post Success'],
     SPLIT: ['b-warn', 'Split into multiple SOs'],
   };

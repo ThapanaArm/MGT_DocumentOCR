@@ -151,9 +151,8 @@ public partial class DocumentRepository(Db db)
     /// company isolation existed). Null when there is no such document.</summary>
     public async Task<string?> GetCompanyAsync(int docId)
     {
-        // Sales Orders are another developer's flow and ocr.SalesOrder has no company column, so
-        // they are reported as unscoped instead of being queried for one.
-        if (docId >= DocumentTables.SoIdBase) return "";
+        // ocr.Document and ocr.SalesOrder both carry SalesOrg (sql/30_company_scope.sql), so Sales
+        // Orders are company-scoped the same way as invoices.
         var t = DocumentTables.ForId(docId).Doc;
         var row = await db.QueryOneAsync($"SELECT SalesOrg FROM {t} WHERE DocId=@docId", new { docId });
         if (row == null) return null;
@@ -308,7 +307,8 @@ public partial class DocumentRepository(Db db)
             ["tokensIn"] = d.Get("OcrTokensIn"), ["tokensOut"] = d.Get("OcrTokensOut"),
             ["cost"] = d.Get("OcrCost"), ["costIn"] = d.Get("OcrInputCost"), ["costOut"] = d.Get("OcrOutputCost"),
             ["costCurrency"] = d.GetStr("OcrCostCurrency"),
-            ["apDocCategory"] = d.GetStr("ApDocCategory"), ["createdAt"] = d.Get("CreatedAt"),
+            ["apDocCategory"] = d.GetStr("ApDocCategory"), ["createdAt"] = d.Get("CreatedAt"), ["createdBy"] = d.GetStr("CreatedBy"),
+            ["postedBy"] = d.GetStr("PostedBy"),
             ["sapDocNo"] = d.Get("SapDocNo"), ["postedAt"] = d.Get("PostedAt"), ["mapStatus"] = d.Get("MapStatus"),
             ["partnerCode"] = d.Get("PartnerCode"), ["shipToCode"] = d.Get("ShipToCode"),
             ["sourceDocId"] = sourceDocId, ["splitChildren"] = splitChildren,
@@ -345,7 +345,7 @@ public partial class DocumentRepository(Db db)
 
     private const string DocListCols =
         "DocId,Module,FileName,Status,DocNo,DocDate,PartnerName,PartnerCode," +
-        "TotalAmount,Currency,SapDocNo,PostedAt,CreatedAt,OcrProvider,OcrConfidence,OcrConfidenceNote," +
+        "TotalAmount,Currency,SapDocNo,PostedAt,PostedBy,CreatedAt,CreatedBy,OcrProvider,OcrConfidence,OcrConfidenceNote," +
         "OcrTokensIn,OcrTokensOut,OcrCost,OcrInputCost,OcrOutputCost,OcrCostCurrency,ApDocCategory";
 
     // Ported from list_documents() (main.py:466-491): SO queries ocr.SalesOrder alone; any other
@@ -412,9 +412,8 @@ public partial class DocumentRepository(Db db)
         var mod = module.ToUpperInvariant();
         var p = new DynamicParameters();
         var common = new List<string>();
-        // MGT and GLC share one installation and must not see each other's invoices. This clause
-        // goes only on the ocr.Document queries: Sales Orders are another developer's flow and that
-        // table has no company column. A document whose SalesOrg was never filled in (everything
+        // MGT and GLC share one installation and must not see each other's documents. This clause
+        // goes on both ocr.Document and ocr.SalesOrder queries (both have SalesOrg). A document whose SalesOrg was never filled in (everything
         // imported before this existed) stays visible to both rather than disappearing from
         // someone's list overnight — sql/27_company_scope.sql has the backfill that ends that.
         var docScope = new List<string>();
@@ -461,7 +460,7 @@ public partial class DocumentRepository(Db db)
         }
         else if (mod == "SO")
         {
-            srcSql = "SELECT " + DocListCols + " FROM ocr.SalesOrder" + Where(Array.Empty<string>());
+            srcSql = "SELECT " + DocListCols + " FROM ocr.SalesOrder" + Where(docScope);
         }
         else if (mod.Length > 0)
         {
@@ -481,7 +480,7 @@ public partial class DocumentRepository(Db db)
                 parts.Add("SELECT " + DocListCols + " FROM ocr.Document" + Where(new[] { "Module IN @docMods" }.Concat(docScope)));
             }
             if (includeSo)
-                parts.Add("SELECT " + DocListCols + " FROM ocr.SalesOrder" + Where(Array.Empty<string>()));
+                parts.Add("SELECT " + DocListCols + " FROM ocr.SalesOrder" + Where(docScope));
             srcSql = string.Join(" UNION ALL ", parts);
         }
 

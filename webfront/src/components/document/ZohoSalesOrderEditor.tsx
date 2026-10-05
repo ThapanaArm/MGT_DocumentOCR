@@ -10,6 +10,9 @@ import type {
 import CompareModal, { type CompareCandidateItem } from './CompareModal';
 import type { CompareField } from '../../api/compare';
 import { SEND_DISABLED } from '../../constants/flags';
+import type { DeliveryDateGroup } from './SapSalesOrderEditor';
+import type { SoGroupState } from '../../api/documents';
+import SoGroupPanel, { groupStatus } from './SoGroupPanel';
 
 /* The Zoho Sales Order, lifted whole onto the document page as one editable table -- what
    replaced the old per-line "Material - Row N" comparison cards + the "Confirm Submission to
@@ -39,6 +42,8 @@ export default function ZohoSalesOrderEditor({
   onSend,
   onViewPayload,
   posted,
+  dateGroups = [],
+  posts = [],
 }: {
   /** The merged preview (backend defaults + any AI-confirmed matches) -- fetched by DocumentPage
    *  as soon as a Deal is picked, so this table is visible without pressing Send first. */
@@ -62,7 +67,14 @@ export default function ZohoSalesOrderEditor({
   /** Opens the "View Payload" modal showing the exact JSON that will be POSTed to Zoho. */
   onViewPayload: () => void;
   posted: boolean;
+  /** Lines grouped by effective delivery date (deliveryDateGroups). Same rule as SAP: one Zoho Sales
+   *  Order per delivery date, all created from this document by one Send. */
+  dateGroups?: DeliveryDateGroup[];
+  /** Send results per group (ocr.SalesOrderPost): created groups are skipped on the next Send. */
+  posts?: SoGroupState[];
 }) {
+  const multiDate = dateGroups.length > 1;
+  const remaining = dateGroups.filter((g) => !groupStatus(g, posts).ok).length;
   // Which skipped line (by itemNo) currently has the "Ask AI to suggest a match" popup open.
   const [aiMatchItemNo, setAiMatchItemNo] = useState<string | null>(null);
 
@@ -141,7 +153,12 @@ export default function ZohoSalesOrderEditor({
           </div>
           <div className="f">
             <label>Delivery Date</label>
-            <input type="text" value={header.deliveryDate} placeholder={preview.deliveryDate || ''} disabled={posted} onChange={(e) => onHeaderChange({ deliveryDate: e.target.value })} />
+            {multiDate ? (
+              // Each Sales Order is sent with its own group's date (see the group panel below).
+              <input type="text" value={`Per Sales Order: ${dateGroups.map((g) => g.date).join(', ')}`} disabled readOnly />
+            ) : (
+              <input type="text" value={header.deliveryDate} placeholder={preview.deliveryDate || ''} disabled={posted} onChange={(e) => onHeaderChange({ deliveryDate: e.target.value })} />
+            )}
           </div>
           <div className="f">
             <label>Payment Terms</label>
@@ -284,22 +301,26 @@ export default function ZohoSalesOrderEditor({
         )}
         {result && result.success && (
           <div className="badge b-ok" style={{ marginTop: 14 }}>
-            <i className="fa-solid fa-check" /> Sent — Sales Order created in Zoho CRM ({result.linesSent} line(s))
+            <i className="fa-solid fa-check" /> Sent — {result.groups && result.groups.length > 1 ? `${result.groups.length} Sales Orders` : 'Sales Order'} created in Zoho CRM ({result.linesSent} line(s))
           </div>
         )}
+
+        <SoGroupPanel groups={dateGroups} posts={posts} target="Zoho CRM" />
 
         <div className="so-send">
           <div className="row" style={{ gap: 10 }}>
             <button
               className="btn success"
               onClick={onSend}
-              disabled={SEND_DISABLED || sending || posted || preview.lines.length === 0 || !!result?.success}
+              disabled={SEND_DISABLED || sending || posted || preview.lines.length === 0 || !!result?.success || remaining === 0}
             >
               {sending
                 ? 'Sending…'
                 : result?.success
                   ? 'Sent ✓'
-                  : `⎋ Send ${preview.lines.length} line${preview.lines.length === 1 ? '' : 's'} to Zoho CRM`}
+                  : multiDate
+                    ? `⎋ Send ${remaining} Sales Order${remaining === 1 ? '' : 's'} to Zoho CRM`
+                    : `⎋ Send ${preview.lines.length} line${preview.lines.length === 1 ? '' : 's'} to Zoho CRM`}
             </button>
             <button className="btn" onClick={onViewPayload} disabled={preview.lines.length === 0}>
               {'{}'} View payload
@@ -314,7 +335,9 @@ export default function ZohoSalesOrderEditor({
                   : `${preview.lines.length} line${preview.lines.length === 1 ? '' : 's'} ready`}
             </b>
             <div className="hint">
-              {preview.lines.length === 0
+              {multiDate
+                ? `${dateGroups.length} Sales Orders by delivery date — same Customer PO, each with its own Delivery Date`
+                : preview.lines.length === 0
                 ? 'Match at least one line before sending'
                 : preview.skipped.length
                   ? `Not sent: line ${preview.skipped.map((sk, i) => String(sk.itemNo ?? i + 1)).join(', ')}`

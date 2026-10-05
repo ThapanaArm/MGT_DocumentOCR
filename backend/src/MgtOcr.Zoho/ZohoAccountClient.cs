@@ -320,6 +320,13 @@ public class ZohoAccountClient(ZohoClient zoho)
     /// Ship_to_Street_2..5, Ship_to_House_Number, Ship_to_District, Ship_to_City,
     /// Ship_to_Difference_City, Ship_to_Post_Code, Ship_to_Country_Reg).
     /// </summary>
+    private static readonly string[] ShipToModuleFields =
+    [
+        "Name", "Ship_to_Code", "Ship_to_Street_2", "Ship_to_Street_3", "Ship_to_Street_4", "Ship_to_Street_5",
+        "Ship_to_House_Number", "Ship_to_District", "Ship_to_City", "Ship_to_Difference_City",
+        "Ship_to_Post_Code", "Ship_to_Country_Reg",
+    ];
+
     private async Task<List<ZohoShipToInfo>> GetShipToFromRelatedModuleAsync(string accountId)
     {
         if (!_shipToRelatedListChecked)
@@ -339,7 +346,9 @@ public class ZohoAccountClient(ZohoClient zoho)
         }
         if (string.IsNullOrEmpty(_shipToRelatedListApiName)) return [];
 
-        var records = await zoho.GetRelatedRecordsAsync(Module, accountId, _shipToRelatedListApiName);
+        // Only field names confirmed by the manual (section 5.4.3) — an unknown api_name in `fields`
+        // can itself make Zoho reject the call, so the old CRM_Ship_to_Code guess isn't requested.
+        var records = await zoho.GetRelatedRecordsAsync(Module, accountId, _shipToRelatedListApiName, ShipToModuleFields);
         var result = new List<ZohoShipToInfo>();
         foreach (var node in records)
         {

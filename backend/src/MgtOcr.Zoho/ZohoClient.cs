@@ -320,10 +320,16 @@ public class ZohoClient(AppConfig config, ILogger<ZohoClient> logger)
     // GET /crm/v8/{module}/{id}/{relatedListApiName} — the actual linked records for one related
     // list on one record (e.g. every record in a separate "Ship To" module attached to this
     // Account), once GetRelatedListsAsync above has confirmed the related list's real api_name.
-    public async Task<JsonArray> GetRelatedRecordsAsync(string module, string recordId, string relatedListApiName)
+    // Zoho API v8 REQUIRES a `fields` query parameter on related-records GETs — without it Zoho
+    // answers 400 REQUIRED_PARAM_MISSING {"param_name":"fields"}. Callers pass the api_names they
+    // actually read (comma-separated, max 50); `id` always comes back regardless.
+    public async Task<JsonArray> GetRelatedRecordsAsync(string module, string recordId, string relatedListApiName, IEnumerable<string> fields)
     {
+        var fieldList = string.Join(",", fields.Where(f => !string.IsNullOrWhiteSpace(f)).Select(f => f.Trim()).Distinct());
+        if (fieldList.Length == 0) throw new ArgumentException("Zoho related records need at least one field", nameof(fields));
         string token = await GetAccessTokenAsync();
-        string url = $"{ApiDomain}/crm/v8/{module}/{Uri.EscapeDataString(recordId)}/{Uri.EscapeDataString(relatedListApiName)}";
+        string url = $"{ApiDomain}/crm/v8/{module}/{Uri.EscapeDataString(recordId)}/{Uri.EscapeDataString(relatedListApiName)}" +
+                     $"?fields={Uri.EscapeDataString(fieldList)}&per_page=200";
         using var req = new HttpRequestMessage(HttpMethod.Get, url);
         req.Headers.Authorization = new AuthenticationHeaderValue("Zoho-oauthtoken", token);
         using var resp = await _http.SendAsync(req);

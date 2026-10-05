@@ -6,6 +6,7 @@ import { deleteMaster, getMasters, setMasterActive, type MastersData } from '../
 import { MASTER_DEF, MASTER_GROUPS } from '../constants/fields';
 import { num } from '../utils/format';
 import MasterEditModal, { type MasterEditState } from '../components/master/MasterEditModal';
+import ConfirmModal from '../components/ConfirmModal';
 import type { Me } from '../api/me';
 import Pager, { paginate } from '../components/Pager';
 
@@ -30,6 +31,9 @@ export default function MasterPage() {
   const [toggling, setToggling] = useState<Set<string>>(() => new Set());
   // Keys of the rows ticked for bulk delete (def.key value, stringified).
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
+  // Bulk-delete confirmation popup (ConfirmModal) — declared up here, before the early "Loading…" return.
+  const [confirmDel, setConfirmDel] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -141,16 +145,18 @@ export default function MasterPage() {
       else rowKeys.forEach((k) => next.add(k));
       return next;
     });
-  const delSelected = () => {
+  const delSelected = () => { if (selected.size > 0) setConfirmDel(true); };
+  const doDelSelected = async () => {
     const keys = [...selected];
-    if (keys.length === 0) return;
-    if (!window.confirm(`Delete ${keys.length} selected record(s)? This cannot be undone.`)) return;
-    guard(async () => {
+    setDeleting(true);
+    await guard(async () => {
       for (const k of keys) await deleteMaster(activeTab, k);
       await reload();
       setSelected(new Set());
-      showToast(`Deleted ${keys.length} record(s)`);
+      showToast(`Deleted ${keys.length} record(s)`, 'success');
     });
+    setDeleting(false);
+    setConfirmDel(false);
   };
 
   return (
@@ -293,6 +299,15 @@ export default function MasterPage() {
           await reload();
         }}
         isMgt={isMgt}
+      />
+      <ConfirmModal
+        open={confirmDel}
+        title={`Delete ${selected.size} record(s)`}
+        message={<>Delete the <b>{selected.size}</b> selected record(s) from this table?<br /><span className="hint">This cannot be undone.</span></>}
+        confirmLabel={`Delete ${selected.size}`}
+        busy={deleting}
+        onConfirm={() => void doDelSelected()}
+        onCancel={() => setConfirmDel(false)}
       />
     </div>
   );
