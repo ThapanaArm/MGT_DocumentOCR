@@ -104,6 +104,11 @@ var appConfig = new AppConfig
     GeminiModel = Get("Ocr:GeminiModel", "gemini-2.5-flash"),
     OpenAiApiKey = Get("Ocr:OpenAiApiKey"),
     OpenAiModel = Get("Ocr:OpenAiModel", "gpt-4o"),
+    PaddleOcrCmd = Get("Ocr:PaddleOcrCmd"),
+    PaddleOcrLang = Get("Ocr:PaddleOcrLang", "th"),
+    PaddleOcrDevice = Get("Ocr:PaddleOcrDevice"),
+    PaddleOcrMaxPages = int.TryParse(Get("Ocr:PaddleOcrMaxPages", "10"), out var pdMax) ? pdMax : 10,
+    PaddleOcrTimeoutSec = int.TryParse(Get("Ocr:PaddleOcrTimeoutSec", "300"), out var pdTo) ? pdTo : 300,
     SapBaseUrl = Get("Sap:BaseUrl"),
     SapUser = Get("Sap:User"),
     SapPassword = cfg["Sap:Password"] ?? "",
@@ -175,6 +180,12 @@ var appConfig = new AppConfig
     CleanupIntervalMinutes = GetInt("Archive:CleanupIntervalMinutes", 60),
     CleanupGraceHours = GetInt("Archive:CleanupGraceHours", 24),
     CleanupDraftDays = GetInt("Archive:CleanupDraftDays", 30),
+    CleanupDraftHours = GetInt("Archive:CleanupDraftHours", 0),
+    CleanupGraceMinutes = GetInt("Archive:CleanupGraceMinutes", 0),
+    CleanupDraftMinutes = GetInt("Archive:CleanupDraftMinutes", 0),
+    CleanupModules = Get("Archive:CleanupModules", "SO")
+        .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+        .Select(s => s.ToUpperInvariant()).ToArray(),
     CleanupFailedDays = GetInt("Archive:CleanupFailedDays", 7),
     CleanupOrphanDays = GetInt("Archive:CleanupOrphanDays", 0),
 };

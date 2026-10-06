@@ -46,6 +46,10 @@ export interface DocModel {
   sourceDocId?: number;
   splitChildren?: Array<Record<string, any>>;
   mapStatus?: string;
+  updatedAt?: string | null;
+  fileExpiredAt?: string | null;
+  hasFile?: boolean;
+  retentionHours?: number;
   [k: string]: unknown;
 }
 
@@ -252,6 +256,9 @@ export interface InboxRow {
   CreatedBy?: string | null;
   PostedAt?: string | null;
   PostedBy?: string | null;
+  UpdatedAt?: string | null;
+  FileExpiredAt?: string | null;
+  HasFile?: number | boolean | null;
   [k: string]: unknown;
 }
 
@@ -266,6 +273,8 @@ export interface DocumentsPage {
   results: InboxRow[];
   total: number;
   counts?: { all: number; AP: number; II: number } | null;
+  retentionHours?: number;
+  retentionModules?: string[];
 }
 
 /* Real server-side paging for the Document Register: search / date range / module+category /

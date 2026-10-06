@@ -59,7 +59,8 @@ public class ZohoSalesOrderController(
         string? Incoterms,
         string? TaxId,
         ZohoShipToInfo? ShipTo,
-        List<LineOverride>? Lines);
+        List<LineOverride>? Lines,
+        string? Remarks = null);
 
     private record MatchedLine(
         string ItemNo, string? Desc, string? ExtCode, string MaterialId, string? MaterialName,
@@ -134,7 +135,7 @@ public class ZohoSalesOrderController(
         string Subject, string? CustomerRef, string? DeliveryDate,
         string? PaymentTerms, string? PaymentCurrency, string? Incoterms, string? TaxId,
         List<MatchedLine> Lines, List<SkippedLine> Skipped,
-        List<Dictionary<string, object?>> UomRules, string SalesOrg);
+        List<Dictionary<string, object?>> UomRules, string SalesOrg, string? Remarks = null);
 
     private async Task<string> ActorAsync(CancellationToken ct = default) =>
         (await currentUser.RequireAsync(ct)).AuditName;
@@ -244,7 +245,10 @@ public class ZohoSalesOrderController(
             Lines: matched,
             Skipped: skipped,
             UomRules: masterData.Uoms,
-            SalesOrg: salesOrg);
+            SalesOrg: salesOrg,
+            // The document's Remark -> Zoho Sales Order "Remarks" (Multi Line, Megachem Zoho manual
+            // AO-CRM-UM-2026-003 p.302-303). MGT/Zoho only: GLC/SAP carries notes in Item Note 1.
+            Remarks: header.GetStr("remark") is { Length: > 0 } rm ? rm : null);
     }
 
     // Distinct per-line delivery dates (extra.deliveryDate, OCR-prefilled / CS-edited), blanks ignored.
@@ -310,6 +314,7 @@ public class ZohoSalesOrderController(
             paymentCurrency = d.PaymentCurrency,
             incoterms = d.Incoterms,
             taxId = d.TaxId,
+            remarks = d.Remarks,
             paymentTermsOptions,
             paymentCurrencyOptions,
             lines = d.Lines.Select(l => new
@@ -398,6 +403,7 @@ public class ZohoSalesOrderController(
             PaymentCurrency: body.PaymentCurrency is { Length: > 0 } ? body.PaymentCurrency : d.PaymentCurrency,
             Incoterms: body.Incoterms is { Length: > 0 } ? body.Incoterms : d.Incoterms,
             ShipTo: body.ShipTo,
+            Remarks: body.Remarks is { Length: > 0 } ? body.Remarks : d.Remarks,
             SoLines: soLines,
             StillSkipped: stillSkipped,
             Doc: d.Doc,
@@ -408,7 +414,7 @@ public class ZohoSalesOrderController(
         ZohoDeal Deal, string Subject,
         string? TaxId, string? CustomerRef, string? DeliveryDate,
         string? PaymentTerms, string? PaymentCurrency, string? Incoterms,
-        ZohoShipToInfo? ShipTo,
+        ZohoShipToInfo? ShipTo, string? Remarks,
         List<ZohoSalesOrderLine> SoLines, List<SkippedLine> StillSkipped,
         Dictionary<string, object?> Doc,
         List<string> SoItemNos); // itemNo of each SoLines entry (same order) -- used to cut per-delivery-date groups
@@ -473,7 +479,7 @@ public class ZohoSalesOrderController(
                     dealId: a.Deal.Id, accountId: a.Deal.AccountId!, subject: subject, accountCode: a.Deal.AccountCode,
                     taxId: a.TaxId, customerRef: a.CustomerRef, deliveryDate: deliveryDate,
                     paymentTerms: a.PaymentTerms, paymentCurrency: a.PaymentCurrency, incoterms: a.Incoterms,
-                    shipTo: a.ShipTo, items: items);
+                    shipTo: a.ShipTo, items: items, remarks: a.Remarks);
             }
             catch (Exception e)
             {
@@ -495,7 +501,7 @@ public class ZohoSalesOrderController(
                 dealId = a.Deal.Id, dealName = a.Deal.DealName, accountId = a.Deal.AccountId,
                 subject, customerRef = a.CustomerRef, deliveryDate,
                 paymentTerms = a.PaymentTerms, paymentCurrency = a.PaymentCurrency, incoterms = a.Incoterms,
-                taxId = a.TaxId, shipTo = a.ShipTo, lines = items, group = g.Key,
+                taxId = a.TaxId, remarks = a.Remarks, shipTo = a.ShipTo, lines = items, group = g.Key,
             }, PyJson.Options);
             await soPosts.RecordAsync(docId, "SO", g.ItemNos, ok, ok ? result.ZohoId : null,
                 result.Message, "Zoho:Sales_Orders", payloadJson, actor, salesOrg: null);
@@ -595,7 +601,7 @@ public class ZohoSalesOrderController(
                 accountCode: a.Deal.AccountCode, taxId: a.TaxId, customerRef: a.CustomerRef,
                 deliveryDate: multi && g.Key.Length > 0 ? g.Key : a.DeliveryDate,
                 paymentTerms: a.PaymentTerms, paymentCurrency: a.PaymentCurrency, incoterms: a.Incoterms,
-                shipTo: a.ShipTo, items: items);
+                shipTo: a.ShipTo, items: items, remarks: a.Remarks);
             records.Add(record);
         }
 

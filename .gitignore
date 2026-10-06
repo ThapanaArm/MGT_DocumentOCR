@@ -23,3 +23,6 @@ tmp/
 # blocks the push, and a key in the history is a key that has to be rotated.
 # appsettings.Development.json.example shows which fields to fill in.
 backend/src/MgtOcr.Api/appsettings.Development.json
+
+# PaddleOCR-Standalone portable exe + models (hundreds of MB, install per machine)
+tools/

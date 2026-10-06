@@ -3,7 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { useAppState } from '../state/AppState';
 import { useMeta } from '../state/MetaContext';
 import { deleteDocument, listDocumentsPaged, type DocumentsPage, type InboxRow } from '../api/documents';
-import { dt, fmt, moduleLabel, statusBadge } from '../utils/format';
+import { dt, fileRetention, fmt, moduleLabel, statusBadge } from '../utils/format';
 import { OCR_PROVIDER_SHORT } from '../constants/fields';
 import type { ModuleCode } from '../api/types';
 import Pager, { DateRange } from '../components/Pager';
@@ -293,6 +293,25 @@ export default function InboxPage() {
                       )}
                       <td className="reg-col-status">
                         <span className={'badge ' + sb.cls}>{sb.label}</span>{' '}
+                        {(() => {
+                          const fr = fileRetention(
+                            { status: r.Status, hasFile: r.HasFile, fileExpiredAt: r.FileExpiredAt, updatedAt: r.UpdatedAt, createdAt: r.CreatedAt },
+                            (data?.retentionModules ?? ['SO']).includes(r.Module) ? data?.retentionHours : 0,
+                          );
+                          if (fr.kind === 'expired')
+                            return (
+                              <span className="badge b-fail" title={`Original file removed ${dt(fr.expiredAt)} (not posted within the retention period)`}>
+                                <i className="fa-solid fa-file-circle-xmark" /> File expired
+                              </span>
+                            );
+                          if (fr.kind === 'soon')
+                            return (
+                              <span className="badge b-warn" title={`The original file will be removed around ${fr.expiresAt?.toLocaleString('en-GB')} unless the document is posted or edited`}>
+                                <i className="fa-solid fa-hourglass-half" /> File removed in {fr.left}
+                              </span>
+                            );
+                          return null;
+                        })()}{' '}
                         {r.OcrConfidence != null && (
                           <span className="hint">{Math.round(r.OcrConfidence * 100)}%</span>
                         )}

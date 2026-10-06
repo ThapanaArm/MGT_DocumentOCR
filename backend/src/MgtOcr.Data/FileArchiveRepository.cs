@@ -13,6 +13,8 @@ public record ArchiveRecord(string StoredPath, string CompanyCode, string? Remot
 
 // A local file the cleanup job may delete, with the reason (for the log).
 public record CleanupCandidate(string StoredPath, string Reason);
+/// <summary>An archived file due for local deletion; MachineName = the backend that queued it (NULL = before sql/32).</summary>
+public record ArchivedCleanupCandidate(string StoredPath, string? MachineName);
 
 // Persistence for ocr.FileArchive (sql/27_file_archive.sql) and the queries that decide which
 // local files may be archived / removed. A file is keyed by StoredPath because split documents
@@ -34,9 +36,9 @@ public class FileArchiveRepository(DbConnectionFactory factory)
         await conn.ExecuteAsync("""
             MERGE ocr.FileArchive AS t
             USING (SELECT @StoredPath AS StoredPath) s ON t.StoredPath=s.StoredPath
-            WHEN NOT MATCHED THEN INSERT(StoredPath,FileName,CompanyCode,Status,Attempts,DocId,Module,SubPath,PostedAt)
-                 VALUES(@StoredPath,@FileName,@companyCode,'PENDING',0,@docId,@module,@subPath,COALESCE(@PostedAt,SYSDATETIME()));
-            """, new { d.StoredPath, d.FileName, d.PostedAt, companyCode, docId, module, subPath });
+            WHEN NOT MATCHED THEN INSERT(StoredPath,FileName,CompanyCode,Status,Attempts,DocId,Module,SubPath,PostedAt,MachineName)
+                 VALUES(@StoredPath,@FileName,@companyCode,'PENDING',0,@docId,@module,@subPath,COALESCE(@PostedAt,SYSDATETIME()),@machine);
+            """, new { d.StoredPath, d.FileName, d.PostedAt, companyCode, docId, module, subPath, machine = Environment.MachineName });
     }
 
     // Queued files to send now: PENDING, or FAILED with attempts left once its back-off has passed
@@ -148,49 +150,69 @@ public class FileArchiveRepository(DbConnectionFactory factory)
     }
 
     // Archived files whose grace period has passed and whose local copy still exists.
-    public async Task<IEnumerable<CleanupCandidate>> FindArchivedToDeleteAsync(int graceHours, int batch, CancellationToken ct = default)
+    // Only this machine's files (or rows from before sql/32, MachineName NULL): another installation
+    // sharing the database must never decide about a file it doesn't hold.
+    public async Task<IEnumerable<ArchivedCleanupCandidate>> FindArchivedToDeleteAsync(int graceMinutes, int batch, string[] modules, CancellationToken ct = default)
     {
         await using var conn = await factory.OpenAsync(ct);
-        return await conn.QueryAsync<CleanupCandidate>("""
-            SELECT TOP(@batch) StoredPath, 'archived to SharePoint' AS Reason
+        return await conn.QueryAsync<ArchivedCleanupCandidate>("""
+            SELECT TOP(@batch) StoredPath, MachineName
             FROM ocr.FileArchive
             WHERE Status='DONE' AND LocalDeletedAt IS NULL AND RemoteItemId IS NOT NULL
-              AND ArchivedAt < DATEADD(HOUR, -@graceHours, SYSDATETIME())
+              AND ArchivedAt < DATEADD(MINUTE, -@graceMinutes, SYSDATETIME())
+              AND (MachineName IS NULL OR MachineName=@machine)
+              AND Module IN @modules
             ORDER BY ArchivedAt
-            """, new { graceHours, batch });
+            """, new { graceMinutes, batch, modules, machine = Environment.MachineName });
     }
 
     // Files never posted: every referencing document is un-posted and untouched for `days`.
-    public async Task<IEnumerable<CleanupCandidate>> FindStaleDraftsAsync(int days, int batch, CancellationToken ct = default)
+    // idleMinutes: how long every referencing document must have been untouched (config.DraftMinutes; see the
+    // test setting CleanupDraftHours). PARTIAL (some Sales Orders already sent) counts as posted.
+    public async Task<IEnumerable<CleanupCandidate>> FindStaleDraftsAsync(int idleMinutes, int batch, string[] modules, CancellationToken ct = default)
     {
         await using var conn = await factory.OpenAsync(ct);
         return await conn.QueryAsync<CleanupCandidate>("""
             ;WITH allDocs AS (
-                SELECT StoredPath, Status, COALESCE(UpdatedAt,CreatedAt) AS Ts FROM ocr.Document   WHERE StoredPath IS NOT NULL AND StoredPath<>''
+                SELECT StoredPath, Module, Status, COALESCE(UpdatedAt,CreatedAt) AS Ts, FileExpiredAt FROM ocr.Document   WHERE StoredPath IS NOT NULL AND StoredPath<>''
                 UNION ALL
-                SELECT StoredPath, Status, COALESCE(UpdatedAt,CreatedAt) AS Ts FROM ocr.SalesOrder WHERE StoredPath IS NOT NULL AND StoredPath<>''
+                SELECT StoredPath, 'SO' AS Module, Status, COALESCE(UpdatedAt,CreatedAt) AS Ts, FileExpiredAt FROM ocr.SalesOrder WHERE StoredPath IS NOT NULL AND StoredPath<>''
             )
-            SELECT TOP(@batch) StoredPath, 'unposted draft idle > ' + CAST(@days AS varchar(10)) + ' days' AS Reason
+            SELECT TOP(@batch) StoredPath, 'unposted draft idle > ' + CAST(@idleMinutes AS varchar(10)) + ' min' AS Reason
             FROM allDocs
             GROUP BY StoredPath
-            HAVING SUM(CASE WHEN Status='POSTED' THEN 1 ELSE 0 END)=0
-               AND MAX(Ts) < DATEADD(DAY, -@days, SYSDATETIME())
-            """, new { days, batch });
+            HAVING SUM(CASE WHEN Status IN ('POSTED','PARTIAL') THEN 1 ELSE 0 END)=0
+               AND MAX(Ts) < DATEADD(MINUTE, -@idleMinutes, SYSDATETIME())
+               AND SUM(CASE WHEN FileExpiredAt IS NULL THEN 1 ELSE 0 END) > 0
+               AND SUM(CASE WHEN Module IN @modules THEN 0 ELSE 1 END) = 0
+            """, new { idleMinutes, batch, modules });
+    }
+
+    // Stamps every document row that pointed at this file as "file removed after the retention period"
+    // (sql/33_file_expired.sql). UpdatedAt is left alone so the document's own history is unchanged.
+    public async Task MarkFileExpiredAsync(string storedPath, CancellationToken ct = default)
+    {
+        await using var conn = await factory.OpenAsync(ct);
+        await conn.ExecuteAsync("""
+            UPDATE ocr.Document   SET FileExpiredAt=SYSDATETIME() WHERE StoredPath=@storedPath AND FileExpiredAt IS NULL;
+            UPDATE ocr.SalesOrder SET FileExpiredAt=SYSDATETIME() WHERE StoredPath=@storedPath AND FileExpiredAt IS NULL;
+            """, new { storedPath });
     }
 
     // Files of OCR jobs that failed and produced no document.
-    public async Task<IEnumerable<CleanupCandidate>> FindFailedJobFilesAsync(int days, int batch, CancellationToken ct = default)
+    public async Task<IEnumerable<CleanupCandidate>> FindFailedJobFilesAsync(int days, int batch, string[] modules, CancellationToken ct = default)
     {
         await using var conn = await factory.OpenAsync(ct);
         return await conn.QueryAsync<CleanupCandidate>("""
             SELECT TOP(@batch) j.StoredPath, 'failed OCR job idle > ' + CAST(@days AS varchar(10)) + ' days' AS Reason
             FROM ocr.OcrJob j
             WHERE j.Status='FAILED' AND j.StoredPath<>'' AND j.FinishedAt < DATEADD(DAY, -@days, SYSDATETIME())
+              AND j.Module IN @modules
               AND NOT EXISTS(SELECT 1 FROM ocr.Document   d WHERE d.StoredPath=j.StoredPath)
               AND NOT EXISTS(SELECT 1 FROM ocr.SalesOrder s WHERE s.StoredPath=j.StoredPath)
               AND NOT EXISTS(SELECT 1 FROM ocr.OcrJob o WHERE o.StoredPath=j.StoredPath AND o.Status IN ('QUEUED','PROCESSING'))
             GROUP BY j.StoredPath
-            """, new { days, batch });
+            """, new { days, batch, modules });
     }
 
     // True when nothing in the database refers to this file any more (used by the orphan sweep).
@@ -203,6 +225,20 @@ public class FileArchiveRepository(DbConnectionFactory factory)
                           OR EXISTS(SELECT 1 FROM ocr.OcrJob     WHERE StoredPath=@storedPath)
                         THEN 1 ELSE 0 END
             """, new { storedPath }) == 0;
+    }
+
+    // True when another document still uses this file (a split parent and its children share one
+    // file) or an OCR job is still waiting to read it. Finished/failed job rows are only history and
+    // don't keep a file. Used when a document is deleted, to decide whether its file can go too.
+    public async Task<bool> IsFileInUseAsync(string storedPath)
+    {
+        await using var conn = await factory.OpenAsync();
+        return await conn.ExecuteScalarAsync<int>("""
+            SELECT CASE WHEN EXISTS(SELECT 1 FROM ocr.Document   WHERE StoredPath=@storedPath)
+                          OR EXISTS(SELECT 1 FROM ocr.SalesOrder WHERE StoredPath=@storedPath)
+                          OR EXISTS(SELECT 1 FROM ocr.OcrJob     WHERE StoredPath=@storedPath AND Status IN ('QUEUED','PROCESSING'))
+                        THEN 1 ELSE 0 END
+            """, new { storedPath }) == 1;
     }
 
     // ---- In-place compression bookkeeping (sql/28_file_compress.sql) ----

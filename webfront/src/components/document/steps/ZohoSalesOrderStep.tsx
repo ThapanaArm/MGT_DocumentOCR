@@ -109,7 +109,7 @@ function mergeOverrides(
 }
 
 const EMPTY_HEADER: ZohoSalesOrderEditorHeader = {
-  subject: '', customerRef: '', deliveryDate: '', paymentTerms: '', paymentCurrency: '', incoterms: '', taxId: '',
+  subject: '', customerRef: '', deliveryDate: '', paymentTerms: '', paymentCurrency: '', incoterms: '', taxId: '', remarks: '',
 };
 
 const ZohoSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function ZohoSalesOrderStep(
@@ -205,7 +205,7 @@ const ZohoSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function Zoho
     setHeader({
       subject: preview.subject || '', customerRef: preview.customerRef || '', deliveryDate: preview.deliveryDate || '',
       paymentTerms: preview.paymentTerms || '', paymentCurrency: preview.paymentCurrency || '',
-      incoterms: preview.incoterms || '', taxId: preview.taxId || '',
+      incoterms: preview.incoterms || '', taxId: preview.taxId || '', remarks: preview.remarks || '',
     });
     const next: Record<string, LineEdit> = {};
     preview.lines.forEach((line) => {

@@ -207,6 +207,8 @@ export interface ZohoSalesOrderPreview {
   paymentCurrency?: string | null;
   incoterms?: string | null;
   taxId?: string | null;
+  /** Document Remark -> Zoho Sales Order "Remarks". */
+  remarks?: string | null;
   paymentTermsOptions: string[];
   paymentCurrencyOptions: string[];
   lines: ZohoSalesOrderPreviewLine[];
@@ -239,6 +241,7 @@ export interface ZohoSalesOrderEdits {
   paymentCurrency?: string;
   incoterms?: string;
   taxId?: string;
+  remarks?: string;
   /** Delivery address explicitly selected on the Ship-to mapping card. */
   shipTo?: ZohoShipToInfo;
   lines?: ZohoSalesOrderLineEdit[];

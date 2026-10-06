@@ -34,6 +34,7 @@ export interface ArchiveStatus {
   cleanupEnabled: boolean;
   cleanupDryRun: boolean;
   cleanupGraceHours: number;
+  cleanupGraceMinutes?: number;
   intervalSeconds: number;
   targets: ArchiveTarget[];
   /** [{ status, count }] — key casing follows the server's JSON policy. */

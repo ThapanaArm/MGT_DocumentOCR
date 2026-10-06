@@ -227,6 +227,8 @@
   .result{border-radius:var(--r4);padding:18px 20px;margin-bottom:20px;border:1px solid}
   .result.ok{background:var(--green-bg);border-color:var(--brand-line);color:var(--gr1600)}
   .result.bad{background:var(--red-bg);border-color:var(--rd300);color:var(--rd1200)}
+  .result.warn{background:var(--orange-bg);border-color:var(--yl300, #f3d27a);color:#7a5a00}
+  [data-theme="dark"] .result.warn{color:var(--orange)}
   [data-theme="dark"] .result.ok{color:var(--gr1200)}
   [data-theme="dark"] .result.bad{color:var(--rd800)}
   .result h3{margin:0 0 8px;font-size:17px;font-weight:600;display:flex;align-items:center;gap:10px;flex-wrap:wrap}

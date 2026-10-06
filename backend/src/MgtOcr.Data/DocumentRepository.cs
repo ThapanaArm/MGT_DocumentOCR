@@ -312,6 +312,8 @@ public partial class DocumentRepository(Db db)
             ["sapDocNo"] = d.Get("SapDocNo"), ["postedAt"] = d.Get("PostedAt"), ["mapStatus"] = d.Get("MapStatus"),
             ["partnerCode"] = d.Get("PartnerCode"), ["shipToCode"] = d.Get("ShipToCode"),
             ["sourceDocId"] = sourceDocId, ["splitChildren"] = splitChildren,
+            ["updatedAt"] = d.Get("UpdatedAt"), ["fileExpiredAt"] = d.Get("FileExpiredAt"),
+            ["hasFile"] = !string.IsNullOrEmpty(d.GetStr("StoredPath")),
             ["header"] = JsonBodyHelpers.Unwrap(JsonSerializer.Deserialize<Dictionary<string, object?>>(d.GetStr("HeaderJson") is { Length: > 0 } hj ? hj : "{}") ?? new()),
             ["lines"] = lineRows.Select(l => new Dictionary<string, object?>
             {
@@ -346,7 +348,9 @@ public partial class DocumentRepository(Db db)
     private const string DocListCols =
         "DocId,Module,FileName,Status,DocNo,DocDate,PartnerName,PartnerCode," +
         "TotalAmount,Currency,SapDocNo,PostedAt,PostedBy,CreatedAt,CreatedBy,OcrProvider,OcrConfidence,OcrConfidenceNote," +
-        "OcrTokensIn,OcrTokensOut,OcrCost,OcrInputCost,OcrOutputCost,OcrCostCurrency,ApDocCategory";
+        "OcrTokensIn,OcrTokensOut,OcrCost,OcrInputCost,OcrOutputCost,OcrCostCurrency,ApDocCategory," +
+        // File retention (sql/33_file_expired.sql): last activity, when the file was removed, and whether there is a file at all.
+        "UpdatedAt,FileExpiredAt,CASE WHEN StoredPath IS NULL OR StoredPath='' THEN 0 ELSE 1 END AS HasFile";
 
     // Ported from list_documents() (main.py:466-491): SO queries ocr.SalesOrder alone; any other
     // specific module queries ocr.Document filtered by Module; no module unions both tables.

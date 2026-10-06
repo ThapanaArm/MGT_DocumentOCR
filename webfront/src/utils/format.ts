@@ -46,3 +46,39 @@ export const statusBadge = (s: string): StatusBadge => {
   const [cls, label] = map[s] || ['b-idle', s];
   return { cls, label };
 };
+
+/* File retention of a never-posted document (backend: Archive:CleanupDraftHours / CleanupDraftDays,
+   sent as retentionHours). The cleanup worker removes the uploaded file once the document has been
+   untouched (UpdatedAt, else CreatedAt) for that long; FileExpiredAt is stamped when it does. */
+export interface FileRetention {
+  kind: 'none' | 'ok' | 'soon' | 'expired';
+  expiredAt?: string;
+  expiresAt?: Date;
+  left?: string; // "35 min", "5 h", "3 days", or "next cleanup run" when already past due
+}
+
+const leftLabel = (ms: number): string => {
+  if (ms <= 0) return 'next cleanup run';
+  const min = Math.ceil(ms / 60000);
+  if (min < 60) return `${min} min`;
+  const h = Math.floor(min / 60);
+  if (h < 48) return `${h} h`;
+  return `${Math.floor(h / 24)} days`;
+};
+
+export const fileRetention = (
+  d: { status?: string | null; hasFile?: unknown; fileExpiredAt?: unknown; updatedAt?: unknown; createdAt?: unknown },
+  retentionHours: number | null | undefined,
+): FileRetention => {
+  if (d.fileExpiredAt) return { kind: 'expired', expiredAt: String(d.fileExpiredAt) };
+  const hours = Number(retentionHours) || 0;
+  const status = String(d.status || '');
+  if (hours <= 0 || !d.hasFile || status === 'POSTED' || status === 'PARTIAL' || status === 'SPLIT') return { kind: 'none' };
+  const last = new Date(String(d.updatedAt || d.createdAt || ''));
+  if (isNaN(last.getTime())) return { kind: 'none' };
+  const expiresAt = new Date(last.getTime() + hours * 3600000);
+  const ms = expiresAt.getTime() - Date.now();
+  // Warn in the last 20% of the period (at least the last hour, never more than the whole period).
+  const warnMs = Math.min(hours, Math.max(hours * 0.2, 1)) * 3600000;
+  return { kind: ms <= warnMs ? 'soon' : 'ok', expiresAt, left: leftLabel(ms) };
+};

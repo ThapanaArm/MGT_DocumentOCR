@@ -31,6 +31,13 @@ public class AppConfig
     public string GeminiModel { get; init; } = "gemini-2.5-flash";
     public string OpenAiApiKey { get; init; } = "";
     public string OpenAiModel { get; init; } = "gpt-4o";
+    // PaddleOCR-Standalone (local exe). Blank Cmd = look in C:\Program Files\PaddleOCR-CPU|GPU.
+    // Lang "th" = PP-OCRv5 Thai model (also reads English/digits). Device blank = exe default ("cpu" / "gpu:0").
+    public string PaddleOcrCmd { get; init; } = "";
+    public string PaddleOcrLang { get; init; } = "th";
+    public string PaddleOcrDevice { get; init; } = "";
+    public int PaddleOcrMaxPages { get; init; } = 10;
+    public int PaddleOcrTimeoutSec { get; init; } = 300;
 
     public string SapBaseUrl { get; init; } = "";
     public string SapUser { get; init; } = "";
@@ -218,6 +225,23 @@ public class AppConfig
     public int CleanupIntervalMinutes { get; init; } = 60;
     public int CleanupGraceHours { get; init; } = 24;    // keep the local copy this long after archiving
     public int CleanupDraftDays { get; init; } = 30;     // never-posted drafts (0 = never delete)
+    public int CleanupDraftHours { get; init; } = 0;
+    // TEST overrides in minutes (0 = not used): win over CleanupGraceHours / CleanupDraftHours / CleanupDraftDays.
+    public int CleanupGraceMinutes { get; init; } = 0;
+    public int CleanupDraftMinutes { get; init; } = 0;
+    // Effective periods in minutes, whichever setting is in use.
+    public int GraceMinutes => CleanupGraceMinutes > 0 ? CleanupGraceMinutes : Math.Max(0, CleanupGraceHours) * 60;
+    public int DraftMinutes => CleanupDraftMinutes > 0 ? CleanupDraftMinutes
+        : CleanupDraftHours > 0 ? CleanupDraftHours * 60 : Math.Max(0, CleanupDraftDays) * 1440;
+    // Retention of a never-posted document's file in hours (fractional for minute tests), as the UI
+    // should show it. 0 when no file will really be removed (cleanup off, dry run, draft cleanup not set).
+    public double DraftRetentionHours => !CleanupEnabled || CleanupDryRun ? 0 : DraftMinutes / 60.0;
+    // Modules whose uploaded files may be deleted at all (Archive:CleanupModules, comma separated,
+    // default "SO"). Files of any other module are never removed: not after archiving, not as drafts,
+    // not as failed OCR jobs, and not when the document is deleted.
+    public string[] CleanupModules { get; init; } = ["SO"];
+    public bool CleansModule(string? module) => CleanupModules.Contains((module ?? "").Trim().ToUpperInvariant());
+    public double DraftRetentionHoursFor(string? module) => CleansModule(module) ? DraftRetentionHours : 0;     // TEST override of CleanupDraftDays in hours (0 = use days)
     public int CleanupFailedDays { get; init; } = 7;     // failed OCR uploads (0 = never delete)
     public int CleanupOrphanDays { get; init; } = 0;     // files nothing in the DB refers to (0 = off)
 

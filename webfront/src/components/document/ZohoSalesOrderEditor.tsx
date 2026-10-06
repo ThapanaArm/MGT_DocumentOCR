@@ -56,7 +56,7 @@ export default function ZohoSalesOrderEditor({
    *  on a line the automatic match skipped. */
   resolvedDeal: ZohoDeal | null;
   providers: OcrProvider[];
-  header: { subject: string; customerRef: string; deliveryDate: string; paymentTerms: string; paymentCurrency: string; incoterms: string; taxId: string };
+  header: { subject: string; customerRef: string; deliveryDate: string; paymentTerms: string; paymentCurrency: string; incoterms: string; taxId: string; remarks: string };
   onHeaderChange: (patch: Partial<ZohoSalesOrderEditorHeader>) => void;
   lineEdits: Record<string, LineEdit>;
   onLineChange: (itemNo: unknown, patch: Partial<LineEdit>) => void;
@@ -189,6 +189,11 @@ export default function ZohoSalesOrderEditor({
           <div className="f">
             <label>Tax ID</label>
             <input type="text" value={header.taxId} placeholder={preview.taxId || ''} disabled={posted} onChange={(e) => onHeaderChange({ taxId: e.target.value })} />
+          </div>
+          <div className="f" style={{ gridColumn: '1 / -1' }}>
+            {/* Zoho "Remarks" (Terms and Conditions block). Pre-filled from the document's Remark. */}
+            <label>Remarks</label>
+            <textarea rows={2} value={header.remarks} placeholder={preview.remarks || ''} disabled={posted} onChange={(e) => onHeaderChange({ remarks: e.target.value })} />
           </div>
           {preview.accountCode && (
             <div className="f">
@@ -389,5 +394,6 @@ export type ZohoSalesOrderEditorHeader = {
   paymentCurrency: string;
   incoterms: string;
   taxId: string;
+  remarks: string;
 };
 

@@ -19,9 +19,10 @@ public class FileCleanupWorker(AppConfig config, FileArchiveRepository repo, ILo
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
         if (!config.CleanupEnabled) { log.LogInformation("File cleanup is disabled (Archive:CleanupEnabled=false)"); return; }
-        log.LogInformation("File cleanup enabled (DryRun={DryRun}, every {Min} min)", config.CleanupDryRun, config.CleanupIntervalMinutes);
+        log.LogInformation("File cleanup enabled (DryRun={DryRun}, every {Min} min, modules {Modules})", config.CleanupDryRun,
+            config.CleanupIntervalMinutes, string.Join(",", config.CleanupModules));
 
-        try { await Task.Delay(TimeSpan.FromMinutes(1), ct); } catch (OperationCanceledException) { return; }
+        try { await Task.Delay(TimeSpan.FromSeconds(30), ct); } catch (OperationCanceledException) { return; }
         var outage = new DbOutage("File cleanup", log);
         while (!ct.IsCancellationRequested)
         {
@@ -29,36 +30,78 @@ public class FileCleanupWorker(AppConfig config, FileArchiveRepository repo, ILo
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
             catch (Exception e) { outage.Failed(e, "File cleanup run"); }
 
-            try { await Task.Delay(TimeSpan.FromMinutes(Math.Max(5, config.CleanupIntervalMinutes)), ct); }
+            try { await Task.Delay(TimeSpan.FromMinutes(Math.Max(1, config.CleanupIntervalMinutes)), ct); }
             catch (OperationCanceledException) { break; }
         }
     }
 
     private async Task RunOnceAsync(CancellationToken ct)
     {
+        if (config.CleanupModules.Length == 0) { log.LogInformation("File cleanup: Archive:CleanupModules is empty - nothing is deleted"); return; }
         var freed = 0L; var count = 0;
 
-        foreach (var c in await repo.FindArchivedToDeleteAsync(Math.Max(0, config.CleanupGraceHours), Batch, ct))
+        // Archived files past the grace period. Counted per outcome so a run that deletes nothing still
+        // says WHY in the log (before, "nothing happened" and "every file belonged to the other
+        // installation" looked the same: silence).
+        var archived = (await repo.FindArchivedToDeleteAsync(config.GraceMinutes, Batch, config.CleanupModules, ct)).ToList();
+        int otherInstall = 0, alreadyGone = 0, archivedDeleted = 0;
+        var me = Environment.MachineName;
+        foreach (var a in archived)
         {
+            var c = new CleanupCandidate(a.StoredPath, "archived to SharePoint");
             // A file stored by another installation sharing this database (dev PC vs server) is not
             // ours to delete or to mark - leave it for the backend whose uploads folder holds it.
             var full = SafeFull(c.StoredPath);
-            if (full is null) continue;
+            if (full is null) { otherInstall++; continue; }
+            var ours = string.Equals(a.MachineName, me, StringComparison.OrdinalIgnoreCase);
+            var missing = !File.Exists(full);
+            if (missing) alreadyGone++;
             var (deleted, bytes) = Delete(c);
-            if (deleted) { count++; freed += bytes; }
-            // Mark even when the file was already gone, so the row stops being re-selected.
-            if (!config.CleanupDryRun && !File.Exists(full)) await repo.MarkLocalDeletedAsync(c.StoredPath);
+            if (deleted) { count++; archivedDeleted++; freed += bytes; }
+            if (config.CleanupDryRun) continue;
+            // Mark LocalDeletedAt only when WE deleted it, or the row is ours and the file is really
+            // gone. Before sql/32 (MachineName NULL) a missing file proves nothing: the dev PC and the
+            // server can have the same uploads path, and the "missing" one used to mark the row so
+            // the machine actually holding the file never deleted it.
+            if ((deleted && !File.Exists(full)) || (missing && ours))
+                await repo.MarkLocalDeletedAsync(c.StoredPath);
+        }
+        if (archived.Count > 0)
+            log.LogInformation(
+                "File cleanup: {N} archived file(s) past the {M} min grace period - deleted {Del}, already gone {Gone}, " +
+                "belong to another installation (not under {Dir}) {Other}{Dry}",
+                archived.Count, config.GraceMinutes, archivedDeleted, alreadyGone, config.UploadDir, otherInstall,
+                config.CleanupDryRun ? " [DRY RUN - nothing actually deleted]" : "");
+        else
+            log.LogInformation("File cleanup: no archived file is past the {M} min grace period yet", config.GraceMinutes);
+
+        // Never-posted drafts: CleanupDraftMinutes / CleanupDraftHours (tests) win over CleanupDraftDays.
+        var draftMinutes = config.DraftMinutes;
+        if (draftMinutes > 0)
+        {
+            var drafts = 0;
+            foreach (var c in await repo.FindStaleDraftsAsync(draftMinutes, Batch, config.CleanupModules, ct))
+            {
+                var (d, b) = Delete(c);
+                if (!d) continue;
+                count++; drafts++; freed += b;
+                // Tell the UI the file is gone for good ("file expired" badge/banner).
+                if (!config.CleanupDryRun) await repo.MarkFileExpiredAsync(c.StoredPath, ct);
+            }
+            log.LogInformation("File cleanup: {N} unposted draft file(s) idle > {M} min removed{Dry}", drafts, draftMinutes,
+                config.CleanupDryRun ? " [DRY RUN]" : "");
         }
 
-        if (config.CleanupDraftDays > 0)
-            foreach (var c in await repo.FindStaleDraftsAsync(config.CleanupDraftDays, Batch, ct))
-            { var (d, b) = Delete(c); if (d) { count++; freed += b; } }
-
         if (config.CleanupFailedDays > 0)
-            foreach (var c in await repo.FindFailedJobFilesAsync(config.CleanupFailedDays, Batch, ct))
+            foreach (var c in await repo.FindFailedJobFilesAsync(config.CleanupFailedDays, Batch, config.CleanupModules, ct))
             { var (d, b) = Delete(c); if (d) { count++; freed += b; } }
 
-        if (config.CleanupOrphanDays > 0)
+        // An orphan has no document, so its module is unknown: only sweep when every module is cleaned.
+        var allModules = new[] { "SO", "AP", "II", "PODP" }.All(config.CleansModule);
+        if (config.CleanupOrphanDays > 0 && !allModules)
+            log.LogInformation("File cleanup: orphan sweep skipped (Archive:CleanupModules={Modules} does not cover every module)",
+                string.Join(",", config.CleanupModules));
+        if (config.CleanupOrphanDays > 0 && allModules)
         {
             var cutoff = DateTime.Now.AddDays(-config.CleanupOrphanDays);
             foreach (var f in Directory.EnumerateFiles(config.UploadDir, "*", SearchOption.AllDirectories).Take(20000))

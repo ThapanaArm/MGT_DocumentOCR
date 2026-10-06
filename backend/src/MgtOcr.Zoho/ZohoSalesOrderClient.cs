@@ -222,12 +222,13 @@ public class ZohoSalesOrderClient(ZohoClient zoho)
         string? paymentCurrency,
         string? incoterms,
         ZohoShipToInfo? shipTo,
-        List<ZohoSalesOrderLine> items)
+        List<ZohoSalesOrderLine> items,
+        string? remarks = null)
     {
         var module = await ResolveModuleAsync();
         var record = await BuildRecordAsync(
             dealId, accountId, subject, accountCode, taxId, customerRef, deliveryDate,
-            paymentTerms, paymentCurrency, incoterms, shipTo, items);
+            paymentTerms, paymentCurrency, incoterms, shipTo, items, remarks);
         return await zoho.InsertAsync(module, record);
     }
 
@@ -248,7 +249,8 @@ public class ZohoSalesOrderClient(ZohoClient zoho)
         string? paymentCurrency,
         string? incoterms,
         ZohoShipToInfo? shipTo,
-        List<ZohoSalesOrderLine> items)
+        List<ZohoSalesOrderLine> items,
+        string? remarks = null)
     {
         var itemsField = await ResolveOrderedItemsFieldAsync();
 
@@ -265,6 +267,9 @@ public class ZohoSalesOrderClient(ZohoClient zoho)
         if (!string.IsNullOrWhiteSpace(paymentTerms)) record["Payment_Terms"] = paymentTerms;
         if (!string.IsNullOrWhiteSpace(paymentCurrency)) record["Payment_Currency"] = paymentCurrency;
         if (!string.IsNullOrWhiteSpace(incoterms)) record["Incoterms"] = incoterms;
+        // "Remarks" (Multi Line, 32000 chars) in the Sales Order's Terms and Conditions block --
+        // field confirmed in Megachem's Zoho CRM manual AO-CRM-UM-2026-003, pages 302-303.
+        if (!string.IsNullOrWhiteSpace(remarks)) record["Remarks"] = remarks.Length > 32000 ? remarks[..32000] : remarks;
 
         // CORRECTED 2026-09-22 against Megachem's own Zoho CRM user manual (AO-CRM-UM-2026-003,
         // section 5.9.6 "ใบสั่งขาย" (Sales Order), pages 300-303, "Select Address"/"Address

@@ -38,6 +38,14 @@ public class OcrEngine(AppConfig config)
         new("gemini", "Gemini Vision (AI)",
             "Google's Vision model reads the document image directly and understands context — requires GEMINI_API_KEY in .env (billed per call)",
             !string.IsNullOrEmpty(config.GeminiApiKey)),
+        new("paddle_gemini", "PaddleOCR + Gemini (economical)",
+            "PaddleOCR reads the characters on this server (free, Thai model), then only the text is sent to Gemini to structure as JSON — " +
+            "much cheaper than Gemini Vision; accuracy depends on how well PaddleOCR reads the scan",
+            PaddleOcr.IsReady(config) && !string.IsNullOrEmpty(config.GeminiApiKey)),
+        new("paddle", "PaddleOCR only (free, local)",
+            "PaddleOCR reads the characters on this server and the built-in rules pick out the fields — no AI cost, " +
+            "but fields/lines are found by pattern matching, so expect more manual correction",
+            PaddleOcr.IsReady(config)),
         new("openai", "ChatGPT Vision (AI)",
             "OpenAI's GPT-4o/GPT-5 reads the document image directly and understands context — requires OPENAI_API_KEY in .env (billed per call)",
             !string.IsNullOrEmpty(config.OpenAiApiKey)),
@@ -76,6 +84,8 @@ public class OcrEngine(AppConfig config)
         ["claude_text"] = "OCR reads the text first then Claude structures it; accuracy depends on the text quality from the first OCR pass",
         ["gemini"] = "Read with Gemini Vision from the document image; may misinterpret in some places",
         ["openai"] = "Read with ChatGPT Vision from the document image; may misinterpret in some places",
+        ["paddle_gemini"] = "PaddleOCR reads the text first then Gemini structures it; accuracy depends on the text quality from PaddleOCR",
+        ["paddle"] = "Read with PaddleOCR and rule-based field extraction (no AI); check fields and line items carefully",
     };
 
     private static readonly Dictionary<string, string> ApImportant = new()
@@ -109,7 +119,7 @@ public class OcrEngine(AppConfig config)
     private static readonly Dictionary<string, (decimal In, decimal Out)> TokenPrice = new()
     {
         ["claude"] = (2.00m, 10.00m), ["claude_text"] = (2.00m, 10.00m),
-        ["gemini"] = (0.75m, 3.75m), ["openai"] = (2.50m, 10.00m),
+        ["gemini"] = (0.75m, 3.75m), ["paddle_gemini"] = (0.75m, 3.75m), ["openai"] = (2.50m, 10.00m),
     };
 
     // extract(): wraps ExtractDispatchAsync to add confidenceNote + estimated cost uniformly for
@@ -183,6 +193,23 @@ public class OcrEngine(AppConfig config)
             var outDoc = await ClaudeOcr.TextExtractAsync(module, preText, config, salesOrg);
             if (outDoc != null) return outDoc;
             return FailedResult(module, "Could not connect to Claude (structuring from text), or ANTHROPIC_API_KEY is not set in .env");
+        }
+        if (provider is "paddle" or "paddle_gemini")
+        {
+            var (pText, pErr) = await PaddleOcr.ExtractTextAsync(path, config);
+            if (string.IsNullOrWhiteSpace(pText))
+                return FailedResult(module, pErr != "" ? pErr : "PaddleOCR returned no text");
+            if (provider == "paddle_gemini")
+            {
+                var (gDoc, gErr) = await GeminiOcr.TextExtractAsync(module, pText, config, salesOrg, "paddle_gemini");
+                if (gDoc != null) return gDoc;
+                return FailedResult(module, "PaddleOCR read the text, but Gemini could not structure it: " + (gErr ?? "unknown error"));
+            }
+            var blocks = ext == ".pdf" ? PdfExtraction.PdfBlocks(path) : null;
+            var pDoc = HeaderParser.ParseText(pText, module, blocks, "paddle", config.OwnCompanyKeywords, config.OwnTaxId);
+            if (!(pDoc.Lines.Count > 0 || HasValue(pDoc.Header, "vendorTaxId") || HasValue(pDoc.Header, "customerTaxId")))
+                pDoc.Confidence = 0.3;
+            return pDoc;
         }
         if (provider == "typhoon")
         {

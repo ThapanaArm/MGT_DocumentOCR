@@ -101,7 +101,7 @@ export default function ArchivePage() {
                 </span>
                 <span className={'badge ' + (data.cleanupEnabled && !data.cleanupDryRun ? 'b-ok' : 'b-idle')}>
                   Delete local file after archive:{' '}
-                  {!data.cleanupEnabled ? 'OFF' : data.cleanupDryRun ? 'DRY RUN (log only)' : `ON (after ${data.cleanupGraceHours} h)`}
+                  {!data.cleanupEnabled ? 'OFF' : data.cleanupDryRun ? 'DRY RUN (log only)' : `ON (after ${(data.cleanupGraceMinutes ?? data.cleanupGraceHours * 60) < 60 ? `${data.cleanupGraceMinutes} min` : `${(data.cleanupGraceMinutes ?? data.cleanupGraceHours * 60) / 60} h`})`}
                 </span>
                 <span className="badge b-ok">Archived {countOf(data, 'DONE')}</span>
                 <span className="badge b-warn">Pending {countOf(data, 'PENDING')}</span>

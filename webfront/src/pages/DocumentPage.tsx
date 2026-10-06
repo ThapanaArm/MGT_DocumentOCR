@@ -35,11 +35,11 @@ import {
   dutyLabelEn,
 } from '../constants/fields';
 import { SEND_DISABLED } from '../constants/flags';
-import { dt, fmt, fmtCost, intFmt, moduleLabel, statusBadge } from '../utils/format';
+import { dt, fileRetention, fmt, fmtCost, intFmt, moduleLabel, statusBadge } from '../utils/format';
 import { findDupes } from '../utils/dupes';
 import Steps from '../components/Steps';
 import Modal, { ModalHeader } from '../components/Modal';
-import OcrProviderSelect from '../components/OcrProviderSelect';
+import OcrProviderSelect, { READ_ENGINE_IDS } from '../components/OcrProviderSelect';
 import FieldGrid from '../components/document/FieldGrid';
 import TabbedGroups from '../components/document/TabbedGroups';
 import DetailTable from '../components/document/DetailTable';
@@ -470,6 +470,22 @@ function fillMissingTaxIds<T extends { issuerName?: string; issuerTaxId?: string
 // re-fetch. Never changes what's actually sent to Zoho by itself -- that only happens once the
 // same override is included as a line's materialId in the POST .../create request (see
 // the Zoho step), which the backend independently re-validates against the Deal's own Items.
+/* "Use & Save" learning (SAP and Zoho paths). The mapping engine (MappingEngine.MatchMaterial)
+   recognises a line next time by the CUSTOMER's own wording: ExtCode = MaterialCodeCode, then
+   ExtDesc = MaterialCodeName (>= 85% similar). So the row must store the DOCUMENT's code/description,
+   not the SAP/Zoho English name — storing the SAP name meant the next PO never matched and the user
+   had to pick the item again every time (Megachem, 6 Oct 2026, customer 1000609 / HYCE02-JP-LO-01).
+   A customer can word the same item differently on different POs, so an existing row only counts
+   when it would actually match THIS line; otherwise another row is added for the same SAP code. */
+const normItemText = (s: unknown) => String(s ?? '').toLowerCase().replace(/\s+/g, ' ').trim();
+function customerMaterialCoversLine(m: Record<string, any>, line: { extCode?: string; desc?: string }): boolean {
+  const ext = String(line.extCode ?? '').trim().toUpperCase();
+  const desc = normItemText(line.desc);
+  if (!ext && !desc) return true; // nothing on the line to learn from
+  if (ext && String(m.MaterialCodeCode ?? '').trim().toUpperCase() === ext) return true;
+  return !!desc && normItemText(m.MaterialCodeName) === desc;
+}
+
 export default function DocumentPage() {
   const { docId } = useParams<{ docId: string }>();
   const id = Number(docId);
@@ -753,6 +769,9 @@ export default function DocumentPage() {
   // mapping/tax/wht/gl) for BOTH posted and split, while `posted` alone still drives the posted-only
   // UI (the "sent to SAP" banner, step 3). Split shows its own banner + status below.
   const locked = posted || isSplit || partial;
+  // Uploaded file of a never-posted document is removed after the retention period (FileCleanupWorker).
+  const retention = fileRetention(doc, doc.retentionHours);
+  const fileExpired = retention.kind === 'expired';
   const glItems = h.glItems || [];
   const showDetail = doc.module !== 'II' && doc.module !== 'PODP';
   const showGlItems = doc.module === 'AP' || doc.module === 'II';
@@ -1065,9 +1084,13 @@ export default function DocumentPage() {
       }
       setMasterEdit({
         tab: 'shiptos', rowKey: null,
-        prefill: { SalesOrg: companyCode, ShipToCode: info.code || h.shipToCode || '', CustomerCode: custCode,
+        // ShipToCode / ShipToName / ShipToAddress are the DOCUMENT's own text (constants/fields.ts
+        // marks them source:'document'): the mapping engine matches the next PO's ship-to name /
+        // address against them, so SAP/Zoho wording here would stop it recognising the location.
+        // Zoho's own code and address live in SapShipToCode and the per-field columns below.
+        prefill: { SalesOrg: companyCode, ShipToCode: h.shipToCode || '', CustomerCode: custCode,
           SapShipToCode: info.code || custCode, ShipToName: h.shipToName || '',
-          ShipToAddress: info.address || h.shipToAddress || '',
+          ShipToAddress: h.shipToAddress || '',
           // Address sub-fields added 2026-09-22 -- info already carries every Zoho field
           // individually (see ZohoShipToInfo); previously only the collapsed info.address string
           // above was kept, so the persisted "main table" only ever showed one joined row.
@@ -1098,15 +1121,10 @@ export default function DocumentPage() {
         tab: 'shiptos', rowKey: null,
         prefill: { SalesOrg: companyCode, ShipToCode: h.shipToCode || '', CustomerCode: custCode, SapShipToCode: code,
           ShipToName: h.shipToName || '',
-          // Previously fell back straight to the document's own OCR'd address text and never
-          // used SAP's own data at all, even though it was right there on `link.partner` --
-          // fixed 2026-09-22 alongside the SAP address field expansion (see
-          // SapBusinessPartnerClient.BusinessPartner). SAP's real address wins when we have it;
-          // the OCR text is now only a fallback for when SAP returned nothing.
-          ShipToAddress: [bp?.addressHouseNumber, bp?.addressStreet, bp?.addressStreet2, bp?.addressStreet3,
-            bp?.addressStreet4, bp?.addressStreet5, bp?.addressDistrict, bp?.addressCity,
-            bp?.addressPostalCode, bp?.addressCountry]
-            .filter((v) => v && v.trim() !== '').join(', ') || h.shipToAddress || '',
+          // The DOCUMENT's address (Megachem, 6 Oct 2026): ShipToAddress is what the next PO's
+          // address is matched against, so it must be the customer's own wording. SAP's real
+          // address is kept in the per-field columns below (shown on the mapping card).
+          ShipToAddress: h.shipToAddress || '',
           HouseNumber: bp?.addressHouseNumber || '', Street: bp?.addressStreet || '',
           Street2: bp?.addressStreet2 || '', Street3: bp?.addressStreet3 || '',
           Street4: bp?.addressStreet4 || '', Street5: bp?.addressStreet5 || '',
@@ -1263,16 +1281,18 @@ export default function DocumentPage() {
         const existingCm = masters.custmaterials.find((m) =>
           m.MaterialCodeSAP === material.materialCode
             && m.CustomerCode === customerCode
-            && String(m.SalesOrg) === companyCode,
+            && String(m.SalesOrg) === companyCode
+            && customerMaterialCoversLine(m, line),
         );
         if (!existingCm) {
           await createMaster('custmaterials', {
             SalesOrg: companyCode,
             CustomerCode: customerCode,
+            // MaterialCodeCode is required by the master form, so the SAP code stands in when the
+            // document has no customer item code (harmless: matching only uses it when the line has one).
             MaterialCodeCode: line.extCode || material.materialCode,
-            // Prefer the SAP (English) description so CustomerMaterial names stay English; the OCR
-            // line text (often Thai) is only a fallback when SAP returns no description.
-            MaterialCodeName: material.materialDescription || line.desc,
+            // The DOCUMENT's wording, so the next PO is recognised (see customerMaterialCoversLine).
+            MaterialCodeName: line.desc || material.materialDescription,
             MaterialCodeSAP: material.materialCode,
             Isactive: 1,
           });
@@ -1306,14 +1326,16 @@ export default function DocumentPage() {
       const existingCm = masters.custmaterials.find((m) =>
         m.MaterialCodeSAP === matCode
           && m.CustomerCode === customerCode
-          && String(m.SalesOrg) === companyCode,
+          && String(m.SalesOrg) === companyCode
+          && customerMaterialCoversLine(m, line),
       );
       if (!existingCm) {
         await createMaster('custmaterials', {
           SalesOrg: companyCode,
           CustomerCode: customerCode,
           MaterialCodeCode: line.extCode || matCode,
-          MaterialCodeName: item.materialName || item.materialDescription || line.desc,
+          // The DOCUMENT's wording, so the next PO is recognised (see customerMaterialCoversLine).
+          MaterialCodeName: line.desc || item.materialName || item.materialDescription,
           MaterialCodeSAP: matCode,
           Isactive: 1,
         });
@@ -1699,7 +1721,8 @@ export default function DocumentPage() {
   // (re-OCR engine, Chat-fix AI, Zoho step) shows only Gemini. Falls back to the full list only if
   // no Gemini engine is present, so a control is never empty.
   const allProviders = ocrProviders ?? [];
-  const geminiProviders = allProviders.filter((p) => p.id.toLowerCase().includes('gemini'));
+  // Exact id: 'paddle_gemini' also contains "gemini" but is an OCR engine, not a chat AI.
+  const geminiProviders = allProviders.filter((p) => p.id.toLowerCase() === 'gemini');
   const providers = geminiProviders.length ? geminiProviders : allProviders;
 
   // Shared props for the item tables (used standalone for SO/II and inside the AP item tabs).
@@ -1710,6 +1733,9 @@ export default function DocumentPage() {
     posted: locked,
     onEditLine: editLine,
     onEditLineExtra: editLineExtra,
+    // Save + re-map silently (same path setLineSalesEmployee uses), so the note is stored and
+    // the SAP/Zoho payload — built from the stored document — includes it.
+    onCommitLineExtra: () => { if (!locked) runMap(true); },
     onManualLine: setManualLine,
     onDelLine: delLine,
     onAddLine: addLine,
@@ -1831,6 +1857,31 @@ export default function DocumentPage() {
         })()
       )}
 
+      {fileExpired && (
+        <div className="result warn">
+          <h3>
+            <i className="fa-solid fa-file-circle-xmark" /> Original file removed
+          </h3>
+          <div>
+            The uploaded file was removed on {dt(retention.expiredAt)} because this document was not posted within
+            the retention period. The data read from it is still here and can be edited and posted, but View document
+            and Re-read Document are no longer available. Upload the file again if you need it.
+          </div>
+        </div>
+      )}
+      {retention.kind === 'soon' && (
+        <div className="result warn">
+          <h3>
+            <i className="fa-solid fa-hourglass-half" /> Original file will be removed in {retention.left}
+          </h3>
+          <div>
+            This document has not been posted. Its uploaded file is kept for a limited time and will be removed around{' '}
+            {retention.expiresAt?.toLocaleString('en-GB')}. Post the document, or save a change to it to restart the
+            countdown.
+          </div>
+        </div>
+      )}
+
       {isSplit && (
         <div className="result">
           <h3>
@@ -1914,15 +1965,17 @@ export default function DocumentPage() {
           <div className="card-h-actions">
           {!posted && !isSplit && !doc.sourceDocId && (
             <OcrProviderSelect
-              providers={providers}
+              providers={allProviders}
               value={reocrEngine}
               onChange={setReocrEngine}
+              choices={READ_ENGINE_IDS}
             />
           )}
           <button
             className="btn sm primary"
             onClick={doReocr}
-            disabled={posted || isSplit || !!doc.sourceDocId}
+            disabled={posted || isSplit || !!doc.sourceDocId || fileExpired}
+            title={fileExpired ? 'The original file was removed after the retention period' : undefined}
           >
             <i className="fa-solid fa-arrow-rotate-right" /> Re-read Document
           </button>
@@ -1956,7 +2009,12 @@ export default function DocumentPage() {
               )}
             </div>
           )}
-          <button className="btn sm ghost" onClick={() => setReviewOpen(true)}>
+          <button
+            className="btn sm ghost"
+            onClick={() => setReviewOpen(true)}
+            disabled={fileExpired}
+            title={fileExpired ? 'The original file was removed after the retention period' : undefined}
+          >
             <i className="fa-solid fa-eye" /> View document
           </button>
           <button className="btn sm ghost" onClick={() => navigate('/import/' + doc.module)}>

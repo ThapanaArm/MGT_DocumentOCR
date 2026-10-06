@@ -285,11 +285,24 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             results = r.Rows,
             total = r.Total,
             counts = r.CountAll == null ? null : new { all = r.CountAll, AP = r.CountAP, II = r.CountII },
+            retentionHours = config.DraftRetentionHours,   // UI: "file will be removed in ..." warning
+            retentionModules = config.CleanupModules,       // ... only for these modules
         });
     }
 
     [HttpGet("api/documents/{docId:int}")]
-    public async Task<IActionResult> ReadDocument(int docId) => Ok(await repo.GetDocumentAsync(docId));
+    public async Task<IActionResult> ReadDocument(int docId)
+    {
+        var d = await repo.GetDocumentAsync(docId);
+        d["retentionHours"] = config.DraftRetentionHoursFor(d.GetStr("module"));   // UI: "file will be removed in ..." warning
+        return Ok(d);
+    }
+
+    // 404 text for a missing source file: say so plainly when the cleanup removed it after the retention period.
+    private static string MissingFileMessage(object? fileExpiredAt) =>
+        fileExpiredAt is DateTime t
+            ? $"The original file was removed on {t:dd/MM/yyyy HH:mm} because the document was not posted within the retention period"
+            : "Original file not found";
 
     [HttpPut("api/documents/{docId:int}")]
     public async Task<IActionResult> SaveDocument(int docId, [FromBody] Dictionary<string, object?> rawBody)
@@ -358,12 +371,42 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             throw new HttpApiException(400, "This document has been posted (fully or partly) and cannot be deleted");
         var module = doc.GetStr("module");
         var docT = DocumentTables.For(module).Doc;
+        dynamic? fileRow = await GetDbInstance().QueryOneAsync($"SELECT StoredPath FROM {docT} WHERE DocId=@docId", new { docId });
+        string storedPath = (string?)fileRow?.StoredPath ?? "";
         await using (var conn = await GetDbAsync())
             await conn.ExecuteAsync($"DELETE FROM {docT} WHERE DocId=@docId", new { docId });
+        // Only modules listed in Archive:CleanupModules (default SO) lose their file with the document.
+        var fileNote = config.CleansModule(module) ? await DeleteStoredFileIfUnusedAsync(storedPath) : "";
         var header = (Dictionary<string, object?>)doc["header"]!;
         var docNo = header.GetStr("invoiceNo") is { Length: > 0 } inv ? inv : header.GetStr("poNo");
-        await repo.LogAuditAsync(docId, module, "DELETE", user, detail: "Deleted document", docNo: docNo, fileName: doc.GetStr("fileName"));
+        await repo.LogAuditAsync(docId, module, "DELETE", user, detail: "Deleted document" + fileNote, docNo: docNo, fileName: doc.GetStr("fileName"));
         return Ok(new { ok = true });
+    }
+
+    // Deleting a document now removes its uploaded file too (before, only the DB row went and the
+    // file stayed in uploads forever). Kept when: another document still uses it (split parent /
+    // children share one file), an OCR job is still waiting on it, it isn't under THIS installation's
+    // uploads folder (dev PC and server share the database), or it is already gone. Best effort:
+    // the document is already deleted, a file that can't be removed is only logged.
+    private async Task<string> DeleteStoredFileIfUnusedAsync(string storedPath)
+    {
+        if (string.IsNullOrWhiteSpace(storedPath)) return "";
+        try
+        {
+            if (await archive.IsFileInUseAsync(storedPath)) return " (file kept: still used by another document)";
+            var full = Path.GetFullPath(storedPath, config.UploadDir);
+            var root = Path.GetFullPath(config.UploadDir).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            if (!full.StartsWith(root, StringComparison.OrdinalIgnoreCase)) return " (file kept: not in this server's uploads folder)";
+            if (!System.IO.File.Exists(full)) return "";
+            System.IO.File.Delete(full);
+            return " and its uploaded file";
+        }
+        catch (Exception e)
+        {
+            HttpContext.RequestServices.GetRequiredService<ILogger<DocumentsController>>()
+                .LogWarning(e, "Document deleted but its file {Path} could not be removed", storedPath);
+            return " (file could not be removed: " + e.Message + ")";
+        }
     }
 
     [HttpPost("api/documents/{docId:int}/reocr")]
@@ -371,14 +414,16 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     {
         var body = JsonBodyHelpers.Unwrap(rawBody ?? new());
         var docT = DocumentTables.ForId(docId).Doc;
-        dynamic? row = await GetDbInstance().QueryOneAsync($"SELECT Module, StoredPath, FileName FROM {docT} WHERE DocId=@docId", new { docId });
+        dynamic? row = await GetDbInstance().QueryOneAsync($"SELECT Module, StoredPath, FileName, FileExpiredAt FROM {docT} WHERE DocId=@docId", new { docId });
         if (row == null) throw new HttpApiException(404, "Document not found");
         string storedPath = row.StoredPath ?? ""; string module = row.Module; string fileNameOnDisk = row.FileName ?? "";
+        object? fileExpiredAt = row.FileExpiredAt;
 
         var doc = await repo.GetDocumentAsync(docId);
         if (doc.GetStr("status") is "POSTED" or "PARTIAL") throw new HttpApiException(400, "This document has been posted (fully or partly) and cannot be re-read");
         if (doc.GetStr("status") == "SPLIT") throw new HttpApiException(400, "This document has already been split and cannot be re-read (kept as a reference for the split documents)");
         if (doc.Get("sourceDocId") != null) throw new HttpApiException(400, "This document is a split part of another document and cannot be re-read (it would overwrite the split lines with the full document data)");
+        if (fileExpiredAt is DateTime) throw new HttpApiException(400, MissingFileMessage(fileExpiredAt) + " - it cannot be re-read");
         if (storedPath.Length == 0 || !System.IO.File.Exists(storedPath)) throw new HttpApiException(400, "Original file not found (this document may have been created from a sample set)");
 
         var t0 = DateTime.UtcNow;
@@ -748,9 +793,10 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     public async Task<IActionResult> DocumentFile(int docId)
     {
         var docT = DocumentTables.ForId(docId).Doc;
-        dynamic? d = await GetDbInstance().QueryOneAsync($"SELECT StoredPath, FileName, Module FROM {docT} WHERE DocId=@docId", new { docId });
+        dynamic? d = await GetDbInstance().QueryOneAsync($"SELECT StoredPath, FileName, Module, FileExpiredAt FROM {docT} WHERE DocId=@docId", new { docId });
         string? path = d?.StoredPath;
         if (d == null || string.IsNullOrEmpty(path)) throw new HttpApiException(404, "Original file not found");
+        object? expiredAt = d.FileExpiredAt;
         string fileName = d.FileName ?? "";
         string docModule = (string?)d.Module ?? "";
         if (!System.IO.File.Exists(path))
@@ -758,7 +804,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             // Local copy is gone (removed after archiving) - stream it back from SharePoint if it was archived.
             var arch = await archive.FindAsync(path);
             var target = arch is { Status: "DONE", RemoteItemId: not null } ? graph.TargetFor(arch.CompanyCode, docModule) : null;
-            if (arch?.RemoteItemId == null || target == null) throw new HttpApiException(404, "Original file not found");
+            if (arch?.RemoteItemId == null || target == null) throw new HttpApiException(404, MissingFileMessage(expiredAt));
             try
             {
                 var res = await graph.OpenAsync(target, arch.RemoteItemId, HttpContext.RequestAborted);

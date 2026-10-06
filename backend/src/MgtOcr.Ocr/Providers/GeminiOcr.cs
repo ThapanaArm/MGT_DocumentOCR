@@ -127,6 +127,22 @@ public static partial class GeminiOcr
         }
     }
 
+    /// <summary>Text-only structuring: another OCR engine (PaddleOCR) has already read the characters,
+    /// so only the text goes to Gemini — no images — with the same JSON schema/rules as the Vision read.
+    /// Much smaller request than Vision, so it is cheaper and faster.</summary>
+    public static async Task<(ParsedDocument? Doc, string? Error)> TextExtractAsync(
+        string module, string text, AppConfig config, string salesOrg = "", string providerId = "paddle_gemini")
+    {
+        if (string.IsNullOrEmpty(config.GeminiApiKey))
+            return (null, "GeminiApiKey is empty in config \u2014 cannot structure the OCR text with Gemini");
+        if (string.IsNullOrWhiteSpace(text)) return (null, "No OCR text to send to Gemini");
+        var prompt = VisionPrompt.Build(module, "text", salesOrg) + "\n\n--- ข้อความจาก OCR ---\n" +
+                     (text.Length > 40000 ? text[..40000] : text) + "\n";
+        var res = await OneShotAsync([], "", prompt, module, config, 0, TimeSpan.FromSeconds(180), providerId, text);
+        if (res.Doc != null && module is "AP" or "II") AssignTaxRowVendors(res.Doc);
+        return res;
+    }
+
     /// <summary>Pages per request once a file is split. Eight A4 pages answer comfortably inside
     /// the timeout below; the threshold is a little above that so a file only slightly longer than
     /// one chunk is still read in a single request.</summary>
@@ -148,7 +164,8 @@ public static partial class GeminiOcr
         TimeSpan.FromSeconds(Math.Clamp(60 + pages * 25, 120, 900));
 
     private static async Task<(ParsedDocument? Doc, string? Error)> OneShotAsync(
-        List<byte[]> imgs, string mime, string prompt, string module, AppConfig config, int dpi, TimeSpan timeout)
+        List<byte[]> imgs, string mime, string prompt, string module, AppConfig config, int dpi, TimeSpan timeout,
+        string providerId = "gemini", string? rawTextForRecord = null)
     {
         try
         {
@@ -204,7 +221,8 @@ public static partial class GeminiOcr
                     if (resp.IsSuccessStatusCode)
                     {
                         var raw = ExtractText(respText);
-                        var parsedDoc = VisionPrompt.ParseResponse(raw, module, "gemini", 0.87, raw);
+                        var parsedDoc = VisionPrompt.ParseResponse(raw, module, providerId,
+                            providerId == "gemini" ? 0.87 : 0.82, rawTextForRecord ?? raw);
                         if (parsedDoc != null)
                             return (parsedDoc, null);
                         // 200 OK but the body held no parseable JSON. This is NOT a connection problem —

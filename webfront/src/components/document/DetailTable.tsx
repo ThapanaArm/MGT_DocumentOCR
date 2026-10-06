@@ -134,6 +134,10 @@ interface Props {
   posted: boolean;
   onEditLine: (i: number, key: string, value: string) => void;
   onEditLineExtra: (i: number, key: string, value: string) => void;
+  /** Persist line extras (Item Note 1 / per-line Delivery Date) once the user leaves the field.
+   *  onEditLineExtra only changes the page's in-memory copy, and SAP/Zoho Send read the STORED
+   *  document, so without this an edited note was never saved (lost on refresh, never sent). */
+  onCommitLineExtra?: () => void;
   onManualLine: (i: number, value: string) => void;
   onDelLine: (i: number) => void;
   onAddLine: () => void;
@@ -165,6 +169,7 @@ export default function DetailTable({
   posted,
   onEditLine,
   onEditLineExtra,
+  onCommitLineExtra,
   onManualLine,
   onDelLine,
   onAddLine,
@@ -177,6 +182,13 @@ export default function DetailTable({
   bare,
   isMgt,
 }: Props) {
+  // Set when an Item Note 1 / Delivery Date input changes; the first blur afterwards saves once.
+  const extraDirty = useRef(false);
+  const commitExtra = () => {
+    if (!extraDirty.current || posted) return;
+    extraDirty.current = false;
+    onCommitLineExtra?.();
+  };
   // SO documents match Material through ocr.CustomerMaterial, not the (deprecated for SO) generic
   // ocr.Material master -- same source, same cross-customer-borrow ordering and label format the
   // "Material — Row N" card in MappingCards.tsx uses. Before this fix, this table pulled its
@@ -482,7 +494,8 @@ export default function DetailTable({
                               type="date"
                               value={(l.extra || {}).deliveryDate || ''}
                               disabled={posted}
-                              onChange={(e) => onEditLineExtra(i, 'deliveryDate', e.target.value)}
+                              onChange={(e) => { extraDirty.current = true; onEditLineExtra(i, 'deliveryDate', e.target.value); }}
+                              onBlur={commitExtra}
                             />
                           </td>
                           <td style={{ minWidth: 220 }}>
@@ -490,7 +503,8 @@ export default function DetailTable({
                               value={(l.extra || {}).itemNote1 || ''}
                               readOnly={posted}
                               placeholder="OCR prefilled — editable"
-                              onChange={(e) => onEditLineExtra(i, 'itemNote1', e.target.value)}
+                              onChange={(e) => { extraDirty.current = true; onEditLineExtra(i, 'itemNote1', e.target.value); }}
+                              onBlur={commitExtra}
                             />
                           </td>
                         </>

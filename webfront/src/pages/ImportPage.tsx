@@ -7,7 +7,7 @@ import { moduleLabel } from '../utils/format';
 import { sampleDocument, uploadDocument, uploadDocumentBatch } from '../api/documents';
 import type { ModuleCode } from '../api/types';
 import Steps from '../components/Steps';
-import OcrProviderSelect from '../components/OcrProviderSelect';
+import OcrProviderSelect, { READ_ENGINE_IDS } from '../components/OcrProviderSelect';
 
 /* Ports renderWork()'s upload screen (uploadHtml + bindDrop + uploadFile). */
 
@@ -34,7 +34,7 @@ export default function ImportPage() {
   const { guard, showToast } = useAppState();
   const { ocrProviders, loadOcrProviders, apDocCategories, loadApDocCategories, me, loadMe } = useMeta();
 
-  const [provider, setProvider] = useState('auto');
+  const [provider, setProvider] = useState('gemini');
   // Which company this import is filed under. Only an Admin sees the switch; for everyone else the
   // server ignores whatever is sent and stamps their own company (CompanyScope.ImportFor).
   const [company, setCompany] = useState('');
@@ -189,7 +189,7 @@ export default function ImportPage() {
             <label className="hint" style={{ fontWeight: 600 }}>
               <i className="fa-solid fa-brain" /> Reading Method (OCR Engine)
             </label>
-            <OcrProviderSelect providers={providers} value={provider} onChange={setProvider} />
+            <OcrProviderSelect providers={providers} value={provider} onChange={setProvider} choices={READ_ENGINE_IDS} />
           </div>
           <p className="hint" style={{ margin: '-8px 0 16px' }}>
             {active ? active.desc : ''}
