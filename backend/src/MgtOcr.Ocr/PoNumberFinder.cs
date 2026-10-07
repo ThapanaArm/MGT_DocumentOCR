@@ -1,4 +1,4 @@
-using System.Text.RegularExpressions;
+﻿using System.Text.RegularExpressions;
 
 namespace MgtOcr.Ocr;
 
@@ -17,10 +17,11 @@ namespace MgtOcr.Ocr;
 /// ranges. Finding nothing leaves poRef empty and the routing unchanged.</summary>
 public static partial class PoNumberFinder
 {
-    // SAP purchasing-document number ranges in use here. 21xxxxxxxx is what Megachem's own POs
-    // carry (seen on the V-WISE PO and the one demonstrated in the OCR workshop); the rest are the
-    // standard ranges, kept so a document from another range is still recognised.
-    private static readonly string[] Prefixes = ["21", "41", "45", "46"];
+    // SAP purchasing-document number ranges in use here. 21xxxxxxxx is MGT's own range (the V-WISE
+    // PO, 2110000036) and 22xxxxxxxx is GLC's (2230000581, on document #733) — leaving 22 out is
+    // what made that GLC bundle file as "without PO" even though the number was printed on its form
+    // sheet. 23 and the standard 4x ranges are kept so another range is still recognised.
+    private static readonly string[] Prefixes = ["21", "22", "23", "41", "45", "46"];
 
     [GeneratedRegex(
         @"(?:P\s*[/.]?\s*O\.?\s*(?:Number|No\.?|#)?|Purchase\s*Order\s*(?:Number|No\.?|#)?|เลขที่ใบสั่งซื้อ|ใบสั่งซื้อเลขที่)\s*[:：\-]?\s*(\d{10})\b",
@@ -34,9 +35,26 @@ public static partial class PoNumberFinder
         foreach (Match m in LabelledPo().Matches(text))
         {
             var value = m.Groups[1].Value;
-            if (Array.Exists(Prefixes, p => value.StartsWith(p, StringComparison.Ordinal)))
-                return value;
+            if (InPoRange(value)) return value;
         }
         return "";
     }
+
+    /// <summary>A PO number carried in the file's own name, for the scans Purchasing saves as
+    /// "A-MatDoc_&lt;material document&gt;_&lt;PO&gt;.pdf". Last resort: it is used only when neither the read
+    /// nor the text layer produced one, and the number still has to fall in a purchasing range —
+    /// the material-document number in the same name (5000002095) does not, so it is passed over.</summary>
+    public static string FindInFileName(string? fileName)
+    {
+        if (string.IsNullOrWhiteSpace(fileName)) return "";
+        foreach (Match m in TenDigits().Matches(fileName))
+            if (InPoRange(m.Value)) return m.Value;
+        return "";
+    }
+
+    private static bool InPoRange(string value) =>
+        Array.Exists(Prefixes, p => value.StartsWith(p, StringComparison.Ordinal));
+
+    [GeneratedRegex(@"(?<!\d)\d{10}(?!\d)")]
+    private static partial Regex TenDigits();
 }

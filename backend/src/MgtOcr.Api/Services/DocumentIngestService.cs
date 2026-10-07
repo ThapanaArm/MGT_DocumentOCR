@@ -33,10 +33,14 @@ public class DocumentIngestService(OcrEngine ocr, DocumentRepository repo)
             // deciding there is no PO, look for one in the file's text layer. Skipped for Expense,
             // where the form sheet's "PO. NO." refers to the goods PO and must not route the
             // document to MIRO.
-            if (!isExpense && pd.Header.GetStr("poRef").Trim().Length == 0
-                && Path.GetExtension(storedPath).Equals(".pdf", StringComparison.OrdinalIgnoreCase))
+            if (!isExpense && pd.Header.GetStr("poRef").Trim().Length == 0)
             {
-                var found = PoNumberFinder.Find(PdfExtraction.PdfText(storedPath));
+                var found = Path.GetExtension(storedPath).Equals(".pdf", StringComparison.OrdinalIgnoreCase)
+                    ? PoNumberFinder.Find(PdfExtraction.PdfText(storedPath))
+                    : "";
+                // Purchasing saves these scans as "A-MatDoc_<material document>_<PO>.pdf", so the
+                // name itself carries the PO when the page it is printed on will not read.
+                if (found.Length == 0) found = PoNumberFinder.FindInFileName(fileName);
                 if (found.Length > 0) pd.Header["poRef"] = found;
             }
             mod = isExpense

@@ -189,12 +189,98 @@ function seedWhtItems(d: DocModel): DocModel {
 // when the read found every row. Seed one debit G/L row per OCR line that carries an amount; the
 // G/L account / cost center are not on the document, so they are left for the user to fill.
 // Only when glItems is still empty, so rows the user already edited/saved are never replaced.
+// What the purchase order does NOT cover, and so must be posted as a G/L line even on a document
+// that references a PO: anything the Customs or Excise Department charges. isDutyRow alone is too
+// narrow here — its word list is anchored and holds only the four duty names, so a line read as
+// "OTHER : CUSTOMS FEE" did not match it and the fee of 200 was dropped from the document for good.
+// This one matches anywhere in the wording, which is how the item list actually writes them.
+const CUSTOMS_WORDING =
+  /customs|excise|interior tax|import duty|ศุลกากร|สรรพสามิต|มหาดไทย|อากร/i;
+
+function notCoveredByPo(line: { extCode?: unknown; desc?: unknown }): boolean {
+  return isDutyRow(line) || CUSTOMS_WORDING.test(String(line.desc ?? ''));
+}
+
 function seedGlItems(d: DocModel): DocModel {
   // Both invoice modules. It used to seed FB60 (II) only, so a PO-referenced invoice (AP/MIRO)
   // showed an empty G/L Account Items table and there was nowhere to pick the G/L account, tax
   // code or assignment before exporting — the file came out with those columns blank.
   if (d.module !== 'II' && d.module !== 'AP') return d;
-  if (d.header.glItems && d.header.glItems.length) return d;
+  // Duty and customs fees belong in G/L Account Items and NOT on the Tax tab — that tab is the VAT
+  // alone, which is the only figure SAP posts from it. This moves them rather than just deleting
+  // them: a row missing from G/L is added before it leaves the tab, so nothing can fall through the
+  // gap (the customs fee of 200 disappeared from the document exactly that way). It runs even when
+  // G/L is already filled in, because that is the document where the seeding below is skipped, and
+  // it is idempotent — running it again on a tidy document changes nothing.
+  const moveDutyToGl = (doc: DocModel): DocModel => {
+    const gl = ((doc.header.glItems as Array<Record<string, any>>) || []).slice();
+    const tax = (doc.header.taxItems as Array<Record<string, any>>) || [];
+    const amt = (v: unknown) => Number(v) || 0;
+    // What may stay on the Tax tab is decided by the TAX CODE, not by the row's wording. Only the
+    // real input-VAT codes are a tax SAP posts from that tab: V0/V1/V2 claimable and D0/D1/D2
+    // deferred. Anything carrying VX is exempt — duty, excise, interior tax, a customs fee — and
+    // belongs in G/L Account Items. Matching on the label failed here: the duty word list has no
+    // "Customs Fee" in it, so that row kept its seat on the tab through two attempted fixes.
+    const isVatRow = (t: Record<string, any>) => {
+      const code = String(t.taxCode ?? '').trim().toUpperCase();
+      const kind = String(t.taxKind ?? '').trim().toUpperCase();
+      return /^[VD][012]$/.test(code) || kind === 'INPUT' || kind === 'DEFERRED';
+    };
+    const isDutyTax = (t: Record<string, any>) => !isVatRow(t) && amt(t.docCurrencyAmt) !== 0;
+    // Either side may carry no vendor on an older row, so a blank matches anything.
+    const sameVendor = (a: unknown, b: unknown) => {
+      const x = String(a ?? '').trim();
+      const y = String(b ?? '').trim();
+      return x === y || x === '' || y === '';
+    };
+    const poRef = String(doc.header.poRef ?? '').trim();
+    const missing: Array<Record<string, any>> = [];
+    const alreadyThere = (amount: number, vendor: unknown) =>
+      gl.some((g) => amt(g.amount) === amount && sameVendor(g.vendorCode, vendor))
+      || missing.some((g) => amt(g.amount) === amount && sameVendor(g.vendorCode, vendor));
+
+    // Source 1: duty rows sitting on the Tax tab. They carry the customs receipt's number and the
+    // issuing agency, so they make the better G/L line when both sources describe the same money.
+    tax.filter(isDutyTax).forEach((t) => {
+      if (alreadyThere(amt(t.docCurrencyAmt), t.vendorCode)) return;
+      missing.push({
+        glAccount: GL_INPUT_TAX,
+        drCr: 'D',
+        amount: amt(t.docCurrencyAmt),
+        taxCode: String(t.taxCode ?? '').trim() || 'VX',
+        assignment: String(t.taxDocNo ?? ''),
+        itemText: String(t.issuerName ?? '').slice(0, 50),
+        costCenter: '',
+        vendorCode: String(t.vendorCode ?? '').trim(),
+      });
+    });
+
+    // Source 2: duty rows still only in the item list. This is the one that was missed: a document
+    // whose G/L table had already been saved skipped the seeding below entirely, so a customs fee
+    // read as a line item (OTHER : CUSTOMS FEE, 200) had no way in and the money simply vanished.
+    (doc.lines || []).filter((l) => notCoveredByPo(l) && amt(l.amount) !== 0).forEach((l) => {
+      const vendor = String(l.extra?.vendorCode ?? '').trim();
+      if (alreadyThere(amt(l.amount), vendor)) return;
+      missing.push({
+        glAccount: GL_DUTY,
+        drCr: 'D',
+        amount: amt(l.amount),
+        taxCode: 'VX',
+        assignment: poRef,
+        itemText: String(l.desc ?? '').slice(0, 50),
+        costCenter: '',
+        vendorCode: vendor,
+      });
+    });
+
+    const kept = tax.filter((t) => !isDutyTax(t));
+    if (!missing.length && kept.length === tax.length) return doc;
+    return {
+      ...doc,
+      header: { ...doc.header, glItems: [...gl, ...missing], taxItems: kept },
+    };
+  };
+  if (d.header.glItems && d.header.glItems.length) return moveDutyToGl(d);
 
   // The shape of a posted document (5100001269 and the MIRO examples Finance keyed by hand):
   // the costs go in exempt, the VAT is its own line per tax invoice, and withholding tax is a
@@ -202,9 +288,13 @@ function seedGlItems(d: DocModel): DocModel {
   // invoice number on the tax lines, which is how Finance ties them back afterwards.
   const poRef = String(d.header.poRef ?? '').trim();
   const text = (v: unknown) => String(v ?? '').slice(0, 50); // SAP item text is 50 chars
+  // vendorCode travels with the row: the export groups G/L items by it (GroupByVendor), and the
+  // screen's "Vendor in this document" filter hides the rows that are not this supplier's. Seeded
+  // rows used to leave it blank, so every tax row — the Customs Department's included — landed on
+  // whichever supplier was selected.
   const row = (o: Record<string, unknown>) => ({
     glAccount: '', drCr: 'D', amount: 0, taxCode: 'VX',
-    assignment: '', itemText: '', costCenter: '', ...o,
+    assignment: '', itemText: '', costCenter: '', vendorCode: '', ...o,
   });
 
   // With a purchase order behind the invoice, the costs are posted against the PO — in SAP they
@@ -214,11 +304,24 @@ function seedGlItems(d: DocModel): DocModel {
   // against, so they stay here.
   const hasPo = poRef.length > 0;
 
-  const costs = hasPo ? [] : (d.lines || [])
+  // Duty and customs fees are NOT posted against the purchase order — the PO covers the goods, not
+  // what the Customs Department charges — so they stay here as G/L lines even when a PO is present.
+  // Only the freight and handling the PO already carries is left out. Without this the customs fee
+  // of 200 had nowhere to go and simply vanished from the document.
+  const dutyTaxRows = ((d.header.taxItems as Array<Record<string, any>>) || [])
+    .filter((t) => isDutyRow({ desc: t.label }) && (Number(t.docCurrencyAmt) || 0) !== 0);
+  const dutyKey = (label: unknown, amount: unknown) =>
+    `${dutyLabelEn(label)}|${Number(amount) || 0}`;
+  const alreadyOnTaxTab = new Set(dutyTaxRows.map((t) => dutyKey(t.label, t.docCurrencyAmt)));
+
+  const costs = (d.lines || [])
     // VAT and withholding rows live in their own tabs; they come back below, reviewed, rather
     // than twice — once raw from the read and once from the tab.
     .filter((l) => !['VAT', 'WHT'].includes(String(l.extCode || '').toUpperCase()))
     .filter((l) => (Number(l.amount) || 0) !== 0)
+    .filter((l) => !hasPo || notCoveredByPo(l))
+    // A duty already carried by a Tax-tab row becomes one G/L line, not two.
+    .filter((l) => !alreadyOnTaxTab.has(dutyKey(l.desc, l.amount)))
     .map((l) =>
       row({
         // Duty repeated from the customs paperwork is not a freight cost and has no account yet.
@@ -226,6 +329,7 @@ function seedGlItems(d: DocModel): DocModel {
         amount: Number(l.amount) || 0,
         assignment: poRef,
         itemText: text(l.desc),
+        vendorCode: String(l.extra?.vendorCode ?? '').trim(),
       }),
     );
 
@@ -233,8 +337,11 @@ function seedGlItems(d: DocModel): DocModel {
   // Input Tax Type the person picked in the Tax tab — that dropdown IS the mapping, and it is
   // what they reviewed. The tax code's first letter is only a fallback for a row read before
   // anyone touched it: D1/D0/D2 are the deferred codes, so they imply deferred tax.
-  const taxes = ((d.header.taxItems as Array<Record<string, any>>) || [])
-    .filter((t) => (Number(t.docCurrencyAmt) || 0) !== 0)
+  // VAT belongs on the Tax tab and nowhere else: that tab is what SAP posts the input tax from, so
+  // repeating the same amount as a G/L line books it twice — the customs document showed 60,049 on
+  // the Tax tab AND again under Basic Data. Duty and fees have no tab of their own, so those rows
+  // become G/L lines here and come off the tab below.
+  const taxes = dutyTaxRows
     .map((t) => {
       const code = String(t.taxCode ?? '').trim();
       const kind = String(t.taxKind ?? '').trim().toUpperCase();
@@ -245,6 +352,7 @@ function seedGlItems(d: DocModel): DocModel {
         taxCode: code,
         assignment: String(t.taxDocNo ?? ''),
         itemText: text(t.issuerName),
+        vendorCode: String(t.vendorCode ?? '').trim(),
       });
     });
 
@@ -259,12 +367,13 @@ function seedGlItems(d: DocModel): DocModel {
         amount: Number(w.amtFc) || 0,
         assignment: poRef,
         itemText: 'WHT',
+        vendorCode: String(w.vendorCode ?? '').trim(),
       }),
     );
 
   const items = [...costs, ...taxes, ...wht];
   if (!items.length) return d;
-  return { ...d, header: { ...d.header, glItems: items } };
+return moveDutyToGl({ ...d, header: { ...d.header, glItems: items } });
 }
 
 // MIRO / FB60 header Tax Code: fixed to VX (Input VAT Exempt Purchases) per Finance — the real
@@ -1748,14 +1857,6 @@ export default function DocumentPage() {
     // "Sales Employee Name" column (GLC/SO). Falls back to the raw ID inside DetailTable when unknown.
     resolveSalesEmp: (id: string) => salesEmps.find((s) => s.personId === id)?.name || undefined,
   };
-  const glProps = {
-    module: doc.module,
-    items: glItems,
-    posted: locked,
-    onEdit: editGlItem,
-    onAdd: addGlItem,
-    onDelete: delGlItem,
-  };
   // The MIRO tabs are read per vendor, so the Tax / Withholding rows show only that vendor's
   // invoices. Rows keep their real position in the header so editing and deleting still hit the
   // right one; when no row carries a vendor code (older documents) nothing is filtered out.
@@ -1773,6 +1874,18 @@ export default function DocumentPage() {
   };
   const taxRows = forVendor<Record<string, any>>(h.taxItems || []);
   const whtRows = forVendor<Record<string, any>>(h.whtItems || []);
+  // The G/L table follows the same filter. Without it, picking a supplier narrowed the Tax tab but
+  // left every tax row in the G/L table — a GLC bundle showed the Customs Department's duty and VAT
+  // under the shipping agent, and the exported file posted them there too.
+  const glRows = forVendor<Record<string, any>>(glItems);
+  const glProps = {
+    module: doc.module,
+    items: glRows.items,
+    posted: locked,
+    onEdit: (i: number, k: string, v: string) => editGlItem(glRows.at[i], k, v),
+    onAdd: addGlItem,
+    onDelete: (i: number) => delGlItem(glRows.at[i]),
+  };
   const taxProps = {
     items: taxRows.items,
     posted: locked,
@@ -2165,17 +2278,25 @@ export default function DocumentPage() {
       {/* Incoming Invoice (SAP FB60 · no PO) */}
       {doc.module === 'II' && (
         <IncomingInvoiceCard
+          key={`${vendorFilter || 'all'}-${glRows.items.length}`}
           values={h}
           posted={posted}
           onEdit={editHeader}
-          glItems={glItems}
+          glItems={glRows.items}
           taxProps={taxProps}
           whtProps={whtProps}
         />
       )}
 
       {/* G/L Account items (AP/II) */}
-      {showGlItems && <GlItemsTable {...glProps} />}
+      {/* Remounted when the vendor filter or the row count changes. The Amount cell is an
+          uncontrolled input (it has to be, so a half-typed number is not reformatted under the
+          cursor), and with a plain index key React reuses the same DOM node for a different row —
+          which is how switching to the customs vendor showed the customs rows' assignment and tax
+          code beside the PREVIOUS vendor's amounts. */}
+      {showGlItems && (
+        <GlItemsTable key={`${vendorFilter || 'all'}-${glRows.items.length}`} {...glProps} />
+      )}
 
       {/* Chat fix */}
       {!posted && (
