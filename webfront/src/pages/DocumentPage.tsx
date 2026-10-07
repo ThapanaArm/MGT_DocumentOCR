@@ -386,6 +386,42 @@ const HEADER_TAX_CODE = 'VX';
 // for the user; a branch document can still be changed by hand.
 const HEAD_OFFICE_BUSINESS_PLACE = '0000';
 
+// SAP's "Reference Document" on the MIRO PO Reference tab. Per GLC (07-Oct-2026) an invoice is
+// keyed one of two ways, and the field is the switch between them:
+//   Delivery Note                 -> the delivery being invoiced (the shipping costs, 13,751.73)
+//   Purchase Order / Sched. Agmt  -> the goods the PO covers (22,798.00)
+// Delivery Note is the default; Bill of Lading and the rest stay available but are never chosen
+// for the person. Only an empty field is filled, so a choice made by hand is never overwritten.
+const DEFAULT_REF_DOCUMENT = 'DELIVERY_NOTE';
+
+function seedRefDocument(d: DocModel): DocModel {
+  if (d.module !== 'AP' && d.module !== 'II') return d;
+  if (String(d.header.refDocument ?? '').trim()) return d;
+  return { ...d, header: { ...d.header, refDocument: DEFAULT_REF_DOCUMENT } };
+}
+
+/** Does the goods invoice agree with our purchase order? A PO-referenced MIRO is posted against
+ *  the PO, so the supplier's invoice number and the goods total both have to match it before the
+ *  document is sent — on the KIMEX bundle that is invoice 2230000581 / 22,798.00 against PO
+ *  2230000581 / 22,798.00. Returns null when there is nothing to compare yet. */
+function poReferenceCheck(h: Record<string, any>): { ok: boolean; lines: string[] } | null {
+  if (String(h.refDocument ?? '').trim() !== 'PO') return null;
+  const poNo = String(h.poRef ?? '').trim();
+  const invNo = String(h.invoiceNo ?? '').trim();
+  const poAmt = Number(h.poTotalAmount) || 0;
+  const docAmt = Number(h.totalAmount) || 0;
+  if (!poNo && poAmt === 0) return null;
+  const lines: string[] = [];
+  if (poNo && invNo && poNo !== invNo) {
+    lines.push(`เลขที่ใบแจ้งหนี้ ${invNo} ไม่ตรงกับเลขใบสั่งซื้อ ${poNo}`);
+  }
+  if (poAmt > 0 && docAmt > 0 && Math.abs(poAmt - docAmt) > 0.005) {
+    lines.push(`ยอดในเอกสาร ${docAmt.toLocaleString()} ไม่ตรงกับยอดตามใบสั่งซื้อ ${poAmt.toLocaleString()}`);
+  }
+  if (poAmt === 0) lines.push('ยังไม่มียอดตามใบสั่งซื้อให้เทียบ (ช่อง PO / Invoice Amount ว่าง)');
+  return { ok: lines.length === 0, lines };
+}
+
 function seedHeaderTaxCode(d: DocModel): DocModel {
   if (d.module !== 'AP' && d.module !== 'II') return d;
   const businessPlace = String(d.header.businessPlace ?? '').trim() || HEAD_OFFICE_BUSINESS_PLACE;
@@ -766,7 +802,7 @@ export default function DocumentPage() {
       // Locked to Gemini (per Megachem) — the re-OCR engine is always Gemini regardless of which
       // engine last read the document.
       setReocrEngine('gemini');
-      setDoc(seedHeaderTaxCode(seedGlItems(seedTaxItems(seedWhtItems(d)))));
+      setDoc(seedRefDocument(seedHeaderTaxCode(seedGlItems(seedTaxItems(seedWhtItems(d))))));
       if (d.module === 'AP') loadApDocCategories();
       try {
         const chat = await getChat(d.docId);
@@ -947,7 +983,7 @@ export default function DocumentPage() {
   const doReocr = () =>
     guard(async () => {
       const d = await reocrDocument(doc.docId, reocrEngine, USER);
-      setDoc(seedHeaderTaxCode(seedGlItems(seedTaxItems(seedWhtItems(d)))));
+      setDoc(seedRefDocument(seedHeaderTaxCode(seedGlItems(seedTaxItems(seedWhtItems(d))))));
       setMap(null);
       manual.current = { header: {}, lines: {} };
       if (d.provider === 'failed')
@@ -1834,6 +1870,12 @@ export default function DocumentPage() {
   const geminiProviders = allProviders.filter((p) => p.id.toLowerCase() === 'gemini');
   const providers = geminiProviders.length ? geminiProviders : allProviders;
 
+  // The goods the purchase order covers, read from the PO page / the supplier's goods invoice and
+  // kept apart from doc.lines, which are the delivery costs this document invoices.
+  const poGoodsLines = ((h.poLines as DocLine[] | undefined) || []).filter(
+    (l) => (Number(l.amount) || 0) !== 0 || String(l.desc ?? '').trim().length > 0,
+  );
+
   // Shared props for the item tables (used standalone for SO/II and inside the AP item tabs).
   const detailProps = {
     doc,
@@ -2267,7 +2309,46 @@ export default function DocumentPage() {
             posted={posted}
             onEdit={editHeader}
             extras={{
-              'PO Reference': <DetailTable {...detailProps} bare />,
+              'PO Reference': (
+                <>
+                  {(() => {
+                    const check = poReferenceCheck(h);
+                    if (!check) return null;
+                    return (
+                      <p
+                        className="hint"
+                        style={{
+                          margin: '0 0 12px',
+                          padding: '8px 12px',
+                          borderRadius: 8,
+                          background: check.ok ? 'rgba(0,139,83,.10)' : 'rgba(192,0,0,.08)',
+                          color: check.ok ? 'var(--brand)' : '#9C0006',
+                        }}
+                      >
+                        <i className={check.ok ? 'fa-solid fa-circle-check' : 'fa-solid fa-triangle-exclamation'} />{' '}
+                        {check.ok
+                          ? 'ใบแจ้งหนี้ตรงกับใบสั่งซื้อ — เลขที่และยอดเงินตรงกัน'
+                          : check.lines.join(' · ')}
+                      </p>
+                    );
+                  })()}
+                  {/* The dropdown is a switch, not a label. Purchase Order shows the GOODS the PO
+                      covers (22,798.00 on this bundle); Delivery Note — the default — shows the
+                      delivery being invoiced (13,751.73). The goods list is read-only here: SAP
+                      pulls the PO's own items when it posts, so this side is for checking that the
+                      invoice and the purchase order agree. */}
+                  {String(h.refDocument ?? '').trim() === 'PO' && poGoodsLines.length > 0 ? (
+                    <DetailTable
+                      {...detailProps}
+                      doc={{ ...doc, lines: poGoodsLines }}
+                      posted
+                      bare
+                    />
+                  ) : (
+                    <DetailTable {...detailProps} bare />
+                  )}
+                </>
+              ),
               Tax: <TaxDataTable {...taxProps} bare />,
               'Withholding Tax': <WhtTable {...whtProps} bare />,
             }}

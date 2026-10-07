@@ -335,6 +335,9 @@ export const AP_TRADE_GROUPS: FieldGroup[] = [
         ['SERVICE_ENTRY', 'Service Entry Sheet - Lean Services'],
       ]],
       ['PurchasingOrder','Purchasing Order'],
+      // The goods total the PO and the supplier's invoice must agree on. Shown here because a
+      // PO-referenced MIRO is posted against it, and because it is what the check below compares.
+      ['poTotalAmount', 'PO / Invoice Amount'],
       ['refDocType', 'Reference Document Category', 'select', [
         ['1', 'Goods/service items'],
         ['2', 'Planned delivery costs'],

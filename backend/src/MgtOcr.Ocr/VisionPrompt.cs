@@ -50,6 +50,10 @@ public static partial class VisionPrompt
             "poRef": "เลขที่ใบสั่งซื้ออ้างอิงถ้ามี",
             "refDocType": "ประเภทของรายการในเอกสารนี้ ตอบเป็น \"1\" \"2\" \"3\" หรือ \"\": 1 = มีแต่รายการสินค้า/บริการ (goods/service items), 2 = มีแต่ต้นทุนอื่นที่วางแผนไว้ เช่น ค่าขนส่ง ค่าประกัน ค่าพิธีการศุลกากร ค่าคลังสินค้า (planned delivery costs), 3 = มีทั้งสองอย่าง, ถ้าดูไม่ออกให้ใส่ \"\"",
             "currency": "รหัสสกุลเงิน 3 ตัวอักษร เช่น THB", "paymentTerms": "เงื่อนไขการชำระเงิน",
+            "poTotalAmount": 0,
+            "poCurrency": "",
+            "poLines": [{"extCode": "รหัส/ล็อตสินค้าตามใบสั่งซื้อ", "desc": "ชื่อสินค้า",
+                         "qty": 0, "uom": "หน่วยนับ", "price": 0, "amount": 0}],
             "subTotal": 0, "vatRate": 7, "vatAmount": 0, "whtAmount": 0, "totalAmount": 0
           },
           "lines": [{"extCode": "รหัสสินค้า/บริการถ้ามี", "desc": "ชื่อ/รายละเอียดสินค้าหรือบริการ",
@@ -199,7 +203,22 @@ public static partial class VisionPrompt
         + "ก็มีช่อง \"PO. NO.\" / \"PO NO.\" ของใบสั่งซื้ออยู่ด้วย ให้อ่านจากช่องนั้นได้เช่นกัน "
         + "เลข PO ของเราเป็นตัวเลข 10 หลักขึ้นต้นด้วย 21 22 23 41 45 หรือ 46 เช่น 2110000036 หรือ 2230000581 "
         + "ห้ามใส่เลขที่ใบแจ้งหนี้/ใบกำกับภาษีของผู้ขาย (เช่น INV2026030058) หรือเลขผู้เสียภาษีลงในช่องนี้ "
-        + "ถ้าในไฟล์ไม่มีหน้าใบสั่งซื้อและไม่มีเลข PO พิมพ์อยู่จริง ๆ ให้ใส่สตริงว่าง ห้ามเดา";
+        + "ถ้าในไฟล์ไม่มีหน้าใบสั่งซื้อและไม่มีเลข PO พิมพ์อยู่จริง ๆ ให้ใส่สตริงว่าง ห้ามเดา" +
+        // The goods total is what a PO-referenced MIRO is checked against: the supplier's own
+        // invoice for the goods and our purchase order must agree on it (22,798.00 on the KIMEX
+        // bundle). It is a different figure from totalAmount, which is this document's own total.
+        "\n- poTotalAmount = ยอดรวมของ \"สินค้า\" ตามใบสั่งซื้อหรือใบแจ้งหนี้ของผู้ขายสินค้า "
+        + "อ่านจากช่อง Total Amount ท้ายหน้า PURCHASE ORDER หรือบรรทัด TOTAL ของใบ INVOICE ของผู้ขายสินค้าในไฟล์ "
+        + "(เช่น 22,798.00) และ poCurrency = สกุลเงินของยอดนั้น เช่น \"USD\" "
+        + "ยอดนี้คนละตัวกับ totalAmount ซึ่งเป็นยอดรวมของเอกสารใบนี้เอง ห้ามใส่ยอดเดียวกันถ้าเอกสารเป็นชุดค่าขนส่ง "
+        + "ถ้าในไฟล์ไม่มีหน้าใบสั่งซื้อและไม่มีใบแจ้งหนี้สินค้า ให้ใส่ 0" +
+        // The goods lines are a second, separate list: the screen switches the item table to them
+        // when the MIRO is keyed against the purchase order instead of against the delivery costs.
+        "\n- poLines = รายการ \"สินค้า\" ตามหน้า PURCHASE ORDER หรือใบแจ้งหนี้ของผู้ขายสินค้า 1 แถวต่อ 1 รายการ: "
+        + "extCode = รหัสหรือเลขล็อตของสินค้าตามเอกสาร (เช่น M0200063), desc = ชื่อสินค้า, qty = จำนวน, uom = หน่วยนับ, "
+        + "price = ราคาต่อหน่วย, amount = จำนวนเงินของแถวนั้น "
+        + "รายการชุดนี้แยกต่างหากจาก lines ซึ่งเป็นค่าขนส่ง/ค่าใช้จ่าย ห้ามเอามาปนกัน "
+        + "ผลรวมของ poLines ต้องเท่ากับ poTotalAmount ถ้าในไฟล์ไม่มีหน้าใบสั่งซื้อหรือใบแจ้งหนี้สินค้า ให้ตอบเป็นอาร์เรย์ว่าง";
 
     // GLC's "FORM SHIPPING EXPENSE": one AMOUNT column and a VENDOR column on every row.
     private const string GlcFormRules =
