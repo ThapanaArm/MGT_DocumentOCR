@@ -26,7 +26,7 @@ public class CompareController(AppConfig config) : ControllerBase
         if (body.Candidates == null || body.Candidates.Count == 0)
             return BadRequest(new { detail = "Provide at least one candidate to compare" });
 
-        var provider = body.Provider is "gemini" or "openai" ? body.Provider : "claude";
+        var provider = "gemini"; // Gemini only (Megachem, 7 Oct 2026)
         var docFields = (body.DocFields ?? []).Select(f => new CompareField(f.Label, f.Value)).ToList();
         var candidates = body.Candidates
             .Select(c => new CompareCandidate(c.Id, c.Label, (c.Fields ?? []).Select(f => new CompareField(f.Label, f.Value)).ToList()))
@@ -60,7 +60,7 @@ public class CompareController(AppConfig config) : ControllerBase
         if (string.IsNullOrWhiteSpace(body.Text))
             return BadRequest(new { detail = "Provide 'text' to suggest search keywords for" });
 
-        var provider = body.Provider is "gemini" or "openai" ? body.Provider : "claude";
+        var provider = "gemini"; // Gemini only (Megachem, 7 Oct 2026)
         var kind = string.IsNullOrWhiteSpace(body.Kind) ? "record" : body.Kind;
 
         var suggestion = await SearchAdvisor.SuggestKeywordsAsync(body.Text, kind, provider, config);

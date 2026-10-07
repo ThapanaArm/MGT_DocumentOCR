@@ -226,7 +226,9 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         if (files is null || files.Count == 0) throw new HttpApiException(400, "No files were uploaded");
         if (files.Count > 10) throw new HttpApiException(400, "Please import at most 10 files at a time");
         var apCat = ValidateApDocCategory(mod == "AP" ? "AP" : mod, apDocCategory);
-        var engine = string.IsNullOrEmpty(ocr_) || ocr_ == "auto" ? "gemini" : ocr_;
+        // Gemini only (Megachem, 7 Oct 2026): every AI call in the system uses Gemini, whatever the
+        // client sends. The other providers stay in the code but are never selected.
+        var engine = "gemini";
 
         var batchId = Guid.NewGuid();
         var result = new List<object>();
@@ -435,7 +437,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
                 throw new HttpApiException(400, pdfStatus == PdfExtraction.PdfOpenStatus.PasswordRequired ? "PDF_PASSWORD_REQUIRED" : "PDF_PASSWORD_WRONG");
         }
         // Locked to Gemini (per Megachem): empty / "auto" re-OCR uses Gemini (the UI sends "gemini").
-        var reocrEngine = body.GetStr("ocr") is { Length: > 0 } o && o != "auto" ? o : "gemini";
+        var reocrEngine = "gemini"; // Gemini only (Megachem, 7 Oct 2026)
         // Re-reading follows the company the document is already filed under, so a second read
         // never silently swaps MGT's rules for GLC's (CompanyRules treats an empty value as GLC).
         var pd = await ocr.ExtractAsync(storedPath, module, reocrEngine, reocrPw, await repo.GetCompanyAsync(docId));
@@ -527,7 +529,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             catch { throw new HttpApiException(400, "Failed to decode image"); }
         }
 
-        var provider = body.GetStr("provider") is { Length: > 0 } pr && ChatFixProviderLabel.ContainsKey(pr) ? pr : "claude";
+        var provider = "gemini"; // Gemini only (Megachem, 7 Oct 2026)
         var history = await repo.GetChatHistoryAsync(docId);
         await repo.SaveChatMessageAsync(docId, "user", message, imageBytes, imageMediaType, user);
 

@@ -8,7 +8,9 @@ import type { OcrProvider } from '../api/masters';
      paddle         — PaddleOCR + built-in rules, no AI cost
    Engines that are not ready on the server (exe missing / no key) are shown disabled.
    Callers that pass no `choices` (Compare modal) keep the old read-only Gemini label. */
-export const READ_ENGINE_IDS = ['gemini', 'paddle_gemini', 'paddle'];
+// Gemini only (Megachem, 7 Oct 2026): PaddleOCR is no longer offered. With one id the picker
+// renders the read-only Gemini label; the backend also forces Gemini.
+export const READ_ENGINE_IDS = ['gemini'];
 
 export default function OcrProviderSelect(props: {
   id?: string;

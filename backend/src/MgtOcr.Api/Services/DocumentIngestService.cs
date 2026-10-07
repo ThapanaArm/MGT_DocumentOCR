@@ -17,7 +17,7 @@ public class DocumentIngestService(OcrEngine ocr, DocumentRepository repo)
         var mod = module.ToUpperInvariant();
         var detect = mod == "AP";
         // Locked to Gemini for the auto/empty path (per Megachem), same as the sync upload.
-        var uploadEngine = string.IsNullOrEmpty(engine) || engine == "auto" ? "gemini" : engine;
+        var uploadEngine = "gemini"; // Gemini only (Megachem, 7 Oct 2026), whatever engine was requested
         var t0 = DateTime.UtcNow;
         var pd = await ocr.ExtractAsync(storedPath, mod, uploadEngine, password, salesOrg);
         var durationMs = (int)(DateTime.UtcNow - t0).TotalMilliseconds;
