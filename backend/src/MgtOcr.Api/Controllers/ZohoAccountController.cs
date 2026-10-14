@@ -1,5 +1,9 @@
+using MgtOcr.Core;
+using MgtOcr.Core.Auth;
+using MgtOcr.Core.Config;
 using MgtOcr.Zoho;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.Filters;
 
 namespace MgtOcr.Api.Controllers;
 
@@ -9,8 +13,23 @@ namespace MgtOcr.Api.Controllers;
 // GET /api/zoho/account?name=oriental          (fallback — contains match)
 [ApiController]
 [Route("api/zoho")]
-public class ZohoAccountController(ZohoAccountClient client, ZohoClient zoho, ZohoDealClient deals) : ControllerBase
+public class ZohoAccountController(ZohoAccountClient client, ZohoClient zoho, ZohoDealClient deals,
+    ICurrentUserAccessor currentUser, AppConfig config) : ControllerBase, IAsyncActionFilter
 {
+    // Zoho CRM is MGT's system (12 Oct 2026): a user of another company (GLC) gets 403 here instead
+    // of MGT's accounts and deals. Admin and a user with no company on file are left unfiltered,
+    // the same way CompanyScope treats them everywhere else.
+    [NonAction]
+    public async Task OnActionExecutionAsync(ActionExecutingContext context, ActionExecutionDelegate next)
+    {
+        var user = await currentUser.RequireAsync(context.HttpContext.RequestAborted);
+        var scope = CompanyScope.For(user, config);
+        if (scope.Length > 0
+            && !string.Equals(config.CompanyForSalesOrg(scope)?.Name, "MGT", StringComparison.OrdinalIgnoreCase))
+            throw new HttpApiException(403, "Zoho CRM lookups are available to MGT users only");
+        await next();
+    }
+
     [HttpGet("account/by-code/{code}")]
     public async Task<IActionResult> FindByCode(string code)
     {

@@ -12,7 +12,7 @@ import type { CompareField } from '../../api/compare';
 import { SEND_DISABLED } from '../../constants/flags';
 import type { DeliveryDateGroup } from './SapSalesOrderEditor';
 import type { SoGroupState } from '../../api/documents';
-import SoGroupPanel, { groupStatus } from './SoGroupPanel';
+import SoGroupPanel, { groupStatus, type GroupShipToControl } from './SoGroupPanel';
 
 /* The Zoho Sales Order, lifted whole onto the document page as one editable table -- what
    replaced the old per-line "Material - Row N" comparison cards + the "Confirm Submission to
@@ -44,6 +44,8 @@ export default function ZohoSalesOrderEditor({
   posted,
   dateGroups = [],
   posts = [],
+  shipToMissing = false,
+  groupShipTo,
 }: {
   /** The merged preview (backend defaults + any AI-confirmed matches) -- fetched by DocumentPage
    *  as soon as a Deal is picked, so this table is visible without pressing Send first. */
@@ -67,11 +69,15 @@ export default function ZohoSalesOrderEditor({
   /** Opens the "View Payload" modal showing the exact JSON that will be POSTed to Zoho. */
   onViewPayload: () => void;
   posted: boolean;
-  /** Lines grouped by effective delivery date (deliveryDateGroups). Same rule as SAP: one Zoho Sales
-   *  Order per delivery date, all created from this document by one Send. */
+  /** Lines grouped by SO Group + delivery date (deliveryDateGroups). Same rule as SAP: one Zoho Sales
+   *  Order per group, all created from this document by one Send. */
   dateGroups?: DeliveryDateGroup[];
   /** Send results per group (ocr.SalesOrderPost): created groups are skipped on the next Send. */
   posts?: SoGroupState[];
+  /** No Ship-to selected/mapped yet -- Send stays disabled until one is set. */
+  shipToMissing?: boolean;
+  /** Per-SO-Group ship-to picker (Zoho ship-tos of the matched Account). */
+  groupShipTo?: GroupShipToControl;
 }) {
   const multiDate = dateGroups.length > 1;
   const remaining = dateGroups.filter((g) => !groupStatus(g, posts).ok).length;
@@ -155,7 +161,7 @@ export default function ZohoSalesOrderEditor({
             <label>Delivery Date</label>
             {multiDate ? (
               // Each Sales Order is sent with its own group's date (see the group panel below).
-              <input type="text" value={`Per Sales Order: ${dateGroups.map((g) => g.date).join(', ')}`} disabled readOnly />
+              <input type="text" value={`Per Sales Order: ${[...new Set(dateGroups.map((g) => g.date))].join(', ')}`} disabled readOnly />
             ) : (
               <input type="text" value={header.deliveryDate} placeholder={preview.deliveryDate || ''} disabled={posted} onChange={(e) => onHeaderChange({ deliveryDate: e.target.value })} />
             )}
@@ -310,14 +316,14 @@ export default function ZohoSalesOrderEditor({
           </div>
         )}
 
-        <SoGroupPanel groups={dateGroups} posts={posts} target="Zoho CRM" />
+        <SoGroupPanel groups={dateGroups} posts={posts} target="Zoho CRM" shipTo={groupShipTo} />
 
         <div className="so-send">
           <div className="row" style={{ gap: 10 }}>
             <button
               className="btn success"
               onClick={onSend}
-              disabled={SEND_DISABLED || sending || posted || preview.lines.length === 0 || !!result?.success || remaining === 0}
+              disabled={SEND_DISABLED || sending || posted || shipToMissing || preview.lines.length === 0 || !!result?.success || remaining === 0}
             >
               {sending
                 ? 'Sending…'
@@ -335,13 +341,19 @@ export default function ZohoSalesOrderEditor({
             <b>
               {result?.success
                 ? 'Sent to Zoho CRM'
+                : shipToMissing
+                ? 'Ship-to required'
                 : preview.lines.length === 0
                   ? 'Nothing to send yet'
                   : `${preview.lines.length} line${preview.lines.length === 1 ? '' : 's'} ready`}
             </b>
             <div className="hint">
-              {multiDate
-                ? `${dateGroups.length} Sales Orders by delivery date — same Customer PO, each with its own Delivery Date`
+              {shipToMissing && !result?.success
+                ? multiDate
+                  ? 'Select a Ship-to in the mapping cards above, or one for each SO Group in the Sales Orders table'
+                  : 'Select a Ship-to in the mapping cards above before sending'
+                : multiDate
+                ? `${dateGroups.length} Sales Orders (by SO Group and delivery date) — same Customer PO, each with its own Delivery Date and Ship-to`
                 : preview.lines.length === 0
                 ? 'Match at least one line before sending'
                 : preview.skipped.length

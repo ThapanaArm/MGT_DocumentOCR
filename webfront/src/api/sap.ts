@@ -254,6 +254,8 @@ export const getSapLastSalesEmployee = (customerCode: string, materialCode: stri
 export interface SapSalesEmployee {
   personId: string;
   name?: string | null;
+  /** Ms_User.Division = this person's SAP Sales Group; null when not on file. */
+  salesGroup?: string | null;
   /** "db", "sap", or both — where this Person ID was found. */
   sources: string[];
   lastSalesOrder?: string | null;

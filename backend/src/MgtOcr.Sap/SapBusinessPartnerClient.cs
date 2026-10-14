@@ -262,8 +262,18 @@ public class SapBusinessPartnerClient(AppConfig config, HttpClient httpClient)
         if (string.IsNullOrWhiteSpace(baseUrl)) return []; // simulation mode
         var clean = (code ?? "").Trim();
         if (clean.Length == 0) return [];
+        // The BusinessPartner key is Edm.String maxlength=10 (letters/digits only). The live search
+        // box sends its term as BOTH code and name, so a typed customer name ("VEGA NATURAL CO.,
+        // LTD.") lands here too — SAP rejects it with 400 "violates facet information
+        // 'maxlength=10'", which threw and killed the whole search before the name fallback ran.
+        // Anything that can't be a BP code just isn't one: return empty so the caller falls
+        // through to FindByNameAsync.
+        if (!LooksLikeBusinessPartnerCode(clean)) return [];
         return await EnrichAsync(await FetchByIdsAsync(new List<string> { clean }, top, authorizationGroup));
     }
+
+    private static bool LooksLikeBusinessPartnerCode(string value) =>
+        value.Length <= 10 && value.All(char.IsAsciiLetterOrDigit);
 
     // Scope results to the signed-in company's AuthorizationGroup so one company can't read another's
     // customers (see SapBusinessPartnerController). BUT also let through records with NO auth group at

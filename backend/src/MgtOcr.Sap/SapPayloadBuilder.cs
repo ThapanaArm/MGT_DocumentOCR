@@ -73,7 +73,7 @@ public static class SapPayloadBuilder
 
     public static Dictionary<string, object?> BuildPayload(AppConfig config, string module, Dictionary<string, object?> header,
         List<Dictionary<string, object?>> lines, Dictionary<string, object?> mapres, Dictionary<string, object?>? partnerMaster,
-        Dictionary<string, object?>? source = null)
+        Dictionary<string, object?>? source = null, IReadOnlyDictionary<string, string>? divisionByPersonId = null)
     {
         source ??= new();
         var resHeader = (Dictionary<string, object?>)mapres["header"]!;
@@ -98,6 +98,14 @@ public static class SapPayloadBuilder
             // "2000", so this still works if that code ever changes in appsettings.json.
             var isGlc = config.CompanyForSalesOrg(salesOrg)?.Name == "GLC";
 
+            // VAT mode chosen on the GLC Step 3 summary (header.vatMode, 12 Oct 2026). "include" =
+            // the customer's prices already contain 7% VAT, and SAP adds VAT itself, so the price is
+            // sent with the VAT taken out (107 -> 100) -- otherwise the customer is billed VAT twice.
+            // Every other mode sends the price as read. USD orders carry no Thai VAT.
+            var vatDivisor = isGlc && header.GetStr("vatMode") == "include"
+                             && !currency.Equals("USD", StringComparison.OrdinalIgnoreCase)
+                ? 1.07 : 1.0;
+
             // First non-empty of the three (header override -> master -> default), used for the
             // sales-area fields the GLC Customer card can override (Channel/Division).
             static string Pick(string? a, string? b, string def) =>
@@ -115,8 +123,8 @@ public static class SapPayloadBuilder
                     ["Material"] = Key(mapline),
                     ["RequestedQuantity"] = F3(qty),
                     ["RequestedQuantityUnit"] = uom,
-                    ["NetAmount"] = F2(Num(l.Get("amount"))),
-                    ["MaterialByCustomer"] = l.GetStr("extCode"),
+                    ["NetAmount"] = F2(Num(l.Get("amount")) / vatDivisor),
+                    // MaterialByCustomer (customer material no.) is intentionally NOT sent — per user, 7 Oct 2026.
                     ["_internalMaterial"] = mapline.GetStr("code"),
                     ["_isoUnit"] = Iso(mapline), // written twice in Python (harmless dict-literal duplicate) — once here is equivalent
                 };
@@ -170,7 +178,7 @@ public static class SapPayloadBuilder
                 // this tenant's real $metadata — same caveat as SapBusinessPartnerClient; adjust
                 // if SAP rejects this shape. ZDC0/ZCD1 (item discount) are not wired yet — no
                 // discount field exists on the line today; add one here if/when the UI gets one.
-                var unitPrice = Num(l.Get("price"));
+                var unitPrice = Num(l.Get("price")) / vatDivisor;
                 if (isGlc && unitPrice > 0 && !string.IsNullOrWhiteSpace(config.SapSalesOrderPriceConditionType))
                 {
                     item["to_PricingElement"] = new List<object>
@@ -241,7 +249,23 @@ public static class SapPayloadBuilder
             // Sales Group: sent only when the person picked a sales area on the GLC Customer card
             // (persisted on the header as salesGroup). A_SalesOrder.SalesGroup is a standard field;
             // omitted when blank so SAP derives it from the customer master as before.
+            // Megachem rule (7 Oct 2026): Sales Group is a HEADER field, one per Sales Order, and it is
+            // ALWAYS the Ms_User.Division of the FIRST line's Sales Employee — e.g. line 1 sold by
+            // XXX (PH1) and line 2 by YYY (PH2) -> SalesGroup = PH1. "First line" is the first line
+            // of THIS payload, i.e. of this delivery-date group. Same per-line sales-employee
+            // priority as YY1_SDSalesEmployeeI_SDI above. Falls back to the sales area the person
+            // picked on the Customer card (header.salesGroup) when the first line has no Sales
+            // Employee or that person has no Division on file.
             var salesGroup = header.GetStr("salesGroup");
+            if (lines.Count > 0 && divisionByPersonId != null)
+            {
+                var first = lines[0];
+                var firstEmp = Pick((first.Get("extra") as Dictionary<string, object?>)?.GetStr("salesEmployee"),
+                    Pick(first.GetStr("salesEmployee"), header.GetStr("salesEmployee"), ""), "").Trim();
+                if (firstEmp.Length > 0 && divisionByPersonId.TryGetValue(firstEmp, out var div)
+                    && !string.IsNullOrWhiteSpace(div))
+                    salesGroup = div.Trim();
+            }
             if (!string.IsNullOrWhiteSpace(salesGroup))
                 soPayload["SalesGroup"] = salesGroup;
             // SD Sales Employee custom field, HEADER extension (YY1_SDSalesEmployee_SDH). The per-line

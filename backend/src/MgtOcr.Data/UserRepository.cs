@@ -72,12 +72,34 @@ public partial class UserRepository(Db db, AppConfig config)
     public async Task<IEnumerable<dynamic>> GetSalesEmployeesAsync(CancellationToken ct = default) =>
         await db.QueryAsync($@"
             SELECT LTRIM(RTRIM(CAST(PersonID AS NVARCHAR(50)))) AS Code,
-                   COALESCE(NULLIF(LTRIM(RTRIM(FullName)), ''), Username) AS [Text]
+                   COALESCE(NULLIF(LTRIM(RTRIM(FullName)), ''), Username) AS [Text],
+                   NULLIF(LTRIM(RTRIM(CAST(Division AS NVARCHAR(50)))), '') AS Division
             FROM {UserDb}.dbo.Ms_User
             WHERE IsActive = 1
               AND PersonID IS NOT NULL
               AND LTRIM(RTRIM(CAST(PersonID AS NVARCHAR(50)))) <> ''
             ORDER BY [Text]", new { }, ct);
+
+    // PersonID -> Ms_User.Division for every active user that has both. Used as the SAP Sales
+    // Group of a GLC Sales Order: the header SalesGroup is the Division of the FIRST line's Sales
+    // Employee (the person stamped on YY1_SDSalesEmployeeI_SDI).
+    public async Task<Dictionary<string, string>> GetDivisionsByPersonIdAsync(CancellationToken ct = default)
+    {
+        var rows = await db.QueryAsync($@"
+            SELECT LTRIM(RTRIM(CAST(PersonID AS NVARCHAR(50)))) AS PersonID,
+                   LTRIM(RTRIM(CAST(Division AS NVARCHAR(50)))) AS Division
+            FROM {UserDb}.dbo.Ms_User
+            WHERE IsActive = 1
+              AND PersonID IS NOT NULL AND LTRIM(RTRIM(CAST(PersonID AS NVARCHAR(50)))) <> ''
+              AND Division IS NOT NULL AND LTRIM(RTRIM(CAST(Division AS NVARCHAR(50)))) <> ''", new { }, ct);
+        var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var r in rows)
+        {
+            string pid = r.PersonID, div = r.Division;
+            map.TryAdd(pid, div);
+        }
+        return map;
+    }
 
     private async Task<CurrentUser?> BuildAsync(dynamic? row, CancellationToken ct)
     {

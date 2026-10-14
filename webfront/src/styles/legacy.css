@@ -839,6 +839,36 @@
 .tw::-webkit-scrollbar-track{background:transparent}
 input,select,textarea,.btn,.nav a{-webkit-tap-highlight-color:transparent}
 
+/* AI comparison: a compact document reference followed by self-contained candidate cards. */
+.ai-compare-document{margin:4px 0 18px;padding:16px 18px;border:1px solid var(--line);border-radius:16px;background:var(--line-soft)}
+.ai-compare-document-title{display:flex;align-items:center;gap:12px;margin-bottom:14px}
+.ai-compare-document-title .modal-title-icon{width:34px;height:34px;flex-basis:34px;background:var(--card)}
+.ai-compare-document-title small{display:block;margin-top:2px;color:var(--muted)}
+.ai-compare-document dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px 20px;margin:0}
+.ai-compare-document dl>div,.ai-candidate-fields>div{min-width:0}
+.ai-compare-document dt,.ai-candidate-fields dt{margin-bottom:3px;color:var(--muted);font-size:11px;font-weight:700;letter-spacing:.035em;text-transform:uppercase}
+.ai-compare-document dd,.ai-candidate-fields dd{margin:0;overflow-wrap:anywhere;color:var(--text);font-weight:600}
+.ai-candidate-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;align-items:stretch}
+.ai-candidate-card{display:flex;min-width:0;flex-direction:column;padding:17px;border:1px solid var(--line);border-radius:17px;background:var(--card);box-shadow:0 5px 18px rgba(25,55,42,.055);transition:border-color .18s ease,box-shadow .18s ease,transform .18s ease}
+.ai-candidate-card:hover{transform:translateY(-2px);border-color:var(--g300);box-shadow:0 10px 26px rgba(25,55,42,.1)}
+.ai-candidate-card.recommended{border-color:var(--brand);box-shadow:0 0 0 2px color-mix(in srgb,var(--brand) 14%,transparent),0 10px 26px rgba(25,55,42,.09)}
+.ai-candidate-card>header{display:flex;align-items:center;gap:10px;min-height:42px;padding-bottom:13px;border-bottom:1px solid var(--line)}
+.ai-candidate-card>header>div{min-width:0;flex:1}
+.ai-candidate-card>header small{display:block;color:var(--muted);font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase}
+.ai-candidate-card>header h3{margin:2px 0 0;overflow-wrap:anywhere;font-size:15px;line-height:20px}
+.ai-candidate-number{display:inline-flex;width:30px;height:30px;flex:0 0 30px;align-items:center;justify-content:center;border-radius:9px;background:var(--brand-soft);color:var(--brand-dark);font-weight:800}
+.ai-recommended{padding:5px 8px;border-radius:var(--pill);background:var(--brand-soft);color:var(--brand-dark);font-size:10px;font-weight:800}
+.ai-candidate-fields{display:grid;gap:11px;margin:14px 0 16px}
+.ai-candidate-fields dd{font-size:13px;line-height:19px}
+.ai-candidate-verdict{margin-top:auto;padding:12px;border-radius:12px;background:var(--line-soft)}
+.ai-candidate-verdict-label{display:block;margin-bottom:7px;color:var(--muted);font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase}
+.ai-candidate-verdict p{margin:9px 0 0;color:var(--muted);font-size:12px;line-height:18px}
+.ai-candidate-use{width:100%;margin-top:12px;justify-content:center}
+@media(max-width:720px){
+  .ai-candidate-grid{grid-template-columns:1fr}
+  .ai-compare-document dl{grid-template-columns:1fr}
+}
+
 @media (max-width:1200px) and (min-width:761px){
   .sidebar:not(.collapsed){width:280px}
   .content{padding:22px 22px 76px}

@@ -64,6 +64,8 @@ export interface MapEntry {
   method?: string;
   sapCode?: string;
   text?: string;
+  /** Candidate codes when the match is ambiguous (e.g. one name / Tax ID on several customer codes). */
+  cands?: string[];
   doc?: MapField[];
   sap?: MapField[];
   unit?: { doc: MapField[]; sap: MapField[]; status: string };
@@ -177,7 +179,7 @@ export const getSoPosts = (id: number) =>
   api.get<{ groups: SoGroupState[] }>('/api/documents/' + id + '/so-posts');
 
 export const getSoPayloads = (id: number) =>
-  api.get<{ pass: boolean; payloads: { key: string; itemNos: string[]; payload: Record<string, any> }[] }>(
+  api.get<{ pass: boolean; payloads: { key: string; soGroup?: string; deliveryDate?: string; itemNos: string[]; payload: Record<string, any> }[] }>(
     '/api/documents/' + id + '/payload-so',
   );
 

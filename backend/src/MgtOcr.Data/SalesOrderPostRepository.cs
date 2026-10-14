@@ -69,6 +69,57 @@ public class SalesOrderPostRepository(Db db)
     }
 
     /// <summary>
+    /// Claims the document for one send (12 Oct 2026): flips it to POSTING inside a locked
+    /// transaction and returns the status it had, or null when it is already being sent (double
+    /// click, a second tab, SAP and Zoho at once) or can't be sent (POSTED / SPLIT). A POSTING
+    /// claim older than 10 minutes counts as abandoned (the server stopped mid-send) and can be
+    /// taken over. Always pair with <see cref="ReleaseAsync"/> in a finally block.
+    /// </summary>
+    public async Task<string?> TryClaimAsync(int docId)
+    {
+        var t = DocumentTables.ForId(docId).Doc;
+        await using var conn = await db.OpenAsync();
+        return await conn.QuerySingleOrDefaultAsync<string?>($"""
+            SET XACT_ABORT ON;
+            BEGIN TRAN;
+            DECLARE @prev nvarchar(20), @stale bit;
+            SELECT @prev = Status,
+                   @stale = CASE WHEN Status = 'POSTING'
+                                  AND ISNULL(UpdatedAt, '19000101') < DATEADD(minute, -10, SYSDATETIME())
+                                 THEN 1 ELSE 0 END
+              FROM {t} WITH (UPDLOCK, HOLDLOCK) WHERE DocId = @docId;
+            IF @prev IS NOT NULL AND (@prev NOT IN ('POSTED', 'SPLIT', 'POSTING') OR @stale = 1)
+            BEGIN
+                UPDATE {t} SET Status = 'POSTING', UpdatedAt = SYSDATETIME() WHERE DocId = @docId;
+                COMMIT;
+                SELECT @prev;
+            END
+            ELSE
+            BEGIN
+                COMMIT;
+                SELECT CAST(NULL AS nvarchar(20));
+            END
+            """, new { docId });
+    }
+
+    /// <summary>Ends a send started by <see cref="TryClaimAsync"/>. FinalizeAsync has already set
+    /// POSTED / PARTIAL when something went through; otherwise the document goes back to where it
+    /// was (PARTIAL when an earlier send left posted lines; MAPPED for an abandoned claim).</summary>
+    public async Task ReleaseAsync(int docId, string previousStatus)
+    {
+        var t = DocumentTables.ForId(docId).Doc;
+        var restore = previousStatus is "POSTING" or "" ? "MAPPED" : previousStatus;
+        await using var conn = await db.OpenAsync();
+        await conn.ExecuteAsync($"""
+            UPDATE {t}
+               SET Status = CASE WHEN EXISTS(SELECT 1 FROM ocr.SalesOrderLine WHERE DocId = @docId AND PostedSoNo IS NOT NULL)
+                                 THEN 'PARTIAL' ELSE @restore END,
+                   UpdatedAt = SYSDATETIME()
+             WHERE DocId = @docId AND Status = 'POSTING'
+            """, new { docId, restore });
+    }
+
+    /// <summary>
     /// Sets the document's status from its groups: all posted -> POSTED (+ PostedAt/PostedBy/
     /// CompanyCode); at least one -> PARTIAL; none -> unchanged (""). SapDocNo = the posted numbers in
     /// group order, comma-separated. Returns the new status.

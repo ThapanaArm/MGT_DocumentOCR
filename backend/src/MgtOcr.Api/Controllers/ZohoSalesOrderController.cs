@@ -60,7 +60,10 @@ public class ZohoSalesOrderController(
         string? TaxId,
         ZohoShipToInfo? ShipTo,
         List<LineOverride>? Lines,
-        string? Remarks = null);
+        string? Remarks = null,
+        // The person confirmed sending on a Deal whose Account isn't this document's customer
+        // (a Deal picked through the manual name search). See the account check in BuildDefaultsAsync.
+        bool AcceptOtherAccount = false);
 
     private record MatchedLine(
         string ItemNo, string? Desc, string? ExtCode, string MaterialId, string? MaterialName,
@@ -117,8 +120,8 @@ public class ZohoSalesOrderController(
             if (!requireConversion)
                 return new(qty, price, docUnit);
             throw new HttpApiException(400,
-                $"ยังไม่ได้บันทึกกฎแปลงหน่วยของ Material {materialCode}: {docUnit} → {targetUnit} " +
-                "กรุณาบันทึก Unit Conversion (UoM) ก่อน View Payload หรือส่งไป Zoho");
+                $"No unit conversion for material {materialCode}: {docUnit} → {targetUnit}. " +
+                "Add it in Master → Unit Conversion (UoM), or set a Conversion Ratio on the Deal item, before viewing the payload or sending to Zoho");
         }
 
         if (factor <= 0)
@@ -153,7 +156,8 @@ public class ZohoSalesOrderController(
     // document-line-to-Deal-Item matching (unaffected by anything the person edits in the
     // preview — a line's MaterialId/MaterialCode/etc always comes from a real matched Deal Item,
     // never from typed-in text, since Product_Name is a required Lookup with no Material search).
-    private async Task<Defaults> BuildDefaultsAsync(int docId, string dealId, bool requireUomConversion = false)
+    private async Task<Defaults> BuildDefaultsAsync(int docId, string dealId, bool requireUomConversion = false,
+        bool enforceDealAccount = false)
     {
         var doc = await repo.GetDocumentAsync(docId);
         if (doc.GetStr("module") != "SO")
@@ -171,8 +175,24 @@ public class ZohoSalesOrderController(
         var incoterms = Exact(accountFields, "Incoterms");
         var taxId = Exact(accountFields, "Tax ID");
 
+        // The Deal must belong to this document's customer (12 Oct 2026). The page could still hold
+        // the previous customer's Deal after the customer changed (lookup failed / still loading), and
+        // the order was then created on the wrong Account. Same Account code passes; another code of
+        // the same company (same Tax ID -- one customer with several Zoho codes) passes too.
+        // Enforced on Create only; the manual Deal search can legitimately pick another Account's
+        // Deal, so the page asks the person to confirm and then sends AcceptOtherAccount.
+        var docCustomer = doc.GetStr("partnerCode").Trim();
+        if (enforceDealAccount && docCustomer.Length > 0 && !string.IsNullOrWhiteSpace(deal.AccountCode)
+            && !string.Equals(deal.AccountCode.Trim(), docCustomer, StringComparison.OrdinalIgnoreCase))
+        {
+            var docTax = Digits(((Dictionary<string, object?>)doc["header"]!).GetStr("customerTaxId"));
+            if (docTax.Length == 0 || docTax != Digits(taxId))
+                throw new HttpApiException(400,
+                    $"Deal \"{deal.DealName}\" belongs to customer {deal.AccountCode}, but this document's customer is {docCustomer} — pick a Deal of this customer, or confirm sending on this Deal");
+        }
+
         var header = (Dictionary<string, object?>)doc["header"]!;
-        var salesOrg = header.GetStr("salesOrg");
+        var salesOrg = await DocSalesOrgAsync(docId, doc);
         var companyCode = config.CompanyForSalesOrg(salesOrg)?.CompanyCode ?? salesOrg;
         var masterData = MgtOcr.Core.Mapping.MasterSchema.ForSalesOrg(
             await masterRepo.LoadForMappingAsync("SO", companyCode), companyCode);
@@ -236,7 +256,9 @@ public class ZohoSalesOrderController(
             Doc: doc,
             Deal: deal,
             Subject: subject,
-            CustomerRef: header.GetStr("poNo") is { Length: > 0 } poNo ? poNo : deal.CustomerRef,
+            // No PO number on the document -> "-" (Megachem rule 8, same as SAP). The Deal's own
+            // Customer_Ref is another order's PO and must not be reused.
+            CustomerRef: header.GetStr("poNo").Trim() is { Length: > 0 } poNo ? poNo : "-",
             DeliveryDate: deliveryDate,
             PaymentTerms: paymentTerms,
             PaymentCurrency: paymentCurrency,
@@ -338,9 +360,10 @@ public class ZohoSalesOrderController(
     // fold in the caller's edits + any AI-confirmed material matches, and assemble the exact line
     // list + resolved header values that both endpoints hand to the ZohoSalesOrderClient. Material
     // identity per line always comes from the server-side Deal Item match, never the request.
-    private async Task<Assembled> AssembleAsync(int docId, CreateSalesOrderRequest body)
+    private async Task<Assembled> AssembleAsync(int docId, CreateSalesOrderRequest body, bool forCreate = false)
     {
-        var d = await BuildDefaultsAsync(docId, body.DealId, requireUomConversion: true);
+        var d = await BuildDefaultsAsync(docId, body.DealId, requireUomConversion: true,
+            enforceDealAccount: forCreate && !body.AcceptOtherAccount);
 
         var overrides = (body.Lines ?? []).Where(x => !string.IsNullOrEmpty(x.ItemNo))
             .ToDictionary(x => x.ItemNo, x => x);
@@ -436,104 +459,196 @@ public class ZohoSalesOrderController(
 
         if (existing.GetStr("status") == "SPLIT")
             throw new HttpApiException(400, "This document was split into separate documents — send those instead");
+        if (existing.GetStr("module") != "SO")
+            throw new HttpApiException(400, "Only Sales Order documents can be sent to Zoho CRM");
+        // Only MGT Sales Orders go to Zoho; GLC's go to SAP (DocumentsController post-so). The
+        // company stamped on the document wins over its editable header text.
+        if (string.Equals(config.CompanyForSalesOrg(await DocSalesOrgAsync(docId, existing))?.Name, "GLC", StringComparison.OrdinalIgnoreCase))
+            throw new HttpApiException(400, "This Sales Order belongs to GLC — it is sent to SAP, not Zoho CRM");
 
-        // One Zoho Sales Order PER DELIVERY DATE (Megachem rule, same as GLC/SAP), all from this one
-        // document -- replaces "split into child documents" (5 Oct 2026). Every group gets the same
-        // Customer PO; its own Delivery_Date; groups already created are skipped (no duplicates on a
-        // retry); each result is stamped on the group's lines (PostedSoNo / PostError) + ocr.PostLog.
-        var groups = SoDeliveryGroups.Build((Dictionary<string, object?>)existing["header"]!,
-            (List<Dictionary<string, object?>>)existing["lines"]!);
+        // One Zoho Sales Order PER SO GROUP + DELIVERY DATE (SoDeliveryGroups; same rule as GLC/SAP),
+        // all from this one document -- replaces "split into child documents". Every group gets the
+        // same Customer PO, its own Delivery_Date and its SO Group's ship-to; groups already created
+        // are skipped (no duplicates on a retry); each result is stamped on the group's lines
+        // (PostedSoNo / PostError) + ocr.PostLog.
+        var existingHeader = (Dictionary<string, object?>)existing["header"]!;
+        var groups = SoDeliveryGroups.Build(existingHeader, (List<Dictionary<string, object?>>)existing["lines"]!);
         var multi = groups.Count > 1;
-        var a = await AssembleAsync(docId, body);
         var states = (await soPosts.GroupStatesAsync(docId, groups)).ToDictionary(x => x.Key);
-        var actor = await ActorAsync();
-        var results = new List<object>();
-        string? firstZohoId = states.Values.Where(x => x.Posted).Select(x => x.DocNo).FirstOrDefault(x => !string.IsNullOrEmpty(x));
-        string? firstError = null;
-        var linesSent = 0;
 
-        for (var gi = 0; gi < groups.Count; gi++)
+        // Megachem rule (6 Oct 2026): an MGT Sales Order must have a Ship-to before it is sent --
+        // now checked per Sales Order: each SO Group uses its own chosen ship-to, else the document's.
+        var missingShipTo = groups
+            .Where(g => !(states.TryGetValue(g.Key, out var st) && st.Posted))
+            .Where(g => !HasShipTo(GroupShipTo(existingHeader, g) ?? body.ShipTo))
+            .Select(g => g.SoGroupNo).Distinct().ToList();
+        if (missingShipTo.Count > 0)
+            throw new HttpApiException(400, multi
+                ? $"Select a Ship-to for SO Group {string.Join(", ", missingShipTo)} before sending the Sales Orders to Zoho CRM"
+                : "Select a Ship-to before sending the Sales Order to Zoho CRM");
+
+        var a = await AssembleAsync(docId, body, forCreate: true);
+
+        // One send at a time per document (double click, second tab, SAP and Zoho at once): see
+        // SalesOrderPostRepository.TryClaimAsync. States are read again under the claim.
+        var previousStatus = await soPosts.TryClaimAsync(docId)
+            ?? throw new HttpApiException(409, "This Sales Order is being sent right now — wait a moment, then refresh the page");
+        try
         {
-            var g = groups[gi];
-            if (states.TryGetValue(g.Key, out var done) && done.Posted)
-            {
-                results.Add(new { key = g.Key, itemNos = g.ItemNos, success = true, skipped = true, zohoId = done.DocNo, message = "Already created" });
-                continue;
-            }
-            var idx = Enumerable.Range(0, a.SoLines.Count).Where(i => g.ItemNos.Contains(a.SoItemNos[i])).ToList();
-            if (idx.Count == 0)
-            {
-                var msg = "No line of this delivery date is matched to a Deal Item — match it first";
-                firstError ??= msg;
-                results.Add(new { key = g.Key, itemNos = g.ItemNos, success = false, skipped = false, zohoId = (string?)null, message = msg });
-                continue;
-            }
-            var items = idx.Select(i => a.SoLines[i]).ToList();
-            var deliveryDate = multi && g.Key.Length > 0 ? g.Key : a.DeliveryDate;
-            var subject = multi ? GroupSubject(a.Subject, gi + 1, groups.Count) : a.Subject;
+            states = (await soPosts.GroupStatesAsync(docId, groups)).ToDictionary(x => x.Key);
+            var alreadyRecorded = states.Values.Where(s => s.Posted && !string.IsNullOrEmpty(s.DocNo)).Select(s => s.DocNo!).ToHashSet();
+            var actor = await ActorAsync();
+            var results = new List<object>();
+            // Zoho record id of a Sales Order created in THIS call -- used to read it back for the
+            // SharePoint folder. (The stored DocNo is now Zoho's Sales Order No., not the record id; and
+            // a document only reaches POSTED here when this call created at least one order.)
+            string? firstZohoId = null;
+            string? firstError = null;
+            var linesSent = 0;
 
-            ZohoUpsertResult result;
-            try
+            for (var gi = 0; gi < groups.Count; gi++)
             {
-                result = await soClient.CreateAsync(
-                    dealId: a.Deal.Id, accountId: a.Deal.AccountId!, subject: subject, accountCode: a.Deal.AccountCode,
-                    taxId: a.TaxId, customerRef: a.CustomerRef, deliveryDate: deliveryDate,
-                    paymentTerms: a.PaymentTerms, paymentCurrency: a.PaymentCurrency, incoterms: a.Incoterms,
-                    shipTo: a.ShipTo, items: items, remarks: a.Remarks);
-            }
-            catch (Exception e)
-            {
-                log.LogError(e,
-                    "Zoho Sales Order creation failed for document {DocId}, delivery-date group {DeliveryDate}, items {ItemNos}",
-                    docId, g.Key, string.Join(",", g.ItemNos));
-                result = new ZohoUpsertResult { SapKey = "", ZohoId = "", Status = "error", Message = e.Message };
-            }
-            var ok = result.Status == "success";
-            if (ok) { linesSent += items.Count; firstZohoId ??= result.ZohoId; } else firstError ??= result.Message;
+                var g = groups[gi];
+                var hasState = states.TryGetValue(g.Key, out var done);
+                if (hasState && done!.Posted)
+                {
+                    results.Add(new { key = g.Key, itemNos = g.ItemNos, success = true, skipped = true, zohoId = done.DocNo, message = "Already created" });
+                    continue;
+                }
+                var idx = Enumerable.Range(0, a.SoLines.Count).Where(i => g.ItemNos.Contains(a.SoItemNos[i])).ToList();
+                // Every line of the group must go out together: the group's lines are all stamped with
+                // the created Sales Order below, so sending only the matched ones used to mark an
+                // unmatched line as sent (and lock the document) although Zoho never received it.
+                var unmatched = g.ItemNos.Where(n => !idx.Any(i => a.SoItemNos[i] == n)).ToList();
+                if (idx.Count == 0 || unmatched.Count > 0)
+                {
+                    var msg = idx.Count == 0
+                        ? "No line of this Sales Order is matched to a Deal Item — match it first"
+                        : $"Item {string.Join(", ", unmatched)} is not matched to a Deal Item — match it first (nothing in this Sales Order was sent)";
+                    firstError ??= msg;
+                    await soPosts.RecordAsync(docId, "SO", g.ItemNos, false, null, msg, "Zoho:Sales_Orders", "{}", actor, salesOrg: null);
+                    results.Add(new { key = g.Key, itemNos = g.ItemNos, success = false, skipped = false, zohoId = (string?)null, message = msg });
+                    continue;
+                }
+                var items = idx.Select(i => a.SoLines[i]).ToList();
+                var deliveryDate = multi && g.Date.Length > 0 ? g.Date : a.DeliveryDate;
+                var shipTo = GroupShipTo(existingHeader, g) ?? a.ShipTo;
+                var subject = multi ? GroupSubject(a.Subject, gi + 1, groups.Count) : a.Subject;
 
-            var label = multi ? $" (Sales Order {gi + 1}/{groups.Count}, delivery {(g.Key.Length > 0 ? g.Key : "-")})" : "";
-            await repo.LogAuditAsync(docId, "SO", "CREATE", actor, fileName: a.Doc.GetStr("fileName"), detail: ok
-                ? $"Created Zoho Sales Order from Deal \"{a.Deal.DealName}\"{label} -> {result.ZohoId}"
-                : $"Zoho Sales Order creation failed from Deal \"{a.Deal.DealName}\"{label}: {result.Message}");
+                // The previous attempt of this group failed. A timeout can fail AFTER Zoho created the
+                // order, so look for it before sending again (same Deal, Customer Ref, Subject and
+                // delivery date, created in the last 7 days, not recorded on this document yet).
+                (string Id, string? SoNo)? earlierOrder = null;
+                if (hasState && !string.IsNullOrEmpty(done!.Error) && !string.IsNullOrWhiteSpace(a.CustomerRef))
+                    earlierOrder = await soClient.FindExistingAsync(a.Deal.Id, a.CustomerRef!, subject, deliveryDate,
+                        DateTime.UtcNow.AddDays(-7), alreadyRecorded);
 
-            var payloadJson = JsonSerializer.Serialize(new
+                ZohoUpsertResult result;
+                if (earlierOrder is { } found)
+                {
+                    result = new ZohoUpsertResult
+                    {
+                        SapKey = "", ZohoId = found.Id, Status = "success",
+                        Message = $"Already in Zoho as {found.SoNo ?? found.Id} (created by an earlier attempt that reported an error) — not sent again",
+                    };
+                }
+                else try
+                {
+                    result = await soClient.CreateAsync(
+                        dealId: a.Deal.Id, accountId: a.Deal.AccountId!, subject: subject, accountCode: a.Deal.AccountCode,
+                        taxId: a.TaxId, customerRef: a.CustomerRef, deliveryDate: deliveryDate,
+                        paymentTerms: a.PaymentTerms, paymentCurrency: a.PaymentCurrency, incoterms: a.Incoterms,
+                        shipTo: shipTo, items: items, remarks: a.Remarks);
+                }
+                catch (Exception e)
+                {
+                    log.LogError(e,
+                        "Zoho Sales Order creation failed for document {DocId}, delivery-date group {DeliveryDate}, items {ItemNos}",
+                        docId, g.Key, string.Join(",", g.ItemNos));
+                    result = new ZohoUpsertResult { SapKey = "", ZohoId = "", Status = "error", Message = e.Message };
+                }
+                var ok = result.Status == "success";
+                if (ok) { linesSent += items.Count; firstZohoId ??= result.ZohoId; } else firstError ??= result.Message;
+                // What people see and search for in Zoho is the "Sales Order No." (auto-number, API
+                // name Quote_No, e.g. 1OR0000310) -- stored as the posted number instead of the long
+                // record id. The record id is kept in the PostLog payload (zohoRecordId).
+                var soNo = ok ? await SalesOrderNoAsync(result.ZohoId) : null;
+                if (soNo is not null) alreadyRecorded.Add(soNo);
+
+                var label = multi ? $" (Sales Order {gi + 1}/{groups.Count}, SO Group {g.SoGroupNo}, delivery {(g.Date.Length > 0 ? g.Date : "-")})" : "";
+                await repo.LogAuditAsync(docId, "SO", "CREATE", actor, fileName: a.Doc.GetStr("fileName"), detail: ok
+                    ? $"Created Zoho Sales Order from Deal \"{a.Deal.DealName}\"{label} -> {soNo} (record {result.ZohoId})"
+                    : $"Zoho Sales Order creation failed from Deal \"{a.Deal.DealName}\"{label}: {result.Message}");
+
+                var payloadJson = JsonSerializer.Serialize(new
+                {
+                    dealId = a.Deal.Id, dealName = a.Deal.DealName, accountId = a.Deal.AccountId,
+                    subject, customerRef = a.CustomerRef, deliveryDate,
+                    paymentTerms = a.PaymentTerms, paymentCurrency = a.PaymentCurrency, incoterms = a.Incoterms,
+                    taxId = a.TaxId, remarks = a.Remarks, shipTo, lines = items, group = g.Key,
+                    zohoRecordId = ok ? result.ZohoId : null, salesOrderNo = soNo,
+                }, PyJson.Options);
+                await soPosts.RecordAsync(docId, "SO", g.ItemNos, ok, soNo,
+                    result.Message, "Zoho:Sales_Orders", payloadJson, actor, salesOrg: null);
+                results.Add(new { key = g.Key, itemNos = g.ItemNos, success = ok, skipped = false, zohoId = ok ? result.ZohoId : null, soNo, message = result.Message });
+            }
+
+            // companyCode "MGT" literal: this controller only ever creates Zoho Sales Orders (MGT).
+            var newStatus = await soPosts.FinalizeAsync(docId, groups, "MGT", actor);
+            // Release before reading the document back so the response never shows POSTING.
+            await soPosts.ReleaseAsync(docId, previousStatus);
+
+            // Queue the source file for SharePoint once EVERY group is in Zoho. The folder comes from
+            // reading one created Sales Order back (its Account's sales person + customer). Best effort.
+            if (newStatus == "POSTED" && !string.IsNullOrEmpty(firstZohoId))
             {
-                dealId = a.Deal.Id, dealName = a.Deal.DealName, accountId = a.Deal.AccountId,
-                subject, customerRef = a.CustomerRef, deliveryDate,
-                paymentTerms = a.PaymentTerms, paymentCurrency = a.PaymentCurrency, incoterms = a.Incoterms,
-                taxId = a.TaxId, remarks = a.Remarks, shipTo = a.ShipTo, lines = items, group = g.Key,
-            }, PyJson.Options);
-            await soPosts.RecordAsync(docId, "SO", g.ItemNos, ok, ok ? result.ZohoId : null,
-                result.Message, "Zoho:Sales_Orders", payloadJson, actor, salesOrg: null);
-            results.Add(new { key = g.Key, itemNos = g.ItemNos, success = ok, skipped = false, zohoId = ok ? result.ZohoId : null, message = result.Message });
+                var folder = await ArchiveFolderAsync(docId, firstZohoId, a.Deal.Id, a.Deal.AccountCode);
+                try { await archive.EnqueueAsync(docId, DocumentTables.ForId(docId).Doc, "MGT", "SO", folder); }
+                catch (Exception e) { log.LogWarning(e, "Could not queue doc {DocId} for SharePoint (run sql/27 + sql/29?)", docId); }
+            }
+
+            var after = await repo.GetDocumentAsync(docId);
+            return Ok(new
+            {
+                success = newStatus == "POSTED",
+                status = newStatus,
+                zohoId = after.GetStr("sapDocNo"),
+                message = firstError,
+                dealName = a.Deal.DealName,
+                linesSent,
+                skipped = a.StillSkipped,
+                groups = results,
+                document = after,
+            });
         }
-
-        // companyCode "MGT" literal: this controller only ever creates Zoho Sales Orders (MGT).
-        var newStatus = await soPosts.FinalizeAsync(docId, groups, "MGT", actor);
-
-        // Queue the source file for SharePoint once EVERY group is in Zoho. The folder comes from
-        // reading one created Sales Order back (its Account's sales person + customer). Best effort.
-        if (newStatus == "POSTED" && !string.IsNullOrEmpty(firstZohoId))
+        finally
         {
-            var folder = await ArchiveFolderAsync(docId, firstZohoId, a.Deal.Id, a.Deal.AccountCode);
-            try { await archive.EnqueueAsync(docId, DocumentTables.ForId(docId).Doc, "MGT", "SO", folder); }
-            catch (Exception e) { log.LogWarning(e, "Could not queue doc {DocId} for SharePoint (run sql/27 + sql/29?)", docId); }
+            await soPosts.ReleaseAsync(docId, previousStatus);
         }
-
-        var after = await repo.GetDocumentAsync(docId);
-        return Ok(new
-        {
-            success = newStatus == "POSTED",
-            status = newStatus,
-            zohoId = after.GetStr("sapDocNo"),
-            message = firstError,
-            dealName = a.Deal.DealName,
-            linesSent,
-            skipped = a.StillSkipped,
-            groups = results,
-            document = after,
-        });
     }
+
+    // The company (SalesOrg) of a Sales Order: the SalesOrg column stamped at import wins; older
+    // documents without it fall back to the header text.
+    private async Task<string> DocSalesOrgAsync(int docId, Dictionary<string, object?> doc)
+    {
+        var stamped = (await repo.GetCompanyAsync(docId) ?? "").Trim();
+        if (stamped is "1000" or "2000") return stamped;
+        return ((Dictionary<string, object?>)doc["header"]!).GetStr("salesOrg");
+    }
+
+    // The Zoho ship-to the person chose for this SO Group (header.soGroupShipTos, stored as the
+    // ZohoShipToInfo fields in camelCase), or null when the group uses the document's own ship-to.
+    private static readonly JsonSerializerOptions WebJson = new(JsonSerializerDefaults.Web);
+    private static ZohoShipToInfo? GroupShipTo(Dictionary<string, object?> header, SoGroup g)
+    {
+        var stored = SoDeliveryGroups.ShipToFor(header, g.SoGroupNo);
+        if (stored is null) return null;
+        try { return JsonSerializer.Deserialize<ZohoShipToInfo>(JsonSerializer.Serialize(stored), WebJson); }
+        catch (JsonException) { return null; }
+    }
+
+    private static bool HasShipTo(ZohoShipToInfo? s) =>
+        s is not null && (!string.IsNullOrWhiteSpace(s.Code) || !string.IsNullOrWhiteSpace(s.Address));
 
     // "Deal name / Doc#123 (1/2)" -- Zoho Subject is capped at 50 characters, so the base is cut to
     // make room for the group suffix instead of losing the suffix.
@@ -542,6 +657,25 @@ public class ZohoSalesOrderController(
         var suffix = $" ({n}/{total})";
         var room = Math.Max(0, 50 - suffix.Length);
         return (baseSubject.Length > room ? baseSubject[..room] : baseSubject) + suffix;
+    }
+
+    // Zoho's own "Sales Order No." (auto-number field, API name Quote_No) of a just-created record.
+    // The create response only returns the record id, so the record is read back once. Falls back
+    // to the record id when it can't be read, so a send never fails over a display number.
+    private async Task<string> SalesOrderNoAsync(string zohoId)
+    {
+        try
+        {
+            var so = await soClient.GetByIdAsync(zohoId);
+            var no = so?["Quote_No"]?.ToString().Trim();
+            if (!string.IsNullOrEmpty(no)) return no;
+            log.LogWarning("Zoho Sales Order {Id} has no Quote_No (Sales Order No.) - storing the record id", zohoId);
+        }
+        catch (Exception e)
+        {
+            log.LogWarning(e, "Could not read the Sales Order No. (Quote_No) of Zoho record {Id} - storing the record id", zohoId);
+        }
+        return zohoId;
     }
 
     // SharePoint folder "{Sales}/{CustomerCode}_{CustomerName}": read the created Sales Order back
@@ -586,7 +720,8 @@ public class ZohoSalesOrderController(
             throw new HttpApiException(400, "A Deal must be selected first");
 
         var doc = await repo.GetDocumentAsync(docId);
-        var groups = SoDeliveryGroups.Build((Dictionary<string, object?>)doc["header"]!, (List<Dictionary<string, object?>>)doc["lines"]!);
+        var docHeader = (Dictionary<string, object?>)doc["header"]!;
+        var groups = SoDeliveryGroups.Build(docHeader, (List<Dictionary<string, object?>>)doc["lines"]!);
         var multi = groups.Count > 1;
         var a = await AssembleAsync(docId, body);
         var records = new System.Text.Json.Nodes.JsonArray();
@@ -599,9 +734,9 @@ public class ZohoSalesOrderController(
                 dealId: a.Deal.Id, accountId: a.Deal.AccountId!,
                 subject: multi ? GroupSubject(a.Subject, gi + 1, groups.Count) : a.Subject,
                 accountCode: a.Deal.AccountCode, taxId: a.TaxId, customerRef: a.CustomerRef,
-                deliveryDate: multi && g.Key.Length > 0 ? g.Key : a.DeliveryDate,
+                deliveryDate: multi && g.Date.Length > 0 ? g.Date : a.DeliveryDate,
                 paymentTerms: a.PaymentTerms, paymentCurrency: a.PaymentCurrency, incoterms: a.Incoterms,
-                shipTo: a.ShipTo, items: items, remarks: a.Remarks);
+                shipTo: GroupShipTo(docHeader, g) ?? a.ShipTo, items: items, remarks: a.Remarks);
             records.Add(record);
         }
 

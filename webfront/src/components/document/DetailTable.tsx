@@ -152,6 +152,8 @@ interface Props {
    *  name for the "Sales Employee Name" column. Returns undefined when the ID isn't in the pick
    *  list (then the raw ID is shown). Omitted for non-SO / MGT call sites. */
   resolveSalesEmp?: (personId: string) => string | undefined;
+  /** SO: opens the "Split Sales Order" board (drag items into separate Sales Orders). */
+  onOpenSplit?: () => void;
   bare?: boolean; // render without the outer .card wrapper (for use inside a tabbed card)
   /** F01: this table checks OCR lines against shared Master Data (materials/UoM rules) — for the
    *  SAP/GLC path that master data IS the SAP material master, but for MGT the actual Sales Order
@@ -179,6 +181,7 @@ export default function DetailTable({
   vendorFilter = '',
   onVendorFilter,
   resolveSalesEmp,
+  onOpenSplit,
   bare,
   isMgt,
 }: Props) {
@@ -255,7 +258,7 @@ export default function DetailTable({
   const showVendor = doc.module === 'AP' || doc.module === 'II';
   const showPoExtra = doc.module === 'AP';
   const showSoExtra = doc.module === 'SO';
-  const extraCols = (showPoExtra ? 1 : 0) + (showSoExtra ? 3 : 0) + (showVendor ? 1 : 0);
+  const extraCols = (showPoExtra ? 1 : 0) + (showSoExtra ? 4 : 0) + (showVendor ? 1 : 0);
   // Withholding tax is not part of what is billed — it is deducted at payment — so the footer
   // total leaves those rows out (they stay in the table as a record). The total also follows the
   // vendor lookup, so filtering by a vendor shows exactly what that vendor's MIRO run is worth.
@@ -276,9 +279,16 @@ export default function DetailTable({
   ) => <NumCell value={value} posted={posted} onInput={onInput} />;
 
   const addBtn = !posted ? (
-    <button className="btn sm" onClick={onAddLine}>
-      + Add Row
-    </button>
+    <div className="row" style={{ gap: 8 }}>
+      {showSoExtra && onOpenSplit && (
+        <button className="btn sm" onClick={onOpenSplit} title="Split the items into separate Sales Orders">
+          <i className="fa-solid fa-code-branch" /> Split Sales Order
+        </button>
+      )}
+      <button className="btn sm" onClick={onAddLine}>
+        + Add Row
+      </button>
+    </div>
   ) : null;
 
   return (
@@ -326,6 +336,11 @@ export default function DetailTable({
             <thead>
               <tr>
                 <th style={{ width: 54 }}>Item</th>
+                {showSoExtra && (
+                  <th style={{ minWidth: 92 }} title="Which Sales Order this item goes on — change it with Split Sales Order">
+                    Split SO
+                  </th>
+                )}
                 <th style={{ width: 150 }}>Item Code (Partner)</th>
                 {showVendor && <th style={{ width: 110 }}>Vendor</th>}
                 <th style={{ minWidth: 260 }}>Item Description (per Document)</th>
@@ -341,6 +356,7 @@ export default function DetailTable({
                   <>
                     <th style={{ minWidth: 160 }}>Sales Employee Name</th>
                     <th style={{ minWidth: 140 }}>Delivery Date</th>
+
                     <th style={{ minWidth: 220 }}>Item Note 1</th>
                   </>
                 )}
@@ -356,6 +372,22 @@ export default function DetailTable({
                   return (
                     <tr key={i}>
                       <td style={{ textAlign: 'center' }}>{l.itemNo}</td>
+                      {showSoExtra && (
+                        <td style={{ minWidth: 92 }}>
+                          {/* Which Sales Order (SO Group, extra.soGroup; blank = 1) this item goes
+                              on. Changed on the Split Sales Order board, not typed here. */}
+                          {(() => {
+                            const g = Number((l.extra || {}).soGroup) > 0 ? String(Number((l.extra || {}).soGroup)) : '1';
+                            return !posted && onOpenSplit ? (
+                              <button className="badge b-idle" style={{ cursor: 'pointer', border: 0, color: '#000', fontWeight: 700 }} onClick={onOpenSplit} title="Change with Split Sales Order">
+                                SO {g}
+                              </button>
+                            ) : (
+                              <span className="badge b-idle" style={{ color: '#000', fontWeight: 700 }}>SO {g}</span>
+                            );
+                          })()}
+                        </td>
+                      )}
                       <td>
                         {/* "COST" is the read's own tag for a charge off the FORM SHIPPING EXPENSE
                             sheet, not a code the vendor gave us — showing it in a column labelled
@@ -498,6 +530,7 @@ export default function DetailTable({
                               onBlur={commitExtra}
                             />
                           </td>
+
                           <td style={{ minWidth: 220 }}>
                             <input
                               value={(l.extra || {}).itemNote1 || ''}
@@ -529,7 +562,7 @@ export default function DetailTable({
             </tbody>
             <tfoot>
               <tr className="totrow">
-                <td colSpan={5 + (showVendor ? 1 : 0)} style={{ textAlign: 'right' }}>
+                <td colSpan={5 + (showVendor ? 1 : 0) + (showSoExtra ? 1 : 0)} style={{ textAlign: 'right' }}>
                   Total{' '}
                   <span className="hint" style={{ fontWeight: 400 }}>
                     {vendorFilter
@@ -538,7 +571,7 @@ export default function DetailTable({
                   </span>
                 </td>
                 <td style={{ textAlign: 'right' }}>{fmtAmt(sum)}</td>
-                <td colSpan={4 + extraCols - (showVendor ? 1 : 0)} />
+                <td colSpan={4 + extraCols - (showVendor ? 1 : 0) - (showSoExtra ? 1 : 0)} />
               </tr>
             </tfoot>
           </table>

@@ -92,6 +92,7 @@ function CmpCard({
   r,
   picker,
   sapSlot,
+  sapExtra,
   sourceLabel,
   children,
 }: {
@@ -103,6 +104,8 @@ function CmpCard({
    *  (or, for an MGT-opened Sales Order, Zoho CRM) search instead of the static
    *  "No data found in SAP yet" placeholder. */
   sapSlot?: React.ReactNode;
+  /** Shown under the right-hand column's content (e.g. other customer codes as suggestions). */
+  sapExtra?: React.ReactNode;
   /** Label for the right-hand column when it isn't SAP — e.g. "Data from Zoho CRM" for an
    *  MGT-opened Sales Order's Customer card. Defaults to "Data from SAP". */
   sourceLabel?: string;
@@ -133,6 +136,7 @@ function CmpCard({
         <div className="cmp-col sap">
           <div className="cmp-label"><i className="fa-solid fa-building-columns" /> {sourceLabel ?? 'Data from SAP'}</div>
           {sapSlot ?? <SideList items={r.sap} side="sap" />}
+          {sapExtra}
         </div>
       </div>
       {children}
@@ -496,17 +500,20 @@ function SapMaterialPanel({
     return () => { cancelled = true; };
   }, [results, customer]);
 
+  const lastPriceText = (materialCode: string) => {
+    const lp = lastPrices[materialCode];
+    return lp === undefined
+      ? 'Loading…'
+      : lp
+        ? `${lp.pricePerUnit.toLocaleString()} / ${lp.unit || 'unit'}${lp.creationDate ? ` (${lp.creationDate})` : ''}`
+        : 'No sales history with this customer';
+  };
+
   const renderLastPrice = (materialCode: string) => {
     if (!customer) return null;
-    const lp = lastPrices[materialCode];
     return (
       <div className="hint" style={{ marginTop: 3 }}>
-        <i className="fa-solid fa-tag" />{' '}
-        {lp === undefined
-          ? 'Last Price: loading…'
-          : lp
-            ? `Last Price: ${lp.pricePerUnit.toLocaleString()} / ${lp.unit || 'unit'}${lp.creationDate ? ` (${lp.creationDate})` : ''}`
-            : 'Last Price: no sales history with this customer'}
+        <i className="fa-solid fa-tag" /> Last Price: {lastPriceText(materialCode)}
       </div>
     );
   };
@@ -597,15 +604,24 @@ function SapMaterialPanel({
     fields: [
       { label: 'Material Code', value: m.materialCode },
       { label: 'Description', value: m.materialDescription },
+      ...(customer ? [{ label: 'Last Price', value: lastPriceText(m.materialCode) }] : []),
     ],
     raw: m,
   }));
 
+  const visibleResults = sorted.slice(0, 5);
+
   return (
     <>
       <div className="hint" style={{ padding: '6px 0', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-        <span>Found {results.length} matches in SAP — sorted by closest, pick one:</span>
-        {results.length > 1 && (
+        <span>
+          Found {results.length} matches in SAP — showing the {Math.min(results.length, 5)} closest matches:
+        </span>
+        {results.length > 5 ? (
+          <button className="btn sm" onClick={() => setAiOpen(true)}>
+            <i className="fa-solid fa-table-list" /> See more &amp; compare ({results.length})
+          </button>
+        ) : results.length > 1 && (
           <button className="btn sm" onClick={() => setAiOpen(true)}>
             <i className="fa-solid fa-wand-magic-sparkles" /> Ask AI to match
           </button>
@@ -613,7 +629,7 @@ function SapMaterialPanel({
       </div>
       <table className="cmp">
         <tbody>
-          {sorted.map(({ m }) => (
+          {visibleResults.map(({ m }) => (
             <tr key={m.materialCode}>
               <td>
                 <b>{m.materialCode}</b> — {m.materialDescription}
@@ -1955,13 +1971,19 @@ function ZohoDealCard({
       return;
     }
     let cancelled = false;
+    // Drop the previous customer's Deal straight away (12 Oct 2026): while the new lookup runs --
+    // or if it fails -- nothing stays selected, so Send can't create the order on the old
+    // customer's Deal. The new list re-selects the same Deal if it belongs to this customer too.
+    const keep = selectedId;
+    setDeals(null);
+    onSelectId('');
     setLoading(true);
     setError(null);
     getZohoDealsByAccountCode(customerCode)
       .then((r) => {
         if (cancelled) return;
         setDeals(r.deals);
-        onSelectId(r.deals.some((d) => d.id === selectedId) ? selectedId : r.deals[0]?.id || '');
+        onSelectId(r.deals.some((d) => d.id === keep) ? keep : r.deals[0]?.id || '');
       })
       .catch((e) => {
         if (!cancelled) setError(e?.message || 'Zoho CRM lookup failed');
@@ -2171,6 +2193,88 @@ function qtyTxt(n: unknown) {
    of this customer+material (shown as the "From history" hint) and can be changed here from the full
    list (DB master + live SAP). Person IDs that aren't in the list yet (the current value, or the
    suggestion) are still offered so nothing is lost. */
+/* Customer candidates (7 Oct 2026): when the mapping can't tell which of several master customer
+   codes is meant (the same name or Tax ID sits on more than one code, e.g. two branches of one
+   company), list those codes from Master Mapping so the person picks one directly — with a pointer
+   to Search SAP/Zoho or "Select master mapping" when none of them is right. */
+function CustomerCandidatesPanel({
+  codes,
+  masters,
+  companyCode,
+  isMgt,
+  disabled,
+  onPick,
+  suggestOnly,
+}: {
+  codes: string[];
+  masters: MastersData;
+  companyCode: string;
+  isMgt?: boolean;
+  disabled?: boolean;
+  onPick: (code: string) => void;
+  /** true = a code is already matched; these are only other codes with the same Tax ID. */
+  suggestOnly?: boolean;
+}) {
+  const s = (v: unknown) => String(v ?? '').trim();
+  const items = codes.map((code) => {
+    const rows = masters.customers.filter((c) => s(c.ComcompyCodeSAP) === code && s(c.SalesOrg) === companyCode);
+    const docNames = [...new Set(rows.map((r) => s(r.CompanyName)).filter(Boolean))];
+    const sapName = rows.map((r) => s(r.CompanyNameSAP)).find(Boolean) || '';
+    const taxId = rows.map((r) => s(r.TaxId)).find(Boolean) || '';
+    const shipTos = masters.shiptos.filter((x) => s(x.SalesOrg) === companyCode && s(x.CustomerCode) === code);
+    return { code, docNames, sapName, taxId, shipTos };
+  });
+  return (
+    <div style={{ padding: '6px 0' }}>
+      <div className="hint" style={{ marginBottom: 6 }}>
+        {suggestOnly ? (
+          <>
+            <i className="fa-solid fa-lightbulb" /> Other code{codes.length > 1 ? 's' : ''} in Master Mapping with the
+            same Tax ID — switch only if the match above is wrong:
+          </>
+        ) : (
+          <>
+            <i className="fa-solid fa-triangle-exclamation" /> This customer matches <b>{codes.length}</b> codes in
+            Master Mapping — pick the right one:
+          </>
+        )}
+      </div>
+      <table className="cmp">
+        <tbody>
+          {items.map((it) => (
+            <tr key={it.code}>
+              <td>
+                <b>{it.code}</b>
+                {it.sapName ? <> — {it.sapName}</> : null}
+                {it.docNames.length > 0 && <div className="hint">Name on documents: {it.docNames.join(' / ')}</div>}
+                {it.taxId && <div className="hint">Tax ID: {it.taxId}</div>}
+                <div className="hint">
+                  Ship-to:{' '}
+                  {it.shipTos.length === 0
+                    ? 'none on file'
+                    : it.shipTos.slice(0, 3).map((x) => s(x.ShipToName) || s(x.SapShipToCode)).join(' / ') +
+                      (it.shipTos.length > 3 ? ` (+${it.shipTos.length - 3} more)` : '')}
+                </div>
+              </td>
+              <td>
+                <button className={'btn sm' + (suggestOnly ? '' : ' primary')} disabled={disabled} onClick={() => onPick(it.code)}>
+                  {suggestOnly ? 'Switch to this' : 'Use this'}
+                </button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {!suggestOnly && (
+      <small className="master-field-help">
+        None of these? Use “{isMgt ? 'Search Zoho' : 'Search SAP'}” above, or pick from “-- Select master mapping --”.
+        The name on this document will be remembered for the code you choose.
+      </small>
+      )}
+    </div>
+  );
+}
+
 function SalesEmployeePicker({
   value,
   suggestion,
@@ -2186,6 +2290,8 @@ function SalesEmployeePicker({
 }) {
   const nameById = new Map<string, string>();
   for (const e of list) if (e.name) nameById.set(e.personId, e.name);
+  const salesGroupOf = (id: string) => list.find((e) => e.personId === id)?.salesGroup || '';
+  const salesGroup = value ? salesGroupOf(value) : '';
   if (suggestion?.personId && suggestion.name) nameById.set(suggestion.personId, suggestion.name);
 
   const label = (id: string) => {
@@ -2213,6 +2319,15 @@ function SalesEmployeePicker({
           </span>
         ) : (
           <span className="badge b-idle" style={{ marginLeft: 8 }}>Not selected</span>
+        )}
+        {value && (
+          <span
+            className={'badge ' + (salesGroup ? 'b-ok' : 'b-warn')}
+            style={{ marginLeft: 8 }}
+            title="Sales Group = this person's Division in Ms_User. The Sales Order header uses the first line's Sales Group."
+          >
+            <i className="fa-solid fa-people-group" /> Sales Group: {salesGroup || 'not set'}
+          </span>
         )}
       </div>
       <div className="cmp-body" style={{ display: 'block' }}>
@@ -2570,7 +2685,16 @@ export default function MappingCards({
         }
         sourceLabel={isMgt ? 'Data from Zoho CRM' : undefined}
         sapSlot={
-          customerSapOpen ? (
+          !customerSapOpen && c.status === 'fail' && (c.cands?.length ?? 0) > 1 ? (
+            <CustomerCandidatesPanel
+              codes={c.cands || []}
+              masters={masters}
+              companyCode={companyCode}
+              isMgt={isMgt}
+              disabled={posted}
+              onPick={(code) => onManualHeader('customer', code)}
+            />
+          ) : customerSapOpen ? (
             isMgt ? (
               <ZohoCustomerPanel
                 customerName={doc.header.customerName}
@@ -2623,6 +2747,18 @@ export default function MappingCards({
               onSetSalesArea={onSetSalesArea}
             />
           )
+        }
+        sapExtra={
+          !customerSapOpen && c.status !== 'fail' && !posted && (c.cands?.length ?? 0) > 0 ? (
+            <CustomerCandidatesPanel
+              codes={c.cands || []}
+              masters={masters}
+              companyCode={companyCode}
+              isMgt={isMgt}
+              onPick={(code) => onManualHeader('customer', code)}
+              suggestOnly
+            />
+          ) : undefined
         }
       >
         {/* Ship-to lives inside the Customer card as a sub-section instead of its own numbered

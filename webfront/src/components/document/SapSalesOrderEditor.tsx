@@ -3,7 +3,8 @@ import type { DocHeader, DocLine, DocModel, MapResult } from '../../api/document
 import { SEND_DISABLED } from '../../constants/flags';
 import { fmt, num } from '../../utils/format';
 import type { SoGroupState } from '../../api/documents';
-import SoGroupPanel, { groupStatus } from './SoGroupPanel';
+import SoGroupPanel, { groupStatus, type GroupShipToControl } from './SoGroupPanel';
+import type { SapSalesEmployee } from '../../api/sap';
 
 // GLC only (this whole editor is the SAP-side, GLC-only "check before you send" screen -- see the
 // module doc comment below): the Subtotal/VAT/Grand Total block below is purely an OCR-review
@@ -14,43 +15,61 @@ import SoGroupPanel, { groupStatus } from './SoGroupPanel';
 // in this feature needs it to be; if that changes, this should move into AppConfig the same way
 // SapSalesOrderPriceConditionType did.
 const GLC_VAT_RATE = 0.07;
+type VatMode = 'document' | 'exclude' | 'include' | 'none';
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
-/* Delivery-date grouping (GLC Sales Order). Each line can carry its own delivery date
-   (extra.deliveryDate, OCR-prefilled and editable in the DETAIL table). Business rule from Megachem:
-   lines that ship on the SAME date go on one Sales Order; lines with DIFFERENT dates must become
-   SEPARATE Sales Orders (one per date). This groups the document's lines by their effective delivery
-   date (per-line date, else the header date, else "unspecified"), preserving first-seen order so the
-   group numbers are stable. Exported so the page can build the same split assignment the editor shows. */
+/* How one Sales Order document becomes several SAP / Zoho Sales Orders (12 Oct 2026). Every line
+   lands in exactly ONE group, keyed by
+     1. its SO Group -- a number the CS types per line in the DETAIL table (extra.soGroup) to keep
+        products on separate Sales Orders; no business rule, the person decides; blank = 1, and
+     2. its delivery date -- extra.deliveryDate, else the header date (Megachem rule: one Sales Order
+        per delivery date).
+   One key per line means a line can never be sent twice, however the order is cut. The ship-to is
+   chosen per SO Group (header.soGroupShipTos); a group without one uses the document's ship-to.
+   Ordered by SO Group number, then first-seen date, so "SO 1 / SO 2" stays stable.
+   Mirrors MgtOcr.Core.Mapping.SoDeliveryGroups — keep the two in step (same key format). */
 export interface DeliveryDateGroup {
-  /** Grouping key exactly as the backend uses it (SoDeliveryGroups): the date, or '' when none. */
+  /** Grouping key exactly as the backend builds it (SoDeliveryGroups.KeyOf): "{soGroup}|{date}". */
   key: string;
+  /** SO Group number ("1", "2", ...). */
+  soGroup: string;
+  /** Delivery date as stored (YYYY-MM-DD) or '' when none. */
+  rawDate: string;
   /** Display label: the date, or a concise fallback when no date is available. */
   date: string;
   itemNos: number[];
   count: number;
 }
 
+/** The line's SO Group as a canonical string; blank/invalid = "1" (same as the backend). */
+export function lineSoGroup(line: DocLine): string {
+  const raw = String((line.extra as Record<string, string> | undefined)?.soGroup ?? '').trim();
+  const n = /^\d+$/.test(raw) ? parseInt(raw, 10) : 0;
+  return n > 0 ? String(n) : '1';
+}
+
 export function deliveryDateGroups(doc: DocModel, headerDate: string): DeliveryDateGroup[] {
-  // Mirrors MgtOcr.Core.Mapping.SoDeliveryGroups — keep the two in step.
   const order: string[] = [];
-  const byKey = new Map<string, number[]>();
+  const byKey = new Map<string, DeliveryDateGroup>();
   (doc.lines || []).forEach((l, i) => {
-    const raw = ((l.extra as Record<string, string> | undefined)?.deliveryDate || '').trim();
-    const key = raw || (headerDate || '').trim();
-    if (!byKey.has(key)) {
-      byKey.set(key, []);
+    const soGroup = lineSoGroup(l);
+    const rawDate = ((l.extra as Record<string, string> | undefined)?.deliveryDate || '').trim() || (headerDate || '').trim();
+    const key = `${soGroup}|${rawDate}`;
+    let g = byKey.get(key);
+    if (!g) {
+      g = { key, soGroup, rawDate, date: rawDate || 'Delivery date not specified', itemNos: [], count: 0 };
+      byKey.set(key, g);
       order.push(key);
     }
-    byKey.get(key)!.push(Number(l.itemNo ?? (i + 1) * 10));
+    g.itemNos.push(Number(l.itemNo ?? (i + 1) * 10));
+    g.count++;
   });
-  return order.map((key) => ({
-    key,
-    date: key || 'Delivery date not specified',
-    itemNos: byKey.get(key)!,
-    count: byKey.get(key)!.length,
-  }));
+  // Array.prototype.sort is stable, so within one SO Group the first-seen date order is kept.
+  return order.map((k) => byKey.get(k)!).sort((a, b) => Number(a.soGroup) - Number(b.soGroup));
 }
+
+/** Alias with the newer name -- the groups are no longer by delivery date alone. */
+export const soGroups = deliveryDateGroups;
 
 /* The SAP Sales Order review step, lifted onto the page as one card -- the SAP-side counterpart
    of ZohoSalesOrderEditor, built so the two "check before you send" screens look and behave the
@@ -71,6 +90,11 @@ export default function SapSalesOrderEditor({
   onViewPayload,
   posts = [],
   partial = false,
+  groupShipTo,
+  onVatModeChange,
+  salesEmployees = [],
+  unitIssues = [],
+  onFixUnits,
 }: {
   doc: DocModel;
   map: MapResult | null;
@@ -81,16 +105,33 @@ export default function SapSalesOrderEditor({
   onSend: () => void;
   /** Opens the "View Payload" modal showing the exact JSON that will be POSTed to SAP. */
   onViewPayload: () => void;
-  /** Split this document into one Sales Order per delivery date, then send each. Called only when the
-   *  lines carry more than one distinct delivery date. */
-  /** Send results per delivery-date group (ocr.SalesOrderPost) — shown in the group panel. */
+  /** Send results per group (SO Group + delivery date) — shown in the group panel. */
   posts?: SoGroupState[];
   /** Some groups already posted (status PARTIAL): only the remaining ones can be sent. */
   partial?: boolean;
+  /** Per-SO-Group ship-to picker (SAP ship-to parties of the sold-to). */
+  groupShipTo?: GroupShipToControl;
+  /** Saves the chosen VAT mode on the document (header.vatMode) -- 'include' changes the SAP price. */
+  onVatModeChange?: (mode: string) => void;
+  /** Sales Employee pick list (Person ID -> name, Sales Group) for the summary. */
+  salesEmployees?: SapSalesEmployee[];
+  /** Lines whose unit SAP doesn't know for their material (see SapSalesOrderStep). */
+  unitIssues?: { itemNo: unknown; uom: string }[];
+  onFixUnits?: () => void;
 }) {
   const lines: DocLine[] = doc.lines || [];
   const lineStatus = (i: number) => map?.lines?.[i]?.status;
   const willSendCount = map ? lines.filter((_, i) => lineStatus(i) !== 'fail').length : 0;
+
+  // GLC: every line needs its own Sales Employee (SAP item field); the header Sales Group is the
+  // first item's Sales Employee's Division (Ms_User.Division) -- same rule as SapPayloadBuilder.
+  const isTaxLine = (l: DocLine) => ['WHT', 'VAT'].includes(String(l.extCode || '').toUpperCase());
+  const empOf = (l: DocLine) => String((l.extra as Record<string, string> | undefined)?.salesEmployee || '').trim();
+  const missingSalesEmp = lines.filter((l) => !isTaxLine(l) && !empOf(l)).map((l) => l.itemNo);
+  const firstLine = lines.find((l) => !isTaxLine(l));
+  const firstEmp = firstLine ? salesEmployees.find((s) => s.personId === empOf(firstLine)) : undefined;
+  const firstEmpName = firstEmp?.name || (firstLine ? empOf(firstLine) : '');
+  const salesGroup = String(firstEmp?.salesGroup || header.salesGroup || '').trim();
   const notMatchedCount = map ? lines.filter((_, i) => lineStatus(i) === 'fail').length : 0;
 
   // Delivery-date grouping (Megachem rule): one SAP Sales Order per delivery date, all sent from this
@@ -118,9 +159,23 @@ export default function SapSalesOrderEditor({
   //  - 'include': the customer's document has VAT baked into the price but didn't break it out
   //    (e.g. only "Grand Total 19,140" with Tax 0.00) -> back the 7% out so the same money is shown
   //    split into Subtotal + VAT instead of adding a second 7% on top.
-  // This is a per-document human decision (the CS can tell from the customer's document which it is)
-  // and is DISPLAY-ONLY — it never changes the SAP payload, only this breakdown.
-  const [vatMode, setVatMode] = useState<'document' | 'exclude' | 'include'>(docHasVat ? 'document' : 'exclude');
+  // This is a per-document human decision (the CS can tell from the customer's document which it is).
+  // Saved on the document (header.vatMode, 12 Oct 2026). 'include' ALSO changes what is sent: SAP
+  // adds VAT itself, so the price goes out with the 7% taken out (107 -> 100); otherwise the
+  // customer would be billed VAT twice. The other modes send the prices as read.
+  //  - 'none': leave VAT alone entirely -> show the line prices as they are, VAT = 0, no 7% added
+  //    or extracted (added 7 Oct 2026 at the user's request).
+  const savedVatMode = String(header.vatMode || '') as VatMode;
+  const defaultVatMode: VatMode = docHasVat ? 'document' : 'exclude';
+  const [vatModeState, setVatModeState] = useState<VatMode | null>(
+    (['document', 'exclude', 'include', 'none'] as const).includes(savedVatMode) ? savedVatMode : null,
+  );
+  // "document" is offered only while the document has its own VAT figure; fall back when it goes.
+  const vatMode: VatMode = vatModeState === 'document' && !docHasVat ? 'exclude' : vatModeState ?? defaultVatMode;
+  const setVatMode = (m: VatMode) => {
+    setVatModeState(m);
+    onVatModeChange?.(m);
+  };
 
   // Sum of the lines that will actually be sent (unmatched lines aren't part of the SO SAP sees).
   const lineTotal = lines.reduce(
@@ -141,6 +196,11 @@ export default function SapSalesOrderEditor({
     subtotal = round2(num(header.subTotal) || (num(header.totalAmount) - docVat));
     vatAmount = round2(docVat);
     grandTotal = round2(num(header.totalAmount) || (subtotal + vatAmount));
+  } else if (vatMode === 'none') {
+    // 'none': no VAT handling at all — Subtotal = Grand Total = lineTotal, VAT = 0.
+    subtotal = round2(lineTotal);
+    vatAmount = 0;
+    grandTotal = round2(lineTotal);
   } else if (vatMode === 'include') {
     // lineTotal already contains VAT -> Subtotal = lineTotal / 1.07, VAT = remainder (so the two
     // always add back to lineTotal exactly), Grand = lineTotal.
@@ -186,11 +246,30 @@ export default function SapSalesOrderEditor({
           </div>
           <div className="f">
             <label>Ship-to</label>
-            <input type="text" value={map.header.shipTo ? `${map.header.shipTo.code || ''} — ${map.header.shipTo.text || ''}` : ''} disabled readOnly />
+            <input
+              type="text"
+              value={
+                [map.header.shipTo?.code, map.header.shipTo?.text].filter((x) => String(x || '').trim()).join(' — ') ||
+                'Same as Sold-to'
+              }
+              disabled
+              readOnly
+            />
+            {Object.keys(groupShipTo?.current || {}).length > 0 && (
+              <div className="hint">Some SO Groups use their own Ship-to — see the Sales Orders table below</div>
+            )}
           </div>
           <div className="f">
             <label>Customer PO</label>
-            <input type="text" value={header.poNo || ''} disabled readOnly />
+            {/* No PO number on the document -> "-" is what SAP receives (Megachem rule 8). */}
+            <input type="text" value={String(header.poNo || '').trim() || '-'} disabled readOnly />
+          </div>
+          <div className="f">
+            <label>Sales Group</label>
+            <input type="text" value={salesGroup || '—'} disabled readOnly />
+            <small className="master-field-help">
+              From the first item's Sales Employee{firstEmpName ? ` (${firstEmpName})` : ''} — each Sales Order uses its own first item
+            </small>
           </div>
           <div className="f">
             <label>PO Date</label>
@@ -268,13 +347,16 @@ export default function SapSalesOrderEditor({
             ) : (
               <div className="f">
                 <label>Item price in document (VAT)</label>
-                <select value={vatMode} onChange={(e) => setVatMode(e.target.value as 'document' | 'exclude' | 'include')}>
+                <select value={vatMode} onChange={(e) => setVatMode(e.target.value as VatMode)}>
                   {docHasVat && <option value="document">Document already separates VAT — use the document value</option>}
                   <option value="exclude">VAT not included — add 7%</option>
-                  <option value="include">VAT included — extract 7% for display</option>
+                  <option value="include">VAT included — send prices without VAT (÷ 1.07)</option>
+                  <option value="none">No VAT — leave prices as they are</option>
                 </select>
                 <small className="master-field-help">
-                  Match the customer document — display only, does not affect the price sent to SAP
+                  {vatMode === 'include'
+                    ? 'Prices on the document already include 7% VAT — SAP receives each price ÷ 1.07 and adds VAT itself'
+                    : 'Match the customer document — the price sent to SAP is the price on the line'}
                   {docHasVat && ' · this document already has VAT, so the default is set to "use the document value"'}
                 </small>
               </div>
@@ -294,6 +376,28 @@ export default function SapSalesOrderEditor({
           </div>
         </div>
 
+        {unitIssues.length > 0 && (
+          <div className="so-group-notice" role="alert" style={{ marginTop: 12, alignItems: 'center' }}>
+            <i className="fa-solid fa-triangle-exclamation" aria-hidden="true" />
+            <span style={{ flex: 1 }}>
+              SAP doesn&apos;t know the unit of item{' '}
+              <b>{unitIssues.map((x) => `${String(x.itemNo)} (${x.uom || 'no unit'})`).join(', ')}</b> for its material —
+              change it before sending.
+            </span>
+            {onFixUnits && !posted && (
+              <button className="btn sm primary" onClick={onFixUnits}>Change unit</button>
+            )}
+          </div>
+        )}
+        {missingSalesEmp.length > 0 && (
+          <div className="so-group-notice" role="alert" style={{ marginTop: 12 }}>
+            <i className="fa-solid fa-triangle-exclamation" aria-hidden="true" />
+            <span>
+              Sales Employee is required for SAP — pick it for item <b>{missingSalesEmp.join(', ')}</b> in each
+              item's Material card above (<b>Sales Employee — this line</b>), then send.
+            </span>
+          </div>
+        )}
         {notMatchedCount > 0 && (
           <p className="hint" style={{ marginTop: 10, color: 'var(--red, #c0392b)' }}>
             {notMatchedCount} line(s) above are not matched — see the Failed panel higher on this page, fix them, then
@@ -301,14 +405,14 @@ export default function SapSalesOrderEditor({
           </p>
         )}
 
-        <SoGroupPanel groups={dateGroups} posts={posts} target="SAP" />
+        <SoGroupPanel groups={dateGroups} posts={posts} target="SAP" shipTo={groupShipTo} />
 
         <div className="so-send" style={{ justifyContent: 'flex-end' }}>
           <div className="row" style={{ gap: 10 }}>
             <button
               className="btn success"
               onClick={onSend}
-              disabled={SEND_DISABLED || sending || posted || (!partial && !map.pass) || remaining === 0}
+              disabled={SEND_DISABLED || sending || posted || (!partial && !map.pass) || remaining === 0 || missingSalesEmp.length > 0}
             >
               {sending
                 ? 'Sending…'

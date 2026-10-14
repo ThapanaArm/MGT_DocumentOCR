@@ -141,14 +141,34 @@ public static class MappingEngine
     private static bool IsTaxRow(Dictionary<string, object?> line) =>
         (line.GetStr("extCode") ?? "").Trim().ToUpperInvariant() is "WHT" or "VAT" or "DUTY";
 
+    /// <summary>Method value MatchPartner returns when the name matches several partner codes about
+    /// equally well — the caller should ask the person to choose (Cands holds those codes).</summary>
+    public const string AmbiguousNameMethod = "AMBIGUOUS_NAME";
+
     public static (Dictionary<string, object?>? Hit, string Method, double Score, List<string> Cands) MatchPartner(
-        List<Dictionary<string, object?>> rows, object? taxId, object? name, string codeKey, string[] nameKeys)
+        List<Dictionary<string, object?>> rows, object? taxId, object? name, string codeKey, string[] nameKeys,
+        string? primaryNameKey = null)
     {
         var t = Digits(taxId);
         if (t.Length >= 10)
         {
             var byTax = rows.FirstOrDefault(r => Digits(r.Get("TaxId")) == t);
             if (byTax != null) return (byTax, "Tax Registration No (Tax ID)", 1.0, new List<string>());
+        }
+        // Customer (SO) name match, 7 Oct 2026: the document-side name (CompanyName — how the
+        // customer writes its own name on POs, Thai or English per branch) decides FIRST; the SAP
+        // name is only a fallback when no CompanyName matches. Both steps refuse to guess when the
+        // best score is shared by several codes (e.g. MILOTT 1001050 / 1001407): they hand back
+        // those codes as candidates with AmbiguousNameMethod instead of silently taking the first.
+        if (primaryNameKey != null)
+        {
+            foreach (var keys in new[] { new[] { primaryNameKey }, nameKeys })
+            {
+                var (pHit, pScore, pTie) = BestByName(rows, name, codeKey, keys);
+                if (pHit != null)
+                    return (pHit, $"Name ({(int)Math.Round(pScore * 100)}%){(keys.Length == 1 ? "" : " — SAP name")}", pScore, new List<string>());
+                if (pTie.Count > 1) return (null, AmbiguousNameMethod, pScore, pTie);
+            }
         }
         Dictionary<string, object?>? best = null; var bs = 0.0;
         foreach (var r in rows)
@@ -162,6 +182,22 @@ public static class MappingEngine
             .OrderByDescending(x => x.Score).ToList();
         var cands = scored.Where(x => x.Score >= ThSuggest).Take(3).Select(x => x.Row.GetStr(codeKey)).ToList();
         return (null, "", bs, cands);
+    }
+
+    /// <summary>Best row by name similarity over <paramref name="keys"/> (≥ ThAuto). When rows of
+    /// two or more DIFFERENT codes score within 0.05 of the best, there is no clear winner: Hit is
+    /// null and Tie lists those codes (best first).</summary>
+    private static (Dictionary<string, object?>? Hit, double Score, List<string> Tie) BestByName(
+        List<Dictionary<string, object?>> rows, object? name, string codeKey, string[] keys)
+    {
+        var scored = rows.Select(r => (Row: r, Score: keys.Max(k => Sim(name, r.Get(k)))))
+            .Where(x => x.Score >= ThAuto)
+            .OrderByDescending(x => x.Score).ToList();
+        if (scored.Count == 0) return (null, 0, new List<string>());
+        var top = scored[0].Score;
+        var near = scored.Where(x => top - x.Score < 0.05)
+            .Select(x => x.Row.GetStr(codeKey)).Where(c => c.Length > 0).Distinct().ToList();
+        return near.Count <= 1 ? (scored[0].Row, top, new List<string>()) : (null, top, near);
     }
 
     /// <summary>The Customer master row for a customer code. One SAP/Zoho code can sit on several
@@ -201,6 +237,20 @@ public static class MappingEngine
         if (codes.Count <= 1) return null;
 
         var docName = header.Get("customerName");
+        // Name first (7 Oct 2026): if exactly one of the codes carries the document's own customer
+        // name in CompanyName (the document-side name, not the SAP name), that code is the one — a
+        // branch that writes its name in English vs. one that writes it in Thai is told apart here.
+        var byDocName = codes.Select(code =>
+            {
+                var row = taxRows.Where(x => x.GetStr("CustomerCode") == code)
+                    .OrderByDescending(x => Sim(docName, x.Get("NameTh"))).First();
+                return (Code: code, Row: row, Score: Sim(docName, row.Get("NameTh")));
+            })
+            .OrderByDescending(x => x.Score).ToList();
+        if (byDocName[0].Score >= ThAuto && byDocName[0].Score - byDocName[1].Score >= 0.05)
+            return new(byDocName[0].Row,
+                $"Tax ID (matched {codes.Count} codes; chose {byDocName[0].Code}: document name {(int)Math.Round(byDocName[0].Score * 100)}%)",
+                codes);
         var stName = header.Get("shipToName"); var stAddr = header.Get("shipToAddress");
         var hasShipTo = !string.IsNullOrWhiteSpace(stName?.ToString()) || !string.IsNullOrWhiteSpace(stAddr?.ToString());
 
@@ -229,9 +279,32 @@ public static class MappingEngine
         return new(null, "", scored.Select(x => x.Code).ToList());
     }
 
+    /// <summary>Sales Order matching (12 Oct 2026): a name that merely CONTAINS the other no longer
+    /// scores a flat 0.92 -- "CAUSTIC SODA" against "CAUSTIC SODA FLAKE 99%" and "CAUSTIC SODA LIQUID
+    /// 50%" both scored 0.92 and the first row won silently. The containment score now scales with how
+    /// much of the longer name is covered (0.60 .. 0.92), so a short partial name drops to a suggestion.
+    /// Kept separate from Sim so Supplier Invoice matching is unchanged.</summary>
+    public static double SimStrict(object? a, object? b)
+    {
+        var na = Norm(a); var nb = Norm(b);
+        if (na.Length == 0 || nb.Length == 0) return 0.0;
+        if (na == nb) return 1.0;
+        var sim = Sim(a, b);
+        if (na.Contains(nb) || nb.Contains(na))
+        {
+            var ratio = (double)Math.Min(na.Length, nb.Length) / Math.Max(na.Length, nb.Length);
+            return 0.60 + 0.32 * ratio;
+        }
+        return sim;
+    }
+
+    /// <summary>Two candidates closer than this are a tie: nothing is picked automatically.</summary>
+    public const double TieMargin = 0.03;
+
     public static (string Code, string Method, List<string> Cands) MatchMaterial(
         string? partnerCode, object? extCode, object? extDesc,
-        List<Dictionary<string, object?>> mapRows, string keyField, List<Dictionary<string, object?>> materials)
+        List<Dictionary<string, object?>> mapRows, string keyField, List<Dictionary<string, object?>> materials,
+        bool strict = false)
     {
         var scope = mapRows.Where(m => m.GetStr(keyField) == partnerCode).ToList();
         var ec = (extCode?.ToString() ?? "").Trim().ToUpperInvariant();
@@ -240,11 +313,22 @@ public static class MappingEngine
             var hit = scope.FirstOrDefault(m => m.GetStr("ExtCode").Trim().ToUpperInvariant() == ec);
             if (hit != null) return (hit.GetStr("MaterialCode"), "Partner Material Code", new List<string>());
         }
+        Func<object?, object?, double> sim = strict ? SimStrict : Sim;
         Dictionary<string, object?>? best = null; var bs = 0.0;
         foreach (var m in scope)
         {
-            var sc = Sim(extDesc, m.Get("ExtDesc"));
+            var sc = sim(extDesc, m.Get("ExtDesc"));
             if (sc > bs) { best = m; bs = sc; }
+        }
+        if (strict && best != null && bs >= ThMatScope)
+        {
+            // Strict (Sales Order): a near-tie with ANOTHER material is not a match -- the person picks.
+            var bestCode = best.GetStr("MaterialCode");
+            var rivals = scope
+                .Where(m => m.GetStr("MaterialCode") != bestCode && bs - sim(extDesc, m.Get("ExtDesc")) < TieMargin)
+                .Select(m => m.GetStr("MaterialCode")).Distinct().ToList();
+            if (rivals.Count > 0)
+                return ("", "", new List<string> { bestCode }.Concat(rivals).Take(3).ToList());
         }
         if (best != null && bs >= ThMatScope)
             return (best.GetStr("MaterialCode"), $"Partner Material Name ({(int)Math.Round(bs * 100)}%)", new List<string>());
@@ -258,7 +342,8 @@ public static class MappingEngine
         if (b2 != null && s2 >= ThMatMaster)
             return (b2.GetStr("MaterialCode"), $"Material master ({(int)Math.Round(s2 * 100)}%)", new List<string>());
 
-        var cands = scope.Where(m => Sim(extDesc, m.Get("ExtDesc")) >= ThSuggest).Select(m => m.GetStr("MaterialCode")).ToList();
+        var cands = scope.Where(m => sim(extDesc, m.Get("ExtDesc")) >= ThSuggest)
+            .OrderByDescending(m => sim(extDesc, m.Get("ExtDesc"))).Select(m => m.GetStr("MaterialCode")).Distinct().ToList();
         foreach (var m in materials)
         {
             var code = m.GetStr("MaterialCode");
@@ -268,12 +353,27 @@ public static class MappingEngine
     }
 
     public static Dictionary<string, object?> ConvertUom(string materialCode, object? docUom, object? qty,
-        List<Dictionary<string, object?>> materials, List<Dictionary<string, object?>> uomRules)
+        List<Dictionary<string, object?>> materials, List<Dictionary<string, object?>> uomRules,
+        bool noConversion = false)
     {
         var mat = materials.FirstOrDefault(m => m.GetStr("MaterialCode") == materialCode);
         var baseUom = mat.GetStr("Uom").Trim();
         var du = (docUom?.ToString() ?? "").Trim();
         var q = Num(qty);
+
+        // GLC Sales Order (Megachem rule 1, 6 Oct 2026): no unit conversion -- the line is sent in the
+        // unit on the line (the CS picks the SAP unit per line in the Detail table), factor 1. A UoM rule
+        // must never turn 2 DRUM into 400 KG here: the price on the line is per the line's own unit, so
+        // converting only the quantity sent a price 200x too high.
+        if (noConversion)
+        {
+            var unit = du.Length > 0 ? du : baseUom;
+            if (unit.Length == 0)
+                return new() { ["status"] = "fail", ["sapUom"] = "", ["factor"] = 0, ["sapQty"] = 0, ["method"] = "", ["detail"] = "No unit on the line — pick the SAP unit in the Detail table" };
+            if (unit.Contains(' ') || unit.Contains('/') || unit.Contains('\\'))
+                return new() { ["status"] = "fail", ["sapUom"] = unit, ["factor"] = 0, ["sapQty"] = 0, ["method"] = "", ["detail"] = $"Unit '{unit}' isn't a valid code — pick the SAP unit in the Detail table" };
+            return new() { ["status"] = "ok", ["sapUom"] = unit, ["iso"] = UomIso.GetValueOrDefault(unit.ToUpperInvariant(), ""), ["factor"] = 1.0, ["sapQty"] = q, ["method"] = "Unit sent as on the line (no conversion for GLC)" };
+        }
 
         if (du.Length == 0 && baseUom.Length > 0)
             return new() { ["status"] = "ok", ["sapUom"] = baseUom, ["factor"] = 1.0, ["sapQty"] = q, ["method"] = "No unit in document; using Material's base unit" };
@@ -363,7 +463,7 @@ public static class MappingEngine
             }
             else
             {
-                var (hit, method, _, cands) = MatchPartner(masters.Customers, header.Get("customerTaxId"), header.Get("customerName"), "CustomerCode", ["NameTh", "NameEn"]);
+                var (hit, method, _, cands) = MatchPartner(masters.Customers, header.Get("customerTaxId"), header.Get("customerName"), "CustomerCode", ["NameTh", "NameEn"], "NameTh");
                 // One Tax ID on several customer codes: score the codes instead of taking the first.
                 var taxPick = PickCustomerByTax(masters, header);
                 if (taxPick != null) { hit = taxPick.Hit; method = taxPick.Method; cands = taxPick.Codes; }
@@ -371,15 +471,29 @@ public static class MappingEngine
                 if (saved != null && saved.GetStr("CustomerCode") != hit?.GetStr("CustomerCode"))
                     resHeader["customer"] = R("manual", saved.GetStr("CustomerCode"), saved.GetStr("NameTh"), "previously selected");
                 else if (hit != null)
-                    resHeader["customer"] = R("ok", hit.GetStr("CustomerCode"), hit.GetStr("NameTh"), method);
+                    // Auto-picked from several codes (same Tax ID): the OTHER codes ride along in
+                    // cands so the card can offer them as suggestions ("switch to …") without
+                    // blocking the match.
+                    resHeader["customer"] = R("ok", hit.GetStr("CustomerCode"), hit.GetStr("NameTh"), method,
+                        (cands ?? new List<string>()).Where(x => x != hit.GetStr("CustomerCode")).ToList());
                 else if (taxPick != null)
                 {
                     resHeader["customer"] = R("fail", cands: cands);
                     errors.Add(new()
                     {
                         ["field"] = "Customer",
-                        ["msg"] = $"Tax No {Dash(header.GetStr("customerTaxId"))} belongs to {cands.Count} customer codes ({string.Join(", ", cands)}) and none is clearly the right one",
-                        ["fix"] = "Search and select the correct customer below (or fix the duplicate codes in Master Mapping → Customer)",
+                        ["msg"] = $"Tax ID {Dash(header.GetStr("customerTaxId"))} belongs to {cands.Count} customer codes ({string.Join(", ", cands)}) and none is clearly the right one",
+                        ["fix"] = "Pick the right one from the list below — or Search SAP / Select master mapping if none is right (or fix the duplicate codes in Master Mapping → Customer)",
+                    });
+                }
+                else if (method == AmbiguousNameMethod)
+                {
+                    resHeader["customer"] = R("fail", cands: cands);
+                    errors.Add(new()
+                    {
+                        ["field"] = "Customer",
+                        ["msg"] = $"Name \"{Dash(header.GetStr("customerName"))}\" matches {cands.Count} customer codes ({string.Join(", ", cands)}) equally well",
+                        ["fix"] = "Pick the right one from the list below — or Search SAP / Select master mapping if none is right",
                     });
                 }
                 else
@@ -388,8 +502,8 @@ public static class MappingEngine
                     errors.Add(new()
                     {
                         ["field"] = "Customer",
-                        ["msg"] = $"No customer matches Tax No {Dash(header.GetStr("customerTaxId"))} or name \"{Dash(header.GetStr("customerName"))}\"",
-                        ["fix"] = "Create/edit in Master Mapping → Customer",
+                        ["msg"] = $"No customer matches Tax ID {Dash(header.GetStr("customerTaxId"))} or name \"{Dash(header.GetStr("customerName"))}\"",
+                        ["fix"] = "Pick the customer in the Customer card below, or add it in Master Mapping → Customer",
                     });
                 }
             }
@@ -410,11 +524,17 @@ public static class MappingEngine
             {
                 var scope = masters.ShipTos.Where(x => x.GetStr("CustomerCode") == cust).ToList();
                 Dictionary<string, object?>? best = null; var bs = 0.0;
+                double ShipScore(Dictionary<string, object?> x) =>
+                    Math.Max(SimStrict(header.Get("shipToName"), x.Get("ShipToName")), SimStrict(header.Get("shipToAddress"), x.Get("Address")));
                 foreach (var x in scope)
                 {
-                    var sc = Math.Max(Sim(header.Get("shipToName"), x.Get("ShipToName")), Sim(header.Get("shipToAddress"), x.Get("Address")));
+                    var sc = ShipScore(x);
                     if (sc > bs) { best = x; bs = sc; }
                 }
+                // Two different ship-tos scoring within TieMargin of each other: don't guess.
+                if (best != null && bs >= ThShipTo && scope.Any(x =>
+                        x.GetStr("SapShipToCode") != best.GetStr("SapShipToCode") && bs - ShipScore(x) < TieMargin))
+                    bs = 0.0;
                 var savedSt = string.IsNullOrEmpty(savedShipTo) || cust != savedCust ? null
                     : scope.FirstOrDefault(x => x.GetStr("SapShipToCode") == savedShipTo);
                 if (savedSt != null && savedSt.GetStr("SapShipToCode") != (bs >= ThShipTo ? best?.GetStr("SapShipToCode") : null))
@@ -433,12 +553,12 @@ public static class MappingEngine
                     var fallback = (mHead.Get("shipToFallback")?.ToString() ?? "").Trim().ToLowerInvariant();
                     if (fallback == "soldto")
                     {
-                        resHeader["shipTo"] = R("skip", "", "", "ใช้ Sold-to เป็นผู้รับ");
+                        resHeader["shipTo"] = R("skip", "", "", "Sold-to used as ship-to");
                         warns.Add("Ship-to: user chose to use the sold-to party as the receiver (no SH sent; SAP defaults to sold-to).");
                     }
                     else if (fallback is "omit" or "none")
                     {
-                        resHeader["shipTo"] = R("skip", "", "", "ไม่ระบุ Ship-to (ไม่ส่งไป SAP)");
+                        resHeader["shipTo"] = R("skip", "", "", "No ship-to (not sent to SAP)");
                         warns.Add("Ship-to: user chose to omit the ship-to (no SH sent; SAP defaults to sold-to).");
                     }
                     else
@@ -450,7 +570,7 @@ public static class MappingEngine
                         // sold-to. The user can still override via the buttons (omit / pick a ship-to).
                         var hadShipTo = !string.IsNullOrWhiteSpace(header.GetStr("shipToName"))
                                      || !string.IsNullOrWhiteSpace(header.GetStr("shipToAddress"));
-                        resHeader["shipTo"] = R("skip", "", "", "ใช้ Sold-to เป็นผู้รับ (อัตโนมัติ)");
+                        resHeader["shipTo"] = R("skip", "", "", "Sold-to used as ship-to (automatic)");
                         warns.Add(hadShipTo
                             ? $"Ship-to: the document's ship-to \"{Dash(header.GetStr("shipToName"))}\" didn't match any master, so the sold-to party is used as the receiver. Add it in Master → Ship-to if it should route elsewhere."
                             : "Ship-to: none on the document — the sold-to party is used as the receiver (no SH sent; SAP defaults to sold-to).");
@@ -462,8 +582,10 @@ public static class MappingEngine
                     errors.Add(new()
                     {
                         ["field"] = "Ship-to",
-                        ["msg"] = $"Ship-to location not found \"{Dash(header.GetStr("shipToName"))}\" for this customer",
-                        ["fix"] = "Add in Master Mapping → Ship-to",
+                        ["msg"] = string.IsNullOrWhiteSpace(header.GetStr("shipToName"))
+                            ? "The document has no Ship-to, and none is set for this customer yet"
+                            : $"Ship-to location not found \"{header.GetStr("shipToName")}\" for this customer",
+                        ["fix"] = "Pick the Ship-to in the Ship-to card below, or add it in Master Mapping → Ship-to",
                     });
                 }
             }
@@ -532,7 +654,14 @@ public static class MappingEngine
                 continue;
             }
 
-            var mv = mLineRaw.Get(i.ToString())?.ToString();
+            // The person's own pick for this line: keyed by item number ("item:10") so deleting a line
+            // above it can't shift picks onto other lines; the old row-index key is still read for
+            // older callers. "saved:10" = the pick stored on the document from an earlier session
+            // (see MapDocument) -- kept unless the person picks again, like savedCustomer.
+            var itemKey = ln.Get("itemNo")?.ToString() ?? "";
+            var mv = itemKey.Length > 0 ? mLineRaw.Get("item:" + itemKey)?.ToString() : null;
+            if (string.IsNullOrEmpty(mv)) mv = mLineRaw.Get(i.ToString())?.ToString();
+            var savedMat = itemKey.Length > 0 ? mLineRaw.Get("saved:" + itemKey)?.ToString() : null;
             Dictionary<string, object?> row;
             if (!string.IsNullOrEmpty(mv))
             {
@@ -555,8 +684,12 @@ public static class MappingEngine
             }
             else
             {
-                var (code, method, cands) = MatchMaterial(partner, ln.Get("extCode"), ln.Get("desc"), mapRows, keyField, module == "SO" ? [] : masters.Materials);
-                if (!string.IsNullOrEmpty(code))
+                var (code, method, cands) = MatchMaterial(partner, ln.Get("extCode"), ln.Get("desc"), mapRows, keyField, module == "SO" ? [] : masters.Materials,
+                    strict: module == "SO");
+                if (module == "SO" && !string.IsNullOrEmpty(savedMat)
+                    && mapRows.Any(x => x.GetStr(keyField) == partner && x.GetStr("MaterialCode") == savedMat))
+                    row = R("manual", savedMat, matDesc.TryGetValue(savedMat, out var d3) ? d3?.ToString() ?? savedMat : savedMat, "previously selected");
+                else if (!string.IsNullOrEmpty(code))
                     row = R("ok", code, matDesc.TryGetValue(code, out var d2) ? d2?.ToString() ?? code : code, method);
                 else
                 {
@@ -572,7 +705,8 @@ public static class MappingEngine
 
             if (!string.IsNullOrEmpty(row.GetStr("code")))
             {
-                var u = ConvertUom(row.GetStr("code"), ln.Get("uom"), ln.Get("qty"), masters.Materials, uomRules);
+                var u = ConvertUom(row.GetStr("code"), ln.Get("uom"), ln.Get("qty"), masters.Materials, uomRules,
+                    noConversion: module == "SO" && shipToOptional); // shipToOptional is set for GLC Sales Orders only
                 row["uom"] = u;
                 if (u.GetStr("status") == "fail")
                 {

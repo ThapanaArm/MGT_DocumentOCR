@@ -113,11 +113,12 @@ export default function CompareModal<T>({
       .finally(() => setAsking(false));
   };
 
-  // Union of field labels across the document + every candidate, in first-seen order, so a
-  // field one candidate lacks still lines up as a blank row rather than shifting the table.
+  // Candidate cards show candidate fields only. Document-only fields already live in the reference
+  // panel above; repeating them as "Not available" on every candidate adds noise without helping
+  // the comparison. Keep a union across candidates so their cards still use a consistent layout.
   const labels: string[] = [];
   const seen = new Set<string>();
-  for (const f of [...docFields, ...candidates.flatMap((c) => effectiveFields(c))]) {
+  for (const f of candidates.flatMap((c) => effectiveFields(c))) {
     if (!seen.has(f.label)) {
       seen.add(f.label);
       labels.push(f.label);
@@ -190,58 +191,47 @@ export default function CompareModal<T>({
             You must configure at least one AI model API key before "Ask AI to compare" will work
           </p>
         )}
-        <div className="tw" style={{ overflowX: 'auto' }}>
-          <table className="cmp">
-            <thead>
-              <tr>
-                <th></th>
-                <th>Document</th>
-                {candidates.map((c) => (
-                  <th key={c.id}>{c.label}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {labels.map((label) => (
-                <tr key={label}>
-                  <th>{label}</th>
-                  <td>{valueFor(docFields, label) || <span className="hint">—</span>}</td>
-                  {candidates.map((c) => (
-                    <td key={c.id}>{valueFor(effectiveFields(c), label) || <span className="hint">—</span>}</td>
+        <section className="ai-compare-document" aria-label="Values read from the document">
+          <div className="ai-compare-document-title">
+            <span className="modal-title-icon"><i className="fa-regular fa-file-lines" /></span>
+            <div><b>Document values</b><small>Use these details as the source of truth</small></div>
+          </div>
+          <dl>
+            {docFields.filter((f) => f.value).map((f) => (
+              <div key={f.label}><dt>{f.label}</dt><dd>{f.value}</dd></div>
+            ))}
+          </dl>
+        </section>
+
+        <div className="ai-candidate-grid">
+          {candidates.map((c, index) => {
+            const verdict = verdicts[c.id];
+            return (
+              <article className={'ai-candidate-card' + (verdict?.match === 'yes' ? ' recommended' : '')} key={c.id}>
+                <header>
+                  <span className="ai-candidate-number">{index + 1}</span>
+                  <div><small>Candidate</small><h3>{c.label}</h3></div>
+                  {verdict?.match === 'yes' && <span className="ai-recommended">Recommended</span>}
+                </header>
+                <dl className="ai-candidate-fields">
+                  {labels.map((label) => (
+                    <div key={label}>
+                      <dt>{label}</dt>
+                      <dd>{valueFor(effectiveFields(c), label) || <span className="hint">Not available</span>}</dd>
+                    </div>
                   ))}
-                </tr>
-              ))}
-              <tr>
-                <th>AI verdict</th>
-                <td></td>
-                {candidates.map((c) => (
-                  <td key={c.id}>{matchBadge(verdicts[c.id])}</td>
-                ))}
-              </tr>
-              {asked && (
-                <tr>
-                  <th>Reason</th>
-                  <td></td>
-                  {candidates.map((c) => (
-                    <td key={c.id} className="hint">
-                      {verdicts[c.id]?.reason || '—'}
-                    </td>
-                  ))}
-                </tr>
-              )}
-              <tr>
-                <th></th>
-                <td></td>
-                {candidates.map((c) => (
-                  <td key={c.id}>
-                    <button className="btn sm primary" disabled={disabled} onClick={() => onUse(c.raw)}>
-                      Use this record
-                    </button>
-                  </td>
-                ))}
-              </tr>
-            </tbody>
-          </table>
+                </dl>
+                <div className="ai-candidate-verdict">
+                  <span className="ai-candidate-verdict-label">AI verdict</span>
+                  {matchBadge(verdict)}
+                  {asked && <p>{verdict?.reason || 'No reason was returned.'}</p>}
+                </div>
+                <button className="btn primary ai-candidate-use" disabled={disabled} onClick={() => onUse(c.raw)}>
+                  <i className="fa-solid fa-check" /> Use this record
+                </button>
+              </article>
+            );
+          })}
         </div>
       </div>
     </Modal>

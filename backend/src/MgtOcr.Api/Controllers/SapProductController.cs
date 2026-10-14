@@ -24,6 +24,11 @@ public class SapProductController(
         if (string.IsNullOrWhiteSpace(description) || description.Trim().Length < 2)
             return BadRequest(new { detail = "Provide at least 2 characters in 'description'" });
 
+        // A non-Admin searches only their own company's plant (12 Oct 2026); the page's value is
+        // used for Admin, who works both companies.
+        var scope = CompanyScope.For(await currentUser.RequireAsync(), config);
+        if (scope.Length > 0 && config.CompanyForSalesOrg(scope)?.DefaultPlant is { Length: > 0 } ownPlant)
+            plant = ownPlant;
         if (string.IsNullOrWhiteSpace(plant))
             return BadRequest(new { detail = "Provide 'plant' for a company-scoped material search" });
         var results = await client.SearchByDescriptionAsync(description, plant, top);
@@ -107,6 +112,9 @@ public class SapProductController(
     [HttpGet("last-price/raw")]
     public async Task<IActionResult> LastPriceRaw([FromQuery] string? material, [FromQuery] string? customer, [FromQuery] int top = 50)
     {
+        // Diagnostic dump of any customer's billing lines -- Admin only.
+        if (!CompanyScope.SeesEveryCompany(await currentUser.RequireAsync()))
+            return StatusCode(403, new { detail = "Admin only" });
         var hasMaterial = !string.IsNullOrWhiteSpace(material);
         var hasCustomer = !string.IsNullOrWhiteSpace(customer);
         if (!hasMaterial && !hasCustomer)
@@ -167,11 +175,15 @@ public class SapProductController(
             var id = (d.TryGetValue("Code", out var c) ? c?.ToString() : null)?.Trim();
             if (string.IsNullOrEmpty(id) || !emitted.Add(id)) continue;
             var name = d.TryGetValue("Text", out var t) ? t?.ToString() : null;
+            // Ms_User.Division = this person's SAP Sales Group (the SO header SalesGroup is the
+            // first line's Sales Employee's Division — see SapPayloadBuilder).
+            var salesGroup = d.TryGetValue("Division", out var dv) ? dv?.ToString() : null;
             liveById.TryGetValue(id, out var seen);
             list.Add(new
             {
                 personId = id,
                 name,
+                salesGroup,
                 sources = seen != null ? new[] { "db", "sap" } : new[] { "db" },
                 lastSalesOrder = seen?.SalesOrder,
                 lastCreationDate = seen?.CreationDate,
@@ -185,6 +197,7 @@ public class SapProductController(
             {
                 personId = s.PersonId,
                 name = (string?)null,
+                salesGroup = (string?)null,
                 sources = new[] { "sap" },
                 lastSalesOrder = s.SalesOrder,
                 lastCreationDate = s.CreationDate,

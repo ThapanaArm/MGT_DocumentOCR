@@ -14,8 +14,12 @@ import {
 } from '../../../api/zoho';
 import { useAppState } from '../../../state/AppState';
 import Modal, { ModalHeader } from '../../Modal';
+import ConfirmModal from '../../ConfirmModal';
+import { num } from '../../../utils/format';
 import ZohoSalesOrderEditor, { type ZohoSalesOrderEditorHeader } from '../ZohoSalesOrderEditor';
 import { deliveryDateGroups } from '../SapSalesOrderEditor';
+import { groupStatus, type GroupShipToControl } from '../SoGroupPanel';
+import { useSoShipToOptions } from '../useSoShipToOptions';
 import type { SalesOrderStepHandle } from './SapSalesOrderStep';
 
 type LineEdit = {
@@ -41,6 +45,8 @@ interface Props {
   /** Called after a successful Zoho send with the updated (now POSTED) document, so the page can
    *  flip to the posted state without a manual reload -- mirrors SapSalesOrderStep.onPosted. */
   onPosted: (doc: DocModel) => void;
+  /** Save (or clear, with null) the ship-to of one SO Group on the document header. */
+  onGroupShipTo: (soGroup: string, data: Record<string, unknown> | null) => void;
 }
 
 function convertedValues(
@@ -66,8 +72,11 @@ function convertedValues(
         String(u.ExtUom || '').trim().toLowerCase() === docUnit.toLowerCase() &&
         String(u.SapUom || '').trim().toLowerCase() === targetUnit.toLowerCase(),
     );
+  // Same order as the backend (ZohoSalesOrderController.ConvertZohoUom): the Deal's own Conversion
+  // Ratio wins, the local UoM rule is only the fallback. This is only a first guess shown right after
+  // an AI match -- the preview reload replaces it with the backend's own figures.
   const ratio = Number(item.conversionRatio);
-  const factor = rule && Number(rule.Factor) > 0 ? Number(rule.Factor) : ratio > 0 ? 1 / ratio : 1;
+  const factor = ratio > 0 ? 1 / ratio : rule && Number(rule.Factor) > 0 ? Number(rule.Factor) : 1;
   return {
     quantity: Math.round(qty * factor * 1000) / 1000,
     unitPrice: Number.isFinite(rawPrice) ? Math.round((rawPrice / factor) * 1e6) / 1e6 : null,
@@ -113,7 +122,7 @@ const EMPTY_HEADER: ZohoSalesOrderEditorHeader = {
 };
 
 const ZohoSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function ZohoSalesOrderStep(
-  { doc, map, selectedDealId, resolvedDeal, selectedShipTo, providers, uomRules, shipTos, salesOrg, posted, onUseMaterial, onPosted },
+  { doc, map, selectedDealId, resolvedDeal, selectedShipTo, providers, uomRules, shipTos, salesOrg, posted, onUseMaterial, onPosted, onGroupShipTo },
   ref,
 ) {
   const { guard, showToast } = useAppState();
@@ -155,9 +164,18 @@ const ZohoSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function Zoho
     },
   }), [doc.lines, uomRules, salesOrg]);
 
+  // What the person typed in this step (12 Oct 2026). A preview reload -- e.g. after "Ask AI to
+  // match" saved a material, or a re-map -- used to reset every field to the backend defaults,
+  // silently dropping edited Payment Terms / Remarks / quantities. Typed fields are kept now, and
+  // only typed line fields are sent as overrides (the rest come from the backend's own figures).
+  const dirtyHeader = useRef<Set<string>>(new Set());
+  const dirtyLines = useRef<Record<string, Set<string>>>({});
+
   useEffect(() => {
     setOverrides({});
     setResult(null);
+    dirtyHeader.current = new Set();
+    dirtyLines.current = {};
   }, [doc.docId, selectedDealId]);
 
   // The preview is computed server-side from the SAVED document lines (their mapped materialCode,
@@ -165,7 +183,7 @@ const ZohoSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function Zoho
   // (e.g. the AI chat split one line into two, then Mapping matched both) it kept showing the old
   // answer: "Not matched" even though Step 2 shows both lines auto-matched. Reload whenever the
   // saved lines change too.
-  // Send results per delivery-date group (one Zoho Sales Order per date, all from this document).
+  // Send results per group (one Zoho Sales Order per SO Group + delivery date, all from this document).
   const [posts, setPosts] = useState<SoGroupState[]>([]);
   const reloadPosts = () => getSoPosts(doc.docId).then((r) => setPosts(r.groups)).catch(() => setPosts([]));
   useEffect(() => { void reloadPosts(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [doc.docId, doc.status]);
@@ -202,20 +220,42 @@ const ZohoSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function Zoho
 
   useEffect(() => {
     if (!preview) return;
-    setHeader({
+    const fromPreview: ZohoSalesOrderEditorHeader = {
       subject: preview.subject || '', customerRef: preview.customerRef || '', deliveryDate: preview.deliveryDate || '',
       paymentTerms: preview.paymentTerms || '', paymentCurrency: preview.paymentCurrency || '',
       incoterms: preview.incoterms || '', taxId: preview.taxId || '', remarks: preview.remarks || '',
+    };
+    setHeader((prev) => {
+      const merged = { ...fromPreview };
+      dirtyHeader.current.forEach((k) => {
+        (merged as Record<string, string>)[k] = (prev as Record<string, string>)[k];
+      });
+      return merged;
     });
-    const next: Record<string, LineEdit> = {};
-    preview.lines.forEach((line) => {
-      next[String(line.itemNo)] = {
-        quantity: line.quantity != null ? String(line.quantity) : '',
-        unitPrice: line.unitPrice != null ? String(line.unitPrice) : '',
-        unit: line.unit || '', description: line.desc || '',
-      };
+    setLineEdits((prev) => {
+      const next: Record<string, LineEdit> = {};
+      preview.lines.forEach((line) => {
+        const key = String(line.itemNo);
+        const base: LineEdit = {
+          quantity: line.quantity != null ? String(line.quantity) : '',
+          unitPrice: line.unitPrice != null ? String(line.unitPrice) : '',
+          unit: line.unit || '', description: line.desc || '',
+        };
+        const old = prev[key];
+        if (old) {
+          (dirtyLines.current[key] || new Set()).forEach((f) => {
+            (base as Record<string, string | undefined>)[f] = (old as Record<string, string | undefined>)[f];
+          });
+          if (old.materialId) base.materialId = old.materialId;
+        }
+        next[key] = base;
+      });
+      // Lines matched only through an AI pick (not in the preview yet) keep their staged values.
+      Object.entries(prev).forEach(([key, value]) => {
+        if (!next[key] && value.materialId) next[key] = value;
+      });
+      return next;
     });
-    setLineEdits(next);
   }, [preview]);
 
   const mergedPreview = useMemo(
@@ -228,6 +268,17 @@ const ZohoSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function Zoho
       const key = String(itemNo);
       return { ...current, [key]: { ...(current[key] || { quantity: '', unitPrice: '', unit: '', description: '' }), ...patch } };
     });
+  // The person's own typing (marked dirty, so a preview reload keeps it and it is sent).
+  const userEditLine = (itemNo: unknown, patch: Partial<LineEdit>) => {
+    const key = String(itemNo);
+    const set = dirtyLines.current[key] || (dirtyLines.current[key] = new Set());
+    Object.keys(patch).forEach((f) => { if (f !== 'materialId') set.add(f); });
+    editLine(itemNo, patch);
+  };
+  const userEditHeader = (patch: Partial<ZohoSalesOrderEditorHeader>) => {
+    Object.keys(patch).forEach((k) => dirtyHeader.current.add(k));
+    setHeader((current) => ({ ...current, ...patch }));
+  };
 
   const useAiMatch = async (itemNo: unknown, item: ZohoDealItem) => {
     if (!item.materialId) return;
@@ -253,20 +304,94 @@ const ZohoSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function Zoho
     return {
       ...Object.fromEntries(Object.entries(header).map(([key, value]) => [key, value || undefined])),
       shipTo,
-      lines: Object.entries(lineEdits).map(([itemNo, edit]) => ({
-        itemNo, quantity: edit.quantity !== '' ? Number(edit.quantity) : undefined,
-        unitPrice: edit.unitPrice !== '' ? Number(edit.unitPrice) : undefined,
-        unit: edit.unit || undefined, description: edit.description || undefined, materialId: edit.materialId || undefined,
-      })),
+      // Only what the person typed (plus an AI-confirmed material) goes as an override; untouched
+      // quantities / prices come from the backend's own conversion. Numbers accept "1,250.50".
+      lines: Object.entries(lineEdits)
+        .map(([itemNo, edit]) => {
+          const dirty = dirtyLines.current[itemNo] || new Set<string>();
+          return {
+            itemNo,
+            quantity: dirty.has('quantity') && edit.quantity.trim() !== '' ? num(edit.quantity) : undefined,
+            unitPrice: dirty.has('unitPrice') && edit.unitPrice.trim() !== '' ? num(edit.unitPrice) : undefined,
+            unit: dirty.has('unit') ? edit.unit || undefined : undefined,
+            description: dirty.has('description') ? edit.description || undefined : undefined,
+            materialId: edit.materialId || undefined,
+          };
+        })
+        .filter((l) => l.quantity !== undefined || l.unitPrice !== undefined || l.unit !== undefined
+          || l.description !== undefined || l.materialId !== undefined),
     };
   };
 
-  const send = () => guard(async () => {
-    if (!selectedDealId) return;
+  // Typed numbers that can't be sent: a quantity that isn't a positive number, or a price that
+  // isn't a number at all (they used to be silently ignored, while the screen kept showing them).
+  const isNumber = (s: string) => /^-?[\d,]*\.?\d+$/.test(s.replace(/\s/g, ''));
+  const badNumbers = Object.entries(lineEdits)
+    .filter(([itemNo, edit]) => {
+      const dirty = dirtyLines.current[itemNo];
+      if (!dirty) return false;
+      const q = edit.quantity.trim(); const p = edit.unitPrice.trim();
+      return (dirty.has('quantity') && q !== '' && (!isNumber(q) || num(q) <= 0))
+        || (dirty.has('unitPrice') && p !== '' && !isNumber(p));
+    })
+    .map(([itemNo]) => itemNo);
+
+  // Ship-to per SO Group: every Zoho ship-to on file for the matched Account (the same list the
+  // Ship-to card offers). A group without its own pick uses the document's Ship-to.
+  const accountCode = String(map.header.customer?.code || '').trim();
+  const { options: groupShipToOptions, loading: groupShipToLoading, error: groupShipToError } = useSoShipToOptions({
+    enabled: visible, isMgt: true, customerCode: accountCode, soldToSapCode: '', salesOrg,
+  });
+
+  // Megachem rule (6 Oct 2026): an MGT Sales Order must have a Ship-to before it goes to Zoho --
+  // checked per Sales Order: each group's own SO Group ship-to, else the document's (same source as
+  // buildEdits: the Ship-to picked from Zoho, else the mapped Ship-to master row).
+  const groups = deliveryDateGroups(doc, String(doc.header.deliveryDate || ''));
+  const groupShipTos = (doc.header.soGroupShipTos as Record<string, Record<string, unknown>>) || {};
+  const shipToForSend = buildEdits().shipTo;
+  const docHasShipTo = !!shipToForSend
+    && !!(String(shipToForSend.code ?? '').trim() || String(shipToForSend.address ?? '').trim());
+  const hasShipTo = groups
+    .filter((g) => !groupStatus(g, posts).ok)
+    .every((g) => {
+      const own = groupShipTos[g.soGroup];
+      return own ? !!(String(own.code ?? '').trim() || String(own.address ?? '').trim()) : docHasShipTo;
+    });
+  const groupShipTo: GroupShipToControl = {
+    options: groupShipToOptions,
+    loading: groupShipToLoading,
+    error: groupShipToError,
+    current: groupShipTos,
+    docShipToLabel: docHasShipTo
+      ? [shipToForSend?.code, shipToForSend?.address].filter((x) => String(x || '').trim()).join(' — ')
+      : undefined,
+    editable: !posted && doc.status !== 'SPLIT' && doc.status !== 'PARTIAL',
+    onChange: onGroupShipTo,
+  };
+
+  // A Deal of another customer (picked through the manual Deal search) needs a deliberate yes;
+  // the backend refuses it otherwise (AcceptOtherAccount).
+  const docCustomer = String(map.header.customer?.code || '').trim();
+  const dealAccount = String(resolvedDeal?.accountCode || '').trim();
+  const dealOfOtherCustomer = !!docCustomer && !!dealAccount && docCustomer.toUpperCase() !== dealAccount.toUpperCase();
+  const [confirmOtherDeal, setConfirmOtherDeal] = useState(false);
+
+  const send = () => {
+    if (!selectedDealId || !hasShipTo) return;
+    if (badNumbers.length > 0) {
+      showToast(`Check the quantity / price of item ${badNumbers.join(', ')} — not a valid number`, 'error');
+      return;
+    }
+    if (dealOfOtherCustomer) { setConfirmOtherDeal(true); return; }
+    void doSend(false);
+  };
+
+  const doSend = (acceptOtherAccount: boolean) => guard(async () => {
+    setConfirmOtherDeal(false);
     setSending(true);
     setResult(null);
     try {
-      const response = await createZohoSalesOrder(doc.docId, selectedDealId, buildEdits());
+      const response = await createZohoSalesOrder(doc.docId, selectedDealId, { ...buildEdits(), acceptOtherAccount });
       setResult(response);
       // POSTED or PARTIAL (some delivery-date Sales Orders created): reflect it right away and
       // refresh the per-group results so a retry only sends the rest.
@@ -298,14 +423,30 @@ const ZohoSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function Zoho
           <ZohoSalesOrderEditor
             preview={mergedPreview} loading={loading} error={error} selectedDealId={selectedDealId}
             docLines={doc.lines} resolvedDeal={resolvedDeal} providers={providers} header={header}
-            onHeaderChange={(patch) => setHeader((current) => ({ ...current, ...patch }))}
-            lineEdits={lineEdits} onLineChange={editLine} onUseAiMatch={useAiMatch}
+            onHeaderChange={userEditHeader}
+            lineEdits={lineEdits} onLineChange={userEditLine} onUseAiMatch={useAiMatch}
             sending={sending} result={result} onSend={send} onViewPayload={viewPayload} posted={posted}
-            dateGroups={deliveryDateGroups(doc, String(doc.header.deliveryDate || ''))}
+            shipToMissing={!hasShipTo}
+            dateGroups={groups}
             posts={posts}
+            groupShipTo={groupShipTo}
           />
         </div>
       )}
+      <ConfirmModal
+        open={confirmOtherDeal}
+        title="Deal of another customer"
+        message={
+          <>
+            Deal <b>{resolvedDeal?.dealName}</b> belongs to customer <b>{dealAccount}</b>, but this document's customer
+            is <b>{docCustomer}</b>. Send the Sales Order on this Deal anyway?
+          </>
+        }
+        confirmLabel="Send anyway"
+        danger={false}
+        onConfirm={() => void doSend(true)}
+        onCancel={() => setConfirmOtherDeal(false)}
+      />
       <Modal open={payload != null} onClose={() => setPayload(null)}>
         <ModalHeader title="Payload to Send to Zoho CRM" onClose={() => setPayload(null)} />
         <div className="card-b">

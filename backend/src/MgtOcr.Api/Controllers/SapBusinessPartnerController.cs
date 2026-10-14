@@ -55,6 +55,15 @@ public class SapBusinessPartnerController(
     // (A_CustSalesPartnerFunc), so a document's Ship-to can be matched against what SAP knows
     // instead of the local shiptos master alone. See FindPartnerFunctionsAsync's NOTE re: unverified
     // field names.
+    // A non-Admin reads only their OWN company's sales organization (12 Oct 2026): the value the
+    // page sends is used only for Admin, who works both companies. Same idea as the
+    // AuthorizationGroup scope on the search above.
+    private async Task<string?> ScopedSalesOrgAsync(string? requested)
+    {
+        var scope = CompanyScope.For(await currentUser.RequireAsync(), config);
+        return scope.Length > 0 ? scope : requested;
+    }
+
     [HttpGet("business-partner/{customerId}/partners")]
     public async Task<IActionResult> FindPartners(string customerId, [FromQuery] string? function,
         [FromQuery] string? salesOrganization, [FromQuery] int top = 50)
@@ -62,7 +71,7 @@ public class SapBusinessPartnerController(
         if (string.IsNullOrWhiteSpace(customerId))
             return BadRequest(new { detail = "Provide customerId" });
 
-        var results = await client.FindPartnerFunctionsAsync(customerId, function, salesOrganization, top);
+        var results = await client.FindPartnerFunctionsAsync(customerId, function, await ScopedSalesOrgAsync(salesOrganization), top);
         return Ok(new { count = results.Count, results });
     }
 
@@ -83,7 +92,9 @@ public class SapBusinessPartnerController(
         if (string.IsNullOrWhiteSpace(customerId))
             return BadRequest(new { detail = "Provide customerId" });
 
-        var paymentTerms = await client.GetPaymentTermsAsync(customerId, salesOrganization, companyCode);
+        var org = await ScopedSalesOrgAsync(salesOrganization);
+        if (org != salesOrganization) companyCode = config.CompanyForSalesOrg(org ?? "")?.CompanyCode ?? companyCode;
+        var paymentTerms = await client.GetPaymentTermsAsync(customerId, org, companyCode);
         return Ok(new { customerId, paymentTerms });
     }
 
@@ -97,7 +108,7 @@ public class SapBusinessPartnerController(
         if (string.IsNullOrWhiteSpace(customerId))
             return BadRequest(new { detail = "Provide customerId" });
 
-        var areas = await client.GetSalesAreasAsync(customerId, salesOrganization);
+        var areas = await client.GetSalesAreasAsync(customerId, await ScopedSalesOrgAsync(salesOrganization));
         return Ok(new { customerId, count = areas.Count, areas });
     }
 
@@ -109,6 +120,9 @@ public class SapBusinessPartnerController(
     {
         if (string.IsNullOrWhiteSpace(id))
             return BadRequest(new { detail = "Provide id" });
+        // Diagnostic dump of any Business Partner, unfiltered -- Admin only.
+        if (!CompanyScope.SeesEveryCompany(await currentUser.RequireAsync()))
+            return StatusCode(403, new { detail = "Admin only" });
 
         var raw = await client.GetRawByIdAsync(id);
         return Content(raw, "application/json");

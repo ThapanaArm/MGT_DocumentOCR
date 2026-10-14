@@ -201,6 +201,73 @@ public class SapSalesOrderClient(AppConfig config, HttpClient httpClient)
             .ToString("dd/MM/yyyy", System.Globalization.CultureInfo.InvariantCulture);
     }
 
+    /// <summary>
+    /// Duplicate guard before RE-sending a Sales Order group whose previous attempt failed (12 Oct
+    /// 2026). A timeout or an unreadable reply can come back after SAP has in fact created the order;
+    /// sending again then makes a second one. This looks in the tenant orders are WRITTEN to for the
+    /// newest order of this sold-to with this customer PO, created since <paramref name="sinceUtc"/>,
+    /// on this delivery date, whose item materials are exactly <paramref name="materials"/>, and that
+    /// isn't already recorded on the document (<paramref name="exclude"/>). Returns its number, or
+    /// null when there is none, more than one, or the lookup can't run -- the caller then sends
+    /// normally.
+    /// </summary>
+    public async Task<string?> FindExistingOrderAsync(string soldTo, string customerPo, string? deliveryDate,
+        IReadOnlyCollection<string> materials, DateTime sinceUtc, IReadOnlyCollection<string> exclude)
+    {
+        var baseUrl = !string.IsNullOrWhiteSpace(config.SapSalesOrderWriteBaseUrl)
+            ? config.SapSalesOrderWriteBaseUrl : config.SapSalesOrderBaseUrl;
+        soldTo = (soldTo ?? "").Trim();
+        customerPo = (customerPo ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(baseUrl) || soldTo.Length == 0 || customerPo.Length == 0 || materials.Count == 0)
+            return null;
+        try
+        {
+            var filter = $"SoldToParty eq '{EscapeODataLiteral(soldTo)}'" +
+                         $" and PurchaseOrderByCustomer eq '{EscapeODataLiteral(customerPo)}'" +
+                         $" and CreationDate ge datetime'{sinceUtc:yyyy-MM-dd}T00:00:00'";
+            var url = $"{baseUrl.TrimEnd('/')}/A_SalesOrder" +
+                      $"?$filter={Uri.EscapeDataString(filter)}" +
+                      "&$expand=to_Item" +
+                      "&$orderby=CreationDate desc,SalesOrder desc" +
+                      "&$top=20&$format=json";
+            var text = await GetJsonAsync(url);
+            using var doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(text) ? "{}" : text);
+            if (!doc.RootElement.TryGetProperty("d", out var d) || !d.TryGetProperty("results", out var orders)
+                || orders.ValueKind != JsonValueKind.Array)
+                return null;
+
+            static string NormMat(string? m) => (m ?? "").Trim().TrimStart('0').ToUpperInvariant();
+            var want = materials.Select(NormMat).OrderBy(x => x, StringComparer.Ordinal).ToList();
+            var hits = new List<string>();
+            foreach (var order in orders.EnumerateArray())
+            {
+                var so = GetString(order, "SalesOrder")?.Trim();
+                if (string.IsNullOrEmpty(so) || exclude.Contains(so)) continue;
+                if (!string.IsNullOrWhiteSpace(deliveryDate)
+                    && IsoDate(GetString(order, "RequestedDeliveryDate")) != deliveryDate.Trim())
+                    continue;
+                var have = (order.TryGetProperty("to_Item", out var nav) ? EnumerateNestedArray(nav) : Enumerable.Empty<JsonElement>())
+                    .Select(it => NormMat(GetString(it, "Material"))).OrderBy(x => x, StringComparer.Ordinal).ToList();
+                if (have.SequenceEqual(want)) hits.Add(so);
+            }
+            return hits.Count == 1 ? hits[0] : null;
+        }
+        catch
+        {
+            return null; // best effort: never blocks a send
+        }
+    }
+
+    // OData V2 "/Date(1760400000000)/" -> "2025-10-14" (the format stored on the document lines).
+    private static string? IsoDate(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return raw;
+        var m = System.Text.RegularExpressions.Regex.Match(raw, @"/Date\((-?\d+)(?:[+-]\d{4})?\)/");
+        if (!m.Success || !long.TryParse(m.Groups[1].Value, out var ms)) return raw;
+        return DateTimeOffset.FromUnixTimeMilliseconds(ms).UtcDateTime
+            .ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+    }
+
     private static string EscapeODataLiteral(string s) => s.Replace("'", "''");
     private static string Trunc(string s, int n) => string.IsNullOrEmpty(s) ? s : (s.Length <= n ? s : s[..n]);
 }

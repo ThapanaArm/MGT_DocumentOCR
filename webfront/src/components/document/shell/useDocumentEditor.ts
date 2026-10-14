@@ -23,7 +23,7 @@ export function useDocumentEditor(user: string) {
   const [doc, setDoc] = useState<DocModel | null>(null);
   const [map, setMap] = useState<MapResult | null>(null);
   const [failed, setFailed] = useState(false);
-  const manual = useRef<{ header: Record<string, string>; lines: Record<number, string> }>({
+  const manual = useRef<{ header: Record<string, string>; lines: Record<string, string> }>({
     header: {},
     lines: {},
   });
@@ -163,8 +163,14 @@ export function useDocumentEditor(user: string) {
       return { ...d, header: { ...d.header, whtItems: items } };
     });
 
+  // A line's manual material pick is keyed by its item number ("item:10"), not its row index, so
+  // deleting a line above it can't move the pick onto another line (the backend reads both keys).
+  const manualLineKey = (i: number, d: DocModel | null = doc) => {
+    const itemNo = d?.lines?.[i]?.itemNo;
+    return itemNo != null && String(itemNo) !== '' ? `item:${itemNo}` : String(i);
+  };
   const setManualLine = (i: number, v: string) => {
-    manual.current.lines[i] = v;
+    manual.current.lines[manualLineKey(i)] = v;
     runMap(true);
   };
 
@@ -193,5 +199,6 @@ export function useDocumentEditor(user: string) {
     addWhtItem,
     delWhtItem,
     setManualLine,
+    manualLineKey,
   };
 }

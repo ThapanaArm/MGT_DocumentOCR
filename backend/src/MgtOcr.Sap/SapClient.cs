@@ -8,9 +8,10 @@ namespace MgtOcr.Sap;
 
 public record SapPostResult(bool Success, bool Simulated, string SapDocNo, string Endpoint, string Message, object? Raw = null);
 
-// Ported from app/sap.py's post() (lines 116-141). Simulate mode when SAP_BASE_URL is unset
-// (the normal case today); live mode does a raw HTTP POST that first fetches a CSRF token from
-// the OData service (SAP Gateway rejects modifying requests without one).
+// Ported from app/sap.py's post() (lines 116-141). Does a raw HTTP POST that first fetches a CSRF
+// token from the OData service (SAP Gateway rejects modifying requests without one). There is no
+// simulation mode any more: an unset write URL is reported as a failure. `Simulated` stays in the
+// result for API compatibility and is always false.
 public class SapClient(AppConfig config, HttpClient httpClient)
 {
     // Strip every "_"-prefixed key at ALL levels before the live POST. These keys (_target, _source,
@@ -61,11 +62,17 @@ public class SapClient(AppConfig config, HttpClient httpClient)
         var useDedicatedSoUrl = module == "SO" && !string.IsNullOrEmpty(config.SapSalesOrderWriteBaseUrl);
         var baseUrl = useDedicatedSoUrl ? config.SapSalesOrderWriteBaseUrl : config.SapWriteBaseUrl;
 
+        // Simulation mode removed (12 Oct 2026, per Megachem): a missing write URL used to return a
+        // made-up document number as a SUCCESS, which marked the document POSTED and locked it
+        // although nothing existed in SAP. A missing URL is now a plain failure the person can see
+        // and retry once the setting is fixed.
         if (string.IsNullOrEmpty(baseUrl))
         {
-            var docNo = (module == "SO" ? "00" : "51") + Random.Shared.Next(100000, 1000000);
-            return new SapPostResult(true, true, docNo, endpoint,
-                "Simulation mode: SAP base URL is not set in appsettings (payload and log have been saved)");
+            var missing = module == "SO"
+                ? "Sap:SalesOrder:BaseUrl_<Dev|Prod> (or Sap:BaseUrl_<Dev|Prod>)"
+                : "Sap:BaseUrl_<Dev|Prod>";
+            return new SapPostResult(false, false, "", endpoint,
+                $"SAP is not configured: {missing} is empty in appsettings.json, so nothing was sent to SAP");
         }
 
         var url = useDedicatedSoUrl
@@ -142,12 +149,109 @@ public class SapClient(AppConfig config, HttpClient httpClient)
             var root = doc.RootElement;
             var d = root.TryGetProperty("d", out var dEl) ? dEl : root;
             var sapDocNo = TryGetString(d, "SalesOrder") ?? TryGetString(d, "SupplierInvoice") ?? "";
-            return new SapPostResult(true, false, sapDocNo, endpoint, "Document created in SAP successfully", JsonSerializer.Deserialize<object>(d.GetRawText()));
+            var message = "Document created in SAP successfully";
+
+            // GLC Sales Orders: the deep insert adds our Manual Price Gross (ZPR0) row, but the
+            // pricing procedure ALSO determines its own ZPR0 row with no rate (shown with a red
+            // status in VA03), so every item ends up with two ZPR0 lines. Remove the empty one(s)
+            // after create. Best-effort only: the order already exists with the right price, so a
+            // failure here never fails the post — it is just noted in the message.
+            if (module == "SO" && !string.IsNullOrEmpty(sapDocNo)
+                && !string.IsNullOrWhiteSpace(config.SapSalesOrderPriceConditionType))
+            {
+                var serviceRoot = useDedicatedSoUrl
+                    ? baseUrl.TrimEnd('/')
+                    : $"{baseUrl.TrimEnd('/')}/sap/opu/odata/sap/{serviceName}";
+                var cleanup = await RemoveEmptyDuplicatePriceConditionsAsync(
+                    serviceRoot, sapDocNo, config.SapSalesOrderPriceConditionType, csrfToken, ApplyAuth, cts.Token);
+                if (!string.IsNullOrEmpty(cleanup)) message += " — " + cleanup;
+            }
+            return new SapPostResult(true, false, sapDocNo, endpoint, message, JsonSerializer.Deserialize<object>(d.GetRawText()));
         }
         catch (Exception e)
         {
             return new SapPostResult(false, false, "", endpoint, $"Failed to post to SAP: {e.Message}");
         }
+    }
+
+    /// <summary>Deletes the empty (rate 0) duplicate of <paramref name="conditionType"/> on every
+    /// item of a just-created Sales Order, but only on items that also carry a non-zero row of the
+    /// same condition type — so an item whose only ZPR0 is empty is never touched. Returns a short
+    /// note for the post message, or "" when there was nothing to clean up.</summary>
+    private async Task<string> RemoveEmptyDuplicatePriceConditionsAsync(
+        string serviceRoot, string salesOrder, string conditionType, string csrfToken,
+        Action<HttpRequestMessage> applyAuth, CancellationToken ct)
+    {
+        try
+        {
+            var filter = $"SalesOrder eq '{salesOrder.Replace("'", "''")}' and ConditionType eq '{conditionType.Replace("'", "''")}'";
+            var listUrl = $"{serviceRoot}/A_SalesOrderItemPrElement?$filter={Uri.EscapeDataString(filter)}" +
+                          "&$select=SalesOrderItem,PricingProcedureStep,PricingProcedureCounter,ConditionRateValue,ConditionAmount" +
+                          $"&$format=json&sap-client={config.SapClient}";
+            using var listReq = new HttpRequestMessage(HttpMethod.Get, listUrl);
+            applyAuth(listReq);
+            listReq.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+            using var listResp = await httpClient.SendAsync(listReq, ct);
+            var listText = await listResp.Content.ReadAsStringAsync(ct);
+            if (!listResp.IsSuccessStatusCode)
+                return $"could not read {conditionType} conditions to remove the empty duplicate ({(int)listResp.StatusCode})";
+
+            using var doc = JsonDocument.Parse(listText);
+            var rows = new List<(string Item, string Step, string Counter, decimal Rate, decimal Amount)>();
+            if (doc.RootElement.TryGetProperty("d", out var d) && d.TryGetProperty("results", out var results)
+                && results.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var r in results.EnumerateArray())
+                {
+                    rows.Add((TryGetString(r, "SalesOrderItem") ?? "", TryGetString(r, "PricingProcedureStep") ?? "",
+                        TryGetString(r, "PricingProcedureCounter") ?? "", ParseDec(r, "ConditionRateValue"),
+                        ParseDec(r, "ConditionAmount")));
+                }
+            }
+
+            var toDelete = rows
+                .GroupBy(r => r.Item)
+                .Where(g => g.Count() > 1 && g.Any(r => r.Rate != 0))
+                .SelectMany(g => g.Where(r => r.Rate == 0 && r.Amount == 0))
+                .ToList();
+            if (toDelete.Count == 0) return "";
+
+            var failed = new List<string>();
+            foreach (var r in toDelete)
+            {
+                var key = $"SalesOrder='{salesOrder}',SalesOrderItem='{r.Item}'," +
+                          $"PricingProcedureStep='{r.Step}',PricingProcedureCounter='{r.Counter}'";
+                using var delReq = new HttpRequestMessage(HttpMethod.Delete,
+                    $"{serviceRoot}/A_SalesOrderItemPrElement({key})?sap-client={config.SapClient}");
+                applyAuth(delReq);
+                delReq.Headers.TryAddWithoutValidation("X-CSRF-Token", csrfToken);
+                delReq.Headers.TryAddWithoutValidation("If-Match", "*");
+                delReq.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+                using var delResp = await httpClient.SendAsync(delReq, ct);
+                if (!delResp.IsSuccessStatusCode)
+                {
+                    var t = await delResp.Content.ReadAsStringAsync(ct);
+                    failed.Add($"item {r.Item}: {(int)delResp.StatusCode} {t[..Math.Min(200, t.Length)]}");
+                }
+            }
+            return failed.Count == 0
+                ? $"removed {toDelete.Count} empty duplicate {conditionType} row(s)"
+                : $"could not remove empty duplicate {conditionType} row(s): {string.Join("; ", failed)}";
+        }
+        catch (Exception e)
+        {
+            return $"could not remove empty duplicate {conditionType} row(s): {e.Message}";
+        }
+    }
+
+    // OData V2 sends Edm.Decimal as a string ("450.000000000"); accept a JSON number too.
+    private static decimal ParseDec(JsonElement el, string prop)
+    {
+        if (!el.TryGetProperty(prop, out var v)) return 0;
+        if (v.ValueKind == JsonValueKind.Number && v.TryGetDecimal(out var n)) return n;
+        return v.ValueKind == JsonValueKind.String
+               && decimal.TryParse(v.GetString(), System.Globalization.NumberStyles.Any,
+                   System.Globalization.CultureInfo.InvariantCulture, out var s) ? s : 0;
     }
 
     private static string? TryGetString(JsonElement el, string prop) =>

@@ -26,6 +26,9 @@ public record SapMaterialDetail(string MaterialCode, string BaseUnit, string? Ma
 // differ on this system and needs adjusting, same caveat as SapBusinessPartnerClient.
 public class SapProductClient(AppConfig config, HttpClient httpClient)
 {
+    // Material code prefixes hidden from the SAP material search (not sellable on a Sales Order).
+    private static readonly string[] ExcludedMaterialPrefixes = ["SMRM", "SAM"];
+
     /// <summary>Search SAP material descriptions through API_PRODUCT_SRV/A_ProductDescription.</summary>
     public async Task<List<SapMaterial>> SearchByDescriptionAsync(string keyword, string? plant = null, int top = 30)
     {
@@ -52,9 +55,11 @@ public class SapProductClient(AppConfig config, HttpClient httpClient)
                 GetString(el, "ProductDescription") ?? "",
                 GetString(el, "Language")))
             .Where(x => x.MaterialCode.Length > 0)
-            // Per user: materials coded "SMRM..." (samples, not sellable stock) should never be
-            // offered as a match when picking a material for a Sales Order line.
-            .Where(x => !x.MaterialCode.StartsWith("SMRM", StringComparison.OrdinalIgnoreCase))
+            // Per user: materials coded "SMRM..." (samples, not sellable stock) and "SAM..." (added
+            // 7 Oct 2026) should never be offered as a match when picking a material for a Sales
+            // Order line.
+            .Where(x => !ExcludedMaterialPrefixes.Any(p =>
+                x.MaterialCode.StartsWith(p, StringComparison.OrdinalIgnoreCase)))
             .GroupBy(x => x.MaterialCode, StringComparer.OrdinalIgnoreCase)
             // Prefer the English row when a Product has several language descriptions.
             .Select(g => g.OrderByDescending(m =>

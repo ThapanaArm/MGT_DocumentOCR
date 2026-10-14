@@ -41,6 +41,8 @@ export const statusBadge = (s: string): StatusBadge => {
     // Sales Order sent as one SO per delivery date and only some went through — retry the rest.
     PARTIAL: ['b-warn', 'Partially Posted'],
     POSTED: ['b-ok', 'Post Success'],
+    // Being sent right now (backend claim, at most a few minutes; see SalesOrderPostRepository).
+    POSTING: ['b-warn', 'Sending…'],
     SPLIT: ['b-warn', 'Split into multiple SOs'],
   };
   const [cls, label] = map[s] || ['b-idle', s];
