@@ -22,7 +22,7 @@ namespace MgtOcr.Api.Controllers;
 public class DocumentsController(DocumentRepository repo, MasterRepository masters, OcrEngine ocr,
     SapClient sap, SapBusinessPartnerClient sapBp, AppConfig config, ICurrentUserAccessor currentUser,
     OcrJobRepository jobs, MgtOcr.Api.Services.DocumentIngestService ingest,
-    SapProductClient sapProduct, FileArchiveRepository archive, MgtOcr.Api.Services.GraphArchiveClient graph,
+    SapProductClient sapProduct, SapPurchaseOrderClient sapPo, FileArchiveRepository archive, MgtOcr.Api.Services.GraphArchiveClient graph,
     SalesOrderPostRepository soPosts, ILogger<DocumentsController> logger) : ControllerBase
 {
     // Who to stamp on CreatedBy / PerformedBy / PostedBy.
@@ -108,13 +108,24 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             throw new HttpApiException(403, "You do not have access to this document type (your department can only see its own documents)");
     }
 
-    private static readonly (string Id, string Label)[] ApDocCategories =
+    // Group is what the dropdown nests the entry under; empty means it stands on its own. Inventory
+    // is one choice in the list with its two ways of keying underneath, rather than two look-alike
+    // lines the person has to read to the end of.
+    private static readonly (string Id, string Label, string Group)[] ApDocCategories =
     [
-        ("INVENTORY", "Liability Recording - Inventory"),
-        ("EXPENSE", "Liability Recording - Expense"),
-        ("FIXED_ASSET_BUDGET", "Liability Recording - Fixed Asset (Budget-controlled)"),
-        ("FIXED_ASSET_NO_BUDGET", "Liability Recording - Fixed Asset (Non-budget-controlled)"),
-        ("SUB_CONTRACT", "Liability Recording - Sub Contract"),
+        // Inventory is keyed two ways and the person says which up front, because the whole document
+        // follows from it: by the delivery (the shipping agent's costs) or against the purchase
+        // order (the goods it covers). The first keeps the id "INVENTORY" so every document already
+        // filed under it keeps working and simply reads with the clearer label.
+        // Worded exactly as MIRO's Reference Document Category, which is what the choice really
+        // sets: the goods the purchase order covers, or the delivery costs billed against it.
+        // "Delivery" / "Purchase Order" read as document names and were taken for one.
+        ("INVENTORY", "Planned delivery costs", "Liability Recording - Inventory"),
+        ("INVENTORY_PO", "Goods/service items", "Liability Recording - Inventory"),
+        ("EXPENSE", "Liability Recording - Expense", ""),
+        ("FIXED_ASSET_BUDGET", "Liability Recording - Fixed Asset (Budget-controlled)", ""),
+        ("FIXED_ASSET_NO_BUDGET", "Liability Recording - Fixed Asset (Non-budget-controlled)", ""),
+        ("SUB_CONTRACT", "Liability Recording - Sub Contract", ""),
     ];
 
     private static readonly HashSet<string> Modules = ["AP", "SO", "II", "PODP"];
@@ -139,7 +150,8 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     }
 
     [HttpGet("api/ap-doc-categories")]
-    public IActionResult GetApDocCategories() => Ok(ApDocCategories.Select(c => new { id = c.Id, label = c.Label }));
+    public IActionResult GetApDocCategories() =>
+        Ok(ApDocCategories.Select(c => new { id = c.Id, label = c.Label, group = c.Group }));
 
     [HttpGet("api/samples/{module}")]
     public IActionResult Samples(string module)
@@ -440,7 +452,8 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         var reocrEngine = "gemini"; // Gemini only (Megachem, 7 Oct 2026)
         // Re-reading follows the company the document is already filed under, so a second read
         // never silently swaps MGT's rules for GLC's (CompanyRules treats an empty value as GLC).
-        var pd = await ocr.ExtractAsync(storedPath, module, reocrEngine, reocrPw, await repo.GetCompanyAsync(docId));
+        var pd = await ocr.ExtractAsync(storedPath, module, reocrEngine, reocrPw, await repo.GetCompanyAsync(docId),
+            doc.GetStr("apDocCategory"));
         var durationMs = (int)(DateTime.UtcNow - t0).TotalMilliseconds;
         var filled = await repo.ApplyVendorMemoryAsync(module, pd.Header);
         if (filled.Count > 0)
@@ -913,6 +926,43 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             $"JournalVoucher_{docId}.xlsx");
     }
 
+    // GET /api/documents/123/export/journal-entry
+    // The second half of the process: once the supplier's tax invoice has arrived, the VAT this
+    // document parked in deferred input tax moves to the claimable account. SAP takes that as a
+    // general journal entry, in the "Upload General Journal Entry" workbook — one file per
+    // document, two lines per tax invoice.
+    [HttpGet("api/documents/{docId:int}/export/journal-entry")]
+    public async Task<IActionResult> ExportJournalEntry(int docId)
+    {
+        var doc = await repo.GetDocumentAsync(docId);
+        var module = doc.GetStr("module");
+        if (module is not ("AP" or "II"))
+            throw new HttpApiException(400, "The journal-entry file is only produced for supplier invoices");
+
+        var company = await ExportCompanyAsync(docId);
+        var bytes = Export.JournalEntryAccruedExcel.Build(
+            doc,
+            companyCode: company?.CompanyCode ?? "2000",
+            // The reversal is posted on the day it is made, not on the invoice's own date: the tax
+            // invoice arrived in this period, which is the whole point of the entry.
+            postingDate: DateTime.Today);
+        // "Nothing to reverse" is an ordinary answer, not a fault: returned rather than thrown, so
+        // it does not stop the debugger on every click during testing.
+        if (bytes is null)
+            return BadRequest(new
+            {
+                detail = "This document has no deferred input tax to reverse — the journal entry is only "
+                    + "produced when the Tax tab holds a row marked Deferred (Input Tax Type = Deferred, "
+                    + "or a tax code starting with D)",
+            });
+
+        await repo.LogAuditAsync(docId, module, "EXPORT", await ActorAsync(),
+            detail: "Exported the journal-entry file (deferred VAT reversal)", fileName: doc.GetStr("fileName"));
+
+        return File(bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            $"JournalEntry_{docId}.xlsx");
+    }
+
     // GET /api/documents/123/export/sap-import
     // The workbook the SAP Fiori app "Import Supplier Invoices" takes. Same data the direct post
     // would send, but as a file, so Finance can read it before anything reaches SAP — the two
@@ -933,13 +983,37 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             companyCode: company?.CompanyCode ?? "2000",
             // The document says payment terms in words ("30 days"); SAP wants the key (5004). The
             // company's own list is the only place that mapping exists.
-            paymentTerms: await PaymentTermsMasterAsync());
+            paymentTerms: await PaymentTermsMasterAsync(),
+            // Supplier code -> name, so each invoice in the file carries the name of ITS own
+            // supplier in the item text (the customs rows are not the shipping agent's).
+            vendorNames: await VendorNamesAsync());
 
         await repo.LogAuditAsync(docId, module, "EXPORT", await ActorAsync(),
             detail: "Exported the SAP import file", fileName: doc.GetStr("fileName"));
 
         return File(bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             $"SapImportSupplierInvoice_{docId}.xlsx");
+    }
+
+    /// <summary>Supplier code -> supplier name, both the internal code and the SAP one, so a row
+    /// resolves whichever of the two the read put on it.</summary>
+    private async Task<Dictionary<string, string>> VendorNamesAsync()
+    {
+        var names = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            var all = await masters.LoadAllAsync();
+            if (!all.TryGetValue("vendors", out var vendors)) return names;
+            foreach (var v in MgtOcr.Core.DynamicRow.ToDictList(vendors))
+            {
+                var name = v.GetStr("VendorName").Trim();
+                if (name.Length == 0) continue;
+                foreach (var key in new[] { v.GetStr("VendorCode").Trim(), v.GetStr("SapVendorCode").Trim() })
+                    if (key.Length > 0) names[key] = name;
+            }
+        }
+        catch { /* the file is still worth producing without the names */ }
+        return names;
     }
 
     // The payment-terms code/text list from dbo.SysDataMapping, in the shape the export wants.
@@ -1014,7 +1088,8 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         var companyCode = module == "SO" ? CompanyCodeForSalesOrg(header.GetStr("salesOrg")) : null;
         var masterData = await masters.LoadForMappingAsync(module, companyCode);
         var res = MappingEngine.RunMapping(module, header, lines, masterData, manual, companyCode,
-            module == "SO" && IsGlcSalesOrg(header.GetStr("salesOrg")));
+            module == "SO" && IsGlcSalesOrg(header.GetStr("salesOrg")),
+            doc.GetStr("apDocCategory"));
         var resLines = (List<Dictionary<string, object?>>)res["lines"]!;
         var resHeader = (Dictionary<string, object?>)res["header"]!;
 
@@ -1287,7 +1362,11 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         return (await repo.GetDocumentAsync(docId), created);
     }
 
-    private async Task<(Dictionary<string, object?> Payload, Dictionary<string, object?> Res)> PayloadForAsync(Dictionary<string, object?> doc, Dictionary<string, object?>? manual = null)
+    /// <param name="forPost">True only on the route that actually creates the document in SAP.
+    /// A purchase-order lookup that fails then stops the post; on the preview route it does not,
+    /// so the screen can still show what would be sent (and say which items are unmatched) while
+    /// the gateway authorization for API_PURCHASEORDER_PROCESS_SRV is still missing.</param>
+    private async Task<(Dictionary<string, object?> Payload, Dictionary<string, object?> Res)> PayloadForAsync(Dictionary<string, object?> doc, Dictionary<string, object?>? manual = null, bool forPost = false)
     {
         var module = doc.GetStr("module");
         var header = (Dictionary<string, object?>)doc["header"]!;
@@ -1302,7 +1381,8 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             masterData = MasterSchema.ForSalesOrg(masterData, CompanyCodeForSalesOrg(header.GetStr("salesOrg")));
         }
         var res = MappingEngine.RunMapping(module, header, lines, masterData, manual ?? StoredManual(doc), companyCode,
-            module == "SO" && IsGlcSalesOrg(header.GetStr("salesOrg")));
+            module == "SO" && IsGlcSalesOrg(header.GetStr("salesOrg")),
+            doc.GetStr("apDocCategory"));
         var resHeader = (Dictionary<string, object?>)res["header"]!;
         Dictionary<string, object?>? pm;
         if (module == "SO")
@@ -1319,6 +1399,54 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         {
             ["docId"] = doc.Get("docId"), ["file"] = doc.Get("fileName"), ["ocrProvider"] = doc.Get("provider"), ["confidence"] = doc.Get("confidence"),
         };
+        if (module is "AP" or "II")
+        {
+            // MIRO goes through its own builder, which shares its rows with the Excel exporter so
+            // the two routes can never post different documents. The purchase order is read from
+            // SAP first: only SAP knows its item numbers (10, 40, 50, 60 — numbered with gaps).
+            var poRef = Export.SupplierInvoicePayload.PoNumber(header);
+            var poItems = new List<MgtOcr.Sap.SapPurchaseOrderItem>();
+            // The lookup is skipped entirely once every goods line already names its PO item:
+            // the person assigned them on the PO Reference tab, and those numbers are what the
+            // payload uses anyway. That also keeps the flow working while the communication
+            // arrangement for API_PURCHASEORDER_PROCESS_SRV is still missing -- SAP answers that
+            // lookup with 403 "You do not have start authorization for R3TR IWSV
+            // API_PURCHASEORDER_PROCESS_SRV", which says nothing about the invoice itself.
+            var assignedByHand = Export.SupplierInvoicePayload.AllItemsAssignedByHand(doc);
+            if (poRef.Length > 0 && Export.SapImportSupplierInvoiceExcel.IsPoKeyed(doc)
+                && sapPo.Configured && !assignedByHand)
+            {
+                try { poItems = await sapPo.ItemsAsync(poRef); }
+                catch (Exception ex) when (!forPost)
+                {
+                    // Preview only: show what there is. The item numbers come back empty and the
+                    // screen says so, which is more useful than an error page.
+                    logger.LogWarning(ex, "[AP] Purchase-order lookup failed for {Po} (preview)", poRef);
+                }
+                catch (Exception ex)
+                {
+                    // Posting against item numbers nobody checked is worse than not posting.
+                    throw new HttpApiException(502,
+                        $"Could not read purchase order {poRef} from SAP, so the invoice cannot name its "
+                        + "PO items -- assign them by hand on the PO Reference tab, or have Basis add "
+                        + "API_PURCHASEORDER_PROCESS_SRV (communication scenario SAP_COM_0053) to this "
+                        + $"user's communication arrangement: {ex.Message}");
+                }
+            }
+            var apCompany = (await ExportCompanyAsync(Convert.ToInt32(doc.Get("docId") ?? 0)))?.CompanyCode
+                ?? config.SapCompanyCode;
+            var party = doc.GetStr("partnerCode") is { Length: > 0 } pc ? pc : header.GetStr("vendorCode");
+            // The payment-terms KEY the invoice needs when the purchase order carries none
+            // (M8_2/169). The words on the document ("60 Days After B/L Date") are run through
+            // the same master the Excel export uses (dbo.SysDataMapping, Subject='Payment_Terms')
+            // to get the key; the vendor master's own term stands in when that finds nothing.
+            var apTerms = (await PaymentTermsMasterAsync()).Resolve(header.GetStr("paymentTerms"));
+            if (apTerms.Length == 0) apTerms = pm.GetStr("PaymentTerms").Trim();
+            var apPayload = Export.SupplierInvoicePayload.Build(
+                doc, apCompany, party, poItems, source, apTerms);
+            return (apPayload, res);
+        }
+
         var payload = SapPayloadBuilder.BuildPayload(config, module, header, lines, res, pm, source);
         return (payload, res);
     }
@@ -1357,7 +1485,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         var doc = await repo.GetDocumentAsync(docId);
         if (doc.GetStr("status") == "POSTED") throw new HttpApiException(400, $"This document has already been posted to SAP ({doc.GetStr("sapDocNo")})");
         if (doc.GetStr("status") != "MAPPED" || doc.GetStr("mapStatus") != "PASS") throw new HttpApiException(400, "Mapping must pass before posting to SAP");
-        var (payload, res) = await PayloadForAsync(doc);
+        var (payload, res) = await PayloadForAsync(doc, forPost: true);
         if (res.Get("pass") is not true)
             throw new HttpApiException(400, $"Mapping has not passed — {((List<Dictionary<string, object?>>)res["errors"]!).Count} missing item(s)");
 

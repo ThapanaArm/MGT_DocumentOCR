@@ -1,4 +1,4 @@
-using ClosedXML.Excel;
+﻿using ClosedXML.Excel;
 using MgtOcr.Core;
 
 namespace MgtOcr.Api.Export;
@@ -47,11 +47,19 @@ public static class JournalVoucherExcel
         long runningNumber)
     {
         var header = (Dictionary<string, object?>)doc["header"]!;
-        var glItems = ReadRows(header, "glItems");
+        // Accounting asked for this file to follow the journal entry they key in SAP, so when the
+        // document has VAT sitting in the deferred account the voucher IS that reversal — the same
+        // rows DeferredVatReversal hands the SAP workbook, in this template's layout. A document
+        // with no deferred VAT keeps the old behaviour and shows its G/L Account Items.
+        var reversal = DeferredVatReversal.Rows(doc);
+        var glItems = reversal.Count > 0 ? reversal : ReadRows(header, "glItems");
+        var reference = reversal.Count > 0
+            ? DeferredVatReversal.Reference(header)
+            : header.GetStr("invoiceNo");
 
         using var wb = new XLWorkbook();
         BuildControlSheet(wb, companyName, companyCode, runningNumber);
-        BuildVoucherSheet(wb, header, companyName, runningNumber, glItems);
+        BuildVoucherSheet(wb, header, companyName, runningNumber, glItems, reference);
 
         using var ms = new MemoryStream();
         wb.SaveAs(ms);
@@ -102,7 +110,8 @@ public static class JournalVoucherExcel
         Dictionary<string, object?> header,
         string companyName,
         long running,
-        List<Dictionary<string, object?>> glItems)
+        List<Dictionary<string, object?>> glItems,
+        string reference)
     {
         var ws = wb.Worksheets.Add("1");
         ws.Style.Font.FontName = Font;
@@ -120,7 +129,7 @@ public static class JournalVoucherExcel
         ws.Cell(3, 2).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Left;
 
         Title(ws.Cell(4, 1), "Reference", centred: false);
-        Title(ws.Cell(4, 2), header.GetStr("invoiceNo"), centred: false);
+        Title(ws.Cell(4, 2), reference, centred: false);
         ws.Cell(4, 2).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Left;
 
         const int headerRow = 6;

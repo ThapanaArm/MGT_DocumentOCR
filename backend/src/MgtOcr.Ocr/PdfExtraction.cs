@@ -52,7 +52,10 @@ public static class PdfExtraction
     // parity, not optional — reuses the same Y-bucketing approach as PdfBlocks().
     // 0-based indexes of every page whose text layer matches `pattern` (a bundle can carry one
     // FORM per PO). Empty when none match or the PDF has no text layer.
-    public static List<int> FindPageIndexes(string path, Regex pattern)
+    // `exclude`, when given, drops a page that matches it even if `pattern` matched: the two
+    // summary sheets of one bundle can name each other, so "PURCHASE ORDER" has to be able to say
+    // "but not the FORM SHIPPING EXPENSE sheet".
+    public static List<int> FindPageIndexes(string path, Regex pattern, Regex? exclude = null)
     {
         var hits = new List<int>();
         try
@@ -61,7 +64,8 @@ public static class PdfExtraction
             var i = 0;
             foreach (var page in doc.GetPages())
             {
-                if (pattern.IsMatch(ReconstructPageText(page))) hits.Add(i);
+                var text = ReconstructPageText(page);
+                if (pattern.IsMatch(text) && !(exclude?.IsMatch(text) ?? false)) hits.Add(i);
                 i++;
             }
         }

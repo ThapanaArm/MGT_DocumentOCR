@@ -92,8 +92,12 @@ public class MastersController(MasterRepository repo, ICurrentUserAccessor curre
         if (MasterRepository.CompanyColumn(m) is { } editCol)
         {
             var owner = await repo.RowCompanyAsync(m, key);
+            // A tax-map rule with no company is shared by both companies on purpose, so editing one
+            // must not quietly make it the editor's. Only a rule that already belongs to a company
+            // is pinned to it.
+            var sharedAllowed = kind is "vatmaps" or "whtmaps";
             var pinned = string.IsNullOrWhiteSpace(owner)
-                ? CompanyScope.Own(await currentUser.RequireAsync(), config)
+                ? sharedAllowed ? "" : CompanyScope.Own(await currentUser.RequireAsync(), config)
                 : owner;
             if (!string.IsNullOrWhiteSpace(pinned)) values[editCol] = pinned;
         }
@@ -174,12 +178,22 @@ public class MastersController(MasterRepository repo, ICurrentUserAccessor curre
             "customers" => isCreate ? new[] { "SalesOrg", "CompanyName", "ComcompyCodeSAP" } : new[] { "SalesOrg", "CompanyName" },
             "shiptos" => isCreate ? new[] { "SalesOrg", "CustomerCode", "SapShipToCode" } : new[] { "SalesOrg", "CustomerCode" },
             "custmaterials" => isCreate ? new[] { "SalesOrg", "CustomerCode", "MaterialCodeCode", "MaterialCodeSAP" } : new[] { "SalesOrg", "CustomerCode", "MaterialCodeCode" },
+            // The two tax maps: a rule is useless without the thing it maps FROM and the SAP code
+            // it maps TO. Company is deliberately NOT required — a rule with no company serves
+            // both, which is how the shared withholding rates are kept in one place.
+            "vatmaps" => ["DocKind", "TaxCode"],
+            // WhtType / WhtCode come from the SAP configuration and are often filled in later, so
+            // only the income type and its rate are required to save a row.
+            "whtmaps" => ["IncomeType", "Rate"],
             _ => Array.Empty<string>(),
         };
         foreach (var field in required)
             if (!values.TryGetValue(field, out var value) || string.IsNullOrWhiteSpace(value?.ToString()))
                 return $"Please enter {field}";
-        if (values.TryGetValue("SalesOrg", out var org) && string.IsNullOrWhiteSpace(org?.ToString()))
+        // A tax-map rule is allowed to carry no company (it then serves both), so the blanket
+        // SalesOrg check below does not apply to them.
+        if (kind is not ("vatmaps" or "whtmaps")
+            && values.TryGetValue("SalesOrg", out var org) && string.IsNullOrWhiteSpace(org?.ToString()))
             return "Please enter SalesOrg (CompanyCode)";
         return null;
     }

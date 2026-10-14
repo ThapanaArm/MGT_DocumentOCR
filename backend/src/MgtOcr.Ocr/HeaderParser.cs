@@ -42,6 +42,15 @@ public static class HeaderParser
             ["refDocType"] = "",
             ["vendorName"] = "", ["vendorTaxId"] = "", ["branch"] = "", ["poRef"] = "", ["currency"] = "THB",
             ["paymentTerms"] = "", ["subTotal"] = 0.0, ["vatRate"] = 7.0, ["vatAmount"] = 0.0, ["whtAmount"] = 0.0, ["totalAmount"] = 0.0,
+            // The purchase order behind the invoice, for the PO Reference tab: the goods total the
+            // PO covers (22,798.00 on the KIMEX bundle), its currency, and the goods themselves.
+            // A key missing from here is DROPPED by the parser — it only copies fields it already
+            // knows — which is why the PO amount and the goods list arrived empty on screen.
+            ["poTotalAmount"] = 0.0, ["poCurrency"] = "", ["poLines"] = new List<object?>(),
+            // The form's own header: who sold the GOODS and under which invoice number. Every cost
+            // row of the posted document carries them ("KIMEX,INV.2230000581"), while the shipping
+            // agent who bills us appears only on the tax rows.
+            ["goodsSupplier"] = "", ["goodsInvoiceNo"] = "",
         };
 
     // _po_number_date(): some forms (e.g. Henkel/European buyers) write PO number + buyer code +

@@ -11,7 +11,7 @@ public static class OpenAiOcr
 {
     private static readonly HttpClient Http = new();
 
-    public static async Task<(ParsedDocument? Doc, string? Error)> VisionExtractAsync(string path, string module, AppConfig config, string salesOrg = "")
+    public static async Task<(ParsedDocument? Doc, string? Error)> VisionExtractAsync(string path, string module, AppConfig config, string salesOrg = "", string apDocCategory = "")
     {
         if (string.IsNullOrEmpty(config.OpenAiApiKey))
             return (null, "OpenAiApiKey is empty in config — appsettings Ocr:OpenAiApiKey was not loaded by the running app (check which appsettings.json/appsettings.{Env}.json the process reads, and that it was restarted)");
@@ -24,7 +24,7 @@ public static class OpenAiOcr
             if (imgs.Count == 0)
                 return (null, $"Could not rasterize '{Path.GetFileName(path)}' to images (renderer produced 0 pages — check the PDF rasterizer on the server)");
 
-            var content = new List<object> { new { type = "text", text = VisionPrompt.Build(module, "image", salesOrg) } };
+            var content = new List<object> { new { type = "text", text = VisionPrompt.Build(module, "image", salesOrg, apDocCategory) } };
             content.AddRange(imgs.Select(b => (object)new
             {
                 type = "image_url",

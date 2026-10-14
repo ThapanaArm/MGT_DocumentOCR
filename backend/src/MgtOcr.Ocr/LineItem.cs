@@ -30,6 +30,16 @@ public class LineItem
     public double Price { get; set; }
     public double Amount { get; set; }
 
+    // The heading the FORM SHIPPING EXPENSE sheet files this cost under, from its COSTS column:
+    // "Local", "Insurance", "Fee" or "Overseas". It is what picks the G/L account the cost posts
+    // to, so it travels with the line. Empty on anything that is not a form cost row.
+    public string CostType { get; set; } = "";
+
+    // The item number printed in the PURCHASE ORDER's own "Item" column (1, 2, 3 … or 10, 20, 30).
+    // MIRO's Purchasing Document References grid shows "<PO number> / <item>", so the number has to
+    // come off the PO rather than from the position in our list. Blank on anything but a PO read.
+    public string PoItem { get; set; } = "";
+
     // Item Note 1 (SD item long text). OCR-prefilled from a per-line note/remark on the
     // PO, editable by the CS, sent to SAP as the item text ZI01. SO only; blank otherwise.
     public string ItemNote { get; set; } = "";

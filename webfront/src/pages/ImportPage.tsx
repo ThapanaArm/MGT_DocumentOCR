@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useAppState } from '../state/AppState';
+import CategoryOptions from '../components/CategoryOptions';
 import { useMeta } from '../state/MetaContext';
 import { MODULE_LABEL } from '../navConfig';
 import { moduleLabel } from '../utils/format';
@@ -168,11 +169,7 @@ export default function ImportPage() {
               </label>
               <select value={category} onChange={(e) => setCategory(e.target.value)}>
                 <option value="">— Select Document Type —</option>
-                {(apDocCategories ?? []).map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.label}
-                  </option>
-                ))}
+                <CategoryOptions items={apDocCategories ?? []} />
               </select>
             </div>
           )}

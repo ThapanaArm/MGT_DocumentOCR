@@ -109,14 +109,16 @@ public static class SapImportSupplierInvoiceExcel
     public static byte[] Build(
         Dictionary<string, object?> doc,
         string companyCode,
-        PaymentTerms paymentTerms)
+        PaymentTerms paymentTerms,
+        IReadOnlyDictionary<string, string>? vendorNames = null)
     {
+        vendorNames ??= new Dictionary<string, string>();
         var header = (Dictionary<string, object?>)doc["header"]!;
         var glItems = ReadRows(header, "glItems");
         // A PO-referenced invoice (MIRO) never fills the G/L Account Items table on screen — that
         // table is seeded for FB60 only — so the file used to come out with headers and nothing
         // under them. Fall back to the document's own rows, by the same rule the screen uses.
-        if (glItems.Count == 0) glItems = ItemsFromLines(doc);
+        if (glItems.Count == 0) glItems = GlRowsFor(doc, vendorNames);
 
         // partnerCode is the SAP vendor the mapping step matched; the header copy is the fallback
         // for a document mapped by hand.
@@ -152,8 +154,31 @@ public static class SapImportSupplierInvoiceExcel
             // still identifiable from Reference (the supplier's invoice number).
             invoiceId++;
             var gross = GrossAmount(items, headerTaxCode);
+            // The payables side as its own row, which is how Accounting keys these: the supplier's
+            // account and full name against the invoice total, ahead of the cost and tax rows.
+            // A PO-keyed invoice does not get one — it is a single line for the goods.
+            var rows = items;
+            if (!IsPoKeyed(doc) && gross != 0 && party.Trim().Length > 0)
+            {
+                rows = [new Dictionary<string, object?>
+                {
+                    ["glAccount"] = party.Trim(),
+                    ["drCr"] = "C",
+                    ["amount"] = gross,
+                    ["taxCode"] = ExemptTaxCode,
+                    ["assignment"] = Or(header.GetStr("invoiceNo").Trim(), header.GetStr("poRef").Trim()),
+                    ["itemText"] = GoodsText(header),
+                    ["costCenter"] = "",
+                    ["vendorCode"] = party,
+                }, .. items];
+            }
+            // The fallback for a row that set no text of its own. Posted document 5100001129
+            // writes the goods supplier and its invoice number on the payables, cost and variance
+            // rows alike ("KIMEX,INV.2230000581"); only the tax rows name the agent who issued
+            // them ("PROMPT,INV.PI-2608010"), and those carry their own text.
+            var groupText = GoodsText(header);
 
-            foreach (var g in items)
+            foreach (var g in rows)
             {
                 var amount = Num(g.Get("amount"));
                 if (amount == 0) continue;
@@ -193,10 +218,15 @@ public static class SapImportSupplierInvoiceExcel
                 // --- G/L Account Items ---------------------------------------------------------------
                 Code(ws.Cell(row, C_ItemCompanyCode), Cut(companyCode, 4));
                 Code(ws.Cell(row, C_ItemAccount), Cut(g.GetStr("glAccount"), 10));
-                Text(ws.Cell(row, C_ItemText), Cut(g.GetStr("itemText"), 50));
-                // GlItemsTable stores D = debit, C = credit; SAP wants S = debit, H = credit.
-                Text(ws.Cell(row, C_ItemDrCr),
-                    string.Equals(g.GetStr("drCr"), "C", StringComparison.OrdinalIgnoreCase) ? "H" : "S");
+                // A tax row carries its own tax invoice's issuer and number (PILOT,INV.INCI26081151
+                // on the posted document); everything else carries this invoice's supplier.
+                Text(ws.Cell(row, C_ItemText), Cut(Or(g.GetStr("itemText"), groupText), 50));
+                // Every row goes out as H. Accounting asked for this twice — in answer to the
+                // question and again on the rules sheet (8 Oct 2026) — against the posted document
+                // 5100001129, where only the payables row is PK 31 (credit) and the cost, tax and
+                // variance rows are PK 40 (debit). The internal D/C is still what GrossAmount signs
+                // the total from, so the header amount stays right whichever way this is written.
+                Text(ws.Cell(row, C_ItemDrCr), "H");
                 Money(ws.Cell(row, C_ItemAmount), amount);
                 // The line's own code when the screen has one, else the document-level default.
                 Text(ws.Cell(row, C_ItemTaxCode), Or(Cut(g.GetStr("taxCode"), 2), headerTaxCode));
@@ -221,8 +251,72 @@ public static class SapImportSupplierInvoiceExcel
     private const string GlFreightHandling = "21229108";   // Local Hand & Freight
     private const string GlInputTax = "11720000";          // Input VAT, claimable this period
     private const string GlDeferredInputTax = "11730000";  // Deferred input VAT (ภาษีซื้อรอเรียกเก็บ)
-    private const string GlDuty = "";
+    // Import duty, "Import Tax" on posted document 5100001372. The customs VAT on that same
+    // document is NOT this account — it is the ordinary input-tax account, as a tax row.
+    private const string GlDuty = "21229100";
     private const string GlWithholdingTax = "";
+    // The goods a purchase order covers do not post to the freight account — SAP marked all eleven
+    // rows red when they did. The account for them is Accounting's to give, so it stays blank here
+    // rather than carrying a guess into a posting.
+    private const string GlPoGoods = "";
+    // The FORM SHIPPING EXPENSE sheet files every cost line under one of four headings in its
+    // COSTS column, and the heading is what picks the account — "Local" is the Local Hand & Freight
+    // account on the posted GLC document (5100001269). The other three are still to come from
+    // Accounting.
+    // Posted document 5100001373 (company 2000): the insurer's invoice posts its premium here.
+    private const string GlInsurance = "21229107";
+    // Posted document 5100001372 (company 2000): the Customs Department's own charges.
+    private const string GlFee = "21229106";
+    // Posted document 5100001257 (company 2000, USD): the whole invoice is one "Oversea Charge"
+    // row to this account, against the overseas supplier itself.
+    private const string GlOverseas = "21229105";
+
+    /// <summary>The account a cost line posts to, by the COSTS heading the form files it under.</summary>
+    private static string AccountForCostType(string? costType) =>
+        (costType ?? "").Trim().ToUpperInvariant() switch
+        {
+            "INSURANCE" => GlInsurance,
+            "FEE" => GlFee,
+            "OVERSEAS" => GlOverseas,
+            _ => GlFreightHandling, // "Local", and anything the read could not file
+        };
+
+    /// <summary>The trading name Finance writes in the item text: the registered name without its
+    /// legal suffix. "KIMEX CO.,LTD." -> "KIMEX", "BANGKOK INSURANCE PUBLIC COMPANY LIMITED" ->
+    /// "BANGKOK INSURANCE", "THE CUSTOMS DEPARTMENT" unchanged.
+    ///
+    /// Cutting at the first word (what this did before) was wrong on every name that is genuinely
+    /// two words — "KS PEARL", "BIO ACTIVES", "CLARIANT (AG)" — which the posted documents and the
+    /// RPA vouchers are full of.</summary>
+    private static string ShortVendor(string? name)
+    {
+        var n = System.Text.RegularExpressions.Regex.Replace(name ?? "", @"\s+", " ").Trim();
+        if (n.Length == 0) return "";
+        n = System.Text.RegularExpressions.Regex.Replace(
+            n,
+            @"[\s,]*\(?\s*(PUBLIC\s+COMPANY\s+LIMITED|CO\.?\s*,?\s*LTD\.?|COMPANY\s+LIMITED|LIMITED|PCL\.?|INC\.?|CORP\.?)\s*\)?\.?\s*$",
+            "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        // Thai forms of the same thing, around the name rather than only after it.
+        n = n.Replace("\u0e1a\u0e23\u0e34\u0e29\u0e31\u0e17", "").Replace("\u0e08\u0e33\u0e01\u0e31\u0e14", "").Replace("(\u0e21\u0e2b\u0e32\u0e0a\u0e19)", "");
+        return n.Trim(' ', ',', '.').ToUpperInvariant();
+    }
+
+    /// <summary>"KIMEX,INV.2230000581" — the supplier of the goods and that supplier's invoice
+    /// number, from the form's SUPPLIER / INVOICE NO. header when the read captured them, and
+    /// otherwise from the document's own supplier (which is who they are on a PO-keyed read).</summary>
+    private static string GoodsText(Dictionary<string, object?> header)
+    {
+        // The form's SUPPLIER box is taken exactly as printed: that is the name Accounting writes
+        // in the item text, and it is not always one word — "CLARIANT (AG)" on document 5100001373,
+        // "KS PEARL" and "BIO ACTIVES" on the RPA vouchers. Only a name that had to come from the
+        // document's own supplier field is shortened, since that one carries the legal suffix.
+        var fromForm = header.GetStr("goodsSupplier").Trim();
+        var invoiceNo = Or(header.GetStr("goodsInvoiceNo").Trim(),
+            Or(header.GetStr("invoiceNo").Trim(), header.GetStr("poRef").Trim()));
+        var vendor = fromForm.Length > 0 ? fromForm.ToUpperInvariant() : ShortVendor(header.GetStr("vendorName"));
+        if (vendor.Length == 0) return invoiceNo.Length > 0 ? $"INV.{invoiceNo}" : "";
+        return invoiceNo.Length > 0 ? $"{vendor},INV.{invoiceNo}" : vendor;
+    }
 
     /// <summary>The G/L rows for a document whose table on screen was never filled in — the same
     /// rows seedGlItems() builds on the client, so the file matches what a person would have seen.
@@ -233,14 +327,54 @@ public static class SapImportSupplierInvoiceExcel
     /// withholding credit. Coding the cost rows V1 instead — which is what this method used to do —
     /// made SAP calculate 962.62 of VAT on 13,751.73 of costs when the tax invoices in the bundle
     /// add up to 745.62, and left the document out of balance by the difference.</summary>
-    private static List<Dictionary<string, object?>> ItemsFromLines(Dictionary<string, object?> doc)
+    /// <summary>Public because the direct MIRO post builds its lines from the SAME rows: whatever
+    /// goes in the file has to be what goes over the API, or the two routes post different
+    /// documents from one screen.</summary>
+    public static List<Dictionary<string, object?>> GlRowsFor(
+        Dictionary<string, object?> doc,
+        IReadOnlyDictionary<string, string>? vendorNames = null)
     {
         var items = new List<Dictionary<string, object?>>();
         var header = doc.Get("header") as Dictionary<string, object?> ?? new Dictionary<string, object?>();
         var poRef = header.GetStr("poRef").Trim();
 
-        if (doc.Get("lines") is System.Collections.IEnumerable lines)
+        // What the cost rows, the payables row and the variance row all carry: the supplier of the
+        // GOODS and that supplier's invoice number, printed in the form's own SUPPLIER / INVOICE NO.
+        // header. On a PO-keyed document the document's own supplier IS that supplier.
+        var goodsText = GoodsText(header);
+        var itemText = "";
+        // Every (supplier, amount) a cost row already carries. The customs fee and the excise fee
+        // are on the form AND on the Tax tab as duty rows, and taking both put 108,721.60 into the
+        // file twice.
+        var costSeen = new HashSet<string>();
+
+        if (IsPoKeyed(doc))
         {
+            // Keyed against the purchase order, the invoice is ONE line for the goods the PO
+            // covers, not one line per product: the eleven KIMEX rows had to be a single
+            // 22,798.00 against "KIMEX,INV.2230000581". Credit, because the goods themselves are
+            // debited from the purchase order.
+            var goods = Num(header.Get("totalAmount"));
+            if (goods != 0)
+                items.Add(new Dictionary<string, object?>
+                {
+                    ["glAccount"] = GlPoGoods,
+                    ["drCr"] = "C",
+                    ["amount"] = goods,
+                    ["taxCode"] = ExemptTaxCode,
+                    ["assignment"] = poRef,
+                    ["itemText"] = itemText,
+                    ["costCenter"] = "",
+                    ["vendorCode"] = doc.GetStr("partnerCode") is { Length: > 0 } pc ? pc : header.GetStr("vendorCode"),
+                });
+        }
+        else if (doc.Get("lines") is System.Collections.IEnumerable lines)
+        {
+            // Delivery costs are summarised the way the posted document does it: every cost line
+            // under one COSTS heading, for one supplier, becomes a single G/L row (25,156.25 of
+            // "Local" on document 5100001269), not one row per charge. Duty keeps its own row —
+            // it is the Customs Department's, not the shipping agent's.
+            var costRows = new List<(string Vendor, string CostType, bool Duty, double Amount)>();
             foreach (var raw in lines)
             {
                 if (raw is not Dictionary<string, object?> l) continue;
@@ -254,19 +388,31 @@ public static class SapImportSupplierInvoiceExcel
 
                 var isDuty = string.Equals(ext, "DUTY", StringComparison.OrdinalIgnoreCase)
                     || DutyNames.Any(n => l.GetStr("desc").Trim().Equals(n, StringComparison.OrdinalIgnoreCase));
+                costRows.Add((VendorOfLine(l), CostTypeOfLine(l), isDuty, amount));
+            }
+
+            foreach (var g in costRows
+                .GroupBy(r => (r.Vendor, Kind: r.Duty ? "DUTY" : r.CostType.ToUpperInvariant(), r.Duty)))
+            {
+                var first = g.First();
+                costSeen.Add($"{first.Vendor}|{g.Sum(r => r.Amount):F2}");
+                foreach (var r in g) costSeen.Add($"{r.Vendor}|{r.Amount:F2}");
+                var costAccount = first.Duty ? GlDuty : AccountForCostType(first.CostType);
+                // "KIMEX,INV.2230000581" on every cost row of document 5100001129 — the supplier of
+                // the GOODS and its invoice number, off the form's own header, not the shipping
+                // agent who is billing us. The agent appears on the tax rows instead.
                 items.Add(new Dictionary<string, object?>
                 {
-                    ["glAccount"] = isDuty ? GlDuty : GlFreightHandling,
+                    ["glAccount"] = costAccount,
                     ["drCr"] = "D",
-                    ["amount"] = amount,
+                    ["amount"] = g.Sum(r => r.Amount),
                     ["taxCode"] = ExemptTaxCode,
-                    ["assignment"] = poRef,
-                    ["itemText"] = l.GetStr("desc"),
+                    ["itemText"] = goodsText,
                     ["costCenter"] = "",
                     // Which supplier this cost belongs to. A shipping bundle carries lines from
                     // several suppliers, and a SAP supplier invoice has exactly one invoicing
                     // party, so this is what splits the file into one invoice per supplier.
-                    ["vendorCode"] = VendorOfLine(l),
+                    ["vendorCode"] = first.Vendor,
                 });
             }
         }
@@ -274,12 +420,18 @@ public static class SapImportSupplierInvoiceExcel
         // One row per tax invoice. Which account it posts to is decided by the Input Tax Type the
         // person picked in the Tax tab; the code's first letter (D1/D0/D2 are the deferred codes)
         // only stands in for a row nobody has touched yet.
-        foreach (var t in ReadRows(header, "taxItems"))
+        // Via DeferredVatReversal so an unsaved document still exports its VAT: the Tax tab is
+        // seeded in the browser and only written to the database when somebody saves.
+        foreach (var t in DeferredVatReversal.TaxRows(doc))
         {
             var amount = Num(t.Get("docCurrencyAmt"));
             if (amount == 0) continue;
             var code = t.GetStr("taxCode").Trim();
             var kind = t.GetStr("taxKind").Trim();
+            // Only a real input-VAT code is a tax row here. Anything else on that tab is a duty or
+            // a fee, which the form already contributed as a cost row — adding it again doubled it.
+            var isVatCode = code.Length == 2 && (code[0] is 'V' or 'v' or 'D' or 'd') && char.IsDigit(code[1]);
+            if (!isVatCode && costSeen.Contains($"{t.GetStr("vendorCode").Trim()}|{amount:F2}")) continue;
             var deferred = kind.Length > 0
                 ? string.Equals(kind, "DEFERRED", StringComparison.OrdinalIgnoreCase)
                 : code.StartsWith('D') || code.StartsWith('d');
@@ -290,7 +442,12 @@ public static class SapImportSupplierInvoiceExcel
                 ["amount"] = amount,
                 ["taxCode"] = code.Length > 0 ? code : ExemptTaxCode,
                 ["assignment"] = t.GetStr("taxDocNo"),
-                ["itemText"] = t.GetStr("issuerName"),
+                // The issuer of THIS tax invoice and its own number — "PROMPT,INV.PI-2608010" on
+                // the posted document, while the cost rows carry the goods supplier.
+                ["itemText"] = ShortVendor(t.GetStr("issuerName")) is { Length: > 0 } iss
+                    && t.GetStr("taxDocNo").Trim() is { Length: > 0 } tdn
+                        ? $"{iss},INV.{tdn}"
+                        : t.GetStr("issuerName"),
                 ["costCenter"] = "",
                 ["vendorCode"] = t.GetStr("vendorCode").Trim(),
             });
@@ -412,6 +569,17 @@ public static class SapImportSupplierInvoiceExcel
 
     /// <summary>The SAP vendor a document line was matched to, out of the line's extra data —
     /// the same place the screen's "Vendor in this document" filter reads.</summary>
+    /// <summary>The COSTS heading the FORM SHIPPING EXPENSE sheet files this line under — Local,
+    /// Insurance, Fee or Overseas — read into the line's extra bag. Empty when the read did not
+    /// capture it, which falls back to Local.</summary>
+    private static string CostTypeOfLine(Dictionary<string, object?> line) =>
+        line.Get("extra") is Dictionary<string, object?> extra ? extra.GetStr("costType").Trim() : "";
+
+    /// <summary>Whether the document is keyed against the purchase order (Document Type
+    /// "Goods/service items") rather than against the delivery.</summary>
+    public static bool IsPoKeyed(Dictionary<string, object?> doc) =>
+        string.Equals(doc.GetStr("apDocCategory").Trim(), "INVENTORY_PO", StringComparison.OrdinalIgnoreCase);
+
     private static string VendorOfLine(Dictionary<string, object?> line) =>
         line.Get("extra") is Dictionary<string, object?> extra ? extra.GetStr("vendorCode").Trim() : "";
 
@@ -479,7 +647,7 @@ public static class SapImportSupplierInvoiceExcel
     /// screen, which is where it is visible.</summary>
     /// <summary>A row posted to one of the input-tax accounts: the row is the tax itself, not
     /// something taxable.</summary>
-    private static bool IsTaxAccountRow(Dictionary<string, object?> g) =>
+    public static bool IsTaxAccountRow(Dictionary<string, object?> g) =>
         g.GetStr("glAccount").Trim() is var a && (a == GlInputTax || a == GlDeferredInputTax);
 
     private static double GrossAmount(
@@ -516,9 +684,13 @@ public static class SapImportSupplierInvoiceExcel
         return header.GetStr("sapDocType") is "KG" or "RS";
     }
 
+    // A line break inside a cell is not a 50-character SAP text: the PO's goods lines carry their
+    // note on a second line ("…25KG DR\nThis price already includes 0.50USD discount"), and that
+    // newline travelled into SUPPLIERINVOICEITEMTEXT. Any run of whitespace collapses to one space
+    // before the text is cut to length.
     private static string Cut(string? v, int n)
     {
-        var s = (v ?? "").Trim();
+        var s = System.Text.RegularExpressions.Regex.Replace(v ?? "", @"\s+", " ").Trim();
         return s.Length <= n ? s : s[..n];
     }
 

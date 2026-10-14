@@ -222,6 +222,9 @@ builder.Services.AddHttpClient<MgtOcr.Sap.SapBusinessPartnerClient>();
 builder.Services.AddHttpClient<MgtOcr.Sap.SapProductClient>();
 builder.Services.AddHttpClient<MgtOcr.Sap.SapBillingClient>();
 builder.Services.AddHttpClient<MgtOcr.Sap.SapSalesOrderClient>();
+// Read-only purchase-order lookup, so a supplier invoice posted against a PO can name the PO's
+// real item numbers instead of a guess.
+builder.Services.AddHttpClient<MgtOcr.Sap.SapPurchaseOrderClient>();
 // Singleton (not AddHttpClient<T>, unlike the SAP clients above) so its in-memory OAuth
 // access-token cache is shared across requests instead of being torn down each call.
 builder.Services.AddSingleton<MgtOcr.Zoho.ZohoClient>();

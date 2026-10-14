@@ -1,4 +1,4 @@
-using System.Net.Http.Headers;
+﻿using System.Net.Http.Headers;
 using MgtOcr.Core;
 using System.Text;
 using System.Text.Json;
@@ -59,7 +59,14 @@ public class SapClient(AppConfig config, HttpClient httpClient)
         // WriteEnvironment = dev and ActiveEnvironment = prod, master data is matched against live
         // production data while no document is ever posted into production.
         var useDedicatedSoUrl = module == "SO" && !string.IsNullOrEmpty(config.SapSalesOrderWriteBaseUrl);
-        var baseUrl = useDedicatedSoUrl ? config.SapSalesOrderWriteBaseUrl : config.SapWriteBaseUrl;
+        // A supplier invoice posts to its own service root as well (Sap:SupplierInvoice:BaseUrl_*,
+        // on its own environment key that defaults to dev). Leaving BaseUrl_Prod empty is what
+        // keeps a mis-set environment from ever creating a document in the live tenant.
+        var useDedicatedApUrl = module is "AP" or "II" && !string.IsNullOrEmpty(config.SapSupplierInvoiceBaseUrl);
+        var useDedicatedUrl = useDedicatedSoUrl || useDedicatedApUrl;
+        var baseUrl = useDedicatedSoUrl ? config.SapSalesOrderWriteBaseUrl
+            : useDedicatedApUrl ? config.SapSupplierInvoiceBaseUrl
+            : config.SapWriteBaseUrl;
 
         if (string.IsNullOrEmpty(baseUrl))
         {
@@ -68,7 +75,7 @@ public class SapClient(AppConfig config, HttpClient httpClient)
                 "Simulation mode: SAP base URL is not set in appsettings (payload and log have been saved)");
         }
 
-        var url = useDedicatedSoUrl
+        var url = useDedicatedUrl
             ? $"{baseUrl.TrimEnd('/')}/{endpoint[(endpoint.LastIndexOf('/') + 1)..]}?sap-client={config.SapClient}"
             : $"{baseUrl.TrimEnd('/')}/sap/opu/odata/sap/{endpoint}?sap-client={config.SapClient}";
 
@@ -77,7 +84,7 @@ public class SapClient(AppConfig config, HttpClient httpClient)
         // everything up to and including the service name (the part of `endpoint` before its last
         // "/", e.g. "API_SALES_ORDER_SRV" out of "API_SALES_ORDER_SRV/A_SalesOrder").
         var serviceName = endpoint.Contains('/') ? endpoint[..endpoint.LastIndexOf('/')] : endpoint;
-        var tokenUrl = useDedicatedSoUrl
+        var tokenUrl = useDedicatedUrl
             ? $"{baseUrl.TrimEnd('/')}/?sap-client={config.SapClient}"
             : $"{baseUrl.TrimEnd('/')}/sap/opu/odata/sap/{serviceName}/?sap-client={config.SapClient}";
 
@@ -89,6 +96,10 @@ public class SapClient(AppConfig config, HttpClient httpClient)
             if (module == "SO" && !string.IsNullOrWhiteSpace(config.SapSalesOrderAuthHeader))
             {
                 r.Headers.TryAddWithoutValidation("Authorization", config.SapSalesOrderAuthHeader);
+            }
+            else if (useDedicatedApUrl && !string.IsNullOrWhiteSpace(config.SapSupplierInvoiceAuthHeader))
+            {
+                r.Headers.TryAddWithoutValidation("Authorization", config.SapSupplierInvoiceAuthHeader);
             }
             else
             {
