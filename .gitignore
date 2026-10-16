@@ -26,3 +26,4 @@ backend/src/MgtOcr.Api/appsettings.Development.json
 
 # PaddleOCR-Standalone portable exe + models (hundreds of MB, install per machine)
 tools/
+/docs
