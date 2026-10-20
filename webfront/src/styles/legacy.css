@@ -1298,3 +1298,22 @@ input,select,textarea,.btn,.nav a{-webkit-tap-highlight-color:transparent}
   select option:checked{color:var(--green);font-weight:600}
   select option:disabled{opacity:.5;cursor:default}
 }
+/* Overview: Document Processing Time card (Admin only, 20 Oct 2026) */
+.jt-head{align-items:flex-start;flex-wrap:wrap;gap:10px}
+.jt-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:18px}
+.jt-stat{padding:12px 14px;border:1px solid var(--line);border-radius:12px;background:var(--card)}
+.jt-stat b{display:block;font-size:20px;margin-top:2px;font-variant-numeric:tabular-nums}
+.jt-split{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:24px}
+.jt-sub{font-size:12.5px;font-weight:600;margin-bottom:8px;color:var(--muted)}
+.jt-bar-row{display:grid;grid-template-columns:72px minmax(0,1fr) 40px;align-items:center;gap:10px;margin-bottom:6px;font-size:12.5px}
+.jt-bar-track{height:10px;border-radius:6px;background:var(--line-soft);overflow:hidden}
+.jt-bar-fill{display:block;height:100%;border-radius:6px;background:var(--green);min-width:2px}
+.jt-bar-n,.jt-num{text-align:right;font-variant-numeric:tabular-nums}
+.jt-group{display:grid;grid-template-columns:minmax(0,1fr) auto 90px;gap:10px;align-items:baseline;padding:6px 0;border-bottom:1px solid var(--line-soft);font-size:13px}
+.jt-group:last-child{border-bottom:0}
+.jt-row{cursor:pointer}
+.jt-row:hover td{background:var(--line-soft)}
+.jt-nowrap{white-space:nowrap}
+.jt-partner{max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.jt-warn{color:var(--orange)}
+@media (max-width:800px){.jt-split{grid-template-columns:1fr}}

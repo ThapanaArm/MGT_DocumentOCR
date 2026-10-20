@@ -2100,6 +2100,19 @@ function SapCustomerSapSide({
         </div>
       )}
       {areaStatus === 'loading' && <div className="hint" style={{ padding: '2px 0' }}>Reading Sales Area from SAP…</div>}
+      {/* No sales area for this customer in this sales org (or SAP could not be read): the payload would
+          fall back to Channel 10 / Division 00 and SAP rejects it with "The sales area could not be
+          determined". Say so here, before the person presses Post. */}
+      {soldToSapCode && !posted && areaStatus !== 'loading' && !areas.length && (
+        <div className="so-group-notice" role="alert" style={{ margin: '0 0 8px' }}>
+          <i className="fa-solid fa-triangle-exclamation" aria-hidden="true" />
+          <span>
+            {areaStatus === 'error'
+              ? <>Could not read this customer's Sales Area from SAP. Posting may fail with &quot;The sales area could not be determined&quot; — try again, or check the customer in SAP.</>
+              : <>Customer <b>{soldToSapCode}</b> has no Sales Area in Sales Org <b>{salesOrg || '—'}</b> in SAP, so SAP will reject the order (&quot;The sales area could not be determined&quot;). Check that the right customer is mapped, or ask master data to extend this customer to Sales Org {salesOrg || '—'}.</>}
+          </span>
+        </div>
+      )}
       <SideList items={items} side="sap" />
     </>
   );
