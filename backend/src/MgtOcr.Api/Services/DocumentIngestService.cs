@@ -12,8 +12,11 @@ public class DocumentIngestService(OcrEngine ocr, DocumentRepository repo)
 {
     public async Task<(int DocId, string Module, string? Note)> IngestAsync(
         string module, string storedPath, string fileName, int size, string engine,
-        string apDocCategory, string user, string? password = null, string? salesOrg = null)
+        string apDocCategory, string user, string? password = null, string? salesOrg = null,
+        DateTime? jobStartedAt = null)
     {
+        // Job Tasktime starts when the upload started (passed in by the caller); fall back to now.
+        var jobStart = jobStartedAt ?? DateTime.Now;
         var mod = module.ToUpperInvariant();
         var detect = mod == "AP";
         // Locked to Gemini for the auto/empty path (per Megachem), same as the sync upload.
@@ -48,7 +51,8 @@ public class DocumentIngestService(OcrEngine ocr, DocumentRepository repo)
                 : pd.Header.GetStr("poRef").Trim().Length > 0 ? "AP" : "II";
         }
         var ext = ExtConversion.ToExtDict(pd);
-        var docId = await repo.CreateDocumentAsync(mod, ext, fileName, storedPath, size, user, apDocCategory, durationMs, salesOrg);
+        var docId = await repo.CreateDocumentAsync(mod, ext, fileName, storedPath, size, user, apDocCategory, durationMs, salesOrg,
+            jobStartedAt: jobStart);
         return (docId, mod, pd.Note);
     }
 }

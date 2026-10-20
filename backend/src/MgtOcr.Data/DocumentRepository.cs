@@ -163,7 +163,7 @@ public partial class DocumentRepository(Db db)
     // costOut, costCurrency, rawText} — the same shape app/ocr_engine.py's extract() returns.
     public async Task<int> CreateDocumentAsync(string module, Dictionary<string, object?> ext, string fileName,
         string stored, int size, string user, string apDocCategory, int? durationMs = null,
-        string? salesOrg = null)
+        string? salesOrg = null, DateTime? jobStartedAt = null)
     {
         var header = (Dictionary<string, object?>)ext["header"]!;
         var filled = await ApplyVendorMemoryAsync(module, header);
@@ -180,16 +180,26 @@ public partial class DocumentRepository(Db db)
         var rawText = ext.GetStr("rawText");
         if (rawText.Length > 20000) rawText = rawText[..20000];
 
+        // Job Number / Job Tasktime (sql/34_job_tasktime.sql): a document created from an upload gets a
+        // readable job number (JOB + upload date yyMMdd + running number) and the time its upload
+        // started; JobTaskTime (minutes to a successful SAP/Zoho post) is a computed column from that.
         var docId = await db.InsertReturningIdAsync($"""
+            DECLARE @jobSeq bigint = NULL, @jobNumber nvarchar(20) = NULL;
+            IF @jobStartedAt IS NOT NULL
+            BEGIN
+                SET @jobSeq = NEXT VALUE FOR ocr.JobNumberSeq;
+                SET @jobNumber = CONCAT('JOB', FORMAT(@jobStartedAt, 'yyMMdd'), '-', FORMAT(@jobSeq, '00000'));
+            END
             INSERT {docT}(Module,FileName,StoredPath,FileSize,OcrProvider,OcrConfidence,OcrConfidenceNote,
                   OcrTokensIn,OcrTokensOut,OcrCost,OcrInputCost,OcrOutputCost,OcrCostCurrency,OcrDurationMs,
                   ApDocCategory,Status,
                   DocNo,DocDate,PostingDate,PartnerName,PartnerTaxId,Currency,SubTotal,VatRate,VatAmount,
-                  WhtAmount,TotalAmount,HeaderJson,RawText,CreatedBy,SalesOrg)
+                  WhtAmount,TotalAmount,HeaderJson,RawText,CreatedBy,SalesOrg,JobNumber,JobStartedAt)
             VALUES(@module,@fileName,@stored,@size,@provider,@confidence,@confidenceNote,
                   @tokensIn,@tokensOut,@cost,@costIn,@costOut,@costCurrency,@durationMs,
                   @apDocCategory,'NEW', @docNo,@docDate,@postingDate,@partnerName,@partnerTaxId,@currency,
-                  @subTotal,@vatRate,@vatAmount,@whtAmount,@totalAmount,@headerJson,@rawText,@user,@salesOrg);
+                  @subTotal,@vatRate,@vatAmount,@whtAmount,@totalAmount,@headerJson,@rawText,@user,@salesOrg,
+                  @jobNumber,@jobStartedAt);
             SELECT SCOPE_IDENTITY();
             """, new
         {
@@ -207,6 +217,7 @@ public partial class DocumentRepository(Db db)
             // Which company may see this document. Taken from the person importing it, never from
             // the request: a document's company decides who can open it at all.
             salesOrg = string.IsNullOrWhiteSpace(salesOrg) ? null : salesOrg.Trim(),
+            jobStartedAt,
         });
 
         await SaveLinesAsync(module, docId, (List<Dictionary<string, object?>>)ext["lines"]!);

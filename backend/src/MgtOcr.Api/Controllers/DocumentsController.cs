@@ -187,6 +187,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         [FromForm(Name = "apDocCategory")] string? apDocCategory, [FromForm] IFormFile file, [FromForm] string? password,
         [FromForm(Name = "company")] string? company = null)
     {
+        var jobStartedAt = DateTime.Now; // Job Tasktime starts here: the upload reached the server
         var user = await ActorAsync();
         // AP = the single liability-recording (การตั้งหนี้) reading page: read the document first,
         // then route by PO number (poRef present -> Supplier Invoice / MIRO, still module "AP";
@@ -215,7 +216,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         // be validated up front against the pre-routing module before OCR decides AP vs II.
         var apCat = ValidateApDocCategory(mod == "AP" ? "AP" : mod, apDocCategory);
         var (docId, _, note) = await ingest.IngestAsync(mod, stored, fname, size, ocr_, apCat, user, password,
-            await ImportCompanyAsync(company));
+            await ImportCompanyAsync(company), jobStartedAt: jobStartedAt);
         var outDoc = await repo.GetDocumentAsync(docId);
         outDoc["ocrNote"] = note ?? "";
         return Ok(outDoc);

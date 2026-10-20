@@ -4,7 +4,7 @@ namespace MgtOcr.Data;
 
 // A job the queue worker has claimed and will OCR now.
 public record OcrJobClaim(int JobId, string Module, string ApDocCategory, string Engine,
-    string FileName, string StoredPath, int FileSize, string CreatedBy, string? SalesOrg);
+    string FileName, string StoredPath, int FileSize, string CreatedBy, string? SalesOrg, DateTime CreatedAt);
 
 // A job row as the frontend polls it (typed record -> serialized camelCase, unlike raw Dapper rows).
 public record OcrJobStatus(int JobId, string FileName, string Status, string? Error, int? ResultDocId, string Module);
@@ -40,7 +40,8 @@ public class OcrJobRepository(DbConnectionFactory factory)
             )
             UPDATE nxt SET Status='PROCESSING', StartedAt=SYSDATETIME()
             OUTPUT inserted.JobId, inserted.Module, inserted.ApDocCategory, inserted.Engine,
-                   inserted.FileName, inserted.StoredPath, inserted.FileSize, inserted.CreatedBy, inserted.SalesOrg;
+                   inserted.FileName, inserted.StoredPath, inserted.FileSize, inserted.CreatedBy, inserted.SalesOrg,
+                   inserted.CreatedAt;
             """);
     }
 
