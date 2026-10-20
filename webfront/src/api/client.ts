@@ -55,9 +55,18 @@ async function request<T>(
   try {
     r = await fetch(url, opt);
   } catch (netErr) {
-    // Backend unreachable — fall back to mock data when available.
-    const m = getMock(method, url, body);
-    if (m !== undefined) return m as T;
+    // Backend unreachable. READS may fall back to mock data so the UI still renders something;
+    // WRITES must not. A mocked POST answers "created" with an invented id (mocks.ts counts from
+    // 9001), the screen then opens /doc/9001, and every later call fails with "Document not
+    // found" once the backend is back — the person is left chasing a document that was never
+    // created. A dead backend has to look dead on a write.
+    if (method === 'GET') {
+      const m = getMock(method, url, body);
+      if (m !== undefined) {
+        console.warn(`[api] backend unreachable — serving MOCK data for ${method} ${url}`);
+        return m as T;
+      }
+    }
     throw netErr;
   }
   const txt = await r.text();

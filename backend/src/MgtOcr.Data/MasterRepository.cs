@@ -62,6 +62,21 @@ public class MasterRepository(Db db)
         // ocr.Material (the old "apmaterials" master) has been dropped and is no longer loaded —
         // material data now comes solely from CustomerMaterial (the "materials" list above).
         result["venmaterials"] = await db.QueryAsync("SELECT * FROM ocr.VendorMaterial" + scopedVendorMaterial + " ORDER BY VendorCode, ExtCode", scopeParam);
+        // VAT / WHT mapping (sql/28_vat_wht_map.sql). Guarded by a table check like paymentterms
+        // below, so an app pointed at a database where that script has not been run yet still
+        // starts and simply shows the two tabs empty.
+        var mapWhere = new List<string>();
+        if (!includeInactive) mapWhere.Add("IsActive=1");
+        if (!string.IsNullOrWhiteSpace(companyCode)) mapWhere.Add("(SalesOrg=@companyCode OR SalesOrg IS NULL)");
+        var scopedMap = mapWhere.Count > 0 ? " WHERE " + string.Join(" AND ", mapWhere) : "";
+        result["vatmaps"] = await TableExistsAsync("ocr.VatMap")
+            ? await db.QueryAsync("SELECT * FROM ocr.VatMap" + scopedMap
+                + " ORDER BY CASE WHEN SalesOrg IS NULL THEN 0 ELSE 1 END, SalesOrg, DocKind, Id", scopeParam)
+            : [];
+        result["whtmaps"] = await TableExistsAsync("ocr.WhtMap")
+            ? await db.QueryAsync("SELECT * FROM ocr.WhtMap" + scopedMap
+                + " ORDER BY CASE WHEN SalesOrg IS NULL THEN 0 ELSE 1 END, SalesOrg, IncomeType, Id", scopeParam)
+            : [];
         result["uoms"] = await db.QueryAsync(
             "SELECT * FROM ocr.UomConversion ORDER BY CASE WHEN SalesOrg IS NULL THEN 0 ELSE 1 END, SalesOrg, CASE WHEN MaterialCode IS NULL THEN 0 ELSE 1 END, MaterialCode, ExtUom");
         // Payment-terms code -> display-text mapping. SAP returns only the code (e.g. "5009") on the
@@ -103,6 +118,15 @@ public class MasterRepository(Db db)
     /// MGT and GLC share this installation and must not see each other's master data. The
     /// customer-side tables were built with SalesOrg from the start; the vendor tables got theirs in
     /// sql/27_company_scope.sql.</summary>
+    /// <summary>Whether a table is present, so a master whose migration has not been applied yet
+    /// comes back empty instead of throwing "Invalid object name".</summary>
+    private async Task<bool> TableExistsAsync(string table)
+    {
+        var row = await db.QueryOneAsync(
+            "SELECT CASE WHEN OBJECT_ID(@table, 'U') IS NULL THEN 0 ELSE 1 END AS Found", new { table });
+        return row != null && Convert.ToInt32(row.Found) == 1;
+    }
+
     public static string? CompanyColumn(MasterDefinition m) =>
         m.Cols.FirstOrDefault(c => string.Equals(c, "SalesOrg", StringComparison.OrdinalIgnoreCase));
 

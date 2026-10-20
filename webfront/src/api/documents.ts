@@ -146,11 +146,19 @@ export const learnMaterial = (
 export const getPayload = (id: number) =>
   api.get<{ payload: Record<string, any> }>('/api/documents/' + id + '/payload');
 
+/* The post endpoint answers 200 even when SAP REFUSED the document: the attempt is logged either
+   way and `success` is what says whether a document now exists in SAP. `message` carries SAP's own
+   words when it does not. The screen has to read both — a refusal that is shown as success sends
+   the person off to look for a document that was never created. */
 export const postToSap = (id: number, user: string) =>
-  api.post<{ document: DocModel; simulated: boolean; sapDocNo: string }>(
-    '/api/documents/' + id + '/post',
-    { user },
-  );
+  api.post<{
+    document: DocModel;
+    success: boolean;
+    simulated: boolean;
+    sapDocNo: string;
+    endpoint?: string;
+    message?: string;
+  }>('/api/documents/' + id + '/post', { user });
 
 /* Sales Order: one Sales Order PER DELIVERY DATE, all sent from this one document (replaces the
    old split into child documents). One entry per delivery-date group (key = date YYYY-MM-DD,

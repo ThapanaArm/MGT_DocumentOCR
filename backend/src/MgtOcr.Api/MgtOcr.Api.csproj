@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk.Web">
+﻿<Project Sdk="Microsoft.NET.Sdk.Web">
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
@@ -20,6 +20,7 @@
          opens this file and writes rows into it rather than rebuilding the sheet, so the hidden
          technical-name row, the hidden columns and the section bands can never drift. -->
     <None Update="Export\Templates\SupplierInvoice_EN.xlsx" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="Export\Templates\JournalEntry_Accrued.xlsx" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

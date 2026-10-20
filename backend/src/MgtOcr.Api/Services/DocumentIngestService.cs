@@ -8,7 +8,7 @@ namespace MgtOcr.Api.Services;
 // queue worker. Mirrors DocumentsController.Upload's core: read the saved file, route AP->AP/II by
 // PO number, then create the document row. Password prompting stays in the sync endpoint; the batch
 // path rejects encrypted PDFs before enqueuing, so `password` is normally null here.
-public class DocumentIngestService(OcrEngine ocr, DocumentRepository repo)
+public class DocumentIngestService(OcrEngine ocr, DocumentRepository repo, JobLogRepository jobs)
 {
     public async Task<(int DocId, string Module, string? Note)> IngestAsync(
         string module, string storedPath, string fileName, int size, string engine,
@@ -22,7 +22,22 @@ public class DocumentIngestService(OcrEngine ocr, DocumentRepository repo)
         // Locked to Gemini for the auto/empty path (per Megachem), same as the sync upload.
         var uploadEngine = "gemini"; // Gemini only (Megachem, 7 Oct 2026), whatever engine was requested
         var t0 = DateTime.UtcNow;
-        var pd = await ocr.ExtractAsync(storedPath, mod, uploadEngine, password, salesOrg);
+        // ocr.JobLog: the clock starts BEFORE the call, so a read that fails or times out still
+        // leaves a row saying when it began and how long it ran. OcrDurationMs on the document
+        // only ever records a read that finished.
+        var jobNumber = await jobs.NextJobNumberAsync();
+        var job = await jobs.StartAsync(jobNumber, "OCR", module: mod, provider: uploadEngine,
+            fileName: fileName, fileSize: size, performedBy: user);
+        ParsedDocument pd;
+        try
+        {
+            pd = await ocr.ExtractAsync(storedPath, mod, uploadEngine, password, salesOrg, apDocCategory);
+        }
+        catch (Exception ex)
+        {
+            await jobs.FinishAsync(job, "FAILED", message: ex.Message);
+            throw;
+        }
         var durationMs = (int)(DateTime.UtcNow - t0).TotalMilliseconds;
         // Expense is always an Incoming Invoice (FB60, no PO). Its bundles carry a FORM SHIPPING
         // EXPENSE sheet whose "PO. NO." (the goods PO the costs relate to) would otherwise be read
@@ -30,7 +45,12 @@ public class DocumentIngestService(OcrEngine ocr, DocumentRepository repo)
         // keep the PO-based routing. (Ported from Kanomwan's 0cd227c "Edit From ACC GLC".)
         if (detect)
         {
-            var isExpense = string.Equals((apDocCategory ?? "").Trim(), "EXPENSE", StringComparison.OrdinalIgnoreCase);
+            var category = (apDocCategory ?? "").Trim();
+            var isExpense = string.Equals(category, "EXPENSE", StringComparison.OrdinalIgnoreCase);
+            // Inventory (Purchase Order) says so in its name: it is keyed against a purchase order,
+            // so it is a Supplier Invoice (MIRO) whether or not the read found the number.
+            var isInventoryPo = string.Equals(category, "INVENTORY_PO", StringComparison.OrdinalIgnoreCase);
+
             // The PO is often not printed on the supplier's invoice at all — it rides along as our
             // own PURCHASE ORDER page behind it, which a read centred on page 1 misses. Before
             // deciding there is no PO, look for one in the file's text layer. Skipped for Expense,
@@ -46,13 +66,22 @@ public class DocumentIngestService(OcrEngine ocr, DocumentRepository repo)
                 if (found.Length == 0) found = PoNumberFinder.FindInFileName(fileName);
                 if (found.Length > 0) pd.Header["poRef"] = found;
             }
-            mod = isExpense
-                ? "II"
+
+            mod = isExpense ? "II"
+                : isInventoryPo ? "AP"
                 : pd.Header.GetStr("poRef").Trim().Length > 0 ? "AP" : "II";
         }
         var ext = ExtConversion.ToExtDict(pd);
+<<<<<<< HEAD
         var docId = await repo.CreateDocumentAsync(mod, ext, fileName, storedPath, size, user, apDocCategory, durationMs, salesOrg,
             jobStartedAt: jobStart);
+=======
+        var docId = await repo.CreateDocumentAsync(mod, ext, fileName, storedPath, size, user, apDocCategory, durationMs, salesOrg);
+        // DocId is only known now, after the row exists — so it is stamped on the job at the end.
+        // The module can change too: AP/II routing above is decided by what the read found.
+        await jobs.FinishAsync(job, "SUCCESS", docId: docId, tokensIn: pd.TokensIn, tokensOut: pd.TokensOut,
+            cost: pd.Cost, costCurrency: pd.CostCurrency, provider: pd.Provider);
+>>>>>>> feature/ap-invoice
         return (docId, mod, pd.Note);
     }
 }

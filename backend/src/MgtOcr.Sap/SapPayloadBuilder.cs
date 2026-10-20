@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using MgtOcr.Core;
 using MgtOcr.Core.Config;
 using MgtOcr.Core.Mapping;
@@ -51,7 +51,9 @@ public static class SapPayloadBuilder
     // CX_SY_CONVERSION_NO_DATE_TIME, so every date field goes through here. Returns null for a
     // blank or unparseable value so the property is omitted and SAP can apply its own default
     // rather than erroring.
-    private static string? ODataDate(object? value)
+    /// <summary>Public so the supplier-invoice payload (built in the API project, beside the
+    /// Excel exporter it has to agree with) formats its dates the same way.</summary>
+    public static string? ODataDate(object? value)
     {
         DateTime dt;
         if (value is DateTime d)

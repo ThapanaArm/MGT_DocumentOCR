@@ -468,10 +468,24 @@ export default function DetailTable({
                       </td>
                       <td style={{ whiteSpace: 'nowrap' }}>
                         {r &&
+<<<<<<< HEAD
                           (r.status === 'charge' ? (
                             <span className="badge b-idle"><i className="fa-solid fa-truck" /> Freight</span>
                           ) : r.status === 'skip' ? (
                             <span className="badge b-idle">Delivery cost</span>
+=======
+                          (r.status === 'skip' ? (
+                            // Three different reasons share the "skip" status, and calling them all
+                            // "Delivery cost" was wrong on two of them — a PO's goods line is not a
+                            // freight charge.
+                            <span className="badge b-idle">
+                              {/purchase order/i.test(r.method || '')
+                                ? 'From PO'
+                                : /tax row/i.test(r.method || '')
+                                  ? 'Tax row'
+                                  : 'Delivery cost'}
+                            </span>
+>>>>>>> feature/ap-invoice
                           ) : r.status === 'fail' ? (
                             <span className="badge b-fail"><i className="fa-solid fa-xmark" /> Not found</span>
                           ) : r.status === 'manual' ? (

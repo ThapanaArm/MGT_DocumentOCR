@@ -51,6 +51,11 @@ public static partial class ExtConversion
         // Vendor code per line (FORM SHIPPING EXPENSE); read back by the vendor split and shown
         // in the DETAIL table's Vendor column.
         if (!string.IsNullOrWhiteSpace(l.VendorCode)) extra["vendorCode"] = l.VendorCode.Trim();
+        // The PO's own item number, shown as "<PO> / <item>" on the PO Reference tab.
+        if (!string.IsNullOrWhiteSpace(l.PoItem)) extra["poItem"] = l.PoItem.Trim();
+        // The form's COSTS heading — Local / Insurance / Fee / Overseas — which decides the G/L
+        // account the cost posts to in the SAP import file.
+        if (!string.IsNullOrWhiteSpace(l.CostType)) extra["costType"] = l.CostType.Trim();
         // INPUT / DEFERRED for a VAT row — drives the input-VAT report vs ภาษีซื้อรอเรียกเก็บ.
         if (!string.IsNullOrWhiteSpace(l.TaxKind)) extra["taxKind"] = l.TaxKind.Trim();
         // Identity of the tax invoice behind a VAT row — one row per invoice in the Input VAT file

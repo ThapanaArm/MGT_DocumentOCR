@@ -53,7 +53,11 @@ export const GL_INPUT_TAX = '11720000';        // Input tax          (V1 and the
 export const GL_DEFERRED_INPUT_TAX = '11730000'; // Deferred input tax (D1 and the other D* codes)
 // Duty (Excise / Interior) and withholding tax: the account is not confirmed for company 2000
 // yet, so the row is seeded with everything except the number and the person fills that one cell.
-export const GL_DUTY = '';
+// Import duty — "Import Tax" on posted document 5100001372 (company 2000).
+export const GL_DUTY = '21229100';
+// The goods a purchase order covers. Not the freight account — SAP rejected all eleven rows when
+// they were posted there — and Accounting has not given the right one yet, so it stays blank.
+export const GL_PO_GOODS = '';
 export const GL_WITHHOLDING_TAX = '';
 
 export const TAX_CODES: Array<[string, string]> = [
@@ -337,6 +341,9 @@ export const AP_TRADE_GROUPS: FieldGroup[] = [
         ['SERVICE_ENTRY', 'Service Entry Sheet - Lean Services'],
       ]],
       ['PurchasingOrder','Purchasing Order'],
+      // The goods total the PO and the supplier's invoice must agree on. Shown here because a
+      // PO-referenced MIRO is posted against it, and because it is what the check below compares.
+      ['poTotalAmount', 'PO / Invoice Amount'],
       ['refDocType', 'Reference Document Category', 'select', [
         ['1', 'Goods/service items'],
         ['2', 'Planned delivery costs'],
@@ -522,6 +529,36 @@ export const MASTER_DEF: Record<string, MasterDef> = {
       { k: 'SapUomIso', l: 'ISO code (SAP only)', sap: true, maxLen: 3, help: 'Optional ISO unit code, used by SAP only' },
       { k: 'Note', l: 'Note' }],
   },
+  // The tax code and G/L account a VAT row becomes. These used to be constants in this file
+  // (GL_INPUT_TAX / GL_DEFERRED_INPUT_TAX); they belong to Accounting, differ between MGT and GLC
+  // and change, so the rules live in ocr.VatMap and are maintained on screen.
+  vatmaps: {
+    label: 'VAT Mapping', mod: 'AP', key: 'Id', cols: [
+      { k: 'SalesOrg', l: 'Company', help: 'Leave blank to use this rule for both companies · MGT = 1000 / GLC = 2000' },
+      { k: 'DocKind', l: 'Document kind', required: true, help: 'TAX_INVOICE = ใบกำกับภาษี/ใบเสร็จ · BILLING_NOTE = ใบแจ้งหนี้/ใบวางบิล · IMPORT_VAT = ใบเสร็จกรมศุลกากร · EXEMPT = ยกเว้นภาษี' },
+      { k: 'Keywords', l: 'Words on the document', help: 'Comma separated, e.g. ใบกำกับภาษี,Tax Invoice — used to recognise this kind of document' },
+      { k: 'VatRate', l: 'VAT rate (%)', help: 'Leave blank to apply at any rate' },
+      { k: 'TaxCode', l: 'Tax Code (SAP)', sap: true, required: true, maxLen: 2, help: 'V1 input VAT 7% · D1 deferred 7% · VX exempt' },
+      { k: 'TaxKind', l: 'Input Tax Type', help: 'INPUT = claimable this period · DEFERRED = tax invoice not received yet' },
+      { k: 'GlAccount', l: 'G/L Account', sap: true, help: '11720000 input tax · 11730000 deferred input tax' },
+      { k: 'Note', l: 'Note' },
+      { k: 'IsActive', l: 'Status', source: 'system' }],
+  },
+  // Withholding tax by kind of income: the rate deducted, the SAP withholding type/code and the
+  // return it is filed on.
+  whtmaps: {
+    label: 'Withholding Tax Mapping', mod: 'AP', key: 'Id', cols: [
+      { k: 'SalesOrg', l: 'Company', help: 'Leave blank to use this rule for both companies · MGT = 1000 / GLC = 2000' },
+      { k: 'IncomeType', l: 'Kind of income', required: true, help: 'As Accounting names it, e.g. ค่าขนส่ง, ค่าบริการ/ค่าจ้างทำของ, ค่าเช่า' },
+      { k: 'Keywords', l: 'Words on the document', help: 'Comma separated, e.g. TRUCKING,ค่าขนส่ง — used to recognise the kind of income from the cost line' },
+      { k: 'Rate', l: 'Rate (%)', required: true, help: '1 transport · 3 service / hire of work · 5 rent · 2 advertising' },
+      { k: 'WhtType', l: 'WHT Type (SAP)', sap: true, maxLen: 2, help: 'From the SAP withholding tax configuration' },
+      { k: 'WhtCode', l: 'WHT Code (SAP)', sap: true, maxLen: 2, help: 'From the SAP withholding tax configuration' },
+      { k: 'FormType', l: 'Return', help: 'PND3 = individual payee · PND53 = company payee' },
+      { k: 'GlAccount', l: 'G/L Account', sap: true },
+      { k: 'Note', l: 'Note' },
+      { k: 'IsActive', l: 'Status', source: 'system' }],
+  },
   materials: {
     label: 'Material / Service', mod: 'ALL', key: 'MaterialCode', cols: [
       { k: 'MaterialCode', l: 'Material Code (Internal)' }, { k: 'SapMaterialCode', l: 'SAP Code (Material)', sap: true },
@@ -537,6 +574,8 @@ export const MASTER_NOTE: Record<string, string> = {
   vendors: 'Used to match Vendor: checks the Tax ID first, then compares the name if not found',
   venmaterials: "Used to convert the vendor's item code/name to a SAP Material",
   materials: 'SAP Material data (should be replicated from S/4HANA)',
+  vatmaps: 'Decides the Tax Code and G/L account for a VAT row — looked up by Company + kind of document + rate, falling back to a rule with no company and then to a rule with no rate',
+  whtmaps: 'Decides the withholding rate, the SAP withholding type/code and the return (PND3/PND53) for a cost line — looked up by Company + kind of income, falling back to a rule with no company',
   uoms: 'Turns the unit written on the document into a valid order-unit code — looked up by Company + Material + document unit, falling back to a rule with no Material, then to a rule with no Company. Factor changes the quantity only when it is not 1',
 };
 
@@ -556,6 +595,8 @@ export const MASTER_GROUPS: MasterGroup[] = [
   { key: 'shipto', label: '3. Ship-to', mod: 'SO', tabs: ['shiptos'], note: 'Compares location name + delivery address, only under a customer that has already been matched (similarity ≥ 70%)' },
   { key: 'material', label: '4. CustomerMaterial', mod: 'SO', tabs: ['custmaterials', 'uoms'], note: 'Materials use CustomerMaterial: match the document material code or name under the same customer and SalesOrg → SAP material code' },
   { key: 'apmaterial', label: '5. Purchasing materials', mod: 'AP', tabs: ['venmaterials'], note: 'Material and service data for purchasing documents' },
+  { key: 'vat', label: '6. VAT', mod: 'AP', tabs: ['vatmaps'], note: 'Kind of document + rate → Tax Code + G/L account. A rule for the company is preferred; a rule with no company serves both' },
+  { key: 'wht', label: '7. Withholding Tax', mod: 'AP', tabs: ['whtmaps'], note: 'Kind of income → rate + SAP withholding type/code + PND3/PND53. A rule for the company is preferred; a rule with no company serves both' },
 ];
 
 export const M_LABEL: Record<string, string> = {

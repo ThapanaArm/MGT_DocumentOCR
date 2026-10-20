@@ -16,7 +16,9 @@ public static partial class VisionPrompt
     /// <param name="salesOrg">The company the document is filed under — "1000" MGT, "2000" GLC.
     /// Anything else (including empty) reads as GLC, which is how every document behaved before
     /// MGT came into scope.</param>
-    public static string Build(string module, string mode = "image", string salesOrg = "")
+    /// <param name="apDocCategory">The Document Type picked on import. "INVENTORY_PO" means the
+    /// invoice is keyed against the purchase order, so the goods page is what gets read.</param>
+    public static string Build(string module, string mode = "image", string salesOrg = "", string apDocCategory = "")
     {
         string fields = module == "SO" ? """
         {
@@ -50,10 +52,18 @@ public static partial class VisionPrompt
             "poRef": "เลขที่ใบสั่งซื้ออ้างอิงถ้ามี",
             "refDocType": "ประเภทของรายการในเอกสารนี้ ตอบเป็น \"1\" \"2\" \"3\" หรือ \"\": 1 = มีแต่รายการสินค้า/บริการ (goods/service items), 2 = มีแต่ต้นทุนอื่นที่วางแผนไว้ เช่น ค่าขนส่ง ค่าประกัน ค่าพิธีการศุลกากร ค่าคลังสินค้า (planned delivery costs), 3 = มีทั้งสองอย่าง, ถ้าดูไม่ออกให้ใส่ \"\"",
             "currency": "รหัสสกุลเงิน 3 ตัวอักษร เช่น THB", "paymentTerms": "เงื่อนไขการชำระเงิน",
+            "goodsSupplier": "ชื่อผู้ขายสินค้าในช่อง SUPPLIER ที่หัวฟอร์ม FORM SHIPPING EXPENSE (เช่น KIMEX) ไม่ใช่ผู้ให้บริการขนส่ง ถ้าไม่มีให้ใส่สตริงว่าง",
+            "goodsInvoiceNo": "เลขในช่อง INVOICE NO. ที่หัวฟอร์ม FORM SHIPPING EXPENSE (เช่น 2230000581) ถ้าไม่มีให้ใส่สตริงว่าง",
+            "poTotalAmount": 0,
+            "poCurrency": "",
+            "poLines": [{"extCode": "รหัส/ล็อตสินค้าตามใบสั่งซื้อ", "desc": "ชื่อสินค้า",
+                         "qty": 0, "uom": "หน่วยนับ", "price": 0, "amount": 0}],
             "subTotal": 0, "vatRate": 7, "vatAmount": 0, "whtAmount": 0, "totalAmount": 0
           },
           "lines": [{"extCode": "รหัสสินค้า/บริการถ้ามี", "desc": "ชื่อ/รายละเอียดสินค้าหรือบริการ",
                      "qty": 0, "uom": "หน่วยนับ", "price": 0, "amount": 0,
+                     "poItem": "เลขที่รายการในคอลัมน์ Item ของหน้า PURCHASE ORDER (เช่น 1, 2, 3) ถ้าไม่ได้อ่านจากใบสั่งซื้อให้ใส่สตริงว่าง",
+                     "costType": "ค่าในคอลัมน์ COSTS ของหน้า FORM SHIPPING EXPENSE ตอบได้เฉพาะ \"Local\" \"Insurance\" \"Fee\" \"Overseas\" ถ้าไม่ใช่แถวจากฟอร์มให้ใส่สตริงว่าง",
                      "vendorCode": "รหัสผู้ขายของรายการนี้ ถ้าเอกสารมีคอลัมน์ VENDOR ระบุไว้ ไม่มีให้ใส่สตริงว่าง",
                      "taxKind": "เฉพาะแถว VAT: \"INPUT\" ถ้ามาจากใบกำกับภาษี/ใบเสร็จรับเงิน หรือ \"DEFERRED\" ถ้ามาจากใบแจ้งหนี้/ใบวางบิล แถวอื่นใส่สตริงว่าง",
                      "taxDocNo": "เฉพาะแถว VAT: เลขที่ใบกำกับภาษีของใบนั้น แถวอื่นใส่สตริงว่าง",
@@ -89,7 +99,8 @@ public static partial class VisionPrompt
             "ค่าพิธีการศุลกากร = Customs Clearance Fee, ค่าคลังสินค้า = Storage Charge " +
             "ยกเว้นชื่อบริษัท/ชื่อบุคคล และเลขที่เอกสาร ให้คงไว้ตามที่ปรากฏในเอกสาร" +
             (module is "AP" or "II"
-                ? CompanyRules.IsMgt(salesOrg) ? MgtBundleRules : IiBundleRules
+                ? IsInventoryPo(apDocCategory) ? PoGoodsRules
+                : CompanyRules.IsMgt(salesOrg) ? MgtBundleRules : IiBundleRules
                 : ""); // AP: uploads are read as AP, routed to II afterwards
     }
 
@@ -103,9 +114,12 @@ public static partial class VisionPrompt
     /// keeps each request small and stops the model from mistaking an invoice’s own item table for
     /// the document’s line items — the exact confusion the single-request prompt has to work
     /// around by pushing the form page to the front.</summary>
-    public static string BuildSupporting(string module, string mainVendorName = "", string salesOrg = "")
+    public static string BuildSupporting(string module, string mainVendorName = "", string salesOrg = "", string apDocCategory = "")
     {
-        if (module is not ("AP" or "II")) return Build(module, "image", salesOrg);
+        if (module is not ("AP" or "II")) return Build(module, "image", salesOrg, apDocCategory);
+        // Keyed against the purchase order there are no supporting tax pages to gather: the goods
+        // page is the document, and the taxes belong to the delivery document.
+        if (IsInventoryPo(apDocCategory)) return Build(module, "image", salesOrg, apDocCategory);
 
         // Only the sheet's name differs here; what is wanted from the supporting pages (the tax) is
         // the same for both companies, and vendorCode is left blank on this path either way.
@@ -199,13 +213,30 @@ public static partial class VisionPrompt
         + "ก็มีช่อง \"PO. NO.\" / \"PO NO.\" ของใบสั่งซื้ออยู่ด้วย ให้อ่านจากช่องนั้นได้เช่นกัน "
         + "เลข PO ของเราเป็นตัวเลข 10 หลักขึ้นต้นด้วย 21 22 23 41 45 หรือ 46 เช่น 2110000036 หรือ 2230000581 "
         + "ห้ามใส่เลขที่ใบแจ้งหนี้/ใบกำกับภาษีของผู้ขาย (เช่น INV2026030058) หรือเลขผู้เสียภาษีลงในช่องนี้ "
-        + "ถ้าในไฟล์ไม่มีหน้าใบสั่งซื้อและไม่มีเลข PO พิมพ์อยู่จริง ๆ ให้ใส่สตริงว่าง ห้ามเดา";
+        + "ถ้าในไฟล์ไม่มีหน้าใบสั่งซื้อและไม่มีเลข PO พิมพ์อยู่จริง ๆ ให้ใส่สตริงว่าง ห้ามเดา" +
+        // The goods total is what a PO-referenced MIRO is checked against: the supplier's own
+        // invoice for the goods and our purchase order must agree on it (22,798.00 on the KIMEX
+        // bundle). It is a different figure from totalAmount, which is this document's own total.
+        "\n- poTotalAmount = ยอดรวมของ \"สินค้า\" ตามใบสั่งซื้อหรือใบแจ้งหนี้ของผู้ขายสินค้า "
+        + "อ่านจากช่อง Total Amount ท้ายหน้า PURCHASE ORDER หรือบรรทัด TOTAL ของใบ INVOICE ของผู้ขายสินค้าในไฟล์ "
+        + "(เช่น 22,798.00) และ poCurrency = สกุลเงินของยอดนั้น เช่น \"USD\" "
+        + "ยอดนี้คนละตัวกับ totalAmount ซึ่งเป็นยอดรวมของเอกสารใบนี้เอง ห้ามใส่ยอดเดียวกันถ้าเอกสารเป็นชุดค่าขนส่ง "
+        + "ถ้าในไฟล์ไม่มีหน้าใบสั่งซื้อและไม่มีใบแจ้งหนี้สินค้า ให้ใส่ 0" +
+        // The goods lines are a second, separate list: the screen switches the item table to them
+        // when the MIRO is keyed against the purchase order instead of against the delivery costs.
+        "\n- poLines = รายการ \"สินค้า\" ตามหน้า PURCHASE ORDER หรือใบแจ้งหนี้ของผู้ขายสินค้า 1 แถวต่อ 1 รายการ: "
+        + "extCode = รหัสหรือเลขล็อตของสินค้าตามเอกสาร (เช่น M0200063), desc = ชื่อสินค้า, qty = จำนวน, uom = หน่วยนับ, "
+        + "price = ราคาต่อหน่วย, amount = จำนวนเงินของแถวนั้น "
+        + "รายการชุดนี้แยกต่างหากจาก lines ซึ่งเป็นค่าขนส่ง/ค่าใช้จ่าย ห้ามเอามาปนกัน "
+        + "ผลรวมของ poLines ต้องเท่ากับ poTotalAmount ถ้าในไฟล์ไม่มีหน้าใบสั่งซื้อหรือใบแจ้งหนี้สินค้า ให้ตอบเป็นอาร์เรย์ว่าง";
 
     // GLC's "FORM SHIPPING EXPENSE": one AMOUNT column and a VENDOR column on every row.
     private const string GlcFormRules =
         "\n- ถ้ามีหน้า \"FORM SHIPPING EXPENSE\" ให้ lines มาจากตารางในฟอร์มนั้นเท่านั้น: 1 แถวต่อ 1 รายการ, " +
         "desc = คอลัมน์ DESCRIPTION, amount = price = คอลัมน์ AMOUNT, qty = 1, extCode = \"COST\", " +
-        "vendorCode = คอลัมน์ VENDOR ของแถวนั้น (ถ้าว่างหรือเป็น #N/A ให้ใส่ \"\") " +
+        "vendorCode = คอลัมน์ VENDOR ของแถวนั้น (ถ้าว่างหรือเป็น #N/A ให้ใส่ \"\"), " +
+        "costType = คอลัมน์ COSTS ของแถวนั้น ซึ่งมีได้ 4 ค่า Local / Insurance / Fee / Overseas (ตอบตามที่พิมพ์ในฟอร์ม ห้ามเดา) " +
+        "โดยที่หัวฟอร์มให้อ่าน header.goodsSupplier = ช่อง SUPPLIER (ผู้ขายสินค้า เช่น KIMEX) และ header.goodsInvoiceNo = ช่อง INVOICE NO. " +
         "ข้ามแถวที่ AMOUNT เป็น \"-\" หรือ 0 และห้ามใส่แถว TOTAL/Cost variance/MEMO" +
         "\n- (เฉพาะกรณีที่มีหน้า FORM SHIPPING EXPENSE) extCode = \"COST\" ของแถวในฟอร์มมีไว้บอกว่าเป็นค่าขนส่ง/พิธีการ/ค่าธรรมเนียม ไม่ใช่สินค้า " +
         "จะได้ไม่ถูกนำไปจับคู่กับรหัสสินค้าใน SAP ยกเว้นแถวภาษีและอากรที่ใช้ extCode เฉพาะของมัน (WHT, VAT, DUTY) ตามกติกาด้านล่าง " +
@@ -326,6 +357,36 @@ public static partial class VisionPrompt
 
     private const string MgtBundleRules = BundleHeaderRules + MgtFormRules + BundleTaxRules + MgtTaxVendorRules;
 
+    public const string InventoryPoCategory = "INVENTORY_PO";
+
+    public static bool IsInventoryPo(string? apDocCategory) =>
+        string.Equals((apDocCategory ?? "").Trim(), InventoryPoCategory, StringComparison.OrdinalIgnoreCase);
+
+    // Inventory keyed against the purchase order. The same file holds both the goods paperwork and
+    // the shipping agent's cost form, and which one is read is settled by the Document Type the
+    // person picked on import, not by guesswork: here it is the goods, off the PURCHASE ORDER page
+    // (22,798.00 on the KIMEX bundle). The delivery costs are keyed as their own document under
+    // Inventory (Delivery), which keeps the form rules above.
+    private const string PoGoodsRules =
+        "\n- ไฟล์อาจมีหลายหน้าและรวมเอกสารหลายใบ ให้ดูทุกหน้า" +
+        "\n- เอกสารใบนี้เป็นการตั้งหนี้ \"อ้างอิงใบสั่งซื้อ (Purchase Order)\" ให้ lines มาจากตารางสินค้าในหน้า PURCHASE ORDER " +
+        "(หัวเอกสาร PURCHASE ORDER ของ GREEN LEAF CHEMICAL / MEGACHEM) หรือใบแจ้งหนี้ของผู้ขายสินค้าที่มีรายการตรงกัน เท่านั้น " +
+        "ห้ามเอารายการจากหน้า FORM SHIPPING EXPENSE หรือฟอร์มสรุปค่าใช้จ่ายนำเข้ามาใส่เด็ดขาด เพราะค่าขนส่งถูกตั้งหนี้เป็นเอกสารคนละใบ" +
+        "\n- 1 แถวต่อ 1 รายการในตาราง: poItem = เลขในคอลัมน์ Item ของหน้า PURCHASE ORDER (1, 2, 3 …), " +
+        "extCode = รหัสสินค้าหรือเลขล็อตที่อยู่ในคอลัมน์ Description เช่น CSN084379 (ถ้าไม่มีให้เว้นว่าง), " +
+        "desc = ข้อความในคอลัมน์ Description, qty = Quantity, uom = หน่วยนับ เช่น KG, price = Unit Price, amount = Amount " +
+        "บรรทัดย่อยใต้รายการ เช่น \"This price already includes 0.50USD discount\" หรือ \"Add small pack fee $3\" เป็นหมายเหตุของรายการนั้น " +
+        "ไม่ใช่รายการใหม่ ห้ามแยกเป็นอีกแถว" +
+        "\n- header.poRef = PO Number ที่หัวหน้า PURCHASE ORDER (เช่น 2230000581), " +
+        "header.totalAmount = ยอด Total Amount ท้ายตาราง (เช่น 22,798.00), header.currency = สกุลเงินของยอดนั้น เช่น USD, " +
+        "header.poTotalAmount = ยอดเดียวกับ totalAmount และ header.paymentTerms = Payment Terms ที่หัวหน้านั้น" +
+        "\n- header.vendorName / vendorTaxId = ผู้ขายสินค้า (ช่อง Supplier ของใบสั่งซื้อ) ไม่ใช่ GREEN LEAF / MEGACHEM ที่เป็นผู้ซื้อ " +
+        "และ header.invoiceNo = เลขที่ใบแจ้งหนี้ของผู้ขายสินค้า (INVOICE NO.) ถ้าในไฟล์มีใบแจ้งหนี้นั้นอยู่ด้วย" +
+        "\n- ใบสั่งซื้อต่างประเทศมักไม่มีภาษีมูลค่าเพิ่มไทย ถ้าในหน้านั้นระบุ VAT 0% ให้ vatAmount = 0 และไม่ต้องสร้างแถว VAT/WHT " +
+        "ส่วนภาษีและอากรขาเข้าเป็นของเอกสารค่าขนส่งคนละใบ ห้ามนำมารวมที่นี่" +
+        "\n- header.documentType = \"PURCHASE ORDER\" เสมอ ห้ามตอบว่า Shipping Expense Form หรือชื่อเอกสารค่าขนส่ง" +
+        "\n- ส่วน branch ให้ใส่ \"0000\" เสมอ (สำนักงานใหญ่)";
+
 
 
     // Parses a model's raw text response (expected to contain one JSON object, possibly with
@@ -355,6 +416,8 @@ public static partial class VisionPrompt
                 lines.Add(new LineItem
                 {
                     ExtCode = GetStr(ln, "extCode"), Desc = GetStr(ln, "desc"),
+                    PoItem = GetStr(ln, "poItem").Trim(),
+                    CostType = GetStr(ln, "costType").Trim(),
                     Qty = GetNum(ln, "qty"), Uom = GetStr(ln, "uom") is { Length: > 0 } u ? u : "EA",
                     VendorCode = GetStr(ln, "vendorCode") is var vc && vc != "#N/A" ? vc.Trim() : "",
                     TaxKind = NormTaxKind(GetStr(ln, "taxKind")),
@@ -634,6 +697,10 @@ public static partial class VisionPrompt
         JsonValueKind.Number => v.TryGetInt64(out var l) ? l : v.GetDouble(),
         JsonValueKind.True => true,
         JsonValueKind.False => false,
+        // Nested arrays and objects used to collapse to null, so header.poLines — the goods the
+        // purchase order covers — never survived the parse.
+        JsonValueKind.Array => v.EnumerateArray().Select(JsonElementToObject).ToList(),
+        JsonValueKind.Object => v.EnumerateObject().ToDictionary(p => p.Name, p => JsonElementToObject(p.Value)),
         _ => null,
     };
 }

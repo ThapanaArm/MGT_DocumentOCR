@@ -289,3 +289,45 @@ export interface SapSalesEmployee {
 
 export const getSapSalesEmployees = () =>
   api.get<{ count: number; results: SapSalesEmployee[] }>('/api/sap/sales-employees');
+
+/* The purchase order behind a supplier invoice, read from SAP — the only place its ITEM numbers
+   exist. SAP numbers PO items with gaps (10, 40, 50, 60 on PO 2230000020), so a MIRO posted
+   against the PO has to name those exact numbers; the printed PO renumbers its rows 1, 2, 3 and
+   the shipping form does not carry them at all.
+   `configured: false` means Sap:PurchaseOrder:BaseUrl is not set — show that rather than an empty
+   purchase order.
+   Backend: GET /api/sap/purchase-order/{po} (MgtOcr.Sap.SapPurchaseOrderClient). */
+
+export interface SapPurchaseOrderItem {
+  purchaseOrder: string;
+  item: string;
+  material: string;
+  text: string;
+  quantity: number;
+  unit: string;
+  netPrice: number;
+  currency: string;
+  plant: string;
+  taxCode: string;
+}
+
+/** The purchase order's own header — who it is for and under which company. Used to catch an
+ *  invoice pointed at the wrong PO before it is sent: PO 2230000020 is Kimex 2000014 / company
+ *  2000. Null when the service does not return it. */
+export interface SapPurchaseOrderHead {
+  purchaseOrder: string;
+  supplier: string;
+  supplierName: string;
+  companyCode: string;
+  purchasingOrganization: string;
+  currency: string;
+}
+
+export const getSapPurchaseOrder = (purchaseOrder: string) =>
+  api.get<{
+    purchaseOrder: string;
+    configured: boolean;
+    count: number;
+    items: SapPurchaseOrderItem[];
+    head?: SapPurchaseOrderHead | null;
+  }>('/api/sap/purchase-order/' + encodeURIComponent(purchaseOrder.trim()));

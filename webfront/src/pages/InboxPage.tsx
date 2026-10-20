@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useAppState } from '../state/AppState';
+import CategoryOptions, { categoryLabel } from '../components/CategoryOptions';
 import { useMeta } from '../state/MetaContext';
 import { deleteDocument, listDocumentsPaged, type DocumentsPage, type InboxRow } from '../api/documents';
 import { dt, fileRetention, fmt, moduleLabel, statusBadge } from '../utils/format';
@@ -94,7 +95,10 @@ export default function InboxPage() {
   const importPath = isSalesOrder ? '/import/SO' : isInvoice ? '/import/AP' : null;
   const emptyNoun = isSalesOrder ? 'sales orders' : isInvoice ? 'invoices' : 'documents';
   const catLabel = (id: string | null) =>
-    (apDocCategories ?? []).find((c) => c.id === id)?.label || id || '';
+    (() => {
+      const c = (apDocCategories ?? []).find((x) => x.id === id);
+      return c ? categoryLabel(c) : id || '';
+    })();
 
   // ---- Delete: one row (trash icon) or many (ticked rows), confirmed in an in-app popup ----
   // Posted documents can't be deleted (already in SAP/Zoho), so they can't be ticked either.
@@ -174,11 +178,7 @@ export default function InboxPage() {
           {isInvoice && (
             <select value={category} onChange={(e) => setCategory(e.target.value)}>
               <option value="">All Document Types</option>
-              {(apDocCategories ?? []).map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.label}
-                </option>
-              ))}
+              <CategoryOptions items={apDocCategories ?? []} />
             </select>
           )}
           <button className="btn sm" onClick={reload}>

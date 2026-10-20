@@ -30,7 +30,7 @@ public static partial class GeminiOcr
         PooledConnectionLifetime = TimeSpan.FromMinutes(5),
     });
 
-    public static async Task<(ParsedDocument? Doc, string? Error)> VisionExtractAsync(string path, string module, AppConfig config, string salesOrg = "")
+    public static async Task<(ParsedDocument? Doc, string? Error)> VisionExtractAsync(string path, string module, AppConfig config, string salesOrg = "", string apDocCategory = "")
     {
         if (string.IsNullOrEmpty(config.GeminiApiKey))
             return (null, "GeminiApiKey is empty in config \u2014 appsettings Ocr:GeminiApiKey was not loaded by the running app (check which appsettings.json/appsettings.{Env}.json the process reads, and that it was restarted)");
@@ -69,9 +69,15 @@ public static partial class GeminiOcr
             // A prompt rule alone ("take lines from the FORM SHIPPING EXPENSE page") was not enough:
             // with 17 pages Gemini still took the first invoice's lines. When the text layer shows
             // which page the form is, put that page FIRST and say so explicitly up front.
-            var prompt = VisionPrompt.Build(module, "image", salesOrg);
-            // How many of the images at the FRONT of the list are FORM SHIPPING EXPENSE pages.
-            // Zero when the file has no form sheet. This is what the chunked reader splits on.
+            var prompt = VisionPrompt.Build(module, "image", salesOrg, apDocCategory);
+            // Keyed against the purchase order the goods table is on the PURCHASE ORDER sheet, not
+            // on the shipping form, so the anchor page is a different sheet: pulling the form to the
+            // front there is what made the read come back with 13,951.73 of shipping costs instead
+            // of the PO's 22,798.00.
+            var isPoRead = VisionPrompt.IsInventoryPo(apDocCategory);
+            // How many of the images at the FRONT of the list are anchor pages — the FORM SHIPPING
+            // EXPENSE sheet normally, the PURCHASE ORDER sheet for the PO category. Zero when the
+            // file has neither. This is what the chunked reader splits on.
             var formCount = 0;
             // "AP" too: Import Invoice uploads are read as module AP and only routed to II (no PO) AFTER
             // the read, so an II-only check here never fired for a fresh upload.
@@ -80,8 +86,37 @@ public static partial class GeminiOcr
                 // A bundle can hold one FORM per PO, so every form page is pulled to the front —
                 // including any that sits beyond the page cap (rendered on its own, replacing the
                 // last and least useful page).
-                var formIdxs = PdfExtraction.FindPageIndexes(path,
-                    new System.Text.RegularExpressions.Regex(@"FORM\s*SHIPPING\s*EXPENSE", System.Text.RegularExpressions.RegexOptions.IgnoreCase));
+                var formSheet = new System.Text.RegularExpressions.Regex(@"FORM\s*SHIPPING\s*EXPENSE",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                // The title is a heading in a large font, and the layout-aware text reconstruction
+                // can split a heading into single letters, so whitespace is allowed between every
+                // letter — "PURCHASE ORDER" and "P U R C H A S E  O R D E R" both have to match.
+                var poSheet = new System.Text.RegularExpressions.Regex(
+                    @"P\s*U\s*R\s*C\s*H\s*A\s*S\s*E\s*O\s*R\s*D\s*E\s*R",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                // The form sheet is excluded from the PO's page list: it prints "PO. NO." and would
+                // otherwise be a candidate for being pulled to the front all over again.
+                var formIdxs = isPoRead
+                    ? PdfExtraction.FindPageIndexes(path, poSheet, formSheet)
+                    : PdfExtraction.FindPageIndexes(path, formSheet);
+                if (isPoRead && formIdxs.Count == 0)
+                {
+                    // No page announced itself as a purchase order — the heading may be an image, or
+                    // reconstructed in a shape no regex catches. The PO NUMBER is printed as plain
+                    // text on the same page and is the more reliable anchor: the shipping form
+                    // prints it too, which is exactly why the form is excluded here.
+                    var poNo = PoNumberFinder.FindInFileName(Path.GetFileName(path));
+                    if (poNo.Length == 0) poNo = PoNumberFinder.Find(PdfExtraction.PdfText(path));
+                    if (poNo.Length > 0)
+                        formIdxs = PdfExtraction.FindPageIndexes(path,
+                            new System.Text.RegularExpressions.Regex(System.Text.RegularExpressions.Regex.Escape(poNo)),
+                            formSheet);
+                    Log(formIdxs.Count > 0
+                        ? $"No PURCHASE ORDER heading found \u2014 using the {formIdxs.Count} page(s) that print PO {poNo}"
+                        : "No PURCHASE ORDER page found in the text layer \u2014 reading the first pages instead");
+                }
+                else if (isPoRead)
+                    Log($"PO read: purchase order page(s) {string.Join(", ", formIdxs.Select(i => i + 1))}");
                 var formPageNos = formIdxs.Select(i => i + 1).ToList();
                 var formPages = new List<byte[]>();
                 foreach (var idx in formIdxs)
@@ -95,7 +130,16 @@ public static partial class GeminiOcr
                     while (imgs.Count + formPages.Count > MaxPages) imgs.RemoveAt(imgs.Count - 1);
                     imgs.InsertRange(0, formPages);
                     formCount = formPages.Count;
-                    prompt = $"สำคัญ: {formPages.Count} ภาพแรกคือหน้า FORM SHIPPING EXPENSE (หน้า {string.Join(", ", formPageNos)} ของไฟล์) " +
+                    prompt = isPoRead
+                        ? $"สำคัญ: {formPages.Count} ภาพแรกคือหน้า PURCHASE ORDER (หน้า {string.Join(", ", formPageNos)} ของไฟล์) " +
+                          "lines ต้องมาจากตารางรายการสินค้า (Item / Description / Quantity / Unit Price / Amount) ในภาพเหล่านี้เท่านั้น " +
+                          "ห้ามใช้รายการจากหน้า FORM SHIPPING EXPENSE หรือใบแจ้งหนี้ค่าขนส่ง/ใบเสร็จในภาพอื่นเป็น lines " +
+                          "totalAmount ต้องเป็นยอด Total Amount ของหน้า PURCHASE ORDER ไม่ใช่ยอดรวมค่าขนส่ง " +
+                          (formPages.Count > 1
+                             ? "หน้า PURCHASE ORDER มีหลายหน้า (Page 1 of 2, 2 of 2) — ให้รวมรายการสินค้าจากทุกหน้าเรียงต่อกันตามเลข Item "
+                             : "") +
+                          "ภาพที่เหลือเป็นเอกสารประกอบ ใช้เพื่ออ้างอิงเท่านั้น ห้ามนำมาเป็น lines\n\n" + prompt
+                        : $"สำคัญ: {formPages.Count} ภาพแรกคือหน้า FORM SHIPPING EXPENSE (หน้า {string.Join(", ", formPageNos)} ของไฟล์) " +
                              "lines ต้องมาจากตารางในภาพเหล่านี้เท่านั้น ห้ามใช้รายการจากใบแจ้งหนี้/ใบเสร็จในภาพอื่นเป็น lines " +
                              (formPages.Count > 1
                                 ? "ฟอร์มมีหลายใบเพราะมีหลาย PO — ให้รวมรายการชื่อเดียวกันของ vendor เดียวกันจากทุกใบเป็นแถวเดียวโดยบวกยอดกัน " +
@@ -112,7 +156,7 @@ public static partial class GeminiOcr
             // a minute, and the first one is MORE accurate on its own than it was buried in twenty
             // other pages.
             if (isPdf && imgs.Count > ChunkThreshold)
-                return await ChunkedAsync(imgs, formCount, mime, prompt, module, config, dpi, salesOrg);
+                return await ChunkedAsync(imgs, formCount, mime, prompt, module, config, dpi, salesOrg, apDocCategory);
 
             // A file short enough to read in one request still needs the customs rows pointed at the
             // customs vendor: the model fills vendorCode from the form when it can, but it leaves it
@@ -224,7 +268,17 @@ public static partial class GeminiOcr
                         var parsedDoc = VisionPrompt.ParseResponse(raw, module, providerId,
                             providerId == "gemini" ? 0.87 : 0.82, rawTextForRecord ?? raw);
                         if (parsedDoc != null)
+                        {
+                            // What this read cost. Gemini bills per token, not per second, so the
+                            // timings alone cannot produce an invoice figure — and until now nothing
+                            // read usageMetadata at all, which is why ocr.Document.OcrTokensIn /
+                            // OcrTokensOut (and therefore OcrCost, and the dashboard's cost tiles)
+                            // have been NULL for every document ever read.
+                            var (tin, tout) = Usage(respText);
+                            parsedDoc.TokensIn = tin;
+                            parsedDoc.TokensOut = tout;
                             return (parsedDoc, null);
+                        }
                         // 200 OK but the body held no parseable JSON. This is NOT a connection problem —
                         // almost always the JSON got TRUNCATED because the model's output-token budget ran
                         // out (thinking models spend part of it on reasoning/thoughtSignature), or the
@@ -296,30 +350,42 @@ public static partial class GeminiOcr
     /// since without it there is no document at all.</summary>
     private static async Task<(ParsedDocument? Doc, string? Error)> ChunkedAsync(
         List<byte[]> imgs, int formCount, string mime, string mainPrompt,
-        string module, AppConfig config, int dpi, string salesOrg = "")
+        string module, AppConfig config, int dpi, string salesOrg = "", string apDocCategory = "")
     {
         // The form pages carry the cost table, but not the header: the vendor's tax id, invoice
         // date and payment terms are printed on the vendor's own invoice, which the reorder above
         // leaves sitting right after the form pages (it was the file's first page). Sending it
         // with them costs one image and is the only way the header request can see those fields.
+        // Keyed against the purchase order the PO sheet carries the header too (PO number, supplier,
+        // Total Amount), so the two pages that follow it are not sent: they are the front of the
+        // shipping bundle, and the only thing they can do in that request is tempt the read back to
+        // the shipping costs.
+        var isPo = VisionPrompt.IsInventoryPo(apDocCategory);
         var leadCount = formCount > 0
-            ? Math.Min(formCount + HeaderPages, imgs.Count)
+            ? (isPo ? formCount : Math.Min(formCount + HeaderPages, imgs.Count))
             : Math.Min(LeadPages, imgs.Count);
         var lead = imgs.Take(leadCount).ToList();
         var rest = imgs.Skip(leadCount).ToList();
 
-        Log($"Splitting a {imgs.Count}-page read into 1 + {(rest.Count + ChunkSize - 1) / ChunkSize} request(s) "
-            + $"({leadCount} {(formCount > 0 ? "form" : "lead")} page(s) then groups of {ChunkSize})");
+        var leadName = formCount == 0 ? "lead" : isPo ? "purchase order" : "form";
+        var groupNote = isPo ? "no supporting groups (PO read)" : "groups of " + ChunkSize;
+        Log($"Splitting a {imgs.Count}-page read into 1 + {(isPo ? 0 : (rest.Count + ChunkSize - 1) / ChunkSize)} request(s) "
+            + $"({leadCount} {leadName} page(s) then {groupNote})");
 
         var (doc, err) = await OneShotAsync(lead, mime, mainPrompt, module, config, dpi, TimeoutFor(lead.Count));
         if (doc == null) return (null, err);
+
+        // Keyed against the purchase order the goods page IS the document: the VAT and the shipping
+        // costs belong to the delivery document, so the supporting pages have nothing to add and the
+        // read stops at one request.
+        if (isPo) return (doc, null);
 
         // The supporting pages are read without the form in view, so the main vendor's name — the
         // party we pay directly — has to travel with the prompt: withholding tax on any other
         // issuer's invoice in the bundle was already deducted and remitted by the shipping agent,
         // and is not ours to record.
         var mainVendorName = doc.Header.TryGetValue("vendorName", out var vn) ? vn?.ToString() ?? "" : "";
-        var supporting = VisionPrompt.BuildSupporting(module, mainVendorName, salesOrg);
+        var supporting = VisionPrompt.BuildSupporting(module, mainVendorName, salesOrg, apDocCategory);
         var skipped = 0;
         for (var i = 0; i < rest.Count; i += ChunkSize)
         {
@@ -331,6 +397,11 @@ public static partial class GeminiOcr
                 Log($"Supporting pages {leadCount + i + 1}-{leadCount + i + chunk.Count} could not be read: {perr}");
                 continue;
             }
+            // Every chunk is a separate billed request, so the document's cost is the sum of them
+            // all. Without this a 30-page bundle would report only the lead request's tokens and
+            // under-state what it actually cost by most of the file.
+            doc.TokensIn = (doc.TokensIn ?? 0) + (part.TokensIn ?? 0);
+            doc.TokensOut = (doc.TokensOut ?? 0) + (part.TokensOut ?? 0);
             MergeTaxRows(doc, part, mainVendorName);
         }
 
@@ -514,6 +585,31 @@ public static partial class GeminiOcr
     // so it's easy to filter the app log (e.g. findstr "[GeminiOcr]").
     private static void Log(string msg) =>
         Console.Error.WriteLine($"[GeminiOcr] {DateTime.Now:yyyy-MM-dd HH:mm:ss} {msg}");
+
+    /// <summary>usageMetadata from a Gemini 200 response — what the request is billed on.
+    ///
+    /// promptTokenCount covers the prompt AND the page images (an image is charged as a block of
+    /// tokens), which is why input dwarfs output on a scanned invoice. cachedContentTokenCount is
+    /// already included in promptTokenCount by Google, so it is NOT added again here; it is only
+    /// worth splitting out if we ever start caching context, which bills at a lower rate.
+    ///
+    /// Returns nulls when the field is absent rather than zeros: a zero would be stored as "this
+    /// read cost nothing", and a missing figure is not the same as a free one.</summary>
+    private static (int? In, int? Out) Usage(string responseJson)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(responseJson);
+            if (!doc.RootElement.TryGetProperty("usageMetadata", out var u)) return (null, null);
+            int? Read(string name) => u.TryGetProperty(name, out var v) && v.TryGetInt32(out var n) ? n : null;
+            return (Read("promptTokenCount"), Read("candidatesTokenCount"));
+        }
+        catch
+        {
+            // Never fail a successful read over its own accounting.
+            return (null, null);
+        }
+    }
 
     // Reads candidates[0].finishReason from a Gemini 200 response so a truncated/blocked result can be
     // reported precisely (e.g. "MAX_TOKENS"). Returns null if the field isn't present.

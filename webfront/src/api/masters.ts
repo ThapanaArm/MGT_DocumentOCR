@@ -42,6 +42,8 @@ export const getOcrProviders = () => api.get<OcrProvider[]>('/api/ocr/providers'
 export interface ApDocCategory {
   id: string;
   label: string;
+  /** Heading this choice is nested under in the dropdown. Empty for a top-level choice. */
+  group?: string;
 }
 export const getApDocCategories = () => api.get<ApDocCategory[]>('/api/ap-doc-categories');
 

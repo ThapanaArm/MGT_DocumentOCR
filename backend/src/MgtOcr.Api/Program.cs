@@ -204,6 +204,7 @@ builder.Services.AddSingleton<MgtOcr.Api.Auth.SingleSessionService>();
 // Batch OCR queue: a job table + background worker that reads uploaded files off the main request
 // thread (many files at once would otherwise time out the upload request and hit the OCR rate limit).
 builder.Services.AddSingleton<OcrJobRepository>();
+builder.Services.AddSingleton<JobLogRepository>();
 builder.Services.AddSingleton<MgtOcr.Api.Services.DocumentIngestService>();
 builder.Services.AddHostedService<MgtOcr.Api.Services.OcrQueueWorker>();
 // Upload lifecycle: archive posted documents' files to SharePoint, then remove the local copy.
@@ -223,6 +224,9 @@ builder.Services.AddHttpClient<MgtOcr.Sap.SapBusinessPartnerClient>();
 builder.Services.AddHttpClient<MgtOcr.Sap.SapProductClient>();
 builder.Services.AddHttpClient<MgtOcr.Sap.SapBillingClient>();
 builder.Services.AddHttpClient<MgtOcr.Sap.SapSalesOrderClient>();
+// Read-only purchase-order lookup, so a supplier invoice posted against a PO can name the PO's
+// real item numbers instead of a guess.
+builder.Services.AddHttpClient<MgtOcr.Sap.SapPurchaseOrderClient>();
 // Singleton (not AddHttpClient<T>, unlike the SAP clients above) so its in-memory OAuth
 // access-token cache is shared across requests instead of being torn down each call.
 builder.Services.AddSingleton<MgtOcr.Zoho.ZohoClient>();

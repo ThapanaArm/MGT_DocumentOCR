@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using static MgtOcr.Core.Mapping.MappingHelpers;
 
 namespace MgtOcr.Core.Mapping;
@@ -429,10 +429,22 @@ public static class MappingEngine
         return new() { ["status"] = "fail", ["sapUom"] = baseUom, ["factor"] = 0, ["sapQty"] = 0, ["method"] = "", ["detail"] = "No unit-conversion rule yet" };
     }
 
+    /// <summary>The Document Type that keys an inventory invoice against the purchase order rather
+    /// than against the delivery. Spelled out here rather than taken from VisionPrompt, which sits
+    /// in the OCR project and is not referenced from Core.</summary>
+    private const string InventoryPoCategory = "INVENTORY_PO";
+
     public static Dictionary<string, object?> RunMapping(string module, Dictionary<string, object?> header,
         List<Dictionary<string, object?>> lines, MasterData masters, Dictionary<string, object?>? manual,
-        string? companyCode = null, bool shipToOptional = false)
+        string? companyCode = null, bool shipToOptional = false, string apDocCategory = "")
     {
+        // Keyed against the purchase order, the goods are not looked up in a material master at
+        // all: posting references the PO and SAP takes the items from it (MIRO fills Purchasing
+        // Document References from the PO number). A line with no VendorMaterial rule is therefore
+        // not a defect, and failing all eleven of them blocked a document that had nothing wrong
+        // with it.
+        var poKeyed = module != "SO"
+            && string.Equals((apDocCategory ?? "").Trim(), InventoryPoCategory, StringComparison.OrdinalIgnoreCase);
         if (module == "SO") masters = MasterSchema.ForSalesOrg(
             masters, string.IsNullOrEmpty(companyCode) ? header.GetStr("salesOrg") : companyCode);
         manual ??= new();
@@ -645,6 +657,7 @@ public static class MappingEngine
                 continue;
             }
 
+<<<<<<< HEAD
             // GLC Sales Order: a shipping-charge line (SHIPPING / ค่าขนส่ง ...) is not an item - its
             // amount is sent as the freight condition on the Sales Order header (SoCharges). Status
             // "charge" (not "skip") so the page still shows it, with the choice to treat it as an item.
@@ -653,6 +666,11 @@ public static class MappingEngine
                 // Kept short: the method is stored in ocr.SalesOrderLine.MapMethod (nvarchar(100)).
                 var how = SoCharges.Choice(ln) == "freight" ? "marked by user" : "detected";
                 resLines.Add(R("charge", "", "", $"Freight charge ({how}) - sent as Freight, not an item"));
+=======
+            if (poKeyed)
+            {
+                resLines.Add(R("skip", "", "", "keyed against the purchase order — SAP takes the item from the PO"));
+>>>>>>> feature/ap-invoice
                 continue;
             }
 

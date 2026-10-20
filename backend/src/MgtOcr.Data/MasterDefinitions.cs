@@ -1,4 +1,4 @@
-namespace MgtOcr.Data;
+﻿namespace MgtOcr.Data;
 
 // Ported from the MASTERS dict + ORDER_BY dict in app/main.py (lines 60-80).
 public record MasterDefinition(string Table, string Key, bool Identity, string[] Cols, string OrderBy);
@@ -44,6 +44,21 @@ public static class MasterDefinitions
         ["uoms"] = new("ocr.UomConversion", "Id", true,
             ["SalesOrg", "MaterialCode", "ExtUom", "SapUom", "SapUomIso", "Factor", "Note"],
             "CASE WHEN SalesOrg IS NULL THEN 0 ELSE 1 END, SalesOrg, CASE WHEN MaterialCode IS NULL THEN 0 ELSE 1 END, MaterialCode, ExtUom"),
+
+        // Which SAP tax code (and G/L account) a document's VAT becomes, by the KIND of document
+        // it was read from and the rate printed on it. It used to be decided in code — V1/11720000
+        // for a tax invoice, D1/11730000 for a billing note — which is Accounting's call, differs
+        // between the two companies and changes; SalesOrg scopes a rule to one of them, NULL serves
+        // both (same model as uoms).
+        ["vatmaps"] = new("ocr.VatMap", "Id", true,
+            ["SalesOrg", "DocKind", "Keywords", "VatRate", "TaxCode", "TaxKind", "GlAccount", "Note", "IsActive"],
+            "CASE WHEN SalesOrg IS NULL THEN 0 ELSE 1 END, SalesOrg, DocKind, Id"),
+
+        // Withholding tax by kind of income: the rate, the SAP withholding type/code and which
+        // return (PND3 for an individual, PND53 for a company) it is filed on.
+        ["whtmaps"] = new("ocr.WhtMap", "Id", true,
+            ["SalesOrg", "IncomeType", "Keywords", "Rate", "WhtType", "WhtCode", "FormType", "GlAccount", "Note", "IsActive"],
+            "CASE WHEN SalesOrg IS NULL THEN 0 ELSE 1 END, SalesOrg, IncomeType, Id"),
 
         // NOTE: Payment-terms code->text mapping is intentionally NOT an editable master here. It
         // lives in the shared dbo.SysDataMapping table (Subject='Payment_Terms'), which is
