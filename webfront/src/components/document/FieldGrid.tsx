@@ -1,8 +1,11 @@
 import { fmtAmt, num } from '../../utils/format';
 import type { FieldDef } from '../../constants/fields';
+import DateInput, { toIsoDate } from '../common/DateInput';
 
-/* Renders a grid of header fields (text or select). `numeric` switches to the
+/* Renders a grid of header fields (text, select, checkbox or date). `numeric` switches to the
    0,000.## amount formatting used by the totals blocks (raw on focus). */
+
+
 export default function FieldGrid({
   fields,
   values,
@@ -52,6 +55,14 @@ export default function FieldGrid({
                   style={{ width: 18, height: 18, accentColor: 'var(--brand)', cursor: posted ? 'default' : 'pointer' }}
                 />
               </div>
+            ) : type === 'date' ? (
+              // The app's one date field: shown dd/MM/yyyy in English, stored/sent as YYYY-MM-DD.
+              <>
+                <DateInput value={raw == null ? '' : String(raw)} disabled={posted} onChange={(v) => onEdit(k, v)} ariaLabel={label} />
+                {toIsoDate(raw) === null && (
+                  <small className="hint">Read from document: "{String(raw)}" — pick the date</small>
+                )}
+              </>
             ) : numeric ? (
               <input
                 type="text"

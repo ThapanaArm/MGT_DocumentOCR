@@ -6,7 +6,8 @@ import type { SapUnitChoice } from '../../hooks/useSapUnits';
 /* "Change unit" popup (GLC Sales Order, 12 Oct 2026). Opened when SAP doesn't know the unit on a
    line for its material (SAP rejects the order with "Sales unit KG is not defined for item 000010").
    The person picks one of the material's own SAP units and says how many of the line's current
-   unit make one of the new unit ("1 DR = 50 KG"); quantity and unit price are converted together
+   unit make one of the new unit ("1 DR = 50 KG"), or the other way round ("1 DR = 10 KG" for
+   2 DR -> 20 KG, see Dir below); quantity and unit price are converted together
    (350 KG x 500 -> 7 DR x 25,000), so the line amount stays the same. */
 
 export interface UnitFixTarget {
@@ -22,6 +23,15 @@ export interface UnitFixTarget {
 }
 
 const round = (n: number, d: number) => Math.round(n * 10 ** d) / 10 ** d;
+
+/* Which way the person states the conversion (16 Oct 2026). 'newToCur' = "1 <new> = n <current>"
+   (350 KG -> DR: 1 DR = 50 KG). 'curToNew' = "1 <current> = n <new>" (2 DR -> KG: 1 DR = 10 KG) --
+   so going from a big unit to a small one never means typing 0.1. Defaults to the second when the
+   new unit is the material's base unit (usually the smallest), else the first. */
+type Dir = 'newToCur' | 'curToNew';
+const dirFor = (u?: SapUnitChoice) => (u?.isBase ? 'curToNew' : 'newToCur') as Dir;
+/** suggest() gives "1 new = s current"; turn it into the number for the chosen direction. */
+const nFor = (s: number | undefined, dir: Dir) => (s && s > 0 ? (dir === 'newToCur' ? s : round(1 / s, 6)) : undefined);
 
 export default function UnitFixModal({
   target,
@@ -40,16 +50,26 @@ export default function UnitFixModal({
 }) {
   const first = target.units.find((u) => u.isBase) ?? target.units[0];
   const [unit, setUnit] = useState(first?.unit ?? '');
+  const [dir, setDir] = useState<Dir>(() => dirFor(first));
   const [factorText, setFactorText] = useState(() => {
-    const s = first ? suggest(first.unit) : undefined;
-    return s ? String(s) : '';
+    const n = first ? nFor(suggest(first.unit), dirFor(first)) : undefined;
+    return n ? String(n) : '';
   });
   const pick = (u: string) => {
+    const d = dirFor(target.units.find((x) => x.unit === u));
     setUnit(u);
-    const s = suggest(u);
-    setFactorText(s ? String(s) : '');
+    setDir(d);
+    const n = nFor(suggest(u), d);
+    setFactorText(n ? String(n) : '');
   };
-  const factor = num(factorText);
+  const swap = () => {
+    const n = num(factorText);
+    setDir((d) => (d === 'newToCur' ? 'curToNew' : 'newToCur'));
+    if (n > 0) setFactorText(String(round(1 / n, 6)));
+  };
+  // factor = how many of the line's current unit make one new unit, whichever way it was typed.
+  const typed = num(factorText);
+  const factor = typed > 0 ? (dir === 'newToCur' ? typed : 1 / typed) : 0;
   const valid = !!unit && factor > 0;
   const preview = useMemo(() => {
     if (!valid) return null;
@@ -81,21 +101,24 @@ export default function UnitFixModal({
             </button>
           ))}
         </div>
-        <label className="row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          <span>1 <b>{unit || '?'}</b> =</span>
+        <div className="row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <span>1 <b>{(dir === 'newToCur' ? unit : target.uom) || '?'}</b> =</span>
           <input
             type="text"
             inputMode="decimal"
             value={factorText}
             onChange={(e) => setFactorText(e.target.value)}
-            placeholder="e.g. 50"
+            placeholder="e.g. 10"
             style={{ width: 110 }}
-            aria-label={`How many ${target.uom} in one ${unit}`}
+            aria-label={dir === 'newToCur' ? `How many ${target.uom} in one ${unit}` : `How many ${unit} in one ${target.uom}`}
           />
-          <span><b>{target.uom || '?'}</b></span>
-        </label>
+          <span><b>{(dir === 'newToCur' ? target.uom : unit) || '?'}</b></span>
+          <button type="button" className="btn sm" onClick={swap} title="Write the conversion the other way round">
+            <i className="fa-solid fa-right-left" aria-hidden="true" /> Swap
+          </button>
+        </div>
         <div className="hint" style={{ marginTop: 6 }}>
-          Quantity is divided and the unit price multiplied by this number, so the line amount stays the same.
+          Quantity and unit price are converted together, so the line amount stays the same.
           Use 1 if only the unit name differs.
         </div>
         <div className="so-group-notice" style={{ marginTop: 12 }}>
@@ -106,7 +129,11 @@ export default function UnitFixModal({
               <b>{preview.qty} {unit} × {fmt(preview.price)}</b> = {fmt(target.amount)}
             </span>
           ) : (
-            <span>Enter how many {target.uom || 'units'} make one {unit || 'new unit'}.</span>
+            <span>
+              {dir === 'newToCur'
+                ? `Enter how many ${target.uom || 'units'} make one ${unit || 'new unit'}.`
+                : `Enter how many ${unit || 'new units'} make one ${target.uom || 'unit'}.`}
+            </span>
           )}
         </div>
         <div className="row" style={{ marginTop: 16, gap: 8, alignItems: 'center' }}>

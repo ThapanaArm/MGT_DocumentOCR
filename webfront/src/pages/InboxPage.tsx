@@ -36,7 +36,11 @@ export default function InboxPage() {
   const isSalesOrder = mod === 'SO';
   const navigate = useNavigate();
   const { guard, showToast } = useAppState();
-  const { apDocCategories, loadApDocCategories } = useMeta();
+  const { apDocCategories, loadApDocCategories, me, loadMe } = useMeta();
+  // Admin may also delete a posted document (e.g. test data) — the backend enforces the same rule.
+  // The signed-in user isn't loaded by every page, so load it here (cached after the first call).
+  useEffect(() => { void loadMe().catch(() => { /* not signed in / offline: Admin-only actions stay off */ }); }, [loadMe]);
+  const isAdmin = (me?.role ?? '').trim().toLowerCase() === 'admin';
 
   // Page-local filter state; the current page of rows + total + counts come from the shared hook.
   const [search, setSearch] = useState('');
@@ -100,7 +104,8 @@ export default function InboxPage() {
   const [deleting, setDeleting] = useState(false);
   useEffect(() => { setSelected(new Map()); }, [mod, category, from, to, invTab, searchQ]);
 
-  const deletable = (r: InboxRow) => r.Status !== 'POSTED' && r.Status !== 'PARTIAL';
+  const isPostedRow = (r: InboxRow) => r.Status === 'POSTED' || r.Status === 'PARTIAL';
+  const deletable = (r: InboxRow) => r.Status !== 'POSTING' && (!isPostedRow(r) || isAdmin);
   const pageRows = (rows ?? []).filter(deletable);
   const allOnPage = pageRows.length > 0 && pageRows.every((r) => selected.has(r.DocId));
   const toggleRow = (r: InboxRow) =>
@@ -124,9 +129,10 @@ export default function InboxPage() {
     setDeleting(true);
     let ok = 0;
     const failed: number[] = [];
+    let reason = '';
     for (const r of list) {
       try { await deleteDocument(r.DocId, USER); ok++; }
-      catch { failed.push(r.DocId); }
+      catch (e) { failed.push(r.DocId); if (!reason && e instanceof Error) reason = e.message; }
     }
     setDeleting(false);
     setConfirmRows(null);
@@ -136,7 +142,7 @@ export default function InboxPage() {
       return next;
     });
     if (failed.length === 0) showToast(ok === 1 ? 'Document deleted' : `Deleted ${ok} documents`, 'success');
-    else showToast(`Deleted ${ok}, could not delete ${failed.length}: #${failed.join(', #')}`, 'error');
+    else showToast(`Deleted ${ok}, could not delete ${failed.length}: #${failed.join(', #')}${reason ? ` — ${reason}` : ''}`, 'error');
     reload();
   };
   const docLabel = (r: InboxRow) =>
@@ -256,8 +262,8 @@ export default function InboxPage() {
                           <input type="checkbox" aria-label={'Select document ' + r.DocId}
                             checked={selected.has(r.DocId)} onChange={() => toggleRow(r)} />
                         ) : (
-                          <input type="checkbox" aria-label="Posted documents cannot be deleted"
-                            title="Posted documents cannot be deleted" disabled />
+                          <input type="checkbox" aria-label="Posted documents can only be deleted by an Admin"
+                            title="Posted documents can only be deleted by an Admin" disabled />
                         )}
                       </td>
                       <td className="reg-col-id">{r.DocId}</td>
@@ -333,10 +339,10 @@ export default function InboxPage() {
                         {r.CreatedBy || <span className="hint">—</span>}
                       </td>
                       <td className="reg-col-actions" style={{ whiteSpace: 'nowrap' }}>
-                        {r.Status === 'POSTED' ? (
-                          // Posted docs can't be deleted (already sent to SAP/Zoho), so instead of
-                          // an empty cell show a "view" button that opens the document's detail
-                          // page (same destination as clicking the row).
+                        {!deletable(r) ? (
+                          // Posted docs can't be deleted except by an Admin (already sent to SAP/Zoho),
+                          // so instead of an empty cell show a "view" button that opens the document's
+                          // detail page (same destination as clicking the row).
                           <button
                             className="btn sm ghost"
                             title="View"
@@ -405,7 +411,18 @@ export default function InboxPage() {
         open={confirmRows != null}
         title={confirmRows && confirmRows.length > 1 ? `Delete ${confirmRows.length} documents` : 'Delete document'}
         message={
-          confirmRows && confirmRows.length === 1 ? (
+          <>
+          {(confirmRows ?? []).some(isPostedRow) && (
+            <div className="so-group-notice" role="alert" style={{ marginBottom: 10 }}>
+              <i className="fa-solid fa-triangle-exclamation" aria-hidden="true" />
+              <span>
+                {(confirmRows ?? []).filter(isPostedRow).length === 1 ? 'This document has' : 'Some of these documents have'} already
+                been sent to SAP / Zoho ({(confirmRows ?? []).filter(isPostedRow).map((r) => r.SapDocNo || `#${r.DocId}`).join(', ')}).
+                Deleting removes it from OCR only — the order / invoice in SAP or Zoho is <b>not</b> cancelled.
+              </span>
+            </div>
+          )}
+          {confirmRows && confirmRows.length === 1 ? (
             <>Delete document <b>{docLabel(confirmRows[0])}</b>?<br /><span className="hint">This cannot be undone.</span></>
           ) : (
             <>
@@ -414,7 +431,8 @@ export default function InboxPage() {
                 {(confirmRows ?? []).map((r) => <li key={r.DocId}>{docLabel(r)}</li>)}
               </ul>
             </>
-          )
+          )}
+          </>
         }
         confirmLabel={confirmRows && confirmRows.length > 1 ? `Delete ${confirmRows.length}` : 'Delete'}
         busy={deleting}

@@ -645,6 +645,17 @@ public static class MappingEngine
                 continue;
             }
 
+            // GLC Sales Order: a shipping-charge line (SHIPPING / ค่าขนส่ง ...) is not an item - its
+            // amount is sent as the freight condition on the Sales Order header (SoCharges). Status
+            // "charge" (not "skip") so the page still shows it, with the choice to treat it as an item.
+            if (module == "SO" && shipToOptional && SoCharges.IsFreight(ln))
+            {
+                // Kept short: the method is stored in ocr.SalesOrderLine.MapMethod (nvarchar(100)).
+                var how = SoCharges.Choice(ln) == "freight" ? "marked by user" : "detected";
+                resLines.Add(R("charge", "", "", $"Freight charge ({how}) - sent as Freight, not an item"));
+                continue;
+            }
+
             // Landed costs (freight, customs clearance, storage, ...) go onto the purchase order as
             // planned delivery costs, so there is no material to look up and no reason to block the
             // document. Supplier invoices only — a Sales Order always sells real goods.
@@ -735,6 +746,7 @@ public static class MappingEngine
             var ln = lines[i];
             // A tax row carries an amount, not a sellable quantity/price — same reason as above.
             if (IsTaxRow(ln)) continue;
+            if (module == "SO" && shipToOptional && SoCharges.IsFreight(ln)) continue; // freight: an amount, not goods
             if (Num(ln.Get("qty")) <= 0)
                 errors.Add(new() { ["field"] = $"Quantity line {i + 1}", ["msg"] = "Quantity must be greater than 0", ["fix"] = "Edit the value in the Detail table" });
             if (Num(ln.Get("price")) <= 0)

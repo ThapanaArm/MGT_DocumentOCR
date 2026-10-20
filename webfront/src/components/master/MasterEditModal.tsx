@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import Modal, { ModalHeader } from '../Modal';
 import { MASTER_DEF, M_LABEL } from '../../constants/fields';
 import { createMaster, deleteMaster, updateMaster, type MasterRow, type MastersData } from '../../api/masters';
@@ -28,6 +28,13 @@ export interface MasterEditState {
    *  undefined = not applicable; null = looked up but SAP had no prior billing line for this pair. */
   lastPrice?: SapLastPrice | null;
 }
+
+// 1 <from> = factor <to>, for the Order Unit default above.
+const METRIC_FACTOR: Record<string, number> = {
+  'G>KG': 0.001, 'KG>G': 1000, 'MG>G': 0.001, 'G>MG': 1000, 'MG>KG': 0.000001, 'KG>MG': 1000000,
+  'KG>TON': 0.001, 'TON>KG': 1000, 'G>TON': 0.000001, 'TON>G': 1000000,
+  'ML>L': 0.001, 'L>ML': 1000,
+};
 
 export default function MasterEditModal({
   state,
@@ -87,6 +94,33 @@ export default function MasterEditModal({
     return out;
   }, [masters.uoms]);
   const orderUnitChoices = !uomSapEnabled ? [] : uomMaterial ? sapUnits : commonUnits;
+
+  // SAP first (15 Oct 2026): once SAP's units for the material are known, an Order Unit that SAP
+  // doesn't have (e.g. "G." read off the document) is replaced by SAP's own unit — the same unit
+  // when SAP has it under a clean code (G. -> G), otherwise the material's base unit. Only the
+  // pre-filled value is replaced: once the person picks or types a unit it is left alone, and a
+  // saved rule opened for editing keeps its value unless it came from a prefill.
+  const sapUomTouched = useRef(false);
+  useEffect(() => { sapUomTouched.current = false; }, [state]);
+  useEffect(() => {
+    if (!uomSapEnabled || !uomMaterial || sapUnits.length === 0 || sapUomTouched.current) return;
+    if (state?.rowKey != null && state.prefill?.SapUom == null) return;
+    const cur = (form.SapUom ?? '').toString().trim().toUpperCase();
+    if (cur && sapUnits.some((u) => u.unit.toUpperCase() === cur)) return;
+    const clean = cur.replace(/[^A-Z0-9]/g, '');
+    const same = sapUnits.find((u) => u.unit.toUpperCase() === clean);
+    const pick = same ?? sapUnits.find((u) => u.isBase) ?? sapUnits[0];
+    if (!pick) return;
+    // Switching to a DIFFERENT unit (G -> KG) changes the quantity, so a Factor still at its default
+    // of 1 is set from the standard metric step when there is one (1 G = 0.001 KG); otherwise it is
+    // left for the person to fill in, and the sentence under Factor shows what will be sent.
+    const step = same ? null : METRIC_FACTOR[clean + '>' + pick.unit.toUpperCase()];
+    setForm((f) => {
+      const factorIsDefault = !String(f.Factor ?? '').trim() || Number(f.Factor) === 1;
+      return { ...f, SapUom: pick.unit, ...(step && factorIsDefault ? { Factor: String(step) } : {}) };
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sapUnits, uomMaterial, uomSapEnabled, state]);
 
   // Live customer lookup — only for a brand-new Customer row (quick-add flow), seeded with the
   // document's customer name. Search is best-effort: any failure (backend not configured yet,
@@ -255,7 +289,7 @@ export default function MasterEditModal({
           <UomPicker
             id={'master-' + c.k}
             value={(form[c.k] ?? '').toString()}
-            onChange={(v) => setField(c.k, v)}
+            onChange={(v) => { sapUomTouched.current = true; setField(c.k, v); }}
             units={orderUnitChoices}
             loading={sapUnitsLoading}
             maxLength={c.maxLen}
@@ -286,6 +320,9 @@ export default function MasterEditModal({
               disabled
               readOnly
               value={`${state!.lastPrice.pricePerUnit.toLocaleString()} / ${state!.lastPrice.unit || 'unit'}${state!.lastPrice.creationDate ? ` (billed ${state!.lastPrice.creationDate})` : ''}`}
+              // Red so the price that was actually billed stands out (disabled inputs grey their text,
+              // hence the text-fill colour and full opacity).
+              style={{ color: 'var(--red, #c0392b)', WebkitTextFillColor: 'var(--red, #c0392b)', fontWeight: 700, opacity: 1 }}
             />
           ) : (
             <input type="text" disabled readOnly value="No prior SAP billing found" />

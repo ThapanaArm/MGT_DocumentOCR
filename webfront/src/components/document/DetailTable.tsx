@@ -6,6 +6,7 @@ import type { MastersData } from '../../api/masters';
 import { PO_LINE_EXTRA_FIELDS, isDutyRow } from '../../constants/fields';
 import MaterialSearchSelect from './MaterialSearchSelect';
 import UomPicker from '../common/UomPicker';
+import DateInput from '../common/DateInput';
 import { useSapUnits } from '../../hooks/useSapUnits';
 
 /* Ports the DETAIL lines table from docHtml() incl. uomCell()/lineExtraCount(). */
@@ -192,6 +193,15 @@ export default function DetailTable({
     extraDirty.current = false;
     onCommitLineExtra?.();
   };
+  // A date picked from the calendar has no blur of its own: save once the edited lines are back in
+  // the props (the save reads the document as of that render).
+  const commitAfterRender = useRef(false);
+  useEffect(() => {
+    if (!commitAfterRender.current) return;
+    commitAfterRender.current = false;
+    commitExtra();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doc.lines]);
   // SO documents match Material through ocr.CustomerMaterial, not the (deprecated for SO) generic
   // ocr.Material master -- same source, same cross-customer-borrow ordering and label format the
   // "Material — Row N" card in MappingCards.tsx uses. Before this fix, this table pulled its
@@ -423,7 +433,7 @@ export default function DetailTable({
                       <td>
                         <LineUomCell
                           value={(l.uom ?? '').toString()}
-                          materialCode={(r?.status === 'skip' ? '' : r?.code) || (map ? '' : lastLineCode.current[String(l.itemNo)] || '')}
+                          materialCode={(r?.status === 'skip' || r?.status === 'charge' ? '' : r?.code) || (map ? '' : lastLineCode.current[String(l.itemNo)] || '')}
                           enabled={sapUnitLines}
                           posted={posted}
                           onChange={(v) => onEditLine(i, 'uom', v)}
@@ -437,7 +447,7 @@ export default function DetailTable({
                       >
                         {!map ? (
                           <span className="badge b-idle">Pending Mapping</span>
-                        ) : r?.status === 'skip' ? (
+                        ) : r?.status === 'skip' || r?.status === 'charge' ? (
                           // Landed costs and tax rows have no material of their own — showing the
                           // whole material list here invites picking a product for a customs fee.
                           <span className="hint">{r.method || 'no item to match'}</span>
@@ -458,7 +468,9 @@ export default function DetailTable({
                       </td>
                       <td style={{ whiteSpace: 'nowrap' }}>
                         {r &&
-                          (r.status === 'skip' ? (
+                          (r.status === 'charge' ? (
+                            <span className="badge b-idle"><i className="fa-solid fa-truck" /> Freight</span>
+                          ) : r.status === 'skip' ? (
                             <span className="badge b-idle">Delivery cost</span>
                           ) : r.status === 'fail' ? (
                             <span className="badge b-fail"><i className="fa-solid fa-xmark" /> Not found</span>
@@ -518,16 +530,19 @@ export default function DetailTable({
                             })()}
                           </td>
                           <td style={{ minWidth: 140 }}>
-                            {/* Delivery Date is a calendar date picker (pick a date instead of typing).
-                                type="date" uses/returns YYYY-MM-DD — the same format stored in
-                                extra.deliveryDate and used by SAP scheduling + the split-by-date grouping.
-                                disabled (not readOnly) when posted, since date inputs ignore readOnly. */}
-                            <input
-                              type="date"
+                            {/* Delivery Date: the app's one date field (English, dd/MM/yyyy shown) -- the value
+                                stays YYYY-MM-DD, as stored in extra.deliveryDate and used by SAP scheduling +
+                                the split-by-date grouping. */}
+                            <DateInput
                               value={(l.extra || {}).deliveryDate || ''}
                               disabled={posted}
-                              onChange={(e) => { extraDirty.current = true; onEditLineExtra(i, 'deliveryDate', e.target.value); }}
-                              onBlur={commitExtra}
+                              width={170}
+                              ariaLabel={`Delivery date, item ${l.itemNo ?? i + 1}`}
+                              onChange={(v) => {
+                                extraDirty.current = true;
+                                commitAfterRender.current = true;
+                                onEditLineExtra(i, 'deliveryDate', v);
+                              }}
                             />
                           </td>
 

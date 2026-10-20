@@ -236,7 +236,8 @@ public partial class DocumentRepository(Db db)
                 docId, itemNo = (i + 1) * 10, extCode = l.Get("extCode"), desc = l.Get("desc"),
                 qty = Num(l.Get("qty")), uom = l.Get("uom"), price = Num(l.Get("price")), amount = Num(l.Get("amount")),
                 materialCode = string.IsNullOrEmpty(l.GetStr("materialCode")) ? null : l.GetStr("materialCode"),
-                mapStatus = l.Get("mapStatus"), mapMethod = l.Get("mapMethod"),
+                mapStatus = l.Get("mapStatus"),
+                mapMethod = l.GetStr("mapMethod") is { Length: > 100 } longMethod ? longMethod[..100] : l.Get("mapMethod"),
                 sapQty = l.Get("sapQty"), sapUom = l.Get("sapUom"), uomFactor = l.Get("uomFactor"),
                 extraJson = extra is { Count: > 0 } ? JsonSerializer.Serialize(extra, PyJson.Options) : null,
             }, tx);

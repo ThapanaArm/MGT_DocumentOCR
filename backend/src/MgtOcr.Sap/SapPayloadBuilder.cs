@@ -1,6 +1,7 @@
 using System.Globalization;
 using MgtOcr.Core;
 using MgtOcr.Core.Config;
+using MgtOcr.Core.Mapping;
 using static MgtOcr.Core.Mapping.MappingHelpers;
 
 namespace MgtOcr.Sap;
@@ -73,7 +74,8 @@ public static class SapPayloadBuilder
 
     public static Dictionary<string, object?> BuildPayload(AppConfig config, string module, Dictionary<string, object?> header,
         List<Dictionary<string, object?>> lines, Dictionary<string, object?> mapres, Dictionary<string, object?>? partnerMaster,
-        Dictionary<string, object?>? source = null, IReadOnlyDictionary<string, string>? divisionByPersonId = null)
+        Dictionary<string, object?>? source = null, IReadOnlyDictionary<string, string>? divisionByPersonId = null,
+        double? freightAmount = null)
     {
         source ??= new();
         var resHeader = (Dictionary<string, object?>)mapres["header"]!;
@@ -111,15 +113,23 @@ public static class SapPayloadBuilder
             static string Pick(string? a, string? b, string def) =>
                 !string.IsNullOrEmpty(a) ? a! : (!string.IsNullOrEmpty(b) ? b! : def);
 
+            // GLC: shipping-charge lines are not items (SoCharges) - their amount goes on the header
+            // as the freight condition below. freightAmount = this Sales Order's share when the
+            // document is sent as several orders (SoCharges.FreightByGroup); null = the document's whole
+            // freight (single-order payload).
+            var freight = isGlc ? (freightAmount ?? SoCharges.TotalFreight(lines)) : 0;
             var items = new List<object>();
+            var itemLines = new List<Dictionary<string, object?>>();
             for (var i = 0; i < lines.Count; i++)
             {
                 var l = lines[i];
+                if (isGlc && SoCharges.IsFreight(l)) continue;
+                itemLines.Add(l);
                 var mapline = resLines[i];
                 var (qty, uom, factor) = QtyUom(mapline, l);
                 var item = new Dictionary<string, object?>
                 {
-                    ["SalesOrderItem"] = ((i + 1) * 10).ToString(),
+                    ["SalesOrderItem"] = (itemLines.Count * 10).ToString(),
                     ["Material"] = Key(mapline),
                     ["RequestedQuantity"] = F3(qty),
                     ["RequestedQuantityUnit"] = uom,
@@ -202,7 +212,7 @@ public static class SapPayloadBuilder
             // after that split each child document has a single line date and resolves cleanly here;
             // for the un-split mixed case this falls back to the header date rather than guessing one
             // line's date. Blank per-line dates are ignored (they fall back to the header date too).
-            var lineDeliveryDates = lines
+            var lineDeliveryDates = itemLines
                 .Select(l => (l.Get("extra") as Dictionary<string, object?>).GetStr("deliveryDate"))
                 .Where(s => !string.IsNullOrWhiteSpace(s))
                 .Select(s => s.Trim())
@@ -243,6 +253,18 @@ public static class SapPayloadBuilder
             // partner with an empty Customer makes SAP reject the order. Omitting to_Partner lets SAP
             // default the ship-to to the Sold-to party, which is exactly what's wanted here. When OCR
             // did resolve a ship-to that differs from the sold-to, it's sent as before.
+            // Freight (GLC): one header condition with the amount, e.g. ZFHD 200.00 THB. Taken out of VAT
+            // the same way as the item prices when the person chose "VAT included".
+            if (freight > 0 && !string.IsNullOrWhiteSpace(config.SapSalesOrderFreightConditionType))
+                soPayload["to_PricingElement"] = new List<object>
+                {
+                    new Dictionary<string, object?>
+                    {
+                        ["ConditionType"] = config.SapSalesOrderFreightConditionType,
+                        ["ConditionRateValue"] = F2(freight / vatDivisor),
+                        ["ConditionCurrency"] = currency,
+                    },
+                };
             var shipToKey = Key(shipTo);
             if (!string.IsNullOrWhiteSpace(shipToKey))
                 soPayload["to_Partner"] = new List<object> { new Dictionary<string, object?> { ["PartnerFunction"] = "SH", ["Customer"] = shipToKey } };
@@ -257,9 +279,9 @@ public static class SapPayloadBuilder
             // picked on the Customer card (header.salesGroup) when the first line has no Sales
             // Employee or that person has no Division on file.
             var salesGroup = header.GetStr("salesGroup");
-            if (lines.Count > 0 && divisionByPersonId != null)
+            if (itemLines.Count > 0 && divisionByPersonId != null)
             {
-                var first = lines[0];
+                var first = itemLines[0];
                 var firstEmp = Pick((first.Get("extra") as Dictionary<string, object?>)?.GetStr("salesEmployee"),
                     Pick(first.GetStr("salesEmployee"), header.GetStr("salesEmployee"), ""), "").Trim();
                 if (firstEmp.Length > 0 && divisionByPersonId.TryGetValue(firstEmp, out var div)

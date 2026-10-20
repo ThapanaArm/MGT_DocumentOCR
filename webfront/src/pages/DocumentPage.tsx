@@ -916,6 +916,28 @@ export default function DocumentPage() {
     setDoc(next);
     void runMap(true, next);
   };
+  // GLC freight charge (SHIPPING / ค่าขนส่ง): the person's call on a line -- 'freight' = send its amount
+  // as the Freight condition on the Sales Order header, 'item' = map it to a Material as usual.
+  // Stored on the line (extra.charge) and saved through the same silent re-map.
+  const setLineCharge = (index: number, value: 'freight' | 'item' | '') => {
+    if (locked || !doc.lines[index]) return;
+    const lines = doc.lines.slice();
+    lines[index] = { ...lines[index], extra: { ...(lines[index].extra || {}), charge: value } };
+    const next = { ...doc, lines };
+    setDoc(next);
+    void runMap(true, next);
+    showToast(value === 'freight' ? `Row ${index + 1} will be sent as Freight` : `Row ${index + 1} is an item again`, 'success');
+  };
+  // How the freight is shared between the Sales Orders (Step 3); null = all on the first one.
+  const setFreightSplit = (split: Record<string, number> | null) => {
+    if (locked) return;
+    const header = { ...doc.header };
+    if (split) header.soGroupFreight = split;
+    else delete header.soGroupFreight;
+    const next = { ...doc, header };
+    setDoc(next);
+    void runMap(true, next);
+  };
   const setVatMode = (mode: string) => {
     if (locked || doc.header.vatMode === mode) return;
     const next = { ...doc, header: { ...doc.header, vatMode: mode } };
@@ -1395,7 +1417,11 @@ export default function DocumentPage() {
   // point for the SAP Unit field in the confirmation popup below — the person still reviews and
   // can correct it in that popup, this is never applied blind to what gets saved or posted.
   const normUom = (s: string) => {
-    const t = (s || '').trim().toLowerCase().replace(/s$/, '');
+    // "G." / "KG." / "pcs." on a document: the trailing dot is an abbreviation mark, not part of the
+    // unit (Thai keys like "กก." are still looked up with their dot first, below).
+    const raw = (s || '').trim().toLowerCase();
+    const noDot = raw.replace(/\.+$/, '');
+    const t = noDot.replace(/s$/, '');
     const map: Record<string, string> = {
       kilogram: 'KG', kilo: 'KG', kg: 'KG',
       // Thai spellings — GLC documents write units in Thai ("กิโลกรัม", "กรัม"), which must still
@@ -1410,7 +1436,7 @@ export default function DocumentPage() {
       box: 'BOX', bag: 'BAG', drum: 'DRUM',
       'กล่อง': 'BOX', 'ถุง': 'BAG', 'ถัง': 'DRUM',
     };
-    return map[t] || t.toUpperCase();
+    return map[raw] || map[noDot] || map[t] || t.toUpperCase();
   };
 
   // Picking a SAP search result saves the CustomerMaterial mapping, then (only when needed) pops an
@@ -2310,6 +2336,7 @@ export default function DocumentPage() {
           onQuickAddShipTo={quickAddShipTo}
           onQuickAddMaterial={quickAddMaterial}
           onUseSapMaterial={useSapMaterial}
+          onSetLineCharge={setLineCharge}
           onAddUomRule={addUomRule}
           salesEmployees={salesEmps}
           lineSalesEmpSuggest={lineSalesEmpSuggest}
@@ -2454,6 +2481,7 @@ export default function DocumentPage() {
           onPosted={setDoc}
           onGroupShipTo={setGroupShipTo}
           onVatModeChange={setVatMode}
+          onFreightSplitChange={setFreightSplit}
           salesEmployees={salesEmps}
           uomRules={masters?.uoms || []}
           onFixLineUnit={fixLineUnit}
@@ -2463,6 +2491,7 @@ export default function DocumentPage() {
       {splitOpen && doc.module === 'SO' && !locked && (
         <SoSplitBoard
           doc={doc}
+          skipCharges={!isMgt}
           headerDate={String(doc.header.deliveryDate || '')}
           shipToOptions={splitShipTos.options}
           shipToLoading={splitShipTos.loading}

@@ -6,10 +6,12 @@
 // A header field is one of:
 //   [key, label]                              → text input
 //   [key, label, 'checkbox']                  → checkbox (value 'X' when checked)
+//   [key, label, 'date']                      → calendar date picker (stored as YYYY-MM-DD)
 //   [key, label, 'select', [value,label][]]   → dropdown
 export type FieldDef =
   | [string, string]
   | [string, string, 'checkbox']
+  | [string, string, 'date']
   | [string, string, 'select', [string, string][]];
 export interface FieldGroup {
   title: string;
@@ -18,10 +20,10 @@ export interface FieldGroup {
 }
 
 export const SO_H: FieldDef[] = [
-  ['docType', 'Document Type'], ['poNo', 'Customer PO No.'], ['poDate', 'Document Date'],
+  ['docType', 'Document Type'], ['poNo', 'Customer PO No.'], ['poDate', 'Document Date', 'date'],
   ['customerName', 'Customer Name'], ['customerTaxId', 'Tax ID'], ['customerAddress', 'Customer Address (Sold-to)'],
   ['shipToCode', 'Ship-to code in document'], ['shipToName', 'Ship-to Location'], ['shipToAddress', 'Delivery Address (Ship-to)'],
-  ['deliveryDate', 'Requested Delivery Date'], ['currency', 'Currency'],
+  ['deliveryDate', 'Requested Delivery Date', 'date'], ['currency', 'Currency'],
   ['paymentTerms', 'Payment Terms'], ['incoterms', 'Incoterms'],
 ];
 export const SO_TOTALS_H: FieldDef[] = [

@@ -9,6 +9,8 @@ import {
   type SapPartnerFunctionLink,
   searchSapMaterials,
   getSapLastPrice,
+  getSapCustomerMaterials,
+  type SapCustomerMaterial,
   getSapCustomerPaymentTerms,
   getSapCustomerSalesAreas,
   type SapMaterial,
@@ -440,6 +442,214 @@ function suggestedMaterialKeyword(desc: string): string {
   return (codeish || [...tokens].sort((a, b) => b.length - a.length)[0] || '').trim();
 }
 
+/* Highlights the parts of a SAP / Zoho material name that also appear in the document line (its
+   description or the customer's code): any run of 4+ characters in a row, case-insensitive, with at
+   least 3 letters/digits in it (so "(1*1" or " KG " alone are not marked). Display only. */
+const HL_MIN = 4;
+const hlSignificant = (seg: string) => (seg.match(/[A-Za-z0-9\u0E00-\u0E7F]/g) || []).length >= 3;
+function Hl({ text, against }: { text?: string | null; against: (string | null | undefined)[] }) {
+  const t = String(text ?? '');
+  const src = against.map((a) => String(a ?? '').toLocaleLowerCase()).filter((a) => a.trim().length >= HL_MIN).join('\u0000');
+  if (!t || !src) return <>{t}</>;
+  const low = t.toLocaleLowerCase();
+  const out: React.ReactNode[] = [];
+  let plain = '';
+  let i = 0;
+  while (i < t.length) {
+    let len = 0;
+    while (i + len < t.length && src.includes(low.slice(i, i + len + 1))) len++;
+    const seg = t.slice(i, i + len);
+    if (len >= HL_MIN && hlSignificant(seg)) {
+      if (plain) { out.push(plain); plain = ''; }
+      out.push(
+        <mark key={i} style={{ background: 'rgba(255, 196, 0, .38)', color: 'inherit', borderRadius: 3, padding: '0 1px' }}>
+          {seg}
+        </mark>,
+      );
+      i += len;
+    } else {
+      plain += t[i];
+      i++;
+    }
+  }
+  if (plain) out.push(plain);
+  return <>{out}</>;
+}
+
+/** A Last Price that SAP / OCR history actually has stands out in red (user request, 15 Oct 2026). */
+const LAST_PRICE_STYLE: React.CSSProperties = { color: 'var(--red, #c0392b)', fontWeight: 700 };
+
+/* One "what has this customer bought before" lookup per customer, shared by every Material row of
+   the document (and any other document of the same customer opened in this tab). A failed lookup
+   is dropped from the cache so the next row can try again. */
+// A failed lookup is remembered as an error (shown on the card, not hidden as "no history") but is
+// dropped from the cache so the next card / reopen tries again.
+type SoldLookup = { items: SapCustomerMaterial[]; error: string | null };
+const soldMaterialsCache = new Map<string, Promise<SoldLookup>>();
+function loadSoldMaterials(customer: string): Promise<SoldLookup> {
+  let p = soldMaterialsCache.get(customer);
+  if (!p) {
+    p = getSapCustomerMaterials(customer)
+      .then((r): SoldLookup => {
+        if (!Array.isArray(r?.results)) {
+          soldMaterialsCache.delete(customer);
+          return { items: [], error: 'Unexpected response from the server (is the backend up to date?)' };
+        }
+        return { items: r.results, error: null };
+      })
+      .catch((e): SoldLookup => {
+        soldMaterialsCache.delete(customer);
+        const msg = String(e?.message || '');
+        return {
+          items: [],
+          error: e?.status === 404 || /404|not found/i.test(msg)
+            ? 'The server does not have the sales-history lookup yet — rebuild/restart the backend'
+            : 'Could not read the sales history: ' + (msg || 'request failed'),
+        };
+      });
+    soldMaterialsCache.set(customer, p);
+  }
+  return p;
+}
+
+/** history: null while loading (or no customer yet), [] when there is none. */
+function useSoldMaterials(customer?: string): { history: SapCustomerMaterial[] | null; error: string | null } {
+  const [state, setState] = useState<{ history: SapCustomerMaterial[] | null; error: string | null }>({ history: null, error: null });
+  useEffect(() => {
+    const cust = (customer || '').trim();
+    setState({ history: null, error: null });
+    if (!cust) return;
+    let cancelled = false;
+    loadSoldMaterials(cust).then((r) => { if (!cancelled) setState({ history: r.items, error: r.error }); });
+    return () => { cancelled = true; };
+  }, [customer]);
+  return state;
+}
+
+interface RankedSold { h: SapCustomerMaterial; score: number }
+
+/* Closest to this document line first (SAP text and the customer's own wording on earlier orders
+   both count; the customer's code on the line matching the SAP code counts most), then most
+   recently sold. */
+function rankSoldMaterials(items: SapCustomerMaterial[], docDesc: string, docCode?: string): RankedSold[] {
+  const code = (docCode || '').trim().toUpperCase();
+  return items
+    .map((h, idx) => {
+      let score = Math.max(
+        materialMatchScore(docDesc, h.materialDescription),
+        materialMatchScore(docDesc, h.docDescription || ''),
+      );
+      if (code && h.materialCode.toUpperCase() === code) score += 2;
+      return { h, score, idx };
+    })
+    .sort((a, b) => b.score - a.score || a.idx - b.idx)
+    .map(({ h, score }) => ({ h, score }));
+}
+
+function SoldMaterialsList({
+  ranked,
+  disabled,
+  onUse,
+  limit = 5,
+  docDesc,
+  docCode,
+}: {
+  ranked: RankedSold[];
+  disabled?: boolean;
+  onUse: (m: SapMaterial) => void;
+  limit?: number;
+  /** The document line's own text / code -- matching parts of each name are highlighted. */
+  docDesc?: string;
+  docCode?: string;
+}) {
+  const [showAll, setShowAll] = useState(false);
+  const matched = ranked.filter((x) => x.score > 0).length;
+  const visible = showAll ? ranked : ranked.slice(0, limit);
+  return (
+    <div style={{ marginBottom: 8 }}>
+      <div className="hint" style={{ padding: '6px 0', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <span>
+          <i className="fa-solid fa-clock-rotate-left" /> <b>Previously sold to this customer</b> —{' '}
+          {matched > 0 ? `${matched} of ${ranked.length} look like this line` : `${ranked.length} items, none look like this line`}{' '}
+          (last 12 months)
+        </span>
+        {ranked.length > limit && (
+          <button className="btn sm" onClick={() => setShowAll((v) => !v)}>
+            {showAll ? 'Show fewer' : `Show all (${ranked.length})`}
+          </button>
+        )}
+      </div>
+      <table className="cmp">
+        <tbody>
+          {visible.map(({ h }) => (
+            <tr key={'sold-' + h.materialCode}>
+              <td>
+                <b><Hl text={h.materialCode} against={[docCode]} /></b> —{' '}
+                {h.materialDescription ? <Hl text={h.materialDescription} against={[docDesc, docCode]} /> : '—'}
+                {h.docDescription && h.docDescription !== h.materialDescription && (
+                  <div className="hint">On the customer's earlier order: <Hl text={h.docDescription} against={[docDesc, docCode]} /></div>
+                )}
+                <div className="hint" style={{ marginTop: 3 }}>
+                  <i className="fa-solid fa-tag" /> Last Price:{' '}
+                  {h.lastPrice != null
+                    ? <span style={LAST_PRICE_STYLE}>{`${h.lastPrice.toLocaleString()} / ${h.unit || 'unit'}`}</span>
+                    : '—'}
+                  {h.lastDate ? ` (${h.lastDate})` : ''} · {h.sources.join(' + ')}
+                </div>
+              </td>
+              <td>
+                <button
+                  className="btn sm primary"
+                  disabled={disabled}
+                  onClick={() => onUse({ materialCode: h.materialCode, materialDescription: h.materialDescription })}
+                >
+                  Use &amp; Save
+                </button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/* Shown in a not-yet-mapped Material row's "Data from SAP" column before anyone opens Search SAP:
+   what this customer has bought before, closest to the line first. Falls back to the card's usual
+   content when there is no customer or no history. */
+function SoldMaterialsSuggestions({
+  customer,
+  docDescription,
+  docCode,
+  disabled,
+  onUse,
+  fallback,
+}: {
+  customer?: string;
+  docDescription?: string;
+  docCode?: string;
+  disabled?: boolean;
+  onUse: (m: SapMaterial) => void;
+  fallback: React.ReactNode;
+}) {
+  const { history, error } = useSoldMaterials(customer);
+  if (!(customer || '').trim())
+    return <>{fallback}<div className="hint" style={{ padding: '2px 0 6px' }}>Match the customer first to see what they bought before.</div></>;
+  if (history === null)
+    return <div className="hint" style={{ padding: '6px 0' }}>Checking what this customer bought before…</div>;
+  if (error)
+    return <>{fallback}<div className="hint" style={{ padding: '2px 0 6px' }}><i className="fa-solid fa-triangle-exclamation" /> {error}</div></>;
+  if (history.length === 0)
+    return <>{fallback}<div className="hint" style={{ padding: '2px 0 6px' }}>No sales to this customer in the last 12 months — use "Search SAP".</div></>;
+  return (
+    <>
+      <SoldMaterialsList ranked={rankSoldMaterials(history, (docDescription || '').trim(), docCode)} disabled={disabled} onUse={onUse}
+        docDesc={docDescription} docCode={docCode} />
+      <div className="hint" style={{ padding: '2px 0 6px' }}>Not in the list? Use "Search SAP" to look up other materials.</div>
+    </>
+  );
+}
+
 /* SAP material search shown in the Material card's "Data from SAP" column, mirroring
    SapCustomerPanel: it lists the closest-matching SAP materials (sorted most-similar first) with a
    one-click "Use & Save", plus a manual search box to refine the keyword. Picking one hands the
@@ -475,16 +685,22 @@ function SapMaterialPanel({
   // Last Price per result material for THIS customer. undefined = not fetched yet, null = looked up
   // but SAP had no prior billing, object = found. Best-effort: a failed lookup just shows nothing.
   const [lastPrices, setLastPrices] = useState<Record<string, SapLastPrice | null>>({});
+  // What this customer bought before (one shared lookup per customer, see loadSoldMaterials).
+  const { history, error: historyError } = useSoldMaterials(customer);
+  const historyByCode = new Map((history || []).map((h) => [h.materialCode.toUpperCase(), h]));
 
   // Fetch each candidate's Last Price once the SAP results (and the customer) are known, so the
-  // price shows in the list before the person picks a row. One call per result material — usually
-  // only a handful — run in parallel; each resolves independently and best-effort.
+  // price shows in the list before the person picks a row. Materials already in the customer's
+  // sales history take their price from there; only the rest cost one call each, in parallel,
+  // each best-effort.
   useEffect(() => {
     const cust = (customer || '').trim();
     if (!cust || results.length === 0) { setLastPrices({}); return; }
+    if (history === null) return; // wait for the history so its materials are not fetched twice
+    const known = new Set(history.map((h) => h.materialCode.toUpperCase()));
     let cancelled = false;
     setLastPrices({});
-    Promise.all(results.map(async (m) => {
+    Promise.all(results.filter((m) => !known.has(m.materialCode.toUpperCase())).map(async (m) => {
       try {
         const r = await getSapLastPrice(cust, m.materialCode);
         return [m.materialCode, r.price] as const;
@@ -498,9 +714,14 @@ function SapMaterialPanel({
       setLastPrices(next);
     });
     return () => { cancelled = true; };
-  }, [results, customer]);
+  }, [results, customer, history]);
 
   const lastPriceText = (materialCode: string) => {
+    const h = historyByCode.get(materialCode.toUpperCase());
+    if (h)
+      return h.lastPrice != null
+        ? `${h.lastPrice.toLocaleString()} / ${h.unit || 'unit'}${h.lastDate ? ` (${h.lastDate})` : ''}`
+        : `sold before${h.lastDate ? ` (${h.lastDate})` : ''}`;
     const lp = lastPrices[materialCode];
     return lp === undefined
       ? 'Loading…'
@@ -511,9 +732,11 @@ function SapMaterialPanel({
 
   const renderLastPrice = (materialCode: string) => {
     if (!customer) return null;
+    const hasPrice = historyByCode.get(materialCode.toUpperCase())?.lastPrice != null || !!lastPrices[materialCode];
     return (
       <div className="hint" style={{ marginTop: 3 }}>
-        <i className="fa-solid fa-tag" /> Last Price: {lastPriceText(materialCode)}
+        <i className="fa-solid fa-tag" /> Last Price:{' '}
+        {hasPrice ? <span style={LAST_PRICE_STYLE}>{lastPriceText(materialCode)}</span> : lastPriceText(materialCode)}
       </div>
     );
   };
@@ -580,25 +803,59 @@ function SapMaterialPanel({
 
   const hint = (text: string) => <div className="hint" style={{ padding: '6px 0' }}>{text}</div>;
 
+  // First (automatic) search only: the customer's own sales history comes first, closest to this
+  // line on top. Once the person types their own keyword (appliedQuery set) only that keyword's
+  // SAP results are shown.
+  const autoMode = appliedQuery === null;
+  const soldRanked = autoMode && history && history.length > 0 ? rankSoldMaterials(history, docDesc, docCode) : [];
+  const soldNode = soldRanked.length > 0
+    ? <SoldMaterialsList ranked={soldRanked} disabled={disabled} onUse={onUse} docDesc={docDesc} docCode={docCode} />
+    : autoMode && customer && history === null
+      ? hint('Checking what this customer bought before…')
+      : autoMode && customer && historyError
+        ? hint('Sales history: ' + historyError)
+        : null;
+  const soldCodes = new Set(soldRanked.map((x) => x.h.materialCode.toUpperCase()));
+  // In the automatic search, a material already listed under the sales history isn't repeated.
+  const keywordResults = autoMode ? results.filter((m) => !soldCodes.has(m.materialCode.toUpperCase())) : results;
+
   if (!query || query.length < 2)
-    return <div className="hint" style={{ padding: '6px 0' }}><div>Type a search term to look up Material in SAP</div>{renderSearchBox()}</div>;
-  if (loading) return hint('Searching SAP…');
+    return <>{soldNode}<div className="hint" style={{ padding: '6px 0' }}><div>Type a search term to look up Material in SAP</div>{renderSearchBox()}</div></>;
+  if (loading) return <>{soldNode}{hint('Searching SAP…')}</>;
   if (error)
-    return <div className="hint" style={{ padding: '6px 0' }}><div>SAP search is temporarily unavailable.</div>{renderSearchBox()}</div>;
-  if (searched && results.length === 0)
+    return <>{soldNode}<div className="hint" style={{ padding: '6px 0' }}><div>SAP search is temporarily unavailable.</div>{renderSearchBox()}</div></>;
+  if (searched && keywordResults.length === 0)
     return (
-      <div className="hint" style={{ padding: '6px 0' }}>
-        <div>Not found in SAP — try another search term, or use "+ Add New Item"</div>
-        {renderSearchBox()}
-      </div>
+      <>
+        {soldNode}
+        <div className="hint" style={{ padding: '6px 0' }}>
+          <div>
+            {results.length > 0
+              ? `No other match for "${query}" in SAP — try another search term, or use "+ Add New Item"`
+              : `Not found in SAP — try another search term, or use "+ Add New Item"`}
+          </div>
+          {renderSearchBox()}
+        </div>
+      </>
     );
 
   // Closest first: rank every candidate against the document's line description.
-  const sorted = [...results]
+  const sorted = [...keywordResults]
     .map((m) => ({ m, score: materialMatchScore(docDesc, m.materialDescription) }))
     .sort((a, b) => b.score - a.score);
 
-  const aiCandidates: CompareCandidateItem<SapMaterial>[] = sorted.map(({ m }) => ({
+  const soldCandidates: CompareCandidateItem<SapMaterial>[] = soldRanked.slice(0, 10).map(({ h }) => ({
+    id: h.materialCode,
+    label: h.materialCode,
+    fields: [
+      { label: 'Material Code', value: h.materialCode },
+      { label: 'Description', value: h.materialDescription },
+      { label: 'Last sold to this customer', value: h.lastDate || '—' },
+      ...(customer ? [{ label: 'Last Price', value: lastPriceText(h.materialCode) }] : []),
+    ],
+    raw: { materialCode: h.materialCode, materialDescription: h.materialDescription },
+  }));
+  const aiCandidates: CompareCandidateItem<SapMaterial>[] = [...soldCandidates, ...sorted.map(({ m }) => ({
     id: m.materialCode,
     label: m.materialCode,
     fields: [
@@ -607,21 +864,22 @@ function SapMaterialPanel({
       ...(customer ? [{ label: 'Last Price', value: lastPriceText(m.materialCode) }] : []),
     ],
     raw: m,
-  }));
+  }))];
 
   const visibleResults = sorted.slice(0, 5);
 
   return (
     <>
+      {soldNode}
       <div className="hint" style={{ padding: '6px 0', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
         <span>
-          Found {results.length} matches in SAP — showing the {Math.min(results.length, 5)} closest matches:
+          {soldRanked.length > 0 ? `Search "${query}": ` : ''}Found {sorted.length} matches in SAP — showing the {Math.min(sorted.length, 5)} closest matches:
         </span>
-        {results.length > 5 ? (
+        {aiCandidates.length > 5 ? (
           <button className="btn sm" onClick={() => setAiOpen(true)}>
-            <i className="fa-solid fa-table-list" /> See more &amp; compare ({results.length})
+            <i className="fa-solid fa-table-list" /> See more &amp; compare ({aiCandidates.length})
           </button>
-        ) : results.length > 1 && (
+        ) : aiCandidates.length > 1 && (
           <button className="btn sm" onClick={() => setAiOpen(true)}>
             <i className="fa-solid fa-wand-magic-sparkles" /> Ask AI to match
           </button>
@@ -632,7 +890,7 @@ function SapMaterialPanel({
           {visibleResults.map(({ m }) => (
             <tr key={m.materialCode}>
               <td>
-                <b>{m.materialCode}</b> — {m.materialDescription}
+                <b><Hl text={m.materialCode} against={[docCode]} /></b> — <Hl text={m.materialDescription} against={[docDesc, docCode]} />
                 {renderLastPrice(m.materialCode)}
               </td>
               <td>
@@ -724,7 +982,8 @@ function ZohoMaterialPanel({
             return (
               <tr key={(it.materialCode || it.materialId || 'row') + ':' + idx}>
                 <td>
-                  <b>{it.materialCode || '(no code)'}</b>{label ? ' — ' + label : ''}
+                  <b>{it.materialCode ? <Hl text={it.materialCode} against={[docCode]} /> : '(no code)'}</b>
+                  {label ? <> — <Hl text={label} against={[docDesc, docCode]} /></> : ''}
                   {it.materialGroup && <div className="hint">{it.materialGroup}</div>}
                 </td>
                 <td>
@@ -2385,6 +2644,9 @@ interface Props {
   onQuickAddMaterial: (i: number) => void;
   onUseSapMaterial: (i: number, material: SapMaterial) => void;
   onAddUomRule: (i: number) => void;
+  /** GLC Sales Order: mark a line as a freight charge (sent as the Freight condition, not an item),
+   *  as an item, or '' = let the system decide from the line's wording (utils/soCharges). */
+  onSetLineCharge?: (i: number, value: 'freight' | 'item' | '') => void;
   /** GLC Sales Order only: the full Sales Employee pick list (DB master + live SAP), the per-line
    *  history suggestion (who handled this customer+material last time), and the setter that stores
    *  the chosen Person ID on the line (extra.salesEmployee → SAP item field YY1_SDSalesEmployeeI_SDI). */
@@ -2459,6 +2721,7 @@ export default function MappingCards({
   onQuickAddMaterial,
   onUseSapMaterial,
   onAddUomRule,
+  onSetLineCharge,
   salesEmployees,
   lineSalesEmpSuggest,
   onSetLineSalesEmployee,
@@ -2910,6 +3173,49 @@ export default function MappingCards({
     const taxRow = ['WHT', 'VAT', 'DUTY'].includes(String(l.extCode || '').trim().toUpperCase());
     if (taxRow || r.status === 'skip') return null;
 
+    // GLC freight charge (SHIPPING / ค่าขนส่ง): no Material to match -- its amount is sent as the
+    // Freight condition on the Sales Order header. One click turns it back into a normal item.
+    if (r.status === 'charge') {
+      const amt = num(l.amount) || num(l.qty) * num(l.price);
+      return (
+        <div key={i} className="cmp-card">
+          <div className="cmp-head">
+            <span className="cmp-no">{`${nMat}.${i + 1}`}</span>
+            <b>{`Item — Row ${i + 1}`}</b>
+            <span className="badge b-idle"><i className="fa-solid fa-truck" /> Freight charge</span>
+            <span className="hint">{r.method || ''}</span>
+            <div className="sp" />
+            {!posted && onSetLineCharge && (
+              <button className="btn sm" onClick={() => onSetLineCharge(i, 'item')} title="Map this line to a Material like any other item">
+                <i className="fa-solid fa-box" /> This is an item
+              </button>
+            )}
+          </div>
+          <div className="cmp-body">
+            <div className="cmp-col">
+              <div className="cmp-label"><i className="fa-solid fa-file-lines" /> Data from Document</div>
+              <SideList items={r.doc} side="doc" />
+              {(!r.doc || r.doc.length === 0) && (
+                <div className="hint">{[l.extCode, l.desc].filter(Boolean).join(' — ')}</div>
+              )}
+            </div>
+            <div className="cmp-arrow">→</div>
+            <div className="cmp-col sap">
+              <div className="cmp-label"><i className="fa-solid fa-building-columns" /> Data from SAP</div>
+              <div style={{ padding: '6px 0' }}>
+                <b>Freight</b> {num(amt).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}{' '}
+                {String(doc.header.currency || 'THB')}
+                <div className="hint">
+                  Sent as the Freight condition on the Sales Order header (not an item, no Material needed). With
+                  several Sales Orders, choose which one carries it in Step 3.
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
     return (
       <CmpCard
         key={i}
@@ -2944,6 +3250,12 @@ export default function MappingCards({
               }}
             />
             {r.status === 'fail' && addBtn('Add New Item', () => onQuickAddMaterial(i))}
+            {!isMgt && !posted && onSetLineCharge && r.status === 'fail' && (
+              <button className="btn sm" style={{ marginLeft: 6 }} onClick={() => onSetLineCharge(i, 'freight')}
+                title="Not goods: send this amount as the Freight condition on the Sales Order">
+                <i className="fa-solid fa-truck" /> Freight charge
+              </button>
+            )}
             {!posted && (
               <button
                 className={'btn sm' + (matSapOpen[i] ? ' primary' : '')}
@@ -2957,7 +3269,21 @@ export default function MappingCards({
           </>
         }
         sapSlot={
-          !matSapOpen[i] ? undefined
+          !matSapOpen[i]
+            ? (
+                // GLC: a row not in Master Mapping yet shows what this customer bought before
+                // straight away (one shared lookup per customer), before anyone opens Search SAP.
+                !isMgt && !posted && r.status === 'fail' && !r.code ? (
+                  <SoldMaterialsSuggestions
+                    customer={map.header.customer?.sapCode || map.header.customer?.code}
+                    docDescription={l.desc}
+                    docCode={l.extCode}
+                    disabled={posted}
+                    onUse={(m) => onUseSapMaterial(i, m)}
+                    fallback={<SideList items={r.sap} side="sap" />}
+                  />
+                ) : undefined
+              )
             : isMgt ? (
               <ZohoMaterialPanel
                 dealItems={dealItems || []}

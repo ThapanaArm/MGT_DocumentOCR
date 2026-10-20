@@ -9,6 +9,11 @@ namespace MgtOcr.Sap;
 /// unit that price is per (see <see cref="SapBillingClient.GetLastPriceAsync"/>).</summary>
 public record SapLastPrice(decimal PricePerUnit, string Unit, string? BillingDocument, string? CreationDate);
 
+/// <summary>One material SAP has billed to a customer (latest billing line wins for price/unit/text),
+/// see <see cref="SapBillingClient.GetSoldMaterialsAsync"/>.</summary>
+public record SapSoldMaterial(string MaterialCode, string? Description, decimal? PricePerUnit, string? Unit,
+    DateTime? LastDate, string? BillingDocument, int Times);
+
 // GLC Sales Order flow, material-confirm step: "what did we last actually charge this customer for
 // this material?" — read-only OData V2 GET client against API_BILLING_DOCUMENT_SRV
 // (A_BillingDocumentItem). Mirrors the calculation already proven correct in the nightly
@@ -246,6 +251,124 @@ public class SapBillingClient(AppConfig config, HttpClient httpClient)
         {
             return "{\"error\":\"failed customer lookup: " + EscapeODataLiteral(ex.Message) + "\"}";
         }
+    }
+
+    // GLC Material card (15 Oct 2026): every material SAP has billed to ONE customer in the last
+    // `months` months, newest first, one row per material. Queries the billing HEADER
+    // (A_BillingDocument, where SoldToParty can be filtered server-side - it is not on the item) and
+    // expands to_Item, the same shape GetRawByCustomerAsync already proved on this tenant. One call
+    // (plus paging) per customer, not one per material, so the UI can fetch it once per document.
+    // Cancelled invoices, cancellation documents (N/S) and credit memos (O) are left out - they are
+    // not "sold". Best-effort like the rest of this client: any failure returns an empty list.
+    public async Task<List<SapSoldMaterial>> GetSoldMaterialsAsync(string customerCode, int months = 12, int maxDocs = 200)
+    {
+        var baseUrl = config.SapBillingBaseUrl;
+        var customer = customerCode?.Trim() ?? "";
+        if (string.IsNullOrWhiteSpace(baseUrl) || customer.Length == 0) return new();
+
+        var since = DateTime.UtcNow.Date.AddMonths(-Math.Max(1, months));
+        var custFilter = $"SoldToParty eq '{EscapeODataLiteral(customer)}'";
+        var dated = $"{custFilter} and BillingDocumentDate ge datetime'{since:yyyy-MM-dd}T00:00:00'";
+        string Url(string filter, bool ordered) =>
+            $"{baseUrl.TrimEnd('/')}/A_BillingDocument?$filter={Uri.EscapeDataString(filter)}&$expand=to_Item" +
+            (ordered ? "&$orderby=BillingDocumentDate desc" : "") + "&$top=50&$format=json";
+
+        var docs = new List<(string No, DateTime? Date, JsonElement Items)>();
+        var cancelledNos = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var keep = new List<JsonDocument>(); // JsonElements stay valid only while their document lives
+
+        async Task<bool> ReadAll(string firstUrl, bool clientDateCut)
+        {
+            var url = firstUrl;
+            while (!string.IsNullOrEmpty(url) && docs.Count < maxDocs)
+            {
+                var text = await GetJsonAsync(url);
+                var jd = JsonDocument.Parse(string.IsNullOrWhiteSpace(text) ? "{}" : text);
+                keep.Add(jd);
+                if (!jd.RootElement.TryGetProperty("d", out var d) || !d.TryGetProperty("results", out var arr)
+                    || arr.ValueKind != JsonValueKind.Array) return false;
+                foreach (var bd in arr.EnumerateArray())
+                {
+                    var no = GetString(bd, "BillingDocument") ?? "";
+                    var cancels = GetString(bd, "CancelledBillingDocument");
+                    if (!string.IsNullOrWhiteSpace(cancels)) cancelledNos.Add(cancels.Trim());
+                    var cat = (GetString(bd, "SDDocumentCategory") ?? "").Trim().ToUpperInvariant();
+                    if (cat is "N" or "S" or "O" || !string.IsNullOrWhiteSpace(cancels) || GetBool(bd, "BillingDocumentIsCancelled"))
+                        continue;
+                    var date = ParseSapDate(GetString(bd, "BillingDocumentDate") ?? GetString(bd, "CreationDate"));
+                    if (clientDateCut && date is { } dt && dt < since) continue;
+                    if (bd.TryGetProperty("to_Item", out var items)) docs.Add((no, date, items));
+                    if (docs.Count >= maxDocs) break;
+                }
+                url = d.TryGetProperty("__next", out var nextEl) && nextEl.ValueKind == JsonValueKind.String
+                    ? ResolveNext(baseUrl, nextEl.GetString())
+                    : null;
+            }
+            return true;
+        }
+
+        try
+        {
+            try { await ReadAll(Url(dated, true), false); }
+            catch
+            {
+                // This tenant has rejected some filter shapes before (see GetLastPriceAsync); fall back to
+                // the customer-only filter GetRawByCustomerAsync uses and cut the dates here instead.
+                docs.Clear();
+                await ReadAll(Url(custFilter, false), true);
+            }
+
+            var byMaterial = new Dictionary<string, (SapSoldMaterial Row, HashSet<string> DocNos)>(StringComparer.OrdinalIgnoreCase);
+            foreach (var (no, date, items) in docs.OrderByDescending(x => x.Date ?? DateTime.MinValue))
+            {
+                if (cancelledNos.Contains(no)) continue;
+                foreach (var it in EnumerateNestedArray(items))
+                {
+                    var material = (GetString(it, "Material") ?? "").Trim();
+                    if (material.Length == 0) continue;
+                    var net = GetDecimal(it, "NetAmount") ?? 0m;
+                    var qtyBase = GetDecimal(it, "BillingQuantityInBaseUnit") ?? 0m;
+                    if (qtyBase <= 0) qtyBase = GetDecimal(it, "BillingQuantity") ?? 0m;
+                    if (byMaterial.TryGetValue(material, out var seen))
+                    {
+                        seen.DocNos.Add(no); // newest line already recorded (docs are newest first)
+                        continue;
+                    }
+                    decimal? price = net > 0 && qtyBase > 0 ? Math.Round(net / qtyBase, 2, MidpointRounding.AwayFromZero) : null;
+                    var row = new SapSoldMaterial(material, GetString(it, "BillingDocumentItemText"), price,
+                        GetString(it, "BaseUnit") ?? GetString(it, "BillingQuantityUnit"), date, no, 0);
+                    byMaterial[material] = (row, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { no });
+                }
+            }
+            return byMaterial.Values
+                .Select(v => v.Row with { Times = v.DocNos.Count })
+                .OrderByDescending(r => r.LastDate ?? DateTime.MinValue)
+                .ToList();
+        }
+        catch
+        {
+            return new(); // best-effort - the Material card still works from the keyword search
+        }
+        finally
+        {
+            foreach (var jd in keep) jd.Dispose();
+        }
+    }
+
+    private static bool GetBool(JsonElement el, string prop) =>
+        el.ValueKind == JsonValueKind.Object && el.TryGetProperty(prop, out var v)
+        && (v.ValueKind == JsonValueKind.True
+            || (v.ValueKind == JsonValueKind.String && string.Equals(v.GetString(), "true", StringComparison.OrdinalIgnoreCase)));
+
+    // SAP OData V2 "/Date(ms)/" -> DateTime (UTC date); plain ISO strings are parsed as-is.
+    private static DateTime? ParseSapDate(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+        var m = System.Text.RegularExpressions.Regex.Match(raw, @"/Date\((-?\d+)(?:[+-]\d{4})?\)/");
+        if (m.Success && long.TryParse(m.Groups[1].Value, out var ms))
+            return DateTimeOffset.FromUnixTimeMilliseconds(ms).UtcDateTime;
+        return DateTime.TryParse(raw, System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.AdjustToUniversal, out var dt) ? dt : null;
     }
 
     /// <summary>Walks an OData V2 $expand'd nav-property array (e.g. "to_Item" -> { "results": [...] })

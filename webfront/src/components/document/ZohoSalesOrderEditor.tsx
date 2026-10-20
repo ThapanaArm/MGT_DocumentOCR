@@ -10,6 +10,7 @@ import type {
 import CompareModal, { type CompareCandidateItem } from './CompareModal';
 import type { CompareField } from '../../api/compare';
 import { SEND_DISABLED } from '../../constants/flags';
+import DateInput from '../common/DateInput';
 import type { DeliveryDateGroup } from './SapSalesOrderEditor';
 import type { SoGroupState } from '../../api/documents';
 import SoGroupPanel, { groupStatus, type GroupShipToControl } from './SoGroupPanel';
@@ -163,7 +164,12 @@ export default function ZohoSalesOrderEditor({
               // Each Sales Order is sent with its own group's date (see the group panel below).
               <input type="text" value={`Per Sales Order: ${[...new Set(dateGroups.map((g) => g.date))].join(', ')}`} disabled readOnly />
             ) : (
-              <input type="text" value={header.deliveryDate} placeholder={preview.deliveryDate || ''} disabled={posted} onChange={(e) => onHeaderChange({ deliveryDate: e.target.value })} />
+              <DateInput
+                value={header.deliveryDate || preview.deliveryDate || ''}
+                disabled={posted}
+                onChange={(v) => onHeaderChange({ deliveryDate: v })}
+                ariaLabel="Delivery Date"
+              />
             )}
           </div>
           <div className="f">

@@ -381,12 +381,19 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     [HttpDelete("api/documents/{docId:int}")]
     public async Task<IActionResult> DeleteDocument(int docId)
     {
-        var user = await ActorAsync();
+        var actor = await currentUser.RequireAsync();
+        var user = actor.AuditName;
         var doc = await repo.GetDocumentAsync(docId);
-        // Already in SAP/Zoho (all or some of its Sales Orders) -> never delete; the list hides the
-        // checkbox, this stops a direct API call too.
-        if (doc.GetStr("status") is "POSTED" or "PARTIAL" or "POSTING")
-            throw new HttpApiException(400, "This document has been posted (fully or partly) and cannot be deleted");
+        var docStatus = doc.GetStr("status");
+        // Being sent right now -> never (the send would record its result on a deleted document).
+        if (docStatus == "POSTING")
+            throw new HttpApiException(400, "This document is being sent right now — wait for it to finish, then try again");
+        // Already in SAP/Zoho (all or some of its Sales Orders): only an Admin may delete it (15 Oct
+        // 2026), e.g. to clear test data. The list hides the checkbox for everyone else; this stops a
+        // direct API call too. Deleting here does NOT cancel anything in SAP / Zoho.
+        var wasPosted = docStatus is "POSTED" or "PARTIAL";
+        if (wasPosted && !CompanyScope.SeesEveryCompany(actor))
+            throw new HttpApiException(403, "This document has been posted (fully or partly) — only an Admin can delete it");
         var module = doc.GetStr("module");
         var docT = DocumentTables.For(module).Doc;
         dynamic? fileRow = await GetDbInstance().QueryOneAsync($"SELECT StoredPath FROM {docT} WHERE DocId=@docId", new { docId });
@@ -397,7 +404,10 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         var fileNote = config.CleansModule(module) ? await DeleteStoredFileIfUnusedAsync(storedPath) : "";
         var header = (Dictionary<string, object?>)doc["header"]!;
         var docNo = header.GetStr("invoiceNo") is { Length: > 0 } inv ? inv : header.GetStr("poNo");
-        await repo.LogAuditAsync(docId, module, "DELETE", user, detail: "Deleted document" + fileNote, docNo: docNo, fileName: doc.GetStr("fileName"));
+        var postedNote = wasPosted
+            ? $" — it had been posted ({(doc.GetStr("sapDocNo") is { Length: > 0 } posted ? posted : docStatus)}); the document in SAP/Zoho was NOT deleted"
+            : "";
+        await repo.LogAuditAsync(docId, module, "DELETE", user, detail: "Deleted document" + fileNote + postedNote, docNo: docNo, fileName: doc.GetStr("fileName"));
         return Ok(new { ok = true });
     }
 
@@ -1107,7 +1117,9 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
                     WHERE DocId=@docId AND ItemNo=@itemNo
                     """, new
                 {
-                    materialCode = r.GetStr("code") is { Length: > 0 } c ? c : null, status = r.Get("status"), method = r.Get("method"),
+                    materialCode = r.GetStr("code") is { Length: > 0 } c ? c : null, status = r.Get("status"),
+                    // MapMethod is nvarchar(100): cut a long explanation instead of failing the whole save.
+                    method = r.GetStr("method") is { Length: > 100 } longMethod ? longMethod[..100] : r.Get("method"),
                     sapQty = uStatus is "ok" or "convert" ? u.Get("sapQty") : null, sapUom = u.GetStr("sapUom") is { Length: > 0 } su ? su : null,
                     uomFactor = uStatus is "ok" or "convert" ? u.Get("factor") : null,
                     sapMaterialCode = r.GetStr("sapCode") is { Length: > 0 } sc ? sc : null, sapUomIso = u.GetStr("iso") is { Length: > 0 } iso ? iso : null,
@@ -1517,9 +1529,10 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
 
     // The SAP payload of ONE delivery-date group: the group's lines + their own mapping rows; the
     // header date is set to the group's date (the builder prefers the lines' common date anyway).
+    // freight = this Sales Order's share of the document's shipping charge (SoCharges.FreightByGroup).
     private Dictionary<string, object?> SoGroupPayload(SoGroup g, Dictionary<string, object?> header,
         List<Dictionary<string, object?>> lines, Dictionary<string, object?> res, Dictionary<string, object?>? pm,
-        Dictionary<string, object?> source)
+        Dictionary<string, object?> source, double freight = 0)
     {
         var resLines = (List<Dictionary<string, object?>>)res["lines"]!;
         var gHeader = new Dictionary<string, object?>(header);
@@ -1542,7 +1555,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             ["lines"] = g.Indexes.Select(i => resLines[i]).ToList(),
         };
         return SapPayloadBuilder.BuildPayload(config, "SO", gHeader, g.Indexes.Select(i => lines[i]).ToList(), gRes, pm, source,
-            _divisionsByPersonId);
+            _divisionsByPersonId, freight);
     }
 
     // PersonID -> Ms_User.Division, for the Sales Order header SalesGroup (Division of the first
@@ -1565,7 +1578,10 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     {
         var doc = await repo.GetDocumentAsync(docId);
         if (doc.GetStr("module") != "SO") throw new HttpApiException(400, "Only Sales Order documents have delivery-date groups");
-        var groups = SoDeliveryGroups.Build((Dictionary<string, object?>)doc["header"]!, (List<Dictionary<string, object?>>)doc["lines"]!);
+        var docHeader = (Dictionary<string, object?>)doc["header"]!;
+        // GLC leaves the freight line out of the groups (it is not an item of any Sales Order).
+        var glc = IsGlcSalesOrg(await SalesOrgAsync(docHeader, docId));
+        var groups = SoDeliveryGroups.Build(docHeader, (List<Dictionary<string, object?>>)doc["lines"]!, skipCharges: glc);
         List<SoGroupState> states;
         try
         {
@@ -1590,11 +1606,19 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         var doc = await repo.GetDocumentAsync(docId);
         if (doc.GetStr("module") != "SO") throw new HttpApiException(400, "Only Sales Order documents");
         var (header, lines, res, pm, source) = await SoMappingAsync(doc);
-        var groups = SoDeliveryGroups.Build(header, lines);
+        var glc = IsGlcSalesOrg(header.GetStr("salesOrg"));
+        var groups = SoDeliveryGroups.Build(header, lines, skipCharges: glc);
+        var freight = glc ? SoCharges.FreightByGroup(header, lines, groups) : new Dictionary<string, double>();
         return Ok(new
         {
             pass = res.Get("pass"), errors = res["errors"],
-            payloads = groups.Select(g => new { key = g.Key, soGroup = g.SoGroupNo, deliveryDate = g.Date, itemNos = g.ItemNos, payload = SoGroupPayload(g, header, lines, res, pm, source) }),
+            freightTotal = glc ? SoCharges.TotalFreight(lines) : 0,
+            payloads = groups.Select(g => new
+            {
+                key = g.Key, soGroup = g.SoGroupNo, deliveryDate = g.Date, itemNos = g.ItemNos,
+                freight = freight.GetValueOrDefault(g.Key),
+                payload = SoGroupPayload(g, header, lines, res, pm, source, freight.GetValueOrDefault(g.Key)),
+            }),
         });
     }
 
@@ -1623,6 +1647,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         // and the header Sales Group comes from the first line's -- so each line must have one.
         var noSalesEmployee = lines
             .Where(l => l.GetStr("extCode") is not ("WHT" or "VAT")
+                        && !SoCharges.IsFreight(l) // a freight charge is not an item, it has no Sales Employee
                         && (l.Get("extra") as Dictionary<string, object?>).GetStr("salesEmployee").Trim().Length == 0)
             .Select(l => l.Get("itemNo")?.ToString() ?? "?").ToList();
         if (noSalesEmployee.Count > 0)
@@ -1631,7 +1656,10 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         var user = await ActorAsync();
         var companyCode = await CompanyNameForPostAsync("SO", header, docId);
         var salesOrg = await OwnCompanyAsync() is { Length: > 0 } own ? own : null;
-        var groups = SoDeliveryGroups.Build(header, lines);
+        var groups = SoDeliveryGroups.Build(header, lines, skipCharges: true); // this endpoint is GLC only
+        var freightByGroup = SoCharges.FreightByGroup(header, lines, groups);
+        if (groups.Count == 0)
+            throw new HttpApiException(400, "This document has no items to send — only a freight charge");
 
         // One send at a time per document (double click, second tab): see TryClaimAsync.
         var previousStatus = await soPosts.TryClaimAsync(docId)
@@ -1649,7 +1677,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
                     results.Add(new { key = g.Key, itemNos = g.ItemNos, success = true, skipped = true, docNo = done.DocNo, message = "Already posted" });
                     continue;
                 }
-                var payload = SoGroupPayload(g, header, lines, res, pm, source);
+                var payload = SoGroupPayload(g, header, lines, res, pm, source, freightByGroup.GetValueOrDefault(g.Key));
                 SapPostResult r;
 
                 // The previous attempt of this group failed. A timeout can fail AFTER SAP created the
@@ -1736,6 +1764,11 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         var copy = new Dictionary<string, object?>(h);
         copy.Remove("soGroupShipTos");
         copy.Remove("vatMode");
+        // Picking / changing the Requested Delivery Date isn't a customer or ship-to edit either -
+        // it must not drop the customer / ship-to the person already chose (15 Oct 2026).
+        copy.Remove("deliveryDate");
+        copy.Remove("poDate");
+        copy.Remove("soGroupFreight"); // Step 3 freight split per Sales Order
         return copy;
     }
     private static bool ListEquals(List<object?> a, List<Dictionary<string, object?>> b) =>

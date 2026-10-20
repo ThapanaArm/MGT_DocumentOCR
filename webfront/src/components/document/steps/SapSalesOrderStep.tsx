@@ -25,6 +25,8 @@ interface Props {
   onGroupShipTo: (soGroup: string, data: Record<string, unknown> | null) => void;
   /** Save the VAT mode on the document header (header.vatMode). */
   onVatModeChange: (mode: string) => void;
+  /** Save how the freight is shared between the Sales Orders (header.soGroupFreight); null = all on the first. */
+  onFreightSplitChange?: (split: Record<string, number> | null) => void;
   salesEmployees: SapSalesEmployee[];
   /** Unit Conversion master rows -- only used to pre-fill the "1 DR = ? KG" box. */
   uomRules: Record<string, any>[];
@@ -33,7 +35,7 @@ interface Props {
 }
 
 const SapSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function SapSalesOrderStep(
-  { doc, map, salesOrg, posted, onPosted, onGroupShipTo, onVatModeChange, salesEmployees, uomRules, onFixLineUnit },
+  { doc, map, salesOrg, posted, onPosted, onGroupShipTo, onVatModeChange, onFreightSplitChange, salesEmployees, uomRules, onFixLineUnit },
   ref,
 ) {
   const { guard, showToast } = useAppState();
@@ -85,7 +87,7 @@ const SapSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function SapSa
         const l = doc.lines[i];
         if (['WHT', 'VAT'].includes(String(l.extCode || '').toUpperCase())) continue;
         const m = map.lines?.[i];
-        if (!m || m.status === 'skip' || m.status === 'fail') continue;
+        if (!m || m.status === 'skip' || m.status === 'fail' || m.status === 'charge') continue;
         const code = String(m.sapCode || m.code || '').trim();
         if (!code) continue;
         const units = await loadSapUnits(code);
@@ -183,6 +185,7 @@ const SapSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function SapSa
             partial={doc.status === 'PARTIAL'}
             groupShipTo={groupShipTo}
             onVatModeChange={onVatModeChange}
+            onFreightSplitChange={onFreightSplitChange}
             salesEmployees={salesEmployees}
             unitIssues={unitIssues.map((x) => ({ itemNo: x.itemNo, uom: x.uom }))}
             onFixUnits={() => unitIssues[0] && setFixing(unitIssues[0])}

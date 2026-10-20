@@ -42,12 +42,16 @@ public static class SoDeliveryGroups
 
     public static string KeyOf(string soGroupNo, string date) => soGroupNo + "|" + date;
 
-    public static List<SoGroup> Build(Dictionary<string, object?> header, List<Dictionary<string, object?>> lines)
+    /// <param name="skipCharges">GLC: leave out freight lines (SoCharges.IsFreight) - they are not items
+    /// of any Sales Order, their amount goes on a Sales Order header instead (SoCharges.FreightByGroup).</param>
+    public static List<SoGroup> Build(Dictionary<string, object?> header, List<Dictionary<string, object?>> lines,
+        bool skipCharges = false)
     {
         var headerDate = header.GetStr("deliveryDate");
         var groups = new List<SoGroup>();
         for (var i = 0; i < lines.Count; i++)
         {
+            if (skipCharges && SoCharges.IsFreight(lines[i])) continue;
             var no = LineSoGroup(lines[i]);
             var date = LineDate(lines[i], headerDate);
             var key = KeyOf(no, date);

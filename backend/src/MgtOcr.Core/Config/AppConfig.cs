@@ -87,6 +87,10 @@ public class AppConfig
     // (SalesOrderImportJob.BuildCreateBody) keeps this in config for exactly the same reason —
     // the user isn't 100% sure ZPR0 is fixed for every case, so it's a setting, not a literal.
     public string SapSalesOrderPriceConditionType { get; init; } = "ZPR0";
+    // Header freight condition for GLC Sales Orders (Sap:SalesOrder:FreightConditionType): a PO's
+    // shipping-charge line (SHIPPING / ค่าขนส่ง) is sent as this amount on the order header, shown
+    // by SAP as "Freight" (15 Oct 2026). Blank = freight is not sent at all.
+    public string SapSalesOrderFreightConditionType { get; init; } = "ZFHD";
 
     // Item Note 1 (SD item long text) sent per Sales Order line via the to_Text
     // navigation. LongTextID = the SAP text ID configured for "Item Note 1"

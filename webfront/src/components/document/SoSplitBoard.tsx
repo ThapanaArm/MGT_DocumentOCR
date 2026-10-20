@@ -3,6 +3,8 @@ import Modal, { ModalHeader } from '../Modal';
 import { fmt, num } from '../../utils/format';
 import type { DocModel } from '../../api/documents';
 import { lineSoGroup } from './SapSalesOrderEditor';
+import { isFreightLine } from '../../utils/soCharges';
+import { formatDate } from '../common/DateInput';
 import { shipToValue, type GroupShipToOption } from './SoGroupPanel';
 
 /* "Split Sales Order" board (12 Oct 2026). One card per Sales Order: drag items between cards (or use
@@ -31,8 +33,11 @@ export default function SoSplitBoard({
   canPickShipTo,
   onClose,
   onSave,
+  skipCharges = false,
 }: {
   doc: DocModel;
+  /** GLC: freight lines are not items, so they get no card (their amount is set per Sales Order in Step 3). */
+  skipCharges?: boolean;
   headerDate: string;
   shipToOptions: GroupShipToOption[];
   shipToLoading?: boolean;
@@ -47,7 +52,7 @@ export default function SoSplitBoard({
 }) {
   const lines = doc.lines || [];
   const initialCards = useMemo(() => {
-    const ids = Array.from(new Set(lines.map((l) => lineSoGroup(l))));
+    const ids = Array.from(new Set(lines.filter((l) => !(skipCharges && isFreightLine(l))).map((l) => lineSoGroup(l))));
     ids.sort((a, b) => Number(a) - Number(b));
     return ids.length ? ids : ['1'];
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -92,7 +97,8 @@ export default function SoSplitBoard({
 
   const dateOf = (i: number) =>
     ((lines[i].extra as Record<string, string> | undefined)?.deliveryDate || '').trim() || (headerDate || '').trim();
-  const cardLines = (id: string) => lines.map((_, i) => i).filter((i) => assign[i] === id);
+  const cardLines = (id: string) =>
+    lines.map((_, i) => i).filter((i) => assign[i] === id && !(skipCharges && isFreightLine(lines[i])));
   const cardDates = (id: string) => Array.from(new Set(cardLines(id).map(dateOf)));
   const usedCards = cards.filter((id) => cardLines(id).length > 0);
   const totalOrders = usedCards.reduce((n, id) => n + cardDates(id).length, 0);
@@ -219,7 +225,7 @@ export default function SoSplitBoard({
                             {l.itemNo} · {l.desc || l.extCode || '(no description)'}
                           </div>
                           <div className="hint">
-                            {fmt(l.qty)} {l.uom} · {dateOf(i) || 'no delivery date'}
+                            {fmt(l.qty)} {l.uom} · {dateOf(i) ? formatDate(dateOf(i)) : 'no delivery date'}
                           </div>
                         </div>
                       </div>

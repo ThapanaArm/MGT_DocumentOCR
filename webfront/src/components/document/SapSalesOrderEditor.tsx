@@ -5,6 +5,8 @@ import { fmt, num } from '../../utils/format';
 import type { SoGroupState } from '../../api/documents';
 import SoGroupPanel, { groupStatus, type GroupShipToControl } from './SoGroupPanel';
 import type { SapSalesEmployee } from '../../api/sap';
+import { isFreightLine, totalFreight, freightByGroup, savedFreightSplit } from '../../utils/soCharges';
+import { formatDate } from '../common/DateInput';
 
 // GLC only (this whole editor is the SAP-side, GLC-only "check before you send" screen -- see the
 // module doc comment below): the Subtotal/VAT/Grand Total block below is purely an OCR-review
@@ -48,16 +50,19 @@ export function lineSoGroup(line: DocLine): string {
   return n > 0 ? String(n) : '1';
 }
 
-export function deliveryDateGroups(doc: DocModel, headerDate: string): DeliveryDateGroup[] {
+/** skipCharges (GLC): freight lines are not items of any Sales Order (see utils/soCharges), same as
+ *  SoDeliveryGroups.Build(skipCharges: true) on the backend. */
+export function deliveryDateGroups(doc: DocModel, headerDate: string, skipCharges = false): DeliveryDateGroup[] {
   const order: string[] = [];
   const byKey = new Map<string, DeliveryDateGroup>();
   (doc.lines || []).forEach((l, i) => {
+    if (skipCharges && isFreightLine(l)) return;
     const soGroup = lineSoGroup(l);
     const rawDate = ((l.extra as Record<string, string> | undefined)?.deliveryDate || '').trim() || (headerDate || '').trim();
     const key = `${soGroup}|${rawDate}`;
     let g = byKey.get(key);
     if (!g) {
-      g = { key, soGroup, rawDate, date: rawDate || 'Delivery date not specified', itemNos: [], count: 0 };
+      g = { key, soGroup, rawDate, date: rawDate ? formatDate(rawDate) : 'Delivery date not specified', itemNos: [], count: 0 };
       byKey.set(key, g);
       order.push(key);
     }
@@ -95,6 +100,7 @@ export default function SapSalesOrderEditor({
   salesEmployees = [],
   unitIssues = [],
   onFixUnits,
+  onFreightSplitChange,
 }: {
   doc: DocModel;
   map: MapResult | null;
@@ -118,14 +124,19 @@ export default function SapSalesOrderEditor({
   /** Lines whose unit SAP doesn't know for their material (see SapSalesOrderStep). */
   unitIssues?: { itemNo: unknown; uom: string }[];
   onFixUnits?: () => void;
+  /** Saves how the freight is shared between the Sales Orders (header.soGroupFreight); null = all on the first. */
+  onFreightSplitChange?: (split: Record<string, number> | null) => void;
 }) {
   const lines: DocLine[] = doc.lines || [];
   const lineStatus = (i: number) => map?.lines?.[i]?.status;
-  const willSendCount = map ? lines.filter((_, i) => lineStatus(i) !== 'fail').length : 0;
+  // Freight lines (SHIPPING / ค่าขนส่ง): not items -- sent as the Freight condition on the SO header.
+  const isCharge = (i: number) => lineStatus(i) === 'charge' || (!map && isFreightLine(lines[i]));
+  const willSendCount = map ? lines.filter((_, i) => lineStatus(i) !== 'fail' && !isCharge(i)).length : 0;
+  const freightTotal = totalFreight(lines);
 
   // GLC: every line needs its own Sales Employee (SAP item field); the header Sales Group is the
   // first item's Sales Employee's Division (Ms_User.Division) -- same rule as SapPayloadBuilder.
-  const isTaxLine = (l: DocLine) => ['WHT', 'VAT'].includes(String(l.extCode || '').toUpperCase());
+  const isTaxLine = (l: DocLine) => ['WHT', 'VAT'].includes(String(l.extCode || '').toUpperCase()) || isFreightLine(l);
   const empOf = (l: DocLine) => String((l.extra as Record<string, string> | undefined)?.salesEmployee || '').trim();
   const missingSalesEmp = lines.filter((l) => !isTaxLine(l) && !empOf(l)).map((l) => l.itemNo);
   const firstLine = lines.find((l) => !isTaxLine(l));
@@ -136,8 +147,13 @@ export default function SapSalesOrderEditor({
 
   // Delivery-date grouping (Megachem rule): one SAP Sales Order per delivery date, all sent from this
   // document by one Send. Groups already posted are skipped on the next Send (retry = the rest).
-  const dateGroups = deliveryDateGroups(doc, header.deliveryDate || '');
+  const dateGroups = deliveryDateGroups(doc, header.deliveryDate || '', true);
   const remaining = dateGroups.filter((g) => !groupStatus(g, posts).ok).length;
+  // Freight per Sales Order: all on the first by default, or the CS's own split (header.soGroupFreight).
+  const freightPerGroup = freightByGroup(header, lines, dateGroups.map((g) => g.key));
+  const freightSplitSum = Math.round(Object.values(freightPerGroup).reduce((s, v) => s + v, 0) * 100) / 100;
+  const hasOwnSplit = Object.keys(savedFreightSplit(header)).some((k) => k in freightPerGroup);
+  const [freightDraft, setFreightDraft] = useState<Record<string, string>>({});
 
   // The VAT amount the document ITSELF stated (OCR'd header — the "Totals" card's VAT field). When
   // the customer already broke VAT out on their document, this is filled and we should just show
@@ -166,22 +182,40 @@ export default function SapSalesOrderEditor({
   //  - 'none': leave VAT alone entirely -> show the line prices as they are, VAT = 0, no 7% added
   //    or extracted (added 7 Oct 2026 at the user's request).
   const savedVatMode = String(header.vatMode || '') as VatMode;
-  const defaultVatMode: VatMode = docHasVat ? 'document' : 'exclude';
+  // 16 Oct 2026: the "Prices exclude VAT" choice was taken off the screen (it sent exactly what "No VAT"
+  // sends -- the prices as read). A document saved earlier as 'exclude' now opens as 'none'.
+  const defaultVatMode: VatMode = docHasVat ? 'document' : 'none';
   const [vatModeState, setVatModeState] = useState<VatMode | null>(
-    (['document', 'exclude', 'include', 'none'] as const).includes(savedVatMode) ? savedVatMode : null,
+    savedVatMode === 'exclude'
+      ? 'none'
+      : (['document', 'include', 'none'] as const).includes(savedVatMode) ? savedVatMode : null,
   );
   // "document" is offered only while the document has its own VAT figure; fall back when it goes.
-  const vatMode: VatMode = vatModeState === 'document' && !docHasVat ? 'exclude' : vatModeState ?? defaultVatMode;
+  const vatMode: VatMode = vatModeState === 'document' && !docHasVat ? 'none' : vatModeState ?? defaultVatMode;
   const setVatMode = (m: VatMode) => {
     setVatModeState(m);
     onVatModeChange?.(m);
   };
 
-  // Sum of the lines that will actually be sent (unmatched lines aren't part of the SO SAP sees).
-  const lineTotal = lines.reduce(
-    (sum, l, i) => (map && lineStatus(i) !== 'fail' ? sum + num(l.qty) * num(l.price) : sum),
+  // What SAP actually receives (same rule as SapPayloadBuilder): each line price -- and the freight --
+  // as on the document, or with the 7% taken out (÷ 1.07) when the document prices include VAT.
+  // SAP works out VAT and the order total itself; the VAT / Grand Total further down are a preview only.
+  const stripVat = vatMode === 'include' && !isUsd;
+  const sentPrice = (p: unknown) => round2(stripVat ? num(p) / (1 + GLC_VAT_RATE) : num(p));
+
+  // Sum of the lines that will actually be sent (unmatched lines aren't part of the SO SAP sees),
+  // plus the freight SAP adds on the header (Net Value + Freight = Total Amt+Freight, VAT on that).
+  const itemTotal = lines.reduce(
+    (sum, l, i) => (map && lineStatus(i) !== 'fail' && !isCharge(i) ? sum + num(l.qty) * num(l.price) : sum),
     0,
   );
+  const lineTotal = itemTotal + (map ? freightTotal : 0);
+  const sentItemTotal = lines.reduce(
+    (sum, l, i) => (map && lineStatus(i) !== 'fail' && !isCharge(i) ? sum + num(l.qty) * sentPrice(l.price) : sum),
+    0,
+  );
+  const sentFreight = map ? sentPrice(freightTotal) : 0;
+  const sentNet = round2(sentItemTotal + sentFreight);
   let subtotal: number;
   let vatAmount: number;
   let grandTotal: number;
@@ -273,11 +307,11 @@ export default function SapSalesOrderEditor({
           </div>
           <div className="f">
             <label>PO Date</label>
-            <input type="text" value={header.poDate || ''} disabled readOnly />
+            <input type="text" value={formatDate(header.poDate)} disabled readOnly />
           </div>
           <div className="f">
             <label>Delivery Date</label>
-            <input type="text" value={header.deliveryDate || ''} disabled readOnly />
+            <input type="text" value={formatDate(header.deliveryDate)} disabled readOnly />
           </div>
           <div className="f">
             <label>Currency</label>
@@ -301,7 +335,8 @@ export default function SapSalesOrderEditor({
                 <th>Description</th>
                 <th>Qty</th>
                 <th>Unit</th>
-                <th>Price</th>
+                <th>Price (document)</th>
+                <th className="sap-sent-col">Price sent to SAP</th>
                 <th>Status</th>
               </tr>
             </thead>
@@ -309,6 +344,22 @@ export default function SapSalesOrderEditor({
               {lines.map((l, i) => {
                 const m = map.lines?.[i];
                 const failed = m?.status === 'fail';
+                if (m?.status === 'charge')
+                  return (
+                    <tr key={i}>
+                      <td>{l.itemNo ?? i + 1}</td>
+                      <td><b>Freight</b><div className="hint">header condition, not an item</div></td>
+                      <td>{l.desc}</td>
+                      <td>—</td>
+                      <td>—</td>
+                      <td>{fmt(num(l.amount) || num(l.qty) * num(l.price))}</td>
+                      <td className="sap-sent-col">
+                        {fmt(sentPrice(num(l.amount) || num(l.qty) * num(l.price)))}
+                        <div className="hint">{stripVat ? 'VAT taken out' : 'as on the document'}</div>
+                      </td>
+                      <td><span className="badge b-idle"><i className="fa-solid fa-truck" /> Freight</span></td>
+                    </tr>
+                  );
                 return (
                   <tr key={i}>
                     <td>{l.itemNo ?? i + 1}</td>
@@ -320,6 +371,16 @@ export default function SapSalesOrderEditor({
                     <td>{l.qty}</td>
                     <td>{l.uom}</td>
                     <td>{l.price}</td>
+                    <td className="sap-sent-col">
+                      {failed ? (
+                        <span className="hint">not sent</span>
+                      ) : (
+                        <>
+                          {fmt(sentPrice(l.price))}
+                          <div className="hint">{stripVat ? 'VAT taken out' : 'as on the document'}</div>
+                        </>
+                      )}
+                    </td>
                     <td>
                       {failed ? (
                         <span className="badge b-fail"><i className="fa-solid fa-xmark" /> Not found</span>
@@ -334,45 +395,58 @@ export default function SapSalesOrderEditor({
           </table>
         </div>
 
-        <div className="row" style={{ justifyContent: 'flex-end', marginTop: 10 }}>
-          <div className="grid" style={{ maxWidth: 340, width: '100%' }}>
+        {/* VAT choice, preview, then what SAP receives (last, like a final total) -- stacked in one
+            compact column on the right under the items. */}
+        <div className="so-sum-band">
+          <div className="so-sum-col so-sum-vat">
+            <div className="sap-box-title">
+              <i className="fa-solid fa-percent" aria-hidden="true" /> Item price in document (VAT)
+            </div>
             {isUsd ? (
-              <div className="f">
-                <label>Item price in document (VAT)</label>
-                <input type="text" value="Currency USD — no VAT" disabled readOnly />
-                <small className="master-field-help">
-                  USD (export) line — no VAT; display only, does not affect the price sent to SAP
-                </small>
-              </div>
+              <>
+                <input type="text" value="Currency USD — no VAT" disabled readOnly aria-label="Item price in document (VAT)" />
+                <small className="so-sum-note">USD (export) — no Thai VAT; the highlighted prices are sent to SAP as they are.</small>
+              </>
             ) : (
-              <div className="f">
-                <label>Item price in document (VAT)</label>
-                <select value={vatMode} onChange={(e) => setVatMode(e.target.value as VatMode)}>
-                  {docHasVat && <option value="document">Document already separates VAT — use the document value</option>}
-                  <option value="exclude">VAT not included — add 7%</option>
-                  <option value="include">VAT included — send prices without VAT (÷ 1.07)</option>
-                  <option value="none">No VAT — leave prices as they are</option>
+              <>
+                <select value={vatMode} onChange={(e) => setVatMode(e.target.value as VatMode)} aria-label="Item price in document (VAT)">
+                  {docHasVat && <option value="document">Document shows VAT separately</option>}
+                  <option value="include">Prices include VAT</option>
+                  <option value="none">No VAT on the document</option>
                 </select>
-                <small className="master-field-help">
+                <small className="so-sum-note">
                   {vatMode === 'include'
-                    ? 'Prices on the document already include 7% VAT — SAP receives each price ÷ 1.07 and adds VAT itself'
-                    : 'Match the customer document — the price sent to SAP is the price on the line'}
-                  {docHasVat && ' · this document already has VAT, so the default is set to "use the document value"'}
+                    ? 'The document prices already include 7% VAT — the system takes it out and sends the highlighted values. SAP then calculates VAT itself.'
+                    : 'The highlighted prices are sent to SAP exactly as on the document. SAP calculates VAT itself.'}
                 </small>
-              </div>
+              </>
             )}
-            <div className="f">
-              <label>Subtotal (Excl. VAT)</label>
-              <input type="text" value={fmt(subtotal)} disabled readOnly />
+          </div>
+
+          <div className="so-sum-col sap-preview-box">
+            <div className="sap-box-title">
+              <i className="fa-solid fa-calculator" aria-hidden="true" /> Preview only — not sent
             </div>
-            <div className="f">
-              <label>{isUsd ? 'VAT (none)' : `VAT (${(GLC_VAT_RATE * 100).toFixed(0)}%)`}</label>
-              <input type="text" value={fmt(vatAmount)} disabled readOnly />
+            <div className="so-sum-row"><span>Subtotal (Excl. VAT)</span><span>{fmt(subtotal)}</span></div>
+            <div className="so-sum-row">
+              <span>{isUsd ? 'VAT (none)' : `VAT ${(GLC_VAT_RATE * 100).toFixed(0)}% — calculated by SAP`}</span>
+              <span>{fmt(vatAmount)}</span>
             </div>
-            <div className="f">
-              <label><b>Grand Total</b></label>
-              <input type="text" value={fmt(grandTotal)} disabled readOnly style={{ fontWeight: 'bold' }} />
+            <div className="so-sum-row total"><span>Grand Total (estimate)</span><span>{fmt(grandTotal)}</span></div>
+            <small className="so-sum-note">SAP calculates VAT and the total itself — only for checking against the customer&apos;s document.</small>
+          </div>
+
+          <div className="so-sum-col sap-sent-box">
+            <div className="sap-box-title">
+              <i className="fa-solid fa-paper-plane" aria-hidden="true" /> Sent to SAP
             </div>
+            {freightTotal > 0 && (
+              <>
+                <div className="so-sum-row"><span>Items</span><b>{fmt(round2(sentItemTotal))}</b></div>
+                <div className="so-sum-row"><span>Freight (ZFHD)</span><b>{fmt(sentFreight)}</b></div>
+              </>
+            )}
+            <div className="so-sum-row total"><span>Net value sent to SAP</span><b>{fmt(sentNet)}</b></div>
           </div>
         </div>
 
@@ -403,6 +477,56 @@ export default function SapSalesOrderEditor({
             {notMatchedCount} line(s) above are not matched — see the Failed panel higher on this page, fix them, then
             re-run Step 2.
           </p>
+        )}
+
+        {freightTotal > 0 && dateGroups.length > 1 && (
+          <div className="so-group-notice" style={{ marginTop: 12, display: 'block' }}>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+              <i className="fa-solid fa-truck" aria-hidden="true" />
+              <b>Freight {fmt(freightTotal)} {header.currency || 'THB'} — which Sales Order carries it?</b>
+              <span className="hint">
+                It is billed once: {hasOwnSplit ? 'shared as below' : 'all on the first Sales Order'}. Share it out if the
+                customer wants the freight on each order.
+              </span>
+              {hasOwnSplit && !posted && !partial && onFreightSplitChange && (
+                <button className="btn sm" onClick={() => { setFreightDraft({}); onFreightSplitChange(null); }}>
+                  All on the first Sales Order
+                </button>
+              )}
+            </div>
+            <table style={{ marginTop: 8 }}>
+              <tbody>
+                {dateGroups.map((g, gi) => (
+                  <tr key={g.key}>
+                    <td>SO {gi + 1}</td>
+                    <td className="hint">{g.date} · {g.count} item(s)</td>
+                    <td style={{ width: 160 }}>
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        disabled={posted || partial || !onFreightSplitChange || !!groupStatus(g, posts).ok}
+                        value={freightDraft[g.key] ?? String(freightPerGroup[g.key] ?? 0)}
+                        onChange={(e) => setFreightDraft((d) => ({ ...d, [g.key]: e.target.value }))}
+                        onBlur={() => {
+                          if (freightDraft[g.key] === undefined || !onFreightSplitChange) return;
+                          const next: Record<string, number> = { ...freightPerGroup };
+                          next[g.key] = Math.max(0, round2(num(freightDraft[g.key])));
+                          setFreightDraft((d) => { const c = { ...d }; delete c[g.key]; return c; });
+                          onFreightSplitChange(next);
+                        }}
+                      />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {Math.abs(freightSplitSum - freightTotal) > 0.009 && (
+              <div style={{ marginTop: 6, color: 'var(--red, #c0392b)' }}>
+                The Sales Orders carry {fmt(freightSplitSum)} but the document's freight is {fmt(freightTotal)} — the customer
+                would be billed {freightSplitSum > freightTotal ? 'more' : 'less'} than the PO.
+              </div>
+            )}
+          </div>
         )}
 
         <SoGroupPanel groups={dateGroups} posts={posts} target="SAP" shipTo={groupShipTo} />
