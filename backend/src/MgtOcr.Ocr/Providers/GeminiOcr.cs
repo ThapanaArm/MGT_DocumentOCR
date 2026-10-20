@@ -268,7 +268,17 @@ public static partial class GeminiOcr
                         var parsedDoc = VisionPrompt.ParseResponse(raw, module, providerId,
                             providerId == "gemini" ? 0.87 : 0.82, rawTextForRecord ?? raw);
                         if (parsedDoc != null)
+                        {
+                            // What this read cost. Gemini bills per token, not per second, so the
+                            // timings alone cannot produce an invoice figure — and until now nothing
+                            // read usageMetadata at all, which is why ocr.Document.OcrTokensIn /
+                            // OcrTokensOut (and therefore OcrCost, and the dashboard's cost tiles)
+                            // have been NULL for every document ever read.
+                            var (tin, tout) = Usage(respText);
+                            parsedDoc.TokensIn = tin;
+                            parsedDoc.TokensOut = tout;
                             return (parsedDoc, null);
+                        }
                         // 200 OK but the body held no parseable JSON. This is NOT a connection problem —
                         // almost always the JSON got TRUNCATED because the model's output-token budget ran
                         // out (thinking models spend part of it on reasoning/thoughtSignature), or the
@@ -387,6 +397,11 @@ public static partial class GeminiOcr
                 Log($"Supporting pages {leadCount + i + 1}-{leadCount + i + chunk.Count} could not be read: {perr}");
                 continue;
             }
+            // Every chunk is a separate billed request, so the document's cost is the sum of them
+            // all. Without this a 30-page bundle would report only the lead request's tokens and
+            // under-state what it actually cost by most of the file.
+            doc.TokensIn = (doc.TokensIn ?? 0) + (part.TokensIn ?? 0);
+            doc.TokensOut = (doc.TokensOut ?? 0) + (part.TokensOut ?? 0);
             MergeTaxRows(doc, part, mainVendorName);
         }
 
@@ -570,6 +585,31 @@ public static partial class GeminiOcr
     // so it's easy to filter the app log (e.g. findstr "[GeminiOcr]").
     private static void Log(string msg) =>
         Console.Error.WriteLine($"[GeminiOcr] {DateTime.Now:yyyy-MM-dd HH:mm:ss} {msg}");
+
+    /// <summary>usageMetadata from a Gemini 200 response — what the request is billed on.
+    ///
+    /// promptTokenCount covers the prompt AND the page images (an image is charged as a block of
+    /// tokens), which is why input dwarfs output on a scanned invoice. cachedContentTokenCount is
+    /// already included in promptTokenCount by Google, so it is NOT added again here; it is only
+    /// worth splitting out if we ever start caching context, which bills at a lower rate.
+    ///
+    /// Returns nulls when the field is absent rather than zeros: a zero would be stored as "this
+    /// read cost nothing", and a missing figure is not the same as a free one.</summary>
+    private static (int? In, int? Out) Usage(string responseJson)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(responseJson);
+            if (!doc.RootElement.TryGetProperty("usageMetadata", out var u)) return (null, null);
+            int? Read(string name) => u.TryGetProperty(name, out var v) && v.TryGetInt32(out var n) ? n : null;
+            return (Read("promptTokenCount"), Read("candidatesTokenCount"));
+        }
+        catch
+        {
+            // Never fail a successful read over its own accounting.
+            return (null, null);
+        }
+    }
 
     // Reads candidates[0].finishReason from a Gemini 200 response so a truncated/blocked result can be
     // reported precisely (e.g. "MAX_TOKENS"). Returns null if the field isn't present.

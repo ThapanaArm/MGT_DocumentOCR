@@ -17,9 +17,9 @@ namespace MgtOcr.Api.Export;
 ///     item numbers (10, 40, 50, 60 on PO 2230000020 — SAP numbers them with gaps, so they are
 ///     read from SAP, never guessed). The Import Supplier Invoices spreadsheet cannot express
 ///     this at all, which is why trade invoices have to go this way.
-///   • delivery costs, duty and fees        -> to_SuplrInvcItemGLAcct, one row per COSTS heading
+///   • delivery costs, duty and fees        -> to_SupplierInvoiceItemGLAcct, one row per COSTS heading
 ///     exactly as the file produces them.
-///   • VAT                                  -> to_SuplrInvcTax, one row per tax invoice with its
+///   • VAT                                  -> to_SupplierInvoiceTax, one row per tax invoice with its
 ///     own code (V1 claimable, D1 deferred), not 7% of everything.
 /// </summary>
 public static class SupplierInvoicePayload
@@ -33,7 +33,8 @@ public static class SupplierInvoicePayload
         string invoicingParty,
         IReadOnlyList<SapPurchaseOrderItem> poItems,
         Dictionary<string, object?>? source = null,
-        string paymentTerms = "")
+        string paymentTerms = "",
+        string vendorFilter = "")
     {
         var header = doc.Get("header") as Dictionary<string, object?> ?? new Dictionary<string, object?>();
         var poRef = PoNumber(header);
@@ -41,9 +42,21 @@ public static class SupplierInvoicePayload
         var businessPlace = Or(header.GetStr("businessPlace").Trim(), HeadOffice);
         var branch = Or(header.GetStr("branch").Trim(), HeadOffice);
 
-        // The same rows the file is built from.
-        var glRows = SapImportSupplierInvoiceExcel.GlRowsFor(doc);
-        var taxRows = DeferredVatReversal.TaxRows(doc);
+        // The same rows the file is built from, narrowed to ONE supplier when the caller is
+        // splitting the document. A shipping bundle carries several suppliers' invoices on one
+        // form (the agent, the port authority, the customs broker), and a SAP supplier invoice
+        // has exactly one invoicing party — so one bundle becomes one document per supplier.
+        var vendor = vendorFilter.Trim();
+        var mainVendor = Or(doc.GetStr("partnerCode").Trim(), header.GetStr("vendorCode").Trim());
+        bool Mine(Dictionary<string, object?> r)
+        {
+            if (vendor.Length == 0) return true;
+            // A row the read could not tag belongs to the document's own supplier.
+            var v = Or(r.GetStr("vendorCode").Trim(), mainVendor);
+            return string.Equals(v, vendor, StringComparison.OrdinalIgnoreCase);
+        }
+        var glRows = SapImportSupplierInvoiceExcel.GlRowsFor(doc).Where(Mine).ToList();
+        var taxRows = DeferredVatReversal.TaxRows(doc).Where(Mine).ToList();
         var isPoKeyed = SapImportSupplierInvoiceExcel.IsPoKeyed(doc);
 
         // Goods-receipt reference. A PO item flagged for GR-based invoice verification (the
@@ -53,18 +66,49 @@ public static class SupplierInvoicePayload
         // screen keeps it in header.refMatDoc; the year defaults to the posting date's.
         var matDoc = header.GetStr("refMatDoc").Trim();
         var matDocYear = Or(header.GetStr("refMatDocYear").Trim(), FiscalYearOf(header));
-        var purOrdRef = isPoKeyed
+        // Assignment and Item Text, as the G/L Account Items grid on screen shows them
+        // ("2230000581" / "KIMEX,INV.2230000581"). Keyed against a purchase order there are no
+        // G/L lines in the payload, so without this the vendor line in SAP came out with both
+        // fields EMPTY — Finance reconciles on Assignment, so it has to be on every line and on
+        // the header, not only on the delivery-cost documents that happen to have G/L rows.
+        var firstGl = glRows.FirstOrDefault(g => !SapImportSupplierInvoiceExcel.IsTaxAccountRow(g));
+        var assignment = Or(firstGl?.GetStr("assignment").Trim() ?? "",
+            Or(header.GetStr("invoiceNo").Trim(), poRef));
+        var itemText = Or(firstGl?.GetStr("itemText").Trim() ?? "", assignment);
+
+        // MIRO's Reference Document Category, the same choice the PO Reference tab shows:
+        // 1 = goods, 2 = planned delivery costs, 3 = both.
+        var refDocType = header.GetStr("refDocType").Trim();
+        var wantsGoods = isPoKeyed || refDocType is "1" or "3";
+        var wantsDeliveryCosts = poRef.Length > 0 && refDocType is "2" or "3";
+
+        var purOrdRef = wantsGoods
             ? PurchaseOrderItems(doc, poRef, poItems, currency, header.GetStr("taxCode").Trim(),
-                matDoc, matDocYear)
+                matDoc, matDocYear, assignment, itemText)
             : [];
 
-        // Costs only: the VAT rows go to to_SuplrInvcTax below (sending them as G/L lines as well
+        // Planned delivery costs. These are NOT G/L lines: the purchase order already booked them
+        // as an accrual when the goods were received (document 5000000005 credits 21229108 Local
+        // Hand&Fr with ten PK 50 lines from a WE goods receipt), and the invoice clears that
+        // accrual by naming the PO's own condition. Posting them as G/L lines instead is what SAP
+        // refused with ME/038 "No direct postings can be made to G/L acct. 21229108" — the account
+        // takes automatic postings only, in the test tenant and in production alike.
+        var deliveryCosts = wantsDeliveryCosts
+            ? DeliveryCostItems(doc, poRef, currency, header.GetStr("taxCode").Trim(),
+                invoicingParty, itemText, Mine, purOrdRef.Count)
+            : [];
+        purOrdRef.AddRange(deliveryCosts);
+
+        // Costs only: the VAT rows go to to_SupplierInvoiceTax below (sending them as G/L lines as well
         // would book the tax twice), and the withholding row is not a G/L line at all.
         var glAccountItems = new List<object>();
         var itemNo = purOrdRef.Count;
         foreach (var g in glRows)
         {
             if (isPoKeyed) break;                                   // the goods come from the PO
+            // Costs sent as planned delivery costs above must not also go out as G/L lines —
+            // the document would carry them twice and SAP would refuse the account anyway.
+            if (deliveryCosts.Count > 0) break;
             if (SapImportSupplierInvoiceExcel.IsTaxAccountRow(g)) continue;
             if (string.Equals(g.GetStr("itemText").Trim(), "WHT", StringComparison.OrdinalIgnoreCase)) continue;
             var amount = Num(g.Get("amount"));
@@ -84,11 +128,20 @@ public static class SupplierInvoicePayload
             });
         }
 
+        // "Calculate Tax" on the Basic Data tab, the same checkbox MIRO has. Ticked, SAP works the
+        // tax out itself from the tax code on each line and the document must NOT carry a tax
+        // node — sending one then is what SAP rejects as "Property 'to_SupplierInvoiceTax' is invalid".
+        // Unticked (the default here), the amounts we read off the tax invoices are sent as they
+        // were reviewed, which is what a Thai input-VAT document needs: one row per tax invoice.
+        var calcTax = header.GetStr("calculateTax").Trim() is { Length: > 0 } ct
+            && !string.Equals(ct, "false", StringComparison.OrdinalIgnoreCase) && ct != "0";
+
         // One row per tax invoice, carrying its own code and base — what the Tax tab holds after
         // somebody reviewed it, rather than a rate applied to the whole document.
         var taxItems = new List<object>();
         foreach (var t in taxRows)
         {
+            if (calcTax) break;
             var amount = Num(t.Get("docCurrencyAmt"));
             if (amount == 0) continue;
             var code = t.GetStr("taxCode").Trim();
@@ -96,7 +149,12 @@ public static class SupplierInvoicePayload
             taxItems.Add(new Dictionary<string, object?>
             {
                 ["TaxCode"] = code,
-                ["TaxBaseAmount"] = F2(Num(t.Get("baseAmount"))),
+                ["DocumentCurrency"] = currency,
+                // A_SupplierInvoiceTaxType calls the base "TaxBaseAmountInTransCrcy". Sent as
+                // "TaxBaseAmount" the whole node failed to deserialize and SAP answered
+                // "Property 'to_SupplierInvoiceTax' is invalid" — a parsing error that names the
+                // node, never the field, which is why it took the service's $metadata to find.
+                ["TaxBaseAmountInTransCrcy"] = F2(Num(t.Get("baseAmount"))),
                 ["TaxAmount"] = F2(amount),
             });
         }
@@ -107,7 +165,9 @@ public static class SupplierInvoicePayload
         // A document whose own total was read and reviewed wins over the sum of its parts: the
         // difference is the rounding SAP books as Purchase Variance, and it can only do that if we
         // state the real invoice total.
-        var stated = Num(header.Get("totalAmount"));
+        // Only when the whole document is being posted: header.totalAmount is the bundle's total,
+        // so using it for one supplier's share would bill that supplier for everybody's costs.
+        var stated = vendor.Length == 0 ? Num(header.Get("totalAmount")) : 0;
         if (stated > 0) gross = stated;
 
         var payload = new Dictionary<string, object?>
@@ -118,7 +178,11 @@ public static class SupplierInvoicePayload
             ["PostingDate"] = SapPayloadBuilder.ODataDate(header.Get("postingDate"))
                 ?? SapPayloadBuilder.ODataDate(header.Get("invoiceDate")),
             ["InvoicingParty"] = invoicingParty,
-            ["SupplierInvoiceIDByInvcgParty"] = Cut(Or(header.GetStr("invoiceNo").Trim(), poRef), 16),
+            // Each supplier's document carries ITS OWN invoice number — the one on its tax
+            // invoice — not the bundle's. Falls back to the document's number, then the PO.
+            ["SupplierInvoiceIDByInvcgParty"] = Cut(
+                Or(vendor.Length > 0 ? InvoiceNoOf(taxRows) : "",
+                   Or(header.GetStr("invoiceNo").Trim(), poRef)), 16),
             ["DocumentCurrency"] = currency,
             ["InvoiceGrossAmount"] = F2(gross),
             ["AccountingDocumentType"] = Or(header.GetStr("sapDocType").Trim(), "RE"),
@@ -126,7 +190,16 @@ public static class SupplierInvoicePayload
             // without it on these company codes.
             ["BusinessPlace"] = businessPlace,
             ["BusinessSectionCode"] = branch,
-            ["TaxIsCalculatedAutomatically"] = false,
+            ["TaxIsCalculatedAutomatically"] = calcTax,
+            // The vendor (payables) line SAP creates takes these from the header: Assignment is
+            // what Finance reconciles on, Header Text is what they read in the line-item list.
+            // BKTXT is 25 characters, ZUONR is 18.
+            ["AssignmentReference"] = Cut(assignment, 18),
+            ["DocumentHeaderText"] = Cut(itemText, 25),
+            // The TEXT on the vendor (payables) line is its own field: DocumentHeaderText lands
+            // on the document header (BKTXT) and leaves the line's own Text (BSEG-SGTXT) empty,
+            // which is what Finance reads in the open-item list. 50 characters.
+            ["SupplierPostingLineItemText"] = Cut(itemText, 50),
             ["TaxDeterminationDate"] = SapPayloadBuilder.ODataDate(header.Get("taxDate"))
                 ?? SapPayloadBuilder.ODataDate(header.Get("invoiceDate")),
             ["TaxReportingDate"] = SapPayloadBuilder.ODataDate(header.Get("taxReportingDate"))
@@ -144,8 +217,8 @@ public static class SupplierInvoicePayload
         if (terms.Length is > 0 and <= 4) payload["PaymentTerms"] = terms;
 
         if (purOrdRef.Count > 0) payload["to_SuplrInvcItemPurOrdRef"] = purOrdRef;
-        if (glAccountItems.Count > 0) payload["to_SuplrInvcItemGLAcct"] = glAccountItems;
-        if (taxItems.Count > 0) payload["to_SuplrInvcTax"] = taxItems;
+        if (glAccountItems.Count > 0) payload["to_SupplierInvoiceItemGLAcct"] = glAccountItems;
+        if (taxItems.Count > 0) payload["to_SupplierInvoiceTax"] = taxItems;
 
         var wht = Num(header.Get("whtAmount"));
         if (wht > 0) payload["_wht"] = new Dictionary<string, object?> { ["WithholdingTaxAmount"] = F2(wht) };
@@ -154,6 +227,34 @@ public static class SupplierInvoicePayload
 
     private static double PoAmount(object item) =>
         Num(((Dictionary<string, object?>)item).Get("SupplierInvoiceItemAmount"));
+
+    /// <summary>This supplier's own invoice number, read off the tax rows the screen's Tax tab
+    /// holds (Tax Invoice No.). Empty when the rows carry none.</summary>
+    private static string InvoiceNoOf(IEnumerable<Dictionary<string, object?>> taxRows) =>
+        taxRows.Select(t => t.GetStr("taxDocNo").Trim()).FirstOrDefault(v => v.Length > 0) ?? "";
+
+    /// <summary>The suppliers this document has to be split into, in the order they appear.
+    ///
+    /// One shipping bundle is one piece of paper but several suppliers' invoices, and SAP takes
+    /// one invoicing party per document. A document with a single supplier returns that one, so
+    /// the caller can treat both cases the same way.</summary>
+    public static List<string> VendorsOf(Dictionary<string, object?> doc)
+    {
+        var header = doc.Get("header") as Dictionary<string, object?> ?? new Dictionary<string, object?>();
+        var main = Or(doc.GetStr("partnerCode").Trim(), header.GetStr("vendorCode").Trim());
+        var seen = new List<string>();
+        void Add(string v)
+        {
+            var code = Or(v.Trim(), main);
+            if (code.Length > 0 && !seen.Contains(code, StringComparer.OrdinalIgnoreCase)) seen.Add(code);
+        }
+        // Keyed against a purchase order there is only ever the one supplier.
+        if (SapImportSupplierInvoiceExcel.IsPoKeyed(doc)) { Add(main); return seen; }
+        foreach (var g in SapImportSupplierInvoiceExcel.GlRowsFor(doc)) Add(g.GetStr("vendorCode"));
+        foreach (var t in DeferredVatReversal.TaxRows(doc)) Add(t.GetStr("vendorCode"));
+        if (seen.Count == 0) Add(main);
+        return seen;
+    }
 
     /// <summary>Does every goods line already name the PO item it bills, assigned by hand on the
     /// PO Reference tab? When it does, the SAP lookup is only a cross-check: the numbers the
@@ -195,9 +296,88 @@ public static class SupplierInvoicePayload
     /// left. A line that matched nothing keeps an EMPTY item number rather than a guessed one —
     /// SAP rejects the document and says which line, which is the right outcome: a wrong item
     /// number posts the invoice against the wrong goods.</summary>
+    /// <summary>The bundle's charges as PLANNED DELIVERY COSTS against the purchase order.
+    ///
+    /// SAP takes them in the same node as the goods, to_SuplrInvcItemPurOrdRef, but keyed by the
+    /// PO's own condition rather than by a G/L account: SuplrInvcDeliveryCostCndnType names the
+    /// condition (ZFRE freight, ZLH1 local handling, ZED1 excise duty, ZFE2 fee, ZINS insurance,
+    /// ZIM1 import tax, ZOVS oversea charge, ZOTH other), and FreightSupplier the supplier that
+    /// condition was entered for, which is how one purchase order's costs reach several invoices.
+    ///
+    /// Both have to be on the line before this can be sent, and neither can be guessed: the
+    /// condition decides which accrual is cleared and the supplier decides who is billed. The
+    /// purchase order carries them, but the read of it is refused in this tenant (403 on
+    /// API_PURCHASEORDER_PROCESS_SRV, SAP_COM_0053), so they are what the person set on the PO
+    /// Reference tab.</summary>
+    private static List<object> DeliveryCostItems(
+        Dictionary<string, object?> doc, string poRef, string headerCurrency, string headerTaxCode,
+        string invoicingParty, string itemText,
+        Func<Dictionary<string, object?>, bool> mine, int startNo)
+    {
+        var result = new List<object>();
+        if (doc.Get("lines") is not System.Collections.IEnumerable lines) return result;
+
+        var missing = new List<string>();
+        var no = startNo;
+        foreach (var raw in lines)
+        {
+            if (raw is not Dictionary<string, object?> l) continue;
+            var ext = l.GetStr("extCode").Trim();
+            if (ext is "VAT" or "WHT") continue;          // those travel on their own nodes
+            var amount = Num(l.Get("amount"));
+            if (amount == 0) continue;
+            var extra = l.Get("extra") as Dictionary<string, object?> ?? new Dictionary<string, object?>();
+            if (!mine(extra)) continue;
+
+            var cndnType = Or(extra.GetStr("deliveryCondType").Trim(), extra.GetStr("condType").Trim());
+            var poItem = extra.GetStr("sapPoItem").Trim();
+            if (cndnType.Length == 0 || poItem.Length == 0)
+            {
+                missing.Add($"\"{Cut(l.GetStr("desc"), 40)}\" ("
+                    + (poItem.Length == 0 ? "ยังไม่ได้ผูกรายการ PO" : $"PO item {poItem}")
+                    + (cndnType.Length == 0 ? ", ยังไม่ได้เลือก Condition" : "") + ")");
+                continue;
+            }
+
+            var row = new Dictionary<string, object?>
+            {
+                ["SupplierInvoiceItem"] = (++no).ToString(),
+                ["PurchaseOrder"] = poRef,
+                ["PurchaseOrderItem"] = poItem,
+                ["DocumentCurrency"] = headerCurrency,
+                ["SupplierInvoiceItemAmount"] = F2(amount),
+                ["SuplrInvcDeliveryCostCndnType"] = cndnType,
+                // A condition entered more than once on the same PO item is told apart by its
+                // step and counter. Sent only when the person has them — on a PO with one
+                // condition of each type per item SAP finds it from the type alone.
+                ["SuplrInvcDeliveryCostCndnStep"] = extra.GetStr("deliveryCondStep").Trim() is { Length: > 0 } st ? st : null,
+                ["SuplrInvcDeliveryCostCndnCount"] = extra.GetStr("deliveryCondCount").Trim() is { Length: > 0 } cnt ? cnt : null,
+                // The supplier the condition names on the purchase order. Omitted when it is the
+                // one being invoiced, which is the ordinary case — SAP then uses the document's
+                // own invoicing party.
+                ["FreightSupplier"] = extra.GetStr("vendorCode").Trim() is { Length: > 0 } fs
+                    && !string.Equals(fs, invoicingParty.Trim(), StringComparison.OrdinalIgnoreCase) ? fs : null,
+                ["TaxCode"] = Or(extra.GetStr("taxCode").Trim(), headerTaxCode),
+                ["SupplierInvoiceItemText"] = Cut(Or(l.GetStr("desc").Trim(), itemText), 50),
+                ["_deliveryCost"] = true,
+            };
+            result.Add(row);
+        }
+
+        if (missing.Count > 0)
+            throw new MgtOcr.Core.HttpApiException(400,
+                $"ค่าใช้จ่ายที่จะตัดกับ PO {poRef} ยังไม่ครบ — แต่ละบรรทัดต้องมีทั้ง **รายการใน PO** และ "
+                + "**Condition** (ZFRE / ZLH1 / ZED1 / ZFE2 / ZINS / ZIM1 / ZOVS / ZOTH) ที่ตั้งไว้ใน PO "
+                + "เพราะ SAP ใช้ condition เป็นตัวบอกว่าจะไปล้าง accrual ตัวไหน เดาแทนไม่ได้\n\n"
+                + "บรรทัดที่ยังขาด: " + string.Join(" · ", missing));
+
+        return result;
+    }
+
     private static List<object> PurchaseOrderItems(
         Dictionary<string, object?> doc, string poRef, IReadOnlyList<SapPurchaseOrderItem> poItems,
-        string headerCurrency, string headerTaxCode, string matDoc, string matDocYear)
+        string headerCurrency, string headerTaxCode, string matDoc, string matDocYear,
+        string assignment, string itemText)
     {
         var result = new List<object>();
         if (doc.Get("lines") is not System.Collections.IEnumerable lines) return result;
@@ -261,6 +441,10 @@ public static class SupplierInvoicePayload
                 ["ReferenceDocument"] = matDoc.Length > 0 ? matDoc : null,
                 ["ReferenceDocumentFiscalYear"] = matDoc.Length > 0 ? matDocYear : null,
                 ["ReferenceDocumentItem"] = matDoc.Length > 0 ? GrItem(l, no) : null,
+                // Item Text only: A_SuplrInvcItemPurOrdRefType has SupplierInvoiceItemText but
+                // NO AssignmentReference (unlike the G/L item), so the assignment travels on the
+                // header instead and SAP copies it onto the vendor line.
+                ["SupplierInvoiceItemText"] = Cut(itemText, 50),
                 ["_material"] = match?.Material ?? "",
                 ["_matchedBy"] = assigned.Length > 0 ? "assigned on screen"
                     : match == null ? "not matched" : "material/lot code",

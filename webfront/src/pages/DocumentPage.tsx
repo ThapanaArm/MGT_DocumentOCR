@@ -399,6 +399,21 @@ return moveDutyToGl({ ...d, header: { ...d.header, glItems: items } });
 // only the document-level default. Change this constant when Finance settles on another code.
 const HEADER_TAX_CODE = 'VX';
 
+/* Which input-tax code a document carries, decided by the SAP vendor code — per Finance:
+     vendor 1xxxxxx  = a Thai supplier  -> V1, input VAT 7%, and SAP works the tax out itself
+                                           ("Calculate Tax" ticked, as MIRO does for a domestic
+                                           invoice with one rate)
+     vendor 2xxxxxx  = an overseas supplier -> VX, no input VAT on the invoice at all; the import
+                                           VAT comes separately on the Customs receipt
+   Unknown or unmatched vendor: left alone rather than guessed, since the wrong code either books
+   input VAT that does not exist or drops VAT the company is entitled to claim. */
+function taxDefaultsForVendor(vendorCode: string): { taxCode: string; calculateTax: string } | null {
+  const code = vendorCode.trim();
+  if (/^1\d/.test(code)) return { taxCode: 'V1', calculateTax: 'X' };
+  if (/^2\d/.test(code)) return { taxCode: HEADER_TAX_CODE, calculateTax: '' };
+  return null;
+}
+
 // Business Place = branch for Thai tax purposes. Per the SAP training material both company
 // codes (1000 MGT, 2000 GLC) have only Head Office = 0000, so it is filled in rather than left
 // for the user; a branch document can still be changed by hand.
@@ -481,7 +496,12 @@ function seedRefDocument(d: DocModel): DocModel {
   // The goods-receipt material document, needed whenever the PO item uses GR-based invoice
   // verification. The bundle is filed under it — "A-MatDoc_5000002095_2230000581.pdf" — so the
   // number is taken from the file name rather than typed again.
-  if (!String(h.refMatDoc ?? '').trim()) {
+  // ...but only where a goods receipt can even be referenced. A domestic purchase order
+  // (vendor 1xxxxxx) is not GR-based here, and SAP refuses the invoice outright when the fields
+  // are filled anyway: "Only fill fields 'ReferenceDocument, -FiscalYear, -Item' ... if GR-based
+  // IV is active". So the number is seeded for overseas purchases only, where it is required.
+  const vendorForGr = String((d as Record<string, any>).partnerCode ?? h.vendorCode ?? '');
+  if (!String(h.refMatDoc ?? '').trim() && !/^1\d/.test(vendorForGr.trim())) {
     const m = /MatDoc[_\s-]*(\d{6,12})/i.exec(String(d.fileName ?? ''));
     if (m) next.refMatDoc = m[1];
   }
@@ -529,14 +549,26 @@ function seedHeaderTaxCode(d: DocModel): DocModel {
   // Per Finance, the vendor branch on these documents is always head office, so an empty Branch
   // is filled rather than left for the person to type the same four characters every time.
   const branch = String(d.header.branch ?? '').trim() || HEAD_OFFICE_BUSINESS_PLACE;
-  if (
-    d.header.taxCode === HEADER_TAX_CODE
-    && d.header.businessPlace === businessPlace
-    && d.header.branch === branch
-  ) {
-    return d;
+
+  // The tax code follows the vendor, and it is SEEDED, not forced: this used to write VX over
+  // the header on every load, so a domestic invoice silently went out as exempt and the input
+  // VAT vanished. A code already on the document — read, or chosen by the person — stays.
+  // ...and only on a GOODS document. A delivery bundle carries one tax invoice per supplier —
+  // some deferred (D1, the tax invoice is not in hand yet), some input (V1) — and its cost lines
+  // are exempt (VX) because the tax lives on the Tax tab, one row per invoice. Letting the
+  // "vendor 1xxxxxx = V1" rule touch those would overwrite codes the read got right.
+  const vendor = String((d as Record<string, any>).partnerCode ?? d.header.vendorCode ?? '');
+  const byVendor = isInventoryPoDoc(d) ? taxDefaultsForVendor(vendor) : null;
+  const next: Record<string, any> = {};
+  if (!String(d.header.taxCode ?? '').trim()) {
+    next.taxCode = byVendor?.taxCode ?? HEADER_TAX_CODE;
+    // Only alongside a tax code we just decided: "Calculate Tax" changes what SAP posts.
+    if (byVendor) next.calculateTax = byVendor.calculateTax;
   }
-  return { ...d, header: { ...d.header, taxCode: HEADER_TAX_CODE, businessPlace, branch } };
+  if (d.header.businessPlace !== businessPlace) next.businessPlace = businessPlace;
+  if (d.header.branch !== branch) next.branch = branch;
+  if (!Object.keys(next).length) return d;
+  return { ...d, header: { ...d.header, ...next } };
 }
 
 // Branch is four digits, head office 0000 — per Finance. A five-digit value (an older document,
@@ -805,6 +837,10 @@ export default function DocumentPage() {
   // The PO's own header, kept so the screen can say whose purchase order this is before the
   // invoice is sent against it.
   const [poSapHead, setPoSapHead] = useState<SapPurchaseOrderHead | null>(null);
+  // The goods-receipt boxes are hidden on a domestic purchase, which is not GR-based here. Kept
+  // one click away rather than removed, because GR-based IV is a per-PO-item setting: a domestic
+  // PO could be flagged for it one day, and then the invoice cannot be posted without them.
+  const [showGrFields, setShowGrFields] = useState(false);
   const [poAssigning, setPoAssigning] = useState(false);
   // Why the document could not be loaded, shown in place of a bare "Failed to load document".
   const [failedReason, setFailedReason] = useState('');
@@ -1182,6 +1218,27 @@ export default function DocumentPage() {
       if (!poNumberOf(h)) {
         out.push('ยังไม่มีเลขใบสั่งซื้อ — กรอกช่อง Purchasing Order ในแท็บ PO Reference');
       }
+      // The tax code has to match the kind of supplier, because nothing downstream can tell the
+      // difference once it is posted: a Thai supplier (1xxxxxx) charges VAT and the document
+      // needs V1 with Calculate Tax ticked; an overseas supplier (2xxxxxx) charges none and the
+      // document is VX. The wrong one either invents input VAT or throws away a claim.
+      const vendorCode = String(map?.header.vendor.code ?? '').trim();
+      // Goods only, for the reason above: on a delivery bundle each tax invoice carries its own
+      // code and the cost lines are exempt, so comparing the header against the vendor's rule
+      // would stop a document that is perfectly correct.
+      const want = isInventoryPoDoc(doc) ? taxDefaultsForVendor(vendorCode) : null;
+      const haveCode = String(h.taxCode ?? '').trim().toUpperCase();
+      const haveCalc = String(h.calculateTax ?? '').trim().toUpperCase() === 'X';
+      if (want && haveCode && haveCode !== want.taxCode) {
+        out.push(
+          `ผู้ขาย ${vendorCode} ควรใช้ภาษี ${want.taxCode}`
+            + `${want.taxCode === 'V1' ? ' (ในประเทศ มี VAT 7%)' : ' (ต่างประเทศ ไม่มี VAT)'}`
+            + ` แต่เอกสารตั้งไว้เป็น ${haveCode}`,
+        );
+      }
+      if (want?.taxCode === 'V1' && haveCode === 'V1' && !haveCalc) {
+        out.push('ซื้อในประเทศ (V1) ต้องติ๊ก Calculate Tax ในแท็บ Basic Data');
+      }
       // The purchase order belongs to a supplier of its own. Invoicing party 2000236 against
       // PO 2230000020 (Kimex 2000014) is a different Kimex record, and SAP refuses the document
       // — better to say so here than after the whole screen is filled in.
@@ -1307,12 +1364,16 @@ export default function DocumentPage() {
     kind: 'input-vat' | 'journal-voucher' | 'sap-import' | 'journal-entry',
     fileName: string,
     toast: string,
+    // Appended to the endpoint as-is (already encoded). Only the SAP import file uses it, to pass
+    // the screen's "Vendor in this document" selection — the export reads the database, so without
+    // it the file came back holding every supplier in the bundle no matter what was selected.
+    query = '',
   ) =>
     guard(async () => {
       setExporting(true);
       try {
         setExportOpen(false);
-        const url = await fetchBlobUrl(`/api/documents/${doc.docId}/export/${kind}`);
+        const url = await fetchBlobUrl(`/api/documents/${doc.docId}/export/${kind}${query}`);
         // Guard against saving something that is not a workbook. This bit once: the API route was
         // missing from the running build, the SPA fallback answered with index.html under a plain
         // 200, and the browser wrote that HTML to disk as an .xlsx that Excel then refused to
@@ -1373,8 +1434,13 @@ export default function DocumentPage() {
   const exportSapImport = () =>
     downloadExport(
       'sap-import',
-      `SapImportSupplierInvoice_${doc.docId}.xlsx`,
-      'SAP import file downloaded',
+      vendorFilter
+        ? `SapImportSupplierInvoice_${doc.docId}_${vendorFilter}.xlsx`
+        : `SapImportSupplierInvoice_${doc.docId}.xlsx`,
+      vendorFilter
+        ? `SAP import file for vendor ${vendorFilter} downloaded`
+        : 'SAP import file downloaded',
+      vendorFilter ? `?vendor=${encodeURIComponent(vendorFilter)}` : '',
     );
 
   const useSapVendor = (bp: SapBusinessPartner) =>
@@ -2028,6 +2094,45 @@ export default function DocumentPage() {
     return [...totals.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? '';
   })();
 
+  /* What the Send will actually create: ONE SAP supplier invoice per supplier on the bundle.
+     The form carries the agent's, the port authority's and the broker's invoices together, and
+     SAP takes one invoicing party per document — so the confirmation lists them rather than
+     showing the bundle's own total, which belongs to nobody. */
+  const sendBreakdown = (() => {
+    if (doc.module !== 'AP' && doc.module !== 'II') return [];
+    const codeOf = (l: DocLine) => String(l.extra?.vendorCode ?? '').trim();
+    const isTax = (l: DocLine) => ['VAT', 'WHT', 'DUTY'].includes(String(l.extCode ?? ''));
+    const main = mainVendorCode;
+    const rows = new Map<string, { cost: number; vat: number; duty: number; wht: number; lines: number; invoiceNo: string }>();
+    const of = (code: string) => {
+      const key = code || main;
+      if (!rows.has(key)) rows.set(key, { cost: 0, vat: 0, duty: 0, wht: 0, lines: 0, invoiceNo: '' });
+      return rows.get(key)!;
+    };
+    for (const l of doc.lines || []) {
+      const amt = Number(l.amount) || 0;
+      const r = of(codeOf(l));
+      if (!isTax(l)) { r.cost += amt; r.lines += 1; continue; }
+      if (l.extCode === 'VAT') r.vat += amt;
+      else if (l.extCode === 'DUTY') r.duty += amt;
+      else r.wht += amt;
+    }
+    // Each supplier's own invoice number comes off its tax row (Tax Invoice No.).
+    for (const t of (h.taxItems as Record<string, any>[] | undefined) || []) {
+      const r = of(String(t.vendorCode ?? '').trim());
+      if (!r.invoiceNo) r.invoiceNo = String(t.taxDocNo ?? '').trim();
+    }
+    return [...rows.entries()]
+      .filter(([, r]) => r.cost !== 0 || r.vat !== 0 || r.duty !== 0)
+      .map(([code, r]) => ({
+        code,
+        name: code === main ? String(map?.header.vendor.text ?? '') : '',
+        invoiceNo: r.invoiceNo || (code === main ? String(h.invoiceNo ?? '') : ''),
+        lines: r.lines,
+        total: r.cost + r.vat + r.duty,
+      }));
+  })();
+
   const vendorTotals = (() => {
     if (!vendorFilter || (doc.module !== 'AP' && doc.module !== 'II')) return null;
     const codeOf = (l: DocLine) => String(l.extra?.vendorCode ?? '').trim();
@@ -2148,6 +2253,27 @@ export default function DocumentPage() {
       } finally {
         setPoAssigning(false);
       }
+    });
+
+  /* Fills every unassigned line with the item number SAP would use if the purchase order numbers
+     its items 10, 20, 30 ... with no gaps — the same arithmetic the Invoice Item column already
+     shows, because both are "position x 10".
+
+     This is a GUESS, not a read. PO 2230000022 happens to run 10..110 straight through, but
+     2230000020 runs 10, 40, 50, 60: items deleted while the PO was being written leave holes, and
+     on a PO like that every number this fills in is wrong. SAP answers a wrong number with
+     "M8/036 PO item 00001 does not exist", which names neither the line nor the reason.
+
+     So it is a button the person presses, never something that happens on load: filling saved
+     fields by itself would make invented numbers indistinguishable from checked ones. Once
+     SAP_COM_0053 is open, "Assign all" reads the real items and this stops being needed. */
+  const autoNumberPoItems = () =>
+    guard(async () => {
+      (doc.lines || []).forEach((l, i) => {
+        if (!String((l.extra as Record<string, unknown> | undefined)?.sapPoItem ?? '').trim()) {
+          editLineExtra(i, 'sapPoItem', String((i + 1) * 10));
+        }
+      });
     });
 
   const unassignAllPo = () =>
@@ -2622,7 +2748,28 @@ export default function DocumentPage() {
                       delivery being invoiced (13,751.73). The goods list is read-only here: SAP
                       pulls the PO's own items when it posts, so this side is for checking that the
                       invoice and the purchase order agree. */}
-                  {String(h.refDocument ?? '').trim() === 'PO' && (
+                  {String(h.refDocument ?? '').trim() === 'PO'
+                    && (() => {
+                      // Domestic vendor (1xxxxxx) = no GR reference, unless someone asks for it.
+                      const dom = taxDefaultsForVendor(String(map?.header.vendor.code ?? ''))?.taxCode === 'V1';
+                      return !dom || showGrFields || String(h.refMatDoc ?? '').trim().length > 0;
+                    })() === false ? (
+                    <p className="hint" style={{ margin: '0 0 12px' }}>
+                      ซื้อในประเทศ — ไม่ต้องอ้างใบรับของ{' '}
+                      <button
+                        className="btn sm ghost"
+                        onClick={() => setShowGrFields(true)}
+                        style={{ marginLeft: 6 }}
+                      >
+                        PO นี้เปิด GR-Based IV?
+                      </button>
+                    </p>
+                  ) : null}
+                  {String(h.refDocument ?? '').trim() === 'PO'
+                    && (() => {
+                      const dom = taxDefaultsForVendor(String(map?.header.vendor.code ?? ''))?.taxCode === 'V1';
+                      return !dom || showGrFields || String(h.refMatDoc ?? '').trim().length > 0;
+                    })() && (
                     /* GR-based invoice verification: a stock PO item can only be invoiced
                        against the goods receipt, and SAP asks for the material document by
                        number, fiscal year and item (M8/375). Left empty when the PO item does
@@ -2670,6 +2817,7 @@ export default function DocumentPage() {
                           : (i, code) => editLineExtra(i, 'taxCode', code)
                       }
                       onAssignAll={usePoCopy || locked ? undefined : assignFromPo}
+                      onAutoNumber={usePoCopy || locked ? undefined : autoNumberPoItems}
                       onUnassignAll={unassignAllPo}
                       assigning={poAssigning}
                       sapItemCount={poSapItems.length}
@@ -2685,6 +2833,18 @@ export default function DocumentPage() {
                         usePoCopy || locked
                           ? undefined
                           : (i, item) => editLineExtra(i, 'sapGrItem', item)
+                      }
+                      showCondition={
+                        // Planned delivery costs clear the accrual the goods receipt made under a
+                        // PO condition, so each charge has to name its condition. The purchase
+                        // order holds it, but the read of the PO is refused in this tenant
+                        // (403, SAP_COM_0053), so it is picked here.
+                        ['2', '3'].includes(String(h.refDocType ?? '').trim())
+                      }
+                      onCondType={
+                        usePoCopy || locked
+                          ? undefined
+                          : (i, code) => editLineExtra(i, 'deliveryCondType', code)
                       }
                     />
                   ) : (
@@ -2912,6 +3072,44 @@ export default function DocumentPage() {
                           <td>{h.poNo || ''}</td>
                         </tr>
                       </>
+                    ) : sendBreakdown.length > 1 ? (
+                      // Several suppliers on one bundle: one SAP document each, listed here so
+                      // nobody presses Send thinking it is a single invoice.
+                      <tr>
+                        <th style={{ verticalAlign: 'top' }}>
+                          จะสร้าง {sendBreakdown.length} เอกสาร
+                        </th>
+                        <td>
+                          <table style={{ minWidth: 'auto' }}>
+                            <thead>
+                              <tr>
+                                <th>Vendor</th>
+                                <th>Invoice No.</th>
+                                <th style={{ textAlign: 'right' }}>Rows</th>
+                                <th style={{ textAlign: 'right' }}>Total</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {sendBreakdown.map((v) => (
+                                <tr key={v.code}>
+                                  <td>{v.code}{v.name ? ` — ${v.name}` : ''}</td>
+                                  <td>{v.invoiceNo || <span className="hint">—</span>}</td>
+                                  <td style={{ textAlign: 'right' }}>{v.lines}</td>
+                                  <td style={{ textAlign: 'right' }}>{fmt(v.total)}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                            <tfoot>
+                              <tr>
+                                <td colSpan={3} style={{ textAlign: 'right' }}><b>รวม</b></td>
+                                <td style={{ textAlign: 'right' }}>
+                                  <b>{fmt(sendBreakdown.reduce((a, v) => a + v.total, 0))} {h.currency || 'THB'}</b>
+                                </td>
+                              </tr>
+                            </tfoot>
+                          </table>
+                        </td>
+                      </tr>
                     ) : (
                       <>
                         <tr>
@@ -2937,18 +3135,22 @@ export default function DocumentPage() {
                         )}
                       </>
                     )}
-                    <tr>
-                      <th>Number of Items</th>
-                      <td>{doc.lines.length} rows</td>
-                    </tr>
-                    <tr>
-                      <th>Total</th>
-                      <td>
-                        <b>
-                          {fmt(h.totalAmount)} {h.currency || 'THB'}
-                        </b>
-                      </td>
-                    </tr>
+                    {sendBreakdown.length > 1 ? null : (
+                      <tr>
+                        <th>Number of Items</th>
+                        <td>{doc.lines.length} rows</td>
+                      </tr>
+                    )}
+                    {sendBreakdown.length > 1 ? null : (
+                      <tr>
+                        <th>Total</th>
+                        <td>
+                          <b>
+                            {fmt(h.totalAmount)} {h.currency || 'THB'}
+                          </b>
+                        </td>
+                      </tr>
+                    )}
                   </tbody>
                 </table>
               </div>

@@ -203,6 +203,7 @@ builder.Services.AddSingleton<MgtOcr.Api.Auth.SingleSessionService>();
 // Batch OCR queue: a job table + background worker that reads uploaded files off the main request
 // thread (many files at once would otherwise time out the upload request and hit the OCR rate limit).
 builder.Services.AddSingleton<OcrJobRepository>();
+builder.Services.AddSingleton<JobLogRepository>();
 builder.Services.AddSingleton<MgtOcr.Api.Services.DocumentIngestService>();
 builder.Services.AddHostedService<MgtOcr.Api.Services.OcrQueueWorker>();
 // Upload lifecycle: archive posted documents' files to SharePoint, then remove the local copy.

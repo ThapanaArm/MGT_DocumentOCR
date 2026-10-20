@@ -8,7 +8,7 @@ namespace MgtOcr.Api.Services;
 // queue worker. Mirrors DocumentsController.Upload's core: read the saved file, route AP->AP/II by
 // PO number, then create the document row. Password prompting stays in the sync endpoint; the batch
 // path rejects encrypted PDFs before enqueuing, so `password` is normally null here.
-public class DocumentIngestService(OcrEngine ocr, DocumentRepository repo)
+public class DocumentIngestService(OcrEngine ocr, DocumentRepository repo, JobLogRepository jobs)
 {
     public async Task<(int DocId, string Module, string? Note)> IngestAsync(
         string module, string storedPath, string fileName, int size, string engine,
@@ -19,7 +19,22 @@ public class DocumentIngestService(OcrEngine ocr, DocumentRepository repo)
         // Locked to Gemini for the auto/empty path (per Megachem), same as the sync upload.
         var uploadEngine = "gemini"; // Gemini only (Megachem, 7 Oct 2026), whatever engine was requested
         var t0 = DateTime.UtcNow;
-        var pd = await ocr.ExtractAsync(storedPath, mod, uploadEngine, password, salesOrg, apDocCategory);
+        // ocr.JobLog: the clock starts BEFORE the call, so a read that fails or times out still
+        // leaves a row saying when it began and how long it ran. OcrDurationMs on the document
+        // only ever records a read that finished.
+        var jobNumber = await jobs.NextJobNumberAsync();
+        var job = await jobs.StartAsync(jobNumber, "OCR", module: mod, provider: uploadEngine,
+            fileName: fileName, fileSize: size, performedBy: user);
+        ParsedDocument pd;
+        try
+        {
+            pd = await ocr.ExtractAsync(storedPath, mod, uploadEngine, password, salesOrg, apDocCategory);
+        }
+        catch (Exception ex)
+        {
+            await jobs.FinishAsync(job, "FAILED", message: ex.Message);
+            throw;
+        }
         var durationMs = (int)(DateTime.UtcNow - t0).TotalMilliseconds;
         // Expense is always an Incoming Invoice (FB60, no PO). Its bundles carry a FORM SHIPPING
         // EXPENSE sheet whose "PO. NO." (the goods PO the costs relate to) would otherwise be read
@@ -55,6 +70,10 @@ public class DocumentIngestService(OcrEngine ocr, DocumentRepository repo)
         }
         var ext = ExtConversion.ToExtDict(pd);
         var docId = await repo.CreateDocumentAsync(mod, ext, fileName, storedPath, size, user, apDocCategory, durationMs, salesOrg);
+        // DocId is only known now, after the row exists — so it is stamped on the job at the end.
+        // The module can change too: AP/II routing above is decided by what the read found.
+        await jobs.FinishAsync(job, "SUCCESS", docId: docId, tokensIn: pd.TokensIn, tokensOut: pd.TokensOut,
+            cost: pd.Cost, costCurrency: pd.CostCurrency, provider: pd.Provider);
         return (docId, mod, pd.Note);
     }
 }

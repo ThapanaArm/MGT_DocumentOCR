@@ -23,7 +23,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     SapClient sap, SapBusinessPartnerClient sapBp, AppConfig config, ICurrentUserAccessor currentUser,
     OcrJobRepository jobs, MgtOcr.Api.Services.DocumentIngestService ingest,
     SapProductClient sapProduct, SapPurchaseOrderClient sapPo, FileArchiveRepository archive, MgtOcr.Api.Services.GraphArchiveClient graph,
-    SalesOrderPostRepository soPosts, ILogger<DocumentsController> logger) : ControllerBase
+    SalesOrderPostRepository soPosts, JobLogRepository jobLog, ILogger<DocumentsController> logger) : ControllerBase
 {
     // Who to stamp on CreatedBy / PerformedBy / PostedBy.
     //
@@ -452,9 +452,25 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         var reocrEngine = "gemini"; // Gemini only (Megachem, 7 Oct 2026)
         // Re-reading follows the company the document is already filed under, so a second read
         // never silently swaps MGT's rules for GLC's (CompanyRules treats an empty value as GLC).
-        var pd = await ocr.ExtractAsync(storedPath, module, reocrEngine, reocrPw, await repo.GetCompanyAsync(docId),
-            doc.GetStr("apDocCategory"));
+        // ocr.JobLog: a re-read is a NEW run of this document, so it opens its own JobNumber —
+        // the first read's tokens are already billed and must not be merged into this one.
+        var reocrJobNumber = await jobLog.NextJobNumberAsync();
+        var reocrJob = await jobLog.StartAsync(reocrJobNumber, "OCR", docId: docId, module: module,
+            provider: reocrEngine, fileName: fileNameOnDisk, performedBy: await ActorAsync());
+        ParsedDocument pd;
+        try
+        {
+            pd = await ocr.ExtractAsync(storedPath, module, reocrEngine, reocrPw, await repo.GetCompanyAsync(docId),
+                doc.GetStr("apDocCategory"));
+        }
+        catch (Exception ex)
+        {
+            await jobLog.FinishAsync(reocrJob, "FAILED", message: ex.Message);
+            throw;
+        }
         var durationMs = (int)(DateTime.UtcNow - t0).TotalMilliseconds;
+        await jobLog.FinishAsync(reocrJob, "SUCCESS", tokensIn: pd.TokensIn, tokensOut: pd.TokensOut,
+            cost: pd.Cost, costCurrency: pd.CostCurrency, provider: pd.Provider);
         var filled = await repo.ApplyVendorMemoryAsync(module, pd.Header);
         if (filled.Count > 0)
         {
@@ -968,7 +984,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     // would send, but as a file, so Finance can read it before anything reaches SAP — the two
     // routes the user asked for (review-by-Excel, or post straight through the API).
     [HttpGet("api/documents/{docId:int}/export/sap-import")]
-    public async Task<IActionResult> ExportSapImport(int docId)
+    public async Task<IActionResult> ExportSapImport(int docId, [FromQuery] string? vendor = null)
     {
         var doc = await repo.GetDocumentAsync(docId);
         var module = doc.GetStr("module");
@@ -986,13 +1002,22 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             paymentTerms: await PaymentTermsMasterAsync(),
             // Supplier code -> name, so each invoice in the file carries the name of ITS own
             // supplier in the item text (the customs rows are not the shipping agent's).
-            vendorNames: await VendorNamesAsync());
+            vendorNames: await VendorNamesAsync(),
+            // The screen's "Vendor in this document" selection. Left null the file holds every
+            // supplier in the bundle, numbered as separate invoices inside it — which is what
+            // came back when the dropdown was still frontend-only and never reached here.
+            vendorFilter: vendor);
 
         await repo.LogAuditAsync(docId, module, "EXPORT", await ActorAsync(),
-            detail: "Exported the SAP import file", fileName: doc.GetStr("fileName"));
+            detail: string.IsNullOrWhiteSpace(vendor)
+                ? "Exported the SAP import file"
+                : $"Exported the SAP import file for vendor {vendor.Trim()}",
+            fileName: doc.GetStr("fileName"));
 
         return File(bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            $"SapImportSupplierInvoice_{docId}.xlsx");
+            string.IsNullOrWhiteSpace(vendor)
+                ? $"SapImportSupplierInvoice_{docId}.xlsx"
+                : $"SapImportSupplierInvoice_{docId}_{vendor.Trim()}.xlsx");
     }
 
     /// <summary>Supplier code -> supplier name, both the internal code and the SAP one, so a row
@@ -1366,7 +1391,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     /// A purchase-order lookup that fails then stops the post; on the preview route it does not,
     /// so the screen can still show what would be sent (and say which items are unmatched) while
     /// the gateway authorization for API_PURCHASEORDER_PROCESS_SRV is still missing.</param>
-    private async Task<(Dictionary<string, object?> Payload, Dictionary<string, object?> Res)> PayloadForAsync(Dictionary<string, object?> doc, Dictionary<string, object?>? manual = null, bool forPost = false)
+    private async Task<(List<Dictionary<string, object?>> Payloads, Dictionary<string, object?> Res)> PayloadForAsync(Dictionary<string, object?> doc, Dictionary<string, object?>? manual = null, bool forPost = false)
     {
         var module = doc.GetStr("module");
         var header = (Dictionary<string, object?>)doc["header"]!;
@@ -1442,13 +1467,27 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             // to get the key; the vendor master's own term stands in when that finds nothing.
             var apTerms = (await PaymentTermsMasterAsync()).Resolve(header.GetStr("paymentTerms"));
             if (apTerms.Length == 0) apTerms = pm.GetStr("PaymentTerms").Trim();
-            var apPayload = Export.SupplierInvoicePayload.Build(
-                doc, apCompany, party, poItems, source, apTerms);
-            return (apPayload, res);
+
+            // One SAP document per supplier. A shipping bundle is one piece of paper carrying the
+            // agent's, the port authority's and the broker's invoices at once, and SAP takes one
+            // invoicing party per document — so the bundle is split here rather than posting
+            // everybody's costs against whichever supplier happened to be on the header.
+            var vendors = Export.SupplierInvoicePayload.VendorsOf(doc);
+            if (vendors.Count <= 1)
+            {
+                var only = Export.SupplierInvoicePayload.Build(
+                    doc, apCompany, party, poItems, source, apTerms);
+                return ([only], res);
+            }
+            var split = vendors
+                .Select(v => Export.SupplierInvoicePayload.Build(
+                    doc, apCompany, v, poItems, source, apTerms, v))
+                .ToList();
+            return (split, res);
         }
 
         var payload = SapPayloadBuilder.BuildPayload(config, module, header, lines, res, pm, source);
-        return (payload, res);
+        return ([payload], res);
     }
 
     // stored_manual(): reconstructs the manual-override shape from what's already confirmed in the
@@ -1474,8 +1513,15 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     public async Task<IActionResult> PreviewPayload(int docId)
     {
         var doc = await repo.GetDocumentAsync(docId);
-        var (payload, res) = await PayloadForAsync(doc);
-        return Ok(new { payload, pass = res.Get("pass"), errors = res["errors"] });
+        var (payloads, res) = await PayloadForAsync(doc);
+        // One payload stays one object, so the existing viewer is unchanged; a bundle that splits
+        // into several supplier invoices shows them all.
+        return Ok(new
+        {
+            payload = payloads.Count == 1 ? payloads[0] : (object)payloads,
+            pass = res.Get("pass"),
+            errors = res["errors"],
+        });
     }
 
     [HttpPost("api/documents/{docId:int}/post")]
@@ -1485,37 +1531,82 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         var doc = await repo.GetDocumentAsync(docId);
         if (doc.GetStr("status") == "POSTED") throw new HttpApiException(400, $"This document has already been posted to SAP ({doc.GetStr("sapDocNo")})");
         if (doc.GetStr("status") != "MAPPED" || doc.GetStr("mapStatus") != "PASS") throw new HttpApiException(400, "Mapping must pass before posting to SAP");
-        var (payload, res) = await PayloadForAsync(doc, forPost: true);
+        var (payloads, res) = await PayloadForAsync(doc, forPost: true);
         if (res.Get("pass") is not true)
             throw new HttpApiException(400, $"Mapping has not passed — {((List<Dictionary<string, object?>>)res["errors"]!).Count} missing item(s)");
 
         var user = await ActorAsync();
         var module = doc.GetStr("module");
+        // A supplier invoice is an accounting document. With no service URL configured, SapClient
+        // falls back to simulation and answers with an INVENTED number ("51" + six digits), which
+        // the screen then shows as "Sent to SAP successfully" — and the number exists nowhere.
+        // That is fine for the Sales Order flow in development; it is not fine here, so this route
+        // says plainly that it is not configured instead of pretending.
+        if (module is "AP" or "II" && string.IsNullOrWhiteSpace(config.SapSupplierInvoiceBaseUrl))
+        {
+            throw new HttpApiException(400,
+                "ยังไม่ได้ตั้งค่าปลายทางของ Supplier Invoice (Sap:SupplierInvoice:BaseUrl_Dev ใน appsettings.json) "
+                + "— ถ้าส่งตอนนี้ระบบจะสร้างเลขเอกสารปลอมที่ไม่มีอยู่จริงใน SAP");
+        }
         var docT = DocumentTables.For(module).Doc;
         var companyCode = await CompanyNameForPostAsync(module, (Dictionary<string, object?>)doc["header"]!);
-        var r = await sap.PostAsync(module, payload);
+        // One POST per supplier, in order, each logged on its own. They are NOT one transaction in
+        // SAP — a bundle whose second supplier is refused leaves the first one posted, which is
+        // why every attempt gets its own PostLog row and the message below names what went where.
+        var results = new List<(Dictionary<string, object?> Payload, MgtOcr.Sap.SapPostResult Result)>();
+        // ocr.JobLog: one row for the whole send, grouped under the run that read this document,
+        // so the timeline reads "started reading 09:14, posted to SAP 16:48" on one line. The
+        // per-supplier detail stays in ocr.PostLog, which already has a row per attempt.
+        var postJobNumber = await jobLog.JobNumberForDocumentAsync(docId);
+        var postJob = await jobLog.StartAsync(postJobNumber, "SAP_POST", docId: docId, module: module,
+            provider: "sap", fileName: doc.GetStr("fileName"), performedBy: user);
+        foreach (var p in payloads)
+        {
+            // Stop at the first refusal: posting the rest would scatter half a bundle across SAP
+            // and leave the person reconciling it by hand.
+            var one = await sap.PostAsync(module, p);
+            results.Add((p, one));
+            if (!one.Success) break;
+        }
+        var r = results[^1].Result;
+        var allOk = results.Count == payloads.Count && results.All(x => x.Result.Success);
+        var sapDocNos = string.Join(", ", results.Where(x => x.Result.Success)
+            .Select(x => x.Result.SapDocNo).Where(n => !string.IsNullOrWhiteSpace(n)));
+        var ownCompany = await OwnCompanyAsync() is { Length: > 0 } own ? own : null;
+        // Closed before the database work below: what is being timed is the round trip to SAP, not
+        // how long our own bookkeeping took afterwards.
+        await jobLog.FinishAsync(postJob, allOk ? "SUCCESS" : "FAILED",
+            sapDocNo: Cut50(sapDocNos) is { Length: > 0 } sdn ? sdn : null,
+            message: allOk ? null : r.Message);
+
         await using (var conn = await GetDbAsync())
         await using (var tx = await conn.BeginTransactionAsync())
         {
-            await conn.ExecuteAsync("""
-                INSERT ocr.PostLog(DocId,Module,SapDocNo,Endpoint,PayloadJson,Success,Message,PostedBy,SalesOrg)
-                VALUES(@docId,@module,@sapDocNo,@endpoint,@payloadJson,@success,@message,@user,@salesOrg)
-                """, new
+            foreach (var (p, one) in results)
             {
-                docId, module, sapDocNo = r.SapDocNo, endpoint = r.Endpoint,
-                payloadJson = JsonSerializer.Serialize(payload, PyJson.Options), success = r.Success ? 1 : 0, message = r.Message, user,
-                // Which company's submission history this belongs to — the poster's own, Admin
-                // included, for the same reason a document is filed under the importer's company.
-                salesOrg = await OwnCompanyAsync() is { Length: > 0 } own ? own : null,
-            }, tx);
-            if (r.Success)
+                await conn.ExecuteAsync("""
+                    INSERT ocr.PostLog(DocId,Module,SapDocNo,Endpoint,PayloadJson,Success,Message,PostedBy,SalesOrg)
+                    VALUES(@docId,@module,@sapDocNo,@endpoint,@payloadJson,@success,@message,@user,@salesOrg)
+                    """, new
+                {
+                    docId, module, sapDocNo = one.SapDocNo, endpoint = one.Endpoint,
+                    payloadJson = JsonSerializer.Serialize(p, PyJson.Options),
+                    success = one.Success ? 1 : 0, message = one.Message, user,
+                    // Which company's submission history this belongs to — the poster's own, Admin
+                    // included, for the same reason a document is filed under the importer's company.
+                    salesOrg = ownCompany,
+                }, tx);
+            }
+            // POSTED only when every supplier's invoice was taken: a partly posted bundle stays
+            // open so the person can see it is not finished.
+            if (allOk)
                 await conn.ExecuteAsync($"UPDATE {docT} SET Status='POSTED', SapDocNo=@sapDocNo, CompanyCode=@companyCode, PostedAt=SYSDATETIME(), PostedBy=@user, UpdatedAt=SYSDATETIME() WHERE DocId=@docId",
-                    new { sapDocNo = r.SapDocNo, companyCode, user, docId }, tx);
+                    new { sapDocNo = Cut50(sapDocNos), companyCode, user, docId }, tx);
             await tx.CommitAsync();
         }
         // Queue the source file for SharePoint (real posts only, not simulation). Best effort:
         // the post is already committed above. Waits in the queue until a target covers it.
-        if (r.Success && !r.Simulated)
+        if (allOk && !r.Simulated)
         {
             try
             {
@@ -1542,8 +1633,38 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
                     docId);
             }
         }
-        return Ok(new { success = r.Success, simulated = r.Simulated, sapDocNo = r.SapDocNo, endpoint = r.Endpoint, message = r.Message, document = await repo.GetDocumentAsync(docId) });
+        // What actually happened, supplier by supplier, so a bundle that posted two of three
+        // invoices says so instead of reporting only the last attempt.
+        var perVendor = results.Select(x => new
+        {
+            vendor = x.Payload.GetStr("InvoicingParty"),
+            invoiceNo = x.Payload.GetStr("SupplierInvoiceIDByInvcgParty"),
+            amount = x.Payload.GetStr("InvoiceGrossAmount"),
+            success = x.Result.Success,
+            sapDocNo = x.Result.SapDocNo,
+            message = x.Result.Message,
+        }).ToList();
+        var summary = payloads.Count > 1
+            ? $"{results.Count(x => x.Result.Success)} of {payloads.Count} supplier invoice(s) created"
+                + (sapDocNos.Length > 0 ? $": {sapDocNos}" : "")
+                + (allOk ? "" : $" — {r.Message}")
+            : r.Message;
+
+        return Ok(new
+        {
+            success = allOk,
+            simulated = r.Simulated,
+            sapDocNo = sapDocNos.Length > 0 ? sapDocNos : r.SapDocNo,
+            endpoint = r.Endpoint,
+            message = summary,
+            vendors = perVendor,
+            document = await repo.GetDocumentAsync(docId),
+        });
     }
+
+    /// <summary>SapDocNo is a short column; several document numbers joined together can outgrow
+    /// it, and the full list is in ocr.PostLog either way.</summary>
+    private static string Cut50(string value) => value.Length <= 50 ? value : value[..50];
 
     // ===================================================================================
     // Sales Order: one document -> one Sales Order PER DELIVERY DATE, sent from the same page

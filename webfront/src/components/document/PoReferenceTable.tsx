@@ -48,6 +48,7 @@ export default function PoReferenceTable({
   posted,
   onTaxCode,
   onAssignAll,
+  onAutoNumber,
   onUnassignAll,
   assigning,
   sapItemCount,
@@ -56,6 +57,8 @@ export default function PoReferenceTable({
   onGrItem,
   matDoc,
   onDelLine,
+  onCondType,
+  showCondition,
 }: {
   lines: DocLine[];
   poRef: string;
@@ -65,6 +68,9 @@ export default function PoReferenceTable({
   /** Pull the purchase order from SAP and assign its items to these lines, as MIRO's "Assign all"
    *  does. Absent when the rows cannot be edited (the header's PO copy, or a posted document). */
   onAssignAll?: () => void;
+  /** Fills unassigned lines with position x 10 (10, 20, 30 ...). A guess for a purchase order
+      whose items have no gaps — see autoNumberPoItems in DocumentPage for why it is a button. */
+  onAutoNumber?: () => void;
   onUnassignAll?: () => void;
   assigning?: boolean;
   /** How many items the last lookup returned, for the "n of m" line under the toolbar. */
@@ -91,6 +97,11 @@ export default function PoReferenceTable({
   /** Absent when the rows come from the header's PO copy (header.poLines), which has nowhere to
    *  save an edit — the grid is then read-only, as it is for a posted document. */
   onTaxCode?: (i: number, code: string) => void;
+  /** Writes the PO condition this charge settles (extra.deliveryCondType). A planned delivery
+      cost is cleared by naming the condition it was accrued under, not by a G/L account. */
+  onCondType?: (i: number, code: string) => void;
+  /** Reference Document Category is "Planned delivery costs" (2) or "both" (3). */
+  showCondition?: boolean;
 }) {
   const total = lines.reduce((a, l) => a + num(l.amount), 0);
   const editable = !posted && !!onTaxCode;
@@ -107,6 +118,21 @@ export default function PoReferenceTable({
   const grItemOf = (l: DocLine) =>
     String((l.extra as Record<string, unknown> | undefined)?.sapGrItem ?? '').trim();
   const showGr = !!onGrItem && !posted && !!(matDoc ?? '').trim();
+  /* The condition types NTT DATA configured for MGT/GLC, from KUT-MM-PU-203 p.34. The PO
+     carries one of these per charge and the invoice has to name the same one. */
+  const CONDITIONS: [string, string][] = [
+    ['ZFRE', 'Freight'],
+    ['ZLH1', 'Local Handling'],
+    ['ZED1', 'Excise Duty'],
+    ['ZFE2', 'Fee'],
+    ['ZINS', 'Insurance'],
+    ['ZIM1', 'Import Tax'],
+    ['ZOVS', 'Oversea Charge'],
+    ['ZOTH', 'Other Charges'],
+  ];
+  const condOf = (l: DocLine) =>
+    String((l.extra as Record<string, unknown> | undefined)?.deliveryCondType ?? '').trim();
+  const showCond = !!showCondition && !!onCondType;
 
   return (
     <>
@@ -119,6 +145,16 @@ export default function PoReferenceTable({
             <button className="btn sm" onClick={onAssignAll} disabled={assigning || !poRef}>
               <i className="fa-solid fa-link" /> {assigning ? 'Reading PO…' : 'Assign all'}
             </button>
+            {onAutoNumber && (
+              <button
+                className="btn sm ghost"
+                onClick={onAutoNumber}
+                disabled={assigning || !poRef || assignedCount === lines.length}
+                title="เติมเลขรายการที่ยังว่างเป็น 10, 20, 30 ... ตามลำดับบรรทัด — เป็นการเดา ต้องตรวจกับ PO ใน SAP ก่อนส่ง"
+              >
+                <i className="fa-solid fa-wand-magic-sparkles" /> เติมเลข 10, 20, 30…
+              </button>
+            )}
             <button
               className="btn sm ghost"
               onClick={onUnassignAll}
@@ -144,6 +180,7 @@ export default function PoReferenceTable({
             <th style={{ width: 100 }}>Invoice Item</th>
             <th>Short Text</th>
             <th style={{ minWidth: 190 }}>Purchasing Document/Item</th>
+            {showCond && <th style={{ minWidth: 170 }}>Condition</th>}
             <th style={{ textAlign: 'right', minWidth: 110 }}>Amount</th>
             <th style={{ textAlign: 'right', minWidth: 110 }}>Quantity</th>
             <th style={{ minWidth: 150 }}>Tax Code</th>
@@ -203,7 +240,11 @@ export default function PoReferenceTable({
                         <input
                           value={assignedItemOf(l)}
                           onChange={(e) => onAssignItem(i, e.target.value.replace(/\D/g, ''))}
-                          placeholder={printedItemOf(l) || 'item'}
+                          // The printed PO sheet numbers its rows 1, 2, 3 — SAP numbers the same
+                          // items 10, 20, 30. Showing the printed number here invited people to
+                          // type it, and SAP answered "PO item 00001 does not exist". Suggest the
+                          // SAP-shaped number instead; it is still only a suggestion, in grey.
+                          placeholder={String((i + 1) * 10)}
                           inputMode="numeric"
                           style={{ width: 80 }}
                         />
@@ -216,6 +257,26 @@ export default function PoReferenceTable({
                       </span>
                     )}
                   </td>
+                  {showCond && (
+                    <td>
+                      {posted ? (
+                        condOf(l) || <span className="hint">—</span>
+                      ) : (
+                        <select
+                          value={condOf(l)}
+                          onChange={(e) => onCondType!(i, e.target.value)}
+                          style={{ minWidth: 160 }}
+                        >
+                          <option value="">— Select —</option>
+                          {CONDITIONS.map(([c, label]) => (
+                            <option key={c} value={c}>
+                              {c} · {label}
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                    </td>
+                  )}
                   <td style={{ textAlign: 'right' }}>{fmtAmt(l.amount)}</td>
                   <td style={{ textAlign: 'right' }}>
                     {num(l.qty).toLocaleString('en-US')} {String(l.uom ?? '')}

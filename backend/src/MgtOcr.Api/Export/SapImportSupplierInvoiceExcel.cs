@@ -105,12 +105,21 @@ public static class SapImportSupplierInvoiceExcel
     private const int C_ItemCostCenter = 80;   // CB
     private const int C_ItemProfitCenter = 81; // CC
     private const int C_ItemWbs = 83;          // CE
+    // SAP refuses a tax row without it: "Please enter a value for field Base Amount for
+    // account 11730000" came back on every input-VAT row of SapImportSupplierInvoice_802.
+    // Same field as the direct-post path's TaxBaseAmountInTransCrcy.
+    private const int C_ItemTaxBase = 99;      // CU
 
     public static byte[] Build(
         Dictionary<string, object?> doc,
         string companyCode,
         PaymentTerms paymentTerms,
-        IReadOnlyDictionary<string, string>? vendorNames = null)
+        IReadOnlyDictionary<string, string>? vendorNames = null,
+        // The screen's "Vendor in this document" selection. Null or blank keeps the whole bundle,
+        // numbered as one invoice per supplier inside the file; a code keeps only that supplier's
+        // invoice. Without it the dropdown was frontend-only: the file was built from the database
+        // and came back with every supplier's rows whatever had been selected.
+        string? vendorFilter = null)
     {
         vendorNames ??= new Dictionary<string, string>();
         var header = (Dictionary<string, object?>)doc["header"]!;
@@ -119,6 +128,15 @@ public static class SapImportSupplierInvoiceExcel
         // table is seeded for FB60 only — so the file used to come out with headers and nothing
         // under them. Fall back to the document's own rows, by the same rule the screen uses.
         if (glItems.Count == 0) glItems = GlRowsFor(doc, vendorNames);
+        // A saved G/L Account Items table outlives the rows it was built from. Document 804 still
+        // held six rows for 4000002 from when it was an FB60-style bundle, while its own lines had
+        // since been re-read as three suppliers' delivery costs — so every supplier the screen
+        // offered came back "not in this document". The lines are the newer truth: when the
+        // supplier being asked for is on them but not in the stored table, rebuild.
+        else if (vendorFilter is { } stale && stale.Trim().Length > 0
+            && !glItems.Any(g => string.Equals(g.GetStr("vendorCode").Trim(), stale.Trim(), StringComparison.OrdinalIgnoreCase))
+            && LineVendors(doc).Any(v => string.Equals(v, stale.Trim(), StringComparison.OrdinalIgnoreCase)))
+            glItems = GlRowsFor(doc, vendorNames);
 
         // partnerCode is the SAP vendor the mapping step matched; the header copy is the fallback
         // for a document mapped by hand.
@@ -133,6 +151,32 @@ public static class SapImportSupplierInvoiceExcel
         // them: the Import app treats each distinct Invoice ID as its own invoice, so one file
         // still carries the whole bundle — as several invoices rather than one impossible one.
         var groups = GroupByVendor(glItems, docParty);
+        if (vendorFilter is { } vf && vf.Trim().Length > 0)
+        {
+            var want = vf.Trim();
+            var mine = groups.Where(g => string.Equals(g.Party.Trim(), want, StringComparison.OrdinalIgnoreCase)).ToList();
+            if (mine.Count == 0)
+            {
+                // The G/L rows are built from the DATABASE, not from the screen, and for a PO-keyed
+                // document they are a single goods line — the per-supplier delivery costs sit on the
+                // PO Reference tab, which this template has no section for at all. So name the
+                // document that was actually loaded: a stale read and a PO-keyed document both land
+                // here, and neither is a fault in the filter.
+                var onLines = LineVendors(doc);
+                throw new HttpApiException(400,
+                    $"This document has no G/L rows for supplier {want}. Loaded from the database: "
+                    + $"invoice {Or(header.GetStr("invoiceNo").Trim(), "(none)")}, "
+                    + $"PO {Or(header.GetStr("poRef").Trim(), "(none)")}, "
+                    + $"category {Or(doc.GetStr("apDocCategory").Trim(), "(none)")}. "
+                    + "Suppliers on its G/L rows: "
+                    + (groups.Count == 0 ? "(none)" : string.Join(", ", groups.Select(g => g.Party)))
+                    + "; suppliers on its document lines: "
+                    + (onLines.Count == 0 ? "(none)" : string.Join(", ", onLines))
+                    + ". If that is not what the screen shows, save and re-map first — the export "
+                    + "reads the database, not the screen. Pick \"All vendors\" for the whole bundle.");
+            }
+            groups = mine;
+        }
 
         var templatePath = FindTemplate()
             ?? throw new HttpApiException(500,
@@ -234,6 +278,11 @@ public static class SapImportSupplierInvoiceExcel
                 Code(ws.Cell(row, C_ItemCostCenter), Cut(g.GetStr("costCenter"), 10));
                 Code(ws.Cell(row, C_ItemProfitCenter), Cut(g.GetStr("profitCenter"), 10));
                 Text(ws.Cell(row, C_ItemWbs), Cut(g.GetStr("wbsElement"), 24));
+                // Only a tax row carries a base; a cost row's base is the cost itself and
+                // SAP works that out on its own. Written straight from the tax invoice
+                // (the Tax tab's Base Amount) — never derived from the VAT by a rate.
+                if (IsTaxAccountRow(g) && Num(g.Get("baseAmount")) is var tb && tb != 0)
+                    Money(ws.Cell(row, C_ItemTaxBase), tb);
 
                 row++;
             }
@@ -440,6 +489,7 @@ public static class SapImportSupplierInvoiceExcel
                 ["glAccount"] = deferred ? GlDeferredInputTax : GlInputTax,
                 ["drCr"] = "D",
                 ["amount"] = amount,
+                ["baseAmount"] = Num(t.Get("baseAmount")),
                 ["taxCode"] = code.Length > 0 ? code : ExemptTaxCode,
                 ["assignment"] = t.GetStr("taxDocNo"),
                 // The issuer of THIS tax invoice and its own number — "PROMPT,INV.PI-2608010" on
@@ -579,6 +629,20 @@ public static class SapImportSupplierInvoiceExcel
     /// "Goods/service items") rather than against the delivery.</summary>
     public static bool IsPoKeyed(Dictionary<string, object?> doc) =>
         string.Equals(doc.GetStr("apDocCategory").Trim(), "INVENTORY_PO", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Every distinct supplier the document's own lines carry, in the order they appear —
+    /// the same place the screen's "Vendor in this document" list is built from.</summary>
+    private static List<string> LineVendors(Dictionary<string, object?> doc)
+    {
+        var found = new List<string>();
+        if (doc.Get("lines") is System.Collections.IEnumerable rows)
+            foreach (var raw in rows)
+                if (raw is Dictionary<string, object?> l
+                    && VendorOfLine(l) is { Length: > 0 } code
+                    && !found.Contains(code))
+                    found.Add(code);
+        return found;
+    }
 
     private static string VendorOfLine(Dictionary<string, object?> line) =>
         line.Get("extra") is Dictionary<string, object?> extra ? extra.GetStr("vendorCode").Trim() : "";
