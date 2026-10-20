@@ -72,16 +72,16 @@ public class DocumentIngestService(OcrEngine ocr, DocumentRepository repo, JobLo
                 : pd.Header.GetStr("poRef").Trim().Length > 0 ? "AP" : "II";
         }
         var ext = ExtConversion.ToExtDict(pd);
-<<<<<<< HEAD
+        // Keeps BOTH job clocks (merge, 20 Oct 2026). They answer different questions and write to
+        // different places: jobStartedAt stamps when the upload began on the document row itself,
+        // while ocr.JobLog records each step of the run with its own tokens and cost. Dropping
+        // either one would quietly remove a column somebody's report already reads.
         var docId = await repo.CreateDocumentAsync(mod, ext, fileName, storedPath, size, user, apDocCategory, durationMs, salesOrg,
             jobStartedAt: jobStart);
-=======
-        var docId = await repo.CreateDocumentAsync(mod, ext, fileName, storedPath, size, user, apDocCategory, durationMs, salesOrg);
         // DocId is only known now, after the row exists — so it is stamped on the job at the end.
         // The module can change too: AP/II routing above is decided by what the read found.
         await jobs.FinishAsync(job, "SUCCESS", docId: docId, tokensIn: pd.TokensIn, tokensOut: pd.TokensOut,
             cost: pd.Cost, costCurrency: pd.CostCurrency, provider: pd.Provider);
->>>>>>> feature/ap-invoice
         return (docId, mod, pd.Note);
     }
 }

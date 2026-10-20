@@ -657,7 +657,6 @@ public static class MappingEngine
                 continue;
             }
 
-<<<<<<< HEAD
             // GLC Sales Order: a shipping-charge line (SHIPPING / ค่าขนส่ง ...) is not an item - its
             // amount is sent as the freight condition on the Sales Order header (SoCharges). Status
             // "charge" (not "skip") so the page still shows it, with the choice to treat it as an item.
@@ -666,11 +665,15 @@ public static class MappingEngine
                 // Kept short: the method is stored in ocr.SalesOrderLine.MapMethod (nvarchar(100)).
                 var how = SoCharges.Choice(ln) == "freight" ? "marked by user" : "detected";
                 resLines.Add(R("charge", "", "", $"Freight charge ({how}) - sent as Freight, not an item"));
-=======
+                continue;
+            }
+
+            // Merge note (20 Oct 2026): the two branches each added a skip here and neither replaces
+            // the other — the test above is Sales Order only, this one is everything BUT Sales Order
+            // (poKeyed is false for SO), so they can never both fire on the same line.
             if (poKeyed)
             {
                 resLines.Add(R("skip", "", "", "keyed against the purchase order — SAP takes the item from the PO"));
->>>>>>> feature/ap-invoice
                 continue;
             }
 

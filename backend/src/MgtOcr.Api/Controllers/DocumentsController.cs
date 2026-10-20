@@ -22,13 +22,8 @@ namespace MgtOcr.Api.Controllers;
 public class DocumentsController(DocumentRepository repo, MasterRepository masters, OcrEngine ocr,
     SapClient sap, SapBusinessPartnerClient sapBp, AppConfig config, ICurrentUserAccessor currentUser,
     OcrJobRepository jobs, MgtOcr.Api.Services.DocumentIngestService ingest,
-<<<<<<< HEAD
-    SapProductClient sapProduct, FileArchiveRepository archive, MgtOcr.Api.Services.GraphArchiveClient graph,
-    SalesOrderPostRepository soPosts, UserRepository users, ILogger<DocumentsController> logger) : ControllerBase
-=======
     SapProductClient sapProduct, SapPurchaseOrderClient sapPo, FileArchiveRepository archive, MgtOcr.Api.Services.GraphArchiveClient graph,
-    SalesOrderPostRepository soPosts, JobLogRepository jobLog, ILogger<DocumentsController> logger) : ControllerBase
->>>>>>> feature/ap-invoice
+    SalesOrderPostRepository soPosts, UserRepository users, JobLogRepository jobLog, ILogger<DocumentsController> logger) : ControllerBase
 {
     // Who to stamp on CreatedBy / PerformedBy / PostedBy.
     //
@@ -1505,11 +1500,6 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         {
             ["docId"] = doc.Get("docId"), ["file"] = doc.Get("fileName"), ["ocrProvider"] = doc.Get("provider"), ["confidence"] = doc.Get("confidence"),
         };
-<<<<<<< HEAD
-        var payload = SapPayloadBuilder.BuildPayload(config, module, header, lines, res, pm, source,
-            module == "SO" ? await DivisionsByPersonIdAsync() : null);
-        return (payload, res);
-=======
         if (module is "AP" or "II")
         {
             // MIRO goes through its own builder, which shares its rows with the Excel exporter so
@@ -1572,9 +1562,13 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             return (split, res);
         }
 
-        var payload = SapPayloadBuilder.BuildPayload(config, module, header, lines, res, pm, source);
+        // Sales Order keeps develop's call, which carries the per-person Divisions argument added
+        // there (merge, 20 Oct 2026). The AP/II branch above returns before this line, so the
+        // argument is only ever worked out for the module that uses it — and taking the shorter
+        // seven-argument call from this branch would have dropped Divisions while still compiling.
+        var payload = SapPayloadBuilder.BuildPayload(config, module, header, lines, res, pm, source,
+            module == "SO" ? await DivisionsByPersonIdAsync() : null);
         return ([payload], res);
->>>>>>> feature/ap-invoice
     }
 
     // stored_manual(): reconstructs the manual-override shape from what's already confirmed in the
@@ -1639,11 +1633,12 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
                 + "— ถ้าส่งตอนนี้ระบบจะสร้างเลขเอกสารปลอมที่ไม่มีอยู่จริงใน SAP");
         }
         var docT = DocumentTables.For(module).Doc;
-<<<<<<< HEAD
+        // develop's extra docId argument is kept: CompanyNameForPostAsync passes it to SalesOrgAsync,
+        // which prefers the SalesOrg stamped on the document over the editable header field. Without
+        // it a Sales Order mapped by an Admin of the other company files under the wrong one.
+        // The single PostAsync it sat next to is gone — the loop below posts one document per
+        // supplier instead (merge, 20 Oct 2026).
         var companyCode = await CompanyNameForPostAsync(module, (Dictionary<string, object?>)doc["header"]!, docId);
-        var r = await sap.PostAsync(module, payload);
-=======
-        var companyCode = await CompanyNameForPostAsync(module, (Dictionary<string, object?>)doc["header"]!);
         // One POST per supplier, in order, each logged on its own. They are NOT one transaction in
         // SAP — a bundle whose second supplier is refused leaves the first one posted, which is
         // why every attempt gets its own PostLog row and the message below names what went where.
@@ -1673,7 +1668,6 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             sapDocNo: Cut50(sapDocNos) is { Length: > 0 } sdn ? sdn : null,
             message: allOk ? null : r.Message);
 
->>>>>>> feature/ap-invoice
         await using (var conn = await GetDbAsync())
         await using (var tx = await conn.BeginTransactionAsync())
         {
