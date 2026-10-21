@@ -3,19 +3,25 @@
    these only feed the `disabled` prop of the Send buttons.
 
    The two Send paths are switched SEPARATELY on purpose: they belong to different developers and
-   are at different stages, so freezing one must never freeze the other.
+   move at different speeds, so freezing one must never freeze the other.
 
    SEND_DISABLED    -- the Sales Order flow (SapSalesOrderEditor.tsx, ZohoSalesOrderEditor.tsx).
                        Open. Not ours to change: leave it as the Sales Order work sets it.
-   SEND_DISABLED_AP -- the AP/II "Confirm Submission to SAP" modal in DocumentPage.tsx (MIRO /
-                       FB60 via API_SUPPLIERINVOICE_PROCESS_SRV). CLOSED while the delivery-cost
-                       flow is still being tested (20 Oct 2026): the route works -- supplier
-                       invoice 5105600153 was posted through it -- but PO item numbers are still
-                       being filled in by hand while API_PURCHASEORDER_PROCESS_SRV answers 403, so
-                       a wrong number posts a wrong document. Testing goes through the SAP Fiori
-                       app meanwhile. Set back to false once the PO lookup is open and checked. */
+
+   SEND_DISABLED_AP -- the AP/II "Confirm Submission to SAP" modal in DocumentPage.tsx
+                       (MIRO / FB60 via API_SUPPLIERINVOICE_PROCESS_SRV). Open (20 Oct 2026).
+
+                       It is safe to leave open because this route cannot reach production at all,
+                       by configuration rather than by this flag: Sap:SupplierInvoice carries its
+                       OWN ActiveEnvironment ("dev"), so switching the rest of the system to Prod
+                       does not drag it along, and its BaseUrl_Prod is deliberately EMPTY -- with
+                       no URL the backend refuses to post instead of inventing a document number,
+                       which is what it used to do (a fake "51" + six digits that existed nowhere).
+
+                       Close it again if that stops being true -- if BaseUrl_Prod is ever filled
+                       in, this is the switch that keeps users out until the route is trusted. */
 export const SEND_DISABLED = false;
-export const SEND_DISABLED_AP = true;
+export const SEND_DISABLED_AP = false;
 
 /* Temporary switch for Microsoft (Entra) SSO sign-in (14 Oct 2026). SSO is built and will be used,
    but is not allowed yet, so it is hidden: false = no "Continue with Microsoft" button, no silent
