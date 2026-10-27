@@ -159,6 +159,15 @@ public class ZohoAccountController(ZohoAccountClient client, ZohoClient zoho, Zo
         return Ok(new { count = found.Count, deals = found });
     }
 
+    // GET /api/zoho/web-links — where a Deal opens in the Zoho CRM web screens (27 Oct 2026):
+    // dealBase + the Deal's record id. Deals are the "Potentials" tab in Zoho's own URLs.
+    [HttpGet("web-links")]
+    public async Task<IActionResult> GetWebLinks()
+    {
+        var baseUrl = await zoho.GetWebBaseUrlAsync();
+        return Ok(new { dealBase = $"{baseUrl}/tab/Potentials/" });
+    }
+
     // GET /api/zoho/deals/{id} — one Deal by its Zoho record id (with Deal Items), used to
     // re-fetch full details after the person picks a result from the manual search above.
     [HttpGet("deals/{id}")]

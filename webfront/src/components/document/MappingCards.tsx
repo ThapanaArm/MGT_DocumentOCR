@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { num } from '../../utils/format';
+import { formatDate } from '../common/DateInput';
 import type { DocHeader, DocModel, MapEntry, MapField, MapResult } from '../../api/documents';
 import type { MastersData } from '../../api/masters';
 import {
@@ -30,6 +31,8 @@ import {
   getZohoAccountSoldTo,
   getZohoDealsByAccountCode,
   searchZohoDeals,
+  NEW_DEAL_ID,
+  getZohoWebLinks,
   type ZohoAccount,
   type ZohoShipToInfo,
   type ZohoDeal,
@@ -38,6 +41,7 @@ import {
 } from '../../api/zoho';
 import type { CompareField } from '../../api/compare';
 import CompareModal, { type CompareCandidateItem } from './CompareModal';
+import Modal, { ModalHeader } from '../Modal';
 import MaterialSearchSelect from './MaterialSearchSelect';
 import { useMeta } from '../../state/MetaContext';
 
@@ -2196,6 +2200,99 @@ function RowMapTable({
    "Material — Row N" cards instead (see ZohoMaterialPanel, fed via onDealResolved) -- this card
    used to duplicate that as its own "Deal Items vs Document Lines" table, which was removed as
    redundant. Purely informational otherwise -- doesn't feed map.pass/map.errors. */
+/* Deal auto-pick (Megachem, 27 Oct 2026). The system itself checks which open Deal this PO belongs
+   to by its products: a WCD Deal (Forecast Status Yes) matches when every document line's product is
+   one of its Deal Items -- quantities may differ from the forecast; a non-WCD Deal (No / blank) must
+   also carry the same quantity per line. Among several matching Deals: Customer Ref = the PO no.
+   first, then the newest Deal. No matching Deal -> a new Deal is opened (NEW_DEAL_ID). Products are
+   compared like the backend's line matching: mapped material code, else the description. */
+function sameDealProduct(line: DocModel['lines'][number], it: ZohoDealItem) {
+  const code = String(line.materialCode || '').trim().toLowerCase();
+  if (code && String(it.materialCode || '').trim().toLowerCase() === code) return true;
+  const desc = String(line.desc || '').trim().toLowerCase();
+  if (!desc) return false;
+  return [it.materialName, it.materialDescription].some((v) => {
+    const t = String(v || '').trim().toLowerCase();
+    return !!t && (t.includes(desc) || desc.includes(t));
+  });
+}
+
+function sameDealQuantity(line: DocModel['lines'][number], it: ZohoDealItem) {
+  const docQty = num(line.qty);
+  const dealQty = Number(it.quantity);
+  if (!(docQty > 0) || !(dealQty > 0)) return false;
+  const docUnit = String(line.uom || '').trim().toLowerCase();
+  const dealUnit = String(it.unit || '').trim().toLowerCase();
+  if (!docUnit || !dealUnit || docUnit === dealUnit) return Math.abs(docQty - dealQty) < 0.001;
+  // Document in the sub-unit: 1 Deal unit = Conversion Ratio sub-units (same rule as the backend).
+  const ratio = Number(it.conversionRatio);
+  return ratio > 0 && Math.abs(docQty / ratio - dealQty) < 0.001;
+}
+
+function dealProductMatch(deal: ZohoDeal, lines: DocModel['lines']) {
+  const pool = [...deal.items];
+  let matched = 0;
+  for (const line of lines) {
+    const i = pool.findIndex((it) => sameDealProduct(line, it) && (deal.isWcd || sameDealQuantity(line, it)));
+    if (i < 0) continue;
+    matched++;
+    // A forecast item may cover several lines; a non-WCD Deal item covers one line.
+    if (!deal.isWcd) pool.splice(i, 1);
+  }
+  return { matched, total: lines.length, ok: lines.length > 0 && matched === lines.length };
+}
+
+const dealSentenceStyle: React.CSSProperties = {
+  display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', padding: '12px 14px', margin: '4px 0 12px',
+  borderRadius: 10, background: 'var(--brand-soft)',
+};
+const dealModalRow = (on: boolean): React.CSSProperties => ({
+  display: 'flex', alignItems: 'flex-start', gap: 12, flexWrap: 'wrap', padding: '12px 16px', cursor: 'pointer',
+  borderBottom: '1px solid var(--g200)', background: on ? 'var(--brand-soft)' : 'transparent',
+});
+
+// The Deal's items in the "Change Deal" popup, each marked with whether a document line matches it
+// (same rule as dealProductMatch: product for WCD, product + quantity otherwise).
+function DealItemsList({ deal, lines }: { deal: ZohoDeal; lines: DocModel['lines'] }) {
+  if (!deal.items.length) return <span className="hint">No Deal Items</span>;
+  const shown = deal.items.slice(0, 6);
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 2, fontSize: 13 }}>
+      {shown.map((it, i) => {
+        const hit = lines.some((l) => sameDealProduct(l, it) && (deal.isWcd || sameDealQuantity(l, it)));
+        return (
+          <span key={i} className="hint">
+            <i className={'fa-solid ' + (hit ? 'fa-check' : 'fa-minus')} style={{ color: hit ? 'var(--brand)' : 'var(--g500)', width: 14 }} />{' '}
+            {[it.materialCode, it.materialName || it.materialDescription].filter(Boolean).join(' — ')}
+            {it.quantity != null ? ` · ${deal.isWcd ? 'Forecast ' : ''}${num(it.quantity).toLocaleString('en-US')} ${it.unit || ''}` : ''}
+          </span>
+        );
+      })}
+      {deal.items.length > shown.length && <span className="hint">+{deal.items.length - shown.length} more item(s)</span>}
+    </div>
+  );
+}
+
+function MatchBadge({ deal, lines }: { deal: ZohoDeal; lines: DocModel['lines'] }) {
+  const m = dealProductMatch(deal, lines);
+  return (
+    <span className={'badge ' + (m.ok ? 'b-ok' : 'b-warn')}
+      title={deal.isWcd ? 'WCD: products must match, quantities may differ' : 'Not WCD: products and quantities must match'}>
+      <i className={'fa-solid ' + (m.ok ? 'fa-check' : 'fa-triangle-exclamation')} /> {m.matched}/{m.total}{' '}
+      {deal.isWcd ? 'products' : 'products + qty'} match
+    </span>
+  );
+}
+
+function autoPickDeal(deals: ZohoDeal[], lines: DocModel['lines'], poNo?: string | null) {
+  const po = String(poNo || '').trim().toLowerCase();
+  const hits = deals.filter((d) => dealProductMatch(d, lines).ok);
+  if (!hits.length) return NEW_DEAL_ID;
+  const refMatch = (d: ZohoDeal) => (po && String(d.customerRef || '').trim().toLowerCase() === po ? 1 : 0);
+  const created = (d: ZohoDeal) => Date.parse(String(d.createdTime || '')) || 0;
+  return [...hits].sort((a, b) => refMatch(b) - refMatch(a) || created(b) - created(a))[0].id;
+}
+
 function ZohoDealCard({
   no,
   customerCode,
@@ -2233,6 +2330,22 @@ function ZohoDealCard({
   const [manualResults, setManualResults] = useState<ZohoDeal[] | null>(null);
   const [manualError, setManualError] = useState<string | null>(null);
 
+  // true once the person picks a Deal themselves (dropdown, AI match, manual search) -- the
+  // automatic product-based pick (autoPickDeal) then stops overriding their choice.
+  const userPicked = useRef(false);
+  // "Change Deal" list open/closed, and the Zoho web address a Deal opens at (dealBase + id).
+  const [listOpen, setListOpen] = useState(false);
+  const [staged, setStaged] = useState(''); // the Deal ticked in the "Change Deal" popup, until "Use this Deal"
+  const [dealBase, setDealBase] = useState<string | null>(null);
+  useEffect(() => {
+    getZohoWebLinks().then((r) => setDealBase(r.dealBase)).catch(() => setDealBase(null));
+  }, []);
+  const pickByUser = (id: string) => {
+    userPicked.current = true;
+    onSelectId(id);
+  };
+  const linesKey = doc.lines.map((l) => [l.materialCode ?? '', l.desc ?? '', l.qty, l.uom].join('|')).join(';');
+
   useEffect(() => {
     setManualQuery('');
     setManualResults(null);
@@ -2246,7 +2359,9 @@ function ZohoDealCard({
     // Drop the previous customer's Deal straight away (12 Oct 2026): while the new lookup runs --
     // or if it fails -- nothing stays selected, so Send can't create the order on the old
     // customer's Deal. The new list re-selects the same Deal if it belongs to this customer too.
-    const keep = selectedId;
+    setListOpen(false);
+    const keep = userPicked.current ? selectedId : '';
+    userPicked.current = false;
     setDeals(null);
     onSelectId('');
     setLoading(true);
@@ -2255,7 +2370,14 @@ function ZohoDealCard({
       .then((r) => {
         if (cancelled) return;
         setDeals(r.deals);
-        onSelectId(r.deals.some((d) => d.id === keep) ? keep : r.deals[0]?.id || '');
+        // A Deal the person chose stays chosen; otherwise the system picks by products (autoPickDeal).
+        // No open Deal at all, or none with this document's products = not WCD: a new Deal is opened.
+        if (keep && r.deals.some((d) => d.id === keep)) {
+          userPicked.current = true;
+          onSelectId(keep);
+        } else {
+          onSelectId(autoPickDeal(r.deals, doc.lines, doc.header.poNo));
+        }
       })
       .catch((e) => {
         if (!cancelled) setError(e?.message || 'Zoho CRM lookup failed');
@@ -2268,6 +2390,14 @@ function ZohoDealCard({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [customerCode]);
+
+  // Re-check the automatic pick when the document's lines change (e.g. after Mapping fills in the
+  // material codes), as long as the person hasn't chosen a Deal themselves.
+  useEffect(() => {
+    if (!deals || userPicked.current) return;
+    onSelectId(autoPickDeal(deals, doc.lines, doc.header.poNo));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deals, linesKey, doc.header.poNo]);
 
   const hint = (text: string) => <div className="hint" style={{ padding: '6px 0' }}>{text}</div>;
   const deal = deals?.find((d) => d.id === selectedId);
@@ -2290,6 +2420,7 @@ function ZohoDealCard({
   // match this document's customer, or its Stage is Closed, since the person is choosing it on
   // purpose after seeing why the automatic lookup missed it.
   const selectPickedDeal = (d: ZohoDeal) => {
+    userPicked.current = true;
     setDeals((prev) => [d, ...(prev || []).filter((x) => x.id !== d.id)]);
     onSelectId(d.id);
     setManualResults(null);
@@ -2331,22 +2462,13 @@ function ZohoDealCard({
           <span className="badge b-idle">Reading…</span>
         ) : !customerCode ? (
           <span className="badge b-idle">Waiting for customer</span>
-        ) : deals && deals.length === 0 ? (
-          <span className="badge b-fail"><i className="fa-solid fa-xmark" /> No open Deal</span>
+        ) : selectedId === NEW_DEAL_ID ? (
+          <span className="badge b-idle"><i className="fa-solid fa-plus" /> New Deal · Not WCD</span>
         ) : deal ? (
-          <span className="badge b-ok"><i className="fa-solid fa-check" /> {deal.stage}</span>
+          <span className="badge b-ok"><i className="fa-solid fa-check" /> Deal selected</span>
         ) : null}
         <span className="hint">Next step: pick the Deal this document's Sales Order belongs to</span>
         <div className="sp" />
-        {deals && deals.length > 1 && (
-          <select className="cmp-pick" value={selectedId} onChange={(e) => onSelectId(e.target.value)}>
-            {deals.map((d) => (
-              <option key={d.id} value={d.id}>
-                {d.dealName}
-              </option>
-            ))}
-          </select>
-        )}
         {deals && deals.length > 1 && (
           <button className="btn sm" style={{ marginLeft: 6 }} onClick={() => setAiOpen(true)}>
             <i className="fa-solid fa-wand-magic-sparkles" /> Ask AI to match
@@ -2363,7 +2485,7 @@ function ZohoDealCard({
           : !deals || deals.length === 0
           ? (
               <>
-                {hint('No open Deal found for this customer in Zoho CRM')}
+                {hint('No open Deal found for this customer in Zoho CRM — not WCD: sending opens a new Deal (Forecast Status No, Stage “Sales Order Created”), then a Quote, then the Sales Order.')}
                 <div style={{ marginTop: 4 }}>
                   <div className="hint">
                     Not seeing it? A Deal you added won't show here if its Account wasn't linked
@@ -2414,12 +2536,52 @@ function ZohoDealCard({
                 </div>
               </>
             )
-          : deal && (
-              // Deal Items vs Document Lines used to be compared line-by-line here too, but
-              // that duplicated the per-line "Material -- Row N" cards below (see
-              // ZohoMaterialPanel), which already match each document line against this same
-              // Deal's Ordered Items -- removed per user request, kept only the header-level
-              // PO No./Delivery Date check.
+          : (
+            <>
+              {/* Deal in one line (27 Oct 2026, Megachem's option C): which Deal this Sales Order uses,
+                  a link to it in Zoho, and "Change…" -- the other Deals are picked in a popup. */}
+              <div style={dealSentenceStyle}>
+                <i className={'fa-solid ' + (deal ? 'fa-circle-check' : 'fa-circle-plus')} style={{ color: 'var(--brand)', fontSize: 18 }} />
+                <div style={{ flex: '1 1 320px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+                    {deal ? (
+                      <>
+                        <span>Using Deal</span>
+                        <b style={{ overflowWrap: 'anywhere' }}>{deal.dealName}</b>
+                        <span className={'badge ' + (deal.isWcd ? 'b-ok' : 'b-idle')}>{deal.isWcd ? 'WCD' : 'Not WCD'}</span>
+                        <MatchBadge deal={deal} lines={doc.lines} />
+                      </>
+                    ) : selectedId === NEW_DEAL_ID ? (
+                      <>
+                        <b>A new Deal will be opened</b>
+                        <span className="badge b-idle">Not WCD</span>
+                      </>
+                    ) : (
+                      <b>No Deal selected</b>
+                    )}
+                  </div>
+                  <span className="hint">
+                    {userPicked.current
+                      ? 'Chosen by you'
+                      : deal
+                      ? `Picked automatically — ${deal.isWcd ? 'every product on the document is a Deal Item (quantities may differ from the forecast)' : 'every product and quantity matches this Deal'}`
+                      : selectedId === NEW_DEAL_ID
+                      ? 'None of the open Deals has this document\'s products — Forecast Status No, Stage “Sales Order Created”'
+                      : ''}
+                  </span>
+                </div>
+                {deal && dealBase && (
+                  <a className="btn sm" href={dealBase + encodeURIComponent(deal.id)} target="_blank" rel="noopener noreferrer"
+                    title="Open this Deal in Zoho CRM">
+                    Open in Zoho <i className="fa-solid fa-arrow-up-right-from-square" />
+                  </a>
+                )}
+                <button type="button" className="btn sm" onClick={() => { setStaged(selectedId); setListOpen(true); }}>
+                  Change… <span className="hint">({deals.length} open)</span>
+                </button>
+              </div>
+              {deal && (
+            <>
               <RowMapTable
                 docLabel="Document"
                 srcLabel={deal.dealName}
@@ -2438,8 +2600,65 @@ function ZohoDealCard({
                   },
                 ]}
               />
+            </>
             )}
+            </>
+          )}
       </div>
+      <Modal open={listOpen} onClose={() => setListOpen(false)} wide>
+        <ModalHeader title="Change Deal" onClose={() => setListOpen(false)} />
+        <div className="card-b" style={{ padding: 0 }}>
+          <div role="radiogroup" aria-label="Deal for this Sales Order">
+            {(deals || []).map((d) => {
+              const on = d.id === staged;
+              return (
+                <div key={d.id} role="radio" aria-checked={on} tabIndex={0} style={dealModalRow(on)}
+                  onClick={() => setStaged(d.id)}
+                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setStaged(d.id); } }}>
+                  <i className={on ? 'fa-solid fa-circle-dot' : 'fa-regular fa-circle'}
+                    style={{ color: on ? 'var(--brand)' : 'var(--g500)', marginTop: 3 }} />
+                  <div style={{ flex: '1 1 320px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    <b style={{ overflowWrap: 'anywhere' }}>{d.dealName}</b>
+                    <span style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+                      <span className={'badge ' + (d.isWcd ? 'b-ok' : 'b-idle')}>{d.isWcd ? 'WCD' : 'Not WCD'}</span>
+                      <MatchBadge deal={d} lines={doc.lines} />
+                      <span className="badge b-idle">{d.stage}</span>
+                      <span className="hint">
+                        Customer Ref: {d.customerRef || '—'}
+                        {d.createdTime ? ` · Created ${formatDate(d.createdTime)}` : ''}
+                      </span>
+                    </span>
+                    <DealItemsList deal={d} lines={doc.lines} />
+                  </div>
+                  {dealBase && (
+                    <a href={dealBase + encodeURIComponent(d.id)} target="_blank" rel="noopener noreferrer"
+                      title="Open this Deal in Zoho CRM" aria-label="Open this Deal in Zoho CRM" onClick={(e) => e.stopPropagation()}>
+                      <i className="fa-solid fa-arrow-up-right-from-square" />
+                    </a>
+                  )}
+                </div>
+              );
+            })}
+            <div role="radio" aria-checked={staged === NEW_DEAL_ID} tabIndex={0} style={dealModalRow(staged === NEW_DEAL_ID)}
+              onClick={() => setStaged(NEW_DEAL_ID)}
+              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setStaged(NEW_DEAL_ID); } }}>
+              <i className={staged === NEW_DEAL_ID ? 'fa-solid fa-circle-dot' : 'fa-solid fa-plus'}
+                style={{ color: staged === NEW_DEAL_ID ? 'var(--brand)' : 'var(--g500)', marginTop: 3 }} />
+              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <b>Open a new Deal</b>
+                <span className="hint">None of these fit — not WCD, Forecast Status No, Stage “Sales Order Created”</span>
+              </div>
+            </div>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, padding: '12px 16px' }}>
+            <button type="button" className="btn" onClick={() => setListOpen(false)}>Cancel</button>
+            <button type="button" className="btn primary" disabled={!staged}
+              onClick={() => { pickByUser(staged); setListOpen(false); }}>
+              Use this Deal
+            </button>
+          </div>
+        </div>
+      </Modal>
       <CompareModal<ZohoDeal>
         open={aiOpen}
         onClose={() => setAiOpen(false)}
@@ -2448,7 +2667,7 @@ function ZohoDealCard({
         candidates={dealCandidates}
         providers={ocrProviders || []}
         onUse={(d) => {
-          onSelectId(d.id);
+          pickByUser(d.id);
           setAiOpen(false);
         }}
       />

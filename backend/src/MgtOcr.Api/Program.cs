@@ -229,6 +229,8 @@ builder.Services.AddSingleton<MgtOcr.Zoho.ZohoClient>();
 builder.Services.AddSingleton<MgtOcr.Zoho.ZohoAccountClient>();
 builder.Services.AddSingleton<MgtOcr.Zoho.ZohoDealClient>();
 builder.Services.AddSingleton<MgtOcr.Zoho.ZohoSalesOrderClient>();
+builder.Services.AddSingleton<MgtOcr.Zoho.ZohoQuoteClient>();
+builder.Services.AddSingleton<MgtOcr.Zoho.ZohoMaterialClient>();
 
 builder.Services.AddMgtOcrAuth(appConfig, builder.Environment, startupLog);
 

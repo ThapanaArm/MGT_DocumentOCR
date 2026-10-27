@@ -31,7 +31,26 @@ public record ZohoDeal(
     string? CustomerRef,
     string? DeliveryDate,
     string? ClosingDate,
-    List<ZohoDealItem> Items);
+    List<ZohoDealItem> Items,
+    // "Forecast Status" picklist (API Forecast_Status: Yes / No, may be blank) -- manual 5.6.9.
+    // Megachem rule (27 Oct 2026): "Yes" = a WCD Deal; "No" or blank = not WCD.
+    string? ForecastStatus = null,
+    // Created_Time of the Deal record -- the page picks the newest of several matching Deals.
+    string? CreatedTime = null)
+{
+    public bool IsWcd => string.Equals(ForecastStatus?.Trim(), "Yes", StringComparison.OrdinalIgnoreCase);
+}
+
+/// <summary>One line of a Deal to create (non-WCD Deal opened by the OCR flow -- see
+/// ZohoDealClient.BuildCreateRecord). Quantity/price/unit come from the document.</summary>
+public record ZohoNewDealLine(
+    string MaterialId,
+    string? MaterialCode,
+    string? Description,
+    string? MaterialGroup,
+    decimal Quantity,
+    decimal? UnitPrice,
+    string? Unit);
 
 /// <summary>
 /// Zoho CRM "Deals" module — read-only search used by the Deal-matching step of the OCR→Zoho
@@ -132,7 +151,11 @@ public class ZohoDealClient(ZohoClient zoho)
                 CustomerRef: Str(row, "Customer_Ref"),
                 DeliveryDate: Str(row, "Delivery_Date"),
                 ClosingDate: Str(row, "Closing_Date"),
-                Items: items));
+                Items: items,
+                // Read from the full record (not selected in COQL, so an unexpected field name can
+                // never break the Deal lookup itself).
+                ForecastStatus: full is null ? null : PicklistStr(full, "Forecast_Status"),
+                CreatedTime: full?["Created_Time"]?.ToString()));
         }
         return result;
     }
@@ -161,8 +184,70 @@ public class ZohoDealClient(ZohoClient zoho)
             CustomerRef: Str(full, "Customer_Ref"),
             DeliveryDate: Str(full, "Delivery_Date"),
             ClosingDate: Str(full, "Closing_Date"),
-            Items: ExtractDealItems(full));
+            Items: ExtractDealItems(full),
+            ForecastStatus: PicklistStr(full, "Forecast_Status"),
+            CreatedTime: full["Created_Time"]?.ToString());
     }
+
+    // Stage of a Deal the OCR flow opens itself (Megachem, 27 Oct 2026): the Sales Order is created
+    // right after it, so it starts at "Sales Order Created" (manual 5.6.4.4).
+    public const string NewDealStage = "Sales Order Created";
+
+    private string? _itemsField;
+
+    /// <summary>
+    /// The Deal record the OCR flow creates when a document has no Deal at all (Megachem rule,
+    /// 27 Oct 2026: no Deal = not WCD, so open one, then Quote, then Sales Order). Forecast_Status
+    /// = "No" (the manual's own instruction for a normal, non-forecast Deal, 5.6.3 step 6), Stage =
+    /// NewDealStage, Closing_Date = Delivery_Date = the document's delivery date (both mandatory).
+    /// Deal_Name is mandatory too; Zoho may rename it by its own naming format (manual 5.6.9).
+    /// The Deal Items subform's Quantity is "Number - 9" (whole numbers), so it is rounded here --
+    /// the Quote and Sales Order still carry the document's exact quantity.
+    /// </summary>
+    public async Task<JsonObject> BuildCreateRecordAsync(string accountId, string? accountCode, string dealName,
+        string? deliveryDate, string? customerRef, string? paymentTerms, string? paymentCurrency, string? incoterms,
+        List<ZohoNewDealLine> lines)
+    {
+        var module = await ResolveModuleAsync();
+        _itemsField ??= await ZohoRecordFields.ResolveSubformFieldAsync(zoho, module, "Deal Item");
+        var record = new JsonObject
+        {
+            ["Deal_Name"] = dealName.Length > 120 ? dealName[..120] : dealName,
+            ["Account_Name"] = new JsonObject { ["id"] = accountId },
+            ["Stage"] = NewDealStage,
+            ["Forecast_Status"] = "No",
+        };
+        ZohoRecordFields.Put(record, "Account_Code", accountCode);
+        ZohoRecordFields.Put(record, "Customer_Ref", customerRef);
+        ZohoRecordFields.Put(record, "Closing_Date", deliveryDate);
+        ZohoRecordFields.Put(record, "Delivery_Date", deliveryDate);
+        ZohoRecordFields.Put(record, "Payment_Terms", paymentTerms);
+        ZohoRecordFields.Put(record, "Payment_Currency", paymentCurrency);
+        ZohoRecordFields.Put(record, "Incoterms", incoterms);
+        if (_itemsField is not null)
+        {
+            var rows = new JsonArray();
+            foreach (var l in lines)
+            {
+                var row = new JsonObject
+                {
+                    ["Material_Name"] = new JsonObject { ["id"] = l.MaterialId },
+                    ["Quantity"] = Math.Max(1, (long)Math.Round(l.Quantity, MidpointRounding.AwayFromZero)),
+                };
+                ZohoRecordFields.Put(row, "Material_Code", l.MaterialCode);
+                ZohoRecordFields.Put(row, "Description_1", l.Description);
+                ZohoRecordFields.Put(row, "Material_Group", l.MaterialGroup);
+                ZohoRecordFields.Put(row, "Unit", l.Unit);
+                if (l.UnitPrice is decimal up) row["Unit_Price"] = up;
+                rows.Add(row);
+            }
+            record[_itemsField] = rows;
+        }
+        return record;
+    }
+
+    public async Task<ZohoUpsertResult> CreateAsync(JsonObject record) =>
+        await zoho.InsertAsync(await ResolveModuleAsync(), record);
 
     /// <summary>
     /// Manual fallback for when the automatic Account_Code lookup above finds nothing --
@@ -205,7 +290,11 @@ public class ZohoDealClient(ZohoClient zoho)
                 CustomerRef: Str(row, "Customer_Ref"),
                 DeliveryDate: Str(row, "Delivery_Date"),
                 ClosingDate: Str(row, "Closing_Date"),
-                Items: items));
+                Items: items,
+                // Read from the full record (not selected in COQL, so an unexpected field name can
+                // never break the Deal lookup itself).
+                ForecastStatus: full is null ? null : PicklistStr(full, "Forecast_Status"),
+                CreatedTime: full?["Created_Time"]?.ToString()));
         }
         return result;
     }
@@ -260,6 +349,10 @@ public class ZohoDealClient(ZohoClient zoho)
 
     internal static string? Str(JsonObject row, string field) =>
         row[field] is JsonValue v && v.TryGetValue<string>(out var s) ? s : null;
+
+    // A picklist value; blank / "-None-" -> null.
+    internal static string? PicklistStr(JsonObject row, string field) =>
+        Str(row, field)?.Trim() is { Length: > 0 } v && !string.Equals(v, "-None-", StringComparison.OrdinalIgnoreCase) ? v : null;
 
     internal static decimal? Dec(JsonObject row, string field) =>
         row[field] is JsonValue v && v.TryGetValue<decimal>(out var d) ? d : null;

@@ -1,9 +1,10 @@
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
 import type { DocLine } from '../../api/documents';
 import type { OcrProvider } from '../../api/masters';
 import type {
   ZohoDeal,
   ZohoDealItem,
+  ZohoSalesOrderFlow,
   ZohoSalesOrderPreview,
   ZohoSalesOrderResult,
 } from '../../api/zoho';
@@ -117,6 +118,58 @@ export default function ZohoSalesOrderEditor({
       raw: it,
     }));
 
+  const renderItemRow = (l: ZohoSalesOrderPreview['lines'][number]) => {
+                  const key = String(l.itemNo);
+                  const e = lineEdits[key] || { quantity: '', unitPrice: '', unit: '', description: '' };
+                  return (
+                    <tr key={key}>
+                      <td>{key}</td>
+                      <td>
+                        <b>{l.materialCode || l.materialName || '—'}</b>
+                        {l.materialName && l.materialCode && <div className="hint">{l.materialName}</div>}
+                      </td>
+                      <td>
+                        <input type="text" value={e.description} disabled={posted} onChange={(ev) => onLineChange(l.itemNo, { description: ev.target.value })} style={{ width: '100%', minWidth: 220 }} />
+                      </td>
+                      <td>
+                        <input type="text" value={e.quantity} disabled={posted} onChange={(ev) => onLineChange(l.itemNo, { quantity: ev.target.value })} style={{ width: 90 }} />
+                      </td>
+                      <td>
+                        <input type="text" value={e.unit} disabled={posted} onChange={(ev) => onLineChange(l.itemNo, { unit: ev.target.value })} style={{ width: 80 }} />
+                      </td>
+                      <td>
+                        <input type="text" value={e.unitPrice} disabled={posted} onChange={(ev) => onLineChange(l.itemNo, { unitPrice: ev.target.value })} style={{ width: 110 }} />
+                      </td>
+                      <td style={{ whiteSpace: 'nowrap' }}>
+                        {l.conversionRatio && l.subUnit ? (
+                          <span className="hint">1 {l.unit || 'unit'} = {l.conversionRatio} {l.subUnit}</span>
+                        ) : (
+                          <span className="hint">—</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                };
+
+  // Ordered Items cut the same way as the Sales Orders (dateGroups = SO Group + delivery date).
+  const orderedItemGroups = (() => {
+    if (!preview) return [];
+    const used = new Set<string>();
+    const out = dateGroups.map((g, i) => {
+      const nos = new Set(g.itemNos.map(String));
+      const lines = preview.lines.filter((l) => nos.has(String(l.itemNo)));
+      lines.forEach((l) => used.add(String(l.itemNo)));
+      return {
+        key: g.key,
+        title: `Sales Order ${i + 1} of ${dateGroups.length} · Delivery ${g.date}${dateGroups.some((x) => x.soGroup !== '1') ? ` · SO ${g.soGroup}` : ''} · ${lines.length} item${lines.length === 1 ? '' : 's'}`,
+        lines,
+      };
+    }).filter((g) => g.lines.length > 0);
+    const rest = preview.lines.filter((l) => !used.has(String(l.itemNo)));
+    if (rest.length) out.push({ key: 'other', title: 'Other items', lines: rest });
+    return out;
+  })();
+
   const body = () => {
     if (!selectedDealId) return <p className="hint">Pick a Deal on the Deal (Zoho) card above — the Sales Order to send will appear here.</p>;
     if (loading) return <p className="hint">Reading the Sales Order from Zoho CRM…</p>;
@@ -126,24 +179,15 @@ export default function ZohoSalesOrderEditor({
     return (
       <>
         <p className="hint">
-          This is exactly what will be created in Zoho CRM as a <b>Sales Order</b>, linked to Deal <b>{preview.dealName}</b>. Every
-          field is editable — change anything before you send.
+          This is exactly what will be created in Zoho CRM as a <b>Sales Order</b>, linked to Deal <b>{preview.dealName}</b>
+          {preview.flow?.newDeal ? ' (new)' : ''}. Every field is editable — change anything before you send.
         </p>
 
-        <div className="so-counts">
-          <div>
-            <span>DOCUMENT LINES</span>
-            <b>{preview.lines.length + preview.skipped.length}</b>
-          </div>
-          <div className={preview.lines.length ? 'ok' : ''}>
-            <span>WILL SEND</span>
-            <b>{preview.lines.length}</b>
-          </div>
-          <div className={preview.skipped.length ? 'bad' : 'ok'}>
-            <span>NOT MATCHED</span>
-            <b>{preview.skipped.length}</b>
-          </div>
-        </div>
+        {preview.flow && (
+          // Zoho chain Deal -> Quote -> Sales Order (27 Oct 2026): what Send does, one step per card.
+          <ZohoFlowSteps flow={preview.flow} dealName={preview.dealName} salesOrders={Math.max(1, dateGroups.length)} />
+        )}
+
 
         <p className="hint" style={{ margin: '4px 0 10px' }}>
           Fields left blank fall back to the linked Deal&apos;s saved value — they are not sent empty.
@@ -235,38 +279,20 @@ export default function ZohoSalesOrderEditor({
                 </tr>
               </thead>
               <tbody>
-                {preview.lines.map((l) => {
-                  const key = String(l.itemNo);
-                  const e = lineEdits[key] || { quantity: '', unitPrice: '', unit: '', description: '' };
-                  return (
-                    <tr key={key}>
-                      <td>{key}</td>
-                      <td>
-                        <b>{l.materialCode || l.materialName || '—'}</b>
-                        {l.materialName && l.materialCode && <div className="hint">{l.materialName}</div>}
-                      </td>
-                      <td>
-                        <input type="text" value={e.description} disabled={posted} onChange={(ev) => onLineChange(l.itemNo, { description: ev.target.value })} style={{ width: '100%', minWidth: 220 }} />
-                      </td>
-                      <td>
-                        <input type="text" value={e.quantity} disabled={posted} onChange={(ev) => onLineChange(l.itemNo, { quantity: ev.target.value })} style={{ width: 90 }} />
-                      </td>
-                      <td>
-                        <input type="text" value={e.unit} disabled={posted} onChange={(ev) => onLineChange(l.itemNo, { unit: ev.target.value })} style={{ width: 80 }} />
-                      </td>
-                      <td>
-                        <input type="text" value={e.unitPrice} disabled={posted} onChange={(ev) => onLineChange(l.itemNo, { unitPrice: ev.target.value })} style={{ width: 110 }} />
-                      </td>
-                      <td style={{ whiteSpace: 'nowrap' }}>
-                        {l.conversionRatio && l.subUnit ? (
-                          <span className="hint">1 {l.unit || 'unit'} = {l.conversionRatio} {l.subUnit}</span>
-                        ) : (
-                          <span className="hint">—</span>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
+                {/* Several Sales Orders (SO Group / delivery date): the items are listed under the Sales
+                    Order each one goes to, instead of as one combined list. */}
+                {(multiDate ? orderedItemGroups : [{ key: 'all', title: '', lines: preview.lines }]).map((g) => (
+                  <Fragment key={g.key}>
+                    {g.title && (
+                      <tr>
+                        <td colSpan={7} style={{ background: 'var(--g100)', fontWeight: 700, padding: '8px 12px' }}>
+                          {g.title}
+                        </td>
+                      </tr>
+                    )}
+                    {g.lines.map(renderItemRow)}
+                  </Fragment>
+                ))}
               </tbody>
             </table>
           </div>
@@ -322,7 +348,14 @@ export default function ZohoSalesOrderEditor({
           </div>
         )}
 
-        <SoGroupPanel groups={dateGroups} posts={posts} target="Zoho CRM" shipTo={groupShipTo} />
+        <SoGroupPanel groups={dateGroups} posts={posts} target="Zoho CRM" shipTo={groupShipTo}
+          itemLabel={(no) => {
+            const pl = preview?.lines.find((l) => String(l.itemNo) === String(no));
+            const dl = docLines.find((l) => String(l.itemNo) === String(no));
+            const code = pl?.materialCode || dl?.materialCode || '';
+            const name = pl?.materialName || dl?.desc || '';
+            return [code, name].filter(Boolean).join(' — ');
+          }} />
 
         <div className="so-send">
           <div className="row" style={{ gap: 10 }}>
@@ -337,12 +370,13 @@ export default function ZohoSalesOrderEditor({
                   ? 'Sent ✓'
                   : multiDate
                     ? `⎋ Send ${remaining} Sales Order${remaining === 1 ? '' : 's'} to Zoho CRM`
-                    : `⎋ Send ${preview.lines.length} line${preview.lines.length === 1 ? '' : 's'} to Zoho CRM`}
+                    : '⎋ Send to Zoho CRM'}
             </button>
             <button className="btn" onClick={onViewPayload} disabled={preview.lines.length === 0}>
               {'{}'} View payload
             </button>
           </div>
+          {(result?.success || shipToMissing || multiDate || preview.lines.length === 0 || preview.skipped.length > 0) && (
           <div style={{ textAlign: 'right' }}>
             <b>
               {result?.success
@@ -351,7 +385,9 @@ export default function ZohoSalesOrderEditor({
                 ? 'Ship-to required'
                 : preview.lines.length === 0
                   ? 'Nothing to send yet'
-                  : `${preview.lines.length} line${preview.lines.length === 1 ? '' : 's'} ready`}
+                  : multiDate
+                    ? `${remaining} Sales Order${remaining === 1 ? '' : 's'} to send`
+                    : `${preview.skipped.length} line${preview.skipped.length === 1 ? '' : 's'} not matched`}
             </b>
             <div className="hint">
               {shipToMissing && !result?.success
@@ -364,9 +400,10 @@ export default function ZohoSalesOrderEditor({
                 ? 'Match at least one line before sending'
                 : preview.skipped.length
                   ? `Not sent: line ${preview.skipped.map((sk, i) => String(sk.itemNo ?? i + 1)).join(', ')}`
-                  : 'All document lines matched'}
+                  : ''}
             </div>
           </div>
+          )}
         </div>
       </>
     );
@@ -378,11 +415,8 @@ export default function ZohoSalesOrderEditor({
         <div className="card-h">
           <h2>Sales Order summary to send to Zoho CRM</h2>
           <div className="sp" />
-          {preview && (
-            <span className="badge b-idle">
-              {preview.lines.length + preview.skipped.length} line(s) · will send {preview.lines.length}
-              {preview.skipped.length ? ` · not sent ${preview.skipped.length}` : ''}
-            </span>
+          {preview && preview.skipped.length > 0 && (
+            <span className="badge b-warn">{preview.skipped.length} line(s) not matched</span>
           )}
         </div>
         <div className="card-b">{body()}</div>
@@ -415,3 +449,75 @@ export type ZohoSalesOrderEditorHeader = {
   remarks: string;
 };
 
+/* Deal -> Quote -> Sales Order as three numbered steps: for each, whether Send uses an existing
+   record or creates a new one, which record, and why. */
+function ZohoFlowSteps({ flow, dealName, salesOrders }: { flow: ZohoSalesOrderFlow; dealName: string; salesOrders: number }) {
+  type Step = { title: string; action: string; kind: 'use' | 'create' | 'unknown'; main: string; sub: string };
+  const steps: Step[] = [
+    {
+      title: 'Deal',
+      action: flow.newDeal ? 'Create new' : 'Use existing',
+      kind: flow.newDeal ? 'create' : 'use',
+      main: flow.newDeal ? 'New Deal for this customer' : dealName,
+      sub: flow.newDeal
+        ? 'Not WCD · Forecast Status No · Stage “Sales Order Created”'
+        : flow.wcd ? 'WCD · Forecast Status Yes' : `Not WCD · Forecast Status ${flow.forecastStatus || 'blank'}`,
+    },
+    {
+      title: 'Quote',
+      action: flow.quoteAction === 'use' ? 'Use existing' : flow.quoteAction === 'create' ? 'Create new' : 'Could not check',
+      kind: flow.quoteAction,
+      main: flow.quoteAction === 'use'
+        ? `${flow.quoteNo || 'Existing Quote'}${flow.quoteStage ? ` (${flow.quoteStage})` : ''}`
+        : flow.quoteAction === 'create' ? 'New Quote · Stage Open · every line of this document' : 'Zoho CRM could not be read',
+      sub: flow.quoteReason,
+    },
+    {
+      title: 'Sales Order',
+      action: 'Create new',
+      kind: 'create',
+      main: salesOrders > 1 ? `${salesOrders} Sales Orders` : '1 Sales Order',
+      sub: 'Linked to the Deal and the Quote above',
+    },
+  ];
+  const tone = (k: Step['kind']) =>
+    k === 'use' ? { bg: 'var(--brand-soft)', fg: 'var(--brand)', icon: 'fa-link' }
+    : k === 'create' ? { bg: 'var(--info-bg)', fg: 'var(--info)', icon: 'fa-plus' }
+    : { bg: 'var(--orange-bg)', fg: 'var(--orange)', icon: 'fa-triangle-exclamation' };
+  return (
+    <ol aria-label="What Send does in Zoho CRM" style={{
+      listStyle: 'none', margin: '6px 0 14px', padding: 0, display: 'grid', gap: 10,
+      gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+    }}>
+      {steps.map((st, i) => {
+        const t = tone(st.kind);
+        return (
+          <li key={st.title} style={{
+            border: '1px solid var(--g300)', borderRadius: 12, padding: '12px 14px', background: 'var(--card)',
+            display: 'flex', flexDirection: 'column', gap: 8, minWidth: 0, position: 'relative',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{
+                width: 24, height: 24, borderRadius: '50%', display: 'grid', placeItems: 'center', fontWeight: 700, fontSize: 12,
+                background: 'var(--g200)', color: 'var(--g1600, inherit)',
+              }}>{i + 1}</span>
+              <b style={{ fontSize: 15 }}>{st.title}</b>
+              <div className="sp" style={{ flex: 1 }} />
+              <span style={{
+                display: 'inline-flex', alignItems: 'center', gap: 6, padding: '3px 10px', borderRadius: 999,
+                fontSize: 12, fontWeight: 700, background: t.bg, color: t.fg,
+              }}>
+                <i className={'fa-solid ' + t.icon} /> {st.action}
+              </span>
+            </div>
+            <div style={{ fontWeight: 600, overflowWrap: 'anywhere' }}>{st.main}</div>
+            <div className="hint">{st.sub}</div>
+            {i < steps.length - 1 && (
+              <span aria-hidden="true" className="hint" style={{ position: 'absolute', right: -9, top: 14, fontSize: 14 }}>›</span>
+            )}
+          </li>
+        );
+      })}
+    </ol>
+  );
+}

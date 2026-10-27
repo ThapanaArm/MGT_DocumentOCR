@@ -150,7 +150,29 @@ export interface ZohoDeal {
   deliveryDate?: string | null;
   closingDate?: string | null;
   items: ZohoDealItem[];
+  /** "Forecast Status" picklist (Yes / No / blank). Megachem rule: Yes = WCD Deal. */
+  forecastStatus?: string | null;
+  /** forecastStatus === "Yes" (computed by the backend). */
+  isWcd?: boolean;
+  /** Created_Time of the Deal (newest wins among several Deals matching the PO's products). */
+  createdTime?: string | null;
 }
+
+/** Deal id meaning "this document has no Deal": not WCD, so the send opens a new Deal in Zoho
+ *  (Forecast Status No, Stage "Sales Order Created"), then a Quote, then the Sales Order.
+ *  Same value as ZohoSalesOrderController.NewDealId. */
+export const NEW_DEAL_ID = '__new__';
+
+/* Where a Deal opens in the Zoho CRM web screens: dealBase + the Deal's record id
+   (GET /api/zoho/web-links). Read once per page load. */
+let zohoWebLinks: Promise<{ dealBase: string }> | null = null;
+export const getZohoWebLinks = () => {
+  zohoWebLinks ??= api.get<{ dealBase: string }>('/api/zoho/web-links').catch((e) => {
+    zohoWebLinks = null;
+    throw e;
+  });
+  return zohoWebLinks;
+};
 
 // Looks up open Deals by the Deal's own Account_Code field (same customer code stored locally
 // as CustomerCode) rather than a Zoho Account record id -- see ZohoDealClient.
@@ -213,6 +235,22 @@ export interface ZohoSalesOrderPreview {
   paymentCurrencyOptions: string[];
   lines: ZohoSalesOrderPreviewLine[];
   skipped: ZohoSalesOrderSkippedLine[];
+  /** Zoho chain Deal -> Quote -> Sales Order: what the send will do before the Sales Order. */
+  flow?: ZohoSalesOrderFlow;
+}
+
+export interface ZohoSalesOrderFlow {
+  /** The Deal's Forecast Status is "Yes". */
+  wcd: boolean;
+  forecastStatus?: string | null;
+  /** No Deal yet: the send opens one. */
+  newDeal: boolean;
+  dealStage?: string | null;
+  /** "use" an existing Quote of the Deal, "create" a new one, or "unknown" (Zoho read failed). */
+  quoteAction: 'use' | 'create' | 'unknown';
+  quoteNo?: string | null;
+  quoteStage?: string | null;
+  quoteReason: string;
 }
 
 export const getZohoSalesOrderPreview = (docId: number, dealId: string) =>
@@ -254,6 +292,8 @@ export interface ZohoSalesOrderResult {
   zohoId?: string | null;
   message?: string | null;
   dealName: string;
+  /** Quote No. the Sales Orders were linked to. */
+  quoteNo?: string | null;
   linesSent: number;
   skipped: ZohoSalesOrderSkippedLine[];
   /** The updated document after the send (status flips to POSTED on success), so the page can

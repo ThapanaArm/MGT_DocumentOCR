@@ -258,12 +258,14 @@ public class ZohoSalesOrderClient(ZohoClient zoho)
         string? incoterms,
         ZohoShipToInfo? shipTo,
         List<ZohoSalesOrderLine> items,
-        string? remarks = null)
+        string? remarks = null,
+        string? quoteId = null,
+        string? quoteNo = null)
     {
         var module = await ResolveModuleAsync();
         var record = await BuildRecordAsync(
             dealId, accountId, subject, accountCode, taxId, customerRef, deliveryDate,
-            paymentTerms, paymentCurrency, incoterms, shipTo, items, remarks);
+            paymentTerms, paymentCurrency, incoterms, shipTo, items, remarks, quoteId, quoteNo);
         return await zoho.InsertAsync(module, record);
     }
 
@@ -285,7 +287,9 @@ public class ZohoSalesOrderClient(ZohoClient zoho)
         string? incoterms,
         ZohoShipToInfo? shipTo,
         List<ZohoSalesOrderLine> items,
-        string? remarks = null)
+        string? remarks = null,
+        string? quoteId = null,
+        string? quoteNo = null)
     {
         var itemsField = await ResolveOrderedItemsFieldAsync();
 
@@ -295,6 +299,11 @@ public class ZohoSalesOrderClient(ZohoClient zoho)
             ["Deal_Name"] = new JsonObject { ["id"] = dealId },
             ["Account_Name"] = new JsonObject { ["id"] = accountId },
         };
+        // The Quote this Sales Order was made from (27 Oct 2026, Deal -> Quote -> Sales Order):
+        // Quote_Name (Lookup to Quotes) + Quote_No1 (Single Line, the Quote No. as text) -- manual
+        // AO-CRM-UM-2026-003 section 5.9.6, page 296.
+        if (!string.IsNullOrWhiteSpace(quoteId)) record["Quote_Name"] = new JsonObject { ["id"] = quoteId };
+        if (!string.IsNullOrWhiteSpace(quoteNo)) record["Quote_No1"] = quoteNo.Length > 255 ? quoteNo[..255] : quoteNo;
         if (!string.IsNullOrWhiteSpace(accountCode)) record["Account_Code"] = accountCode;
         if (!string.IsNullOrWhiteSpace(taxId)) record["Tax_ID"] = taxId;
         if (!string.IsNullOrWhiteSpace(customerRef)) record["Customer_Ref"] = customerRef;

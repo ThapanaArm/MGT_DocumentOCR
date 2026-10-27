@@ -399,7 +399,8 @@ const ZohoSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function Zoho
       await reloadPosts();
       const created = (response.groups || []).filter((g) => g.success && !g.skipped).length;
       if (response.success) {
-        const dealReference = response.dealName ? ` — linked to Deal “${response.dealName}”` : '';
+        const dealReference = (response.dealName ? ` — linked to Deal “${response.dealName}”` : '')
+          + (response.quoteNo ? ` and Quote ${response.quoteNo}` : '');
         const what = (response.groups?.length ?? 1) > 1 ? `${response.groups!.length} Sales Orders` : 'Sales Order';
         showToast(`${what} created in Zoho CRM${dealReference} (${response.linesSent} line(s) sent)`, 'success');
         document.querySelector('.content')?.scrollTo({ top: 0, behavior: 'smooth' }); window.scrollTo({ top: 0, behavior: 'smooth' });

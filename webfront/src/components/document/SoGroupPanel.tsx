@@ -54,11 +54,15 @@ export default function SoGroupPanel({
   posts,
   target,
   shipTo,
+  itemLabel,
 }: {
   groups: DeliveryDateGroup[];
   posts: SoGroupState[];
   target: 'SAP' | 'Zoho CRM';
   shipTo?: GroupShipToControl;
+  /** What to show for a line in the Items column (e.g. its material code and name); the bare
+   *  line number when absent. */
+  itemLabel?: (itemNo: number) => string;
 }) {
   const usesSoGroups = groups.some((g) => g.soGroup !== '1');
   if (groups.length < 2 && !usesSoGroups && !posts.some((p) => p.posted || p.error)) return null;
@@ -105,11 +109,18 @@ export default function SoGroupPanel({
           <span className="so-group-icon" aria-hidden="true"><i className="fa-solid fa-calendar-days" /></span>
           <div>
             <h3 id="so-group-title">Sales Orders to create</h3>
-            <p>
-              Each split group (SO 1, SO 2, …) and delivery date becomes its own Sales Order in {target}. Use
-              <b> Split Sales Order</b> above the Detail table to move items between groups; each group can have its
-              own Ship-to.
-            </p>
+            {usesSoGroups ? (
+              <p>
+                Each split group (SO 1, SO 2, …) and delivery date becomes its own Sales Order in {target}. Use
+                <b> Split Sales Order</b> above the Detail table to move items between groups; each group can have its
+                own Ship-to.
+              </p>
+            ) : (
+              <p>
+                Split by delivery date: one Sales Order in {target} per delivery date. To also put products on separate
+                Sales Orders (each with its own Ship-to), use <b>Split Sales Order</b> above the Detail table.
+              </p>
+            )}
           </div>
         </div>
         <div className="so-group-summary" aria-label={`${done} of ${groups.length} Sales Orders created`}>
@@ -134,7 +145,7 @@ export default function SoGroupPanel({
           <thead>
             <tr>
               <th>Sales Order</th>
-              <th>Split group</th>
+              {usesSoGroups && <th>Split group</th>}
               <th>Delivery Date</th>
               <th>Ship-to</th>
               <th>Items</th>
@@ -147,10 +158,22 @@ export default function SoGroupPanel({
               return (
                 <tr key={g.key}>
                   <td><span className="so-group-number">{gi + 1}</span></td>
-                  <td><span className="badge b-idle" style={{ color: '#000', fontWeight: 700 }}>SO {g.soGroup}</span></td>
+                  {usesSoGroups && (
+                    <td><span className="badge b-idle" style={{ color: '#000', fontWeight: 700 }}>SO {g.soGroup}</span></td>
+                  )}
                   <td>{g.date}</td>
                   <td>{shipToCell(g)}</td>
-                  <td>{g.itemNos.join(', ')} <span className="hint">· {g.count} item{g.count === 1 ? '' : 's'}</span></td>
+                  <td>
+                    {itemLabel ? (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                        {g.itemNos.map((no) => (
+                          <span key={no}>{itemLabel(no) || `Line ${no}`}</span>
+                        ))}
+                      </div>
+                    ) : (
+                      <>{g.itemNos.join(', ')} <span className="hint">· {g.count} item{g.count === 1 ? '' : 's'}</span></>
+                    )}
+                  </td>
                   <td>
                     {ok ? (
                       <span className="badge b-ok">

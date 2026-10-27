@@ -62,6 +62,42 @@ public class ZohoClient(AppConfig config, ILogger<ZohoClient> logger)
         return _accessToken;
     }
 
+    private string? _webBase;
+
+    /// <summary>
+    /// Base URL of this org's Zoho CRM web screens, e.g. https://crm.zoho.com/crm/org12345678 --
+    /// used to link a record (a Deal) from the OCR page to its own Zoho screen (27 Oct 2026). The
+    /// org part is GET /crm/v8/org's domain_name; the host follows the API domain's data centre
+    /// (www.zohoapis.com -> crm.zoho.com, zohoapis.eu -> crm.zoho.eu, ...). When the org can't be
+    /// read (e.g. the token lacks ZohoCRM.org.READ) the link falls back to the address without the
+    /// org part, which Zoho opens for a user in a single org.
+    /// </summary>
+    public async Task<string> GetWebBaseUrlAsync()
+    {
+        if (_webBase is not null) return _webBase;
+        var host = new Uri(ApiDomain).Host;                     // www.zohoapis.com
+        var dc = host.Contains("zohoapis.") ? host[(host.IndexOf("zohoapis.", StringComparison.Ordinal) + "zohoapis.".Length)..] : "com";
+        var baseUrl = $"https://crm.zoho.{dc}/crm";
+        try
+        {
+            string token = await GetAccessTokenAsync();
+            using var req = new HttpRequestMessage(HttpMethod.Get, $"{ApiDomain}/crm/v8/org");
+            req.Headers.Authorization = new AuthenticationHeaderValue("Zoho-oauthtoken", token);
+            using var resp = await _http.SendAsync(req);
+            string body = await resp.Content.ReadAsStringAsync();
+            if (resp.IsSuccessStatusCode
+                && JsonNode.Parse(body)?["org"] is JsonArray orgs && orgs.Count > 0
+                && AsStr(orgs[0]?["domain_name"]) is { Length: > 0 } domain)
+                return _webBase = $"{baseUrl}/{domain}";
+            logger.LogWarning("[ZOHO] could not read the org for web links ({Status}) - linking without the org part", (int)resp.StatusCode);
+        }
+        catch (Exception e)
+        {
+            logger.LogWarning(e, "[ZOHO] could not read the org for web links - linking without the org part");
+        }
+        return baseUrl; // not cached: try the org again next time
+    }
+
     // ── search by key -> POST(insert) / PUT(update) ──
     public async Task<ZohoUpsertResult> InsertOrUpdateAsync(
         string module, JsonObject record, string keyField, string keyValue, string? sapKey = null)
