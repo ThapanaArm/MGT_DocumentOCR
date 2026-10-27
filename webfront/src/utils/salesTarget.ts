@@ -1,5 +1,6 @@
 import type { Me } from '../api/me';
 import type { DocModel } from '../api/documents';
+import { DEPLOYMENT_COMPANY } from '../constants/deployment';
 
 /* =====================================================================
    Where a document is posted.
@@ -19,7 +20,10 @@ export function resolveDocTarget(
   doc: Pick<DocModel, 'module'> | null | undefined,
   me: Pick<Me, 'primaryCompany'> | null | undefined,
 ): SalesTarget {
-  const isMgt = me?.primaryCompany?.companyCode === 'MGT';
+  // Separate MGT / GLC deployments (27 Oct 2026): a Sales Order follows this site's company,
+  // not the signed-in user's (see constants/deployment.ts). `me` is no longer consulted.
+  void me;
+  const isMgt = DEPLOYMENT_COMPANY === 'MGT';
   const isSalesOrder = doc?.module === 'SO';
   return isMgt && isSalesOrder ? 'zoho' : 'sap';
 }
