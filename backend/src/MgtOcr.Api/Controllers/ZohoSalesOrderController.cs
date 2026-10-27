@@ -631,6 +631,8 @@ public class ZohoSalesOrderController(
     // documents without it fall back to the header text.
     private async Task<string> DocSalesOrgAsync(int docId, Dictionary<string, object?> doc)
     {
+        // Separate MGT / GLC deployments (27 Oct 2026): always this site's company (DeploymentCompany).
+        if (MgtOcr.Core.Auth.DeploymentCompany.SalesOrg(config) is { Length: > 0 } site) return site;
         var stamped = (await repo.GetCompanyAsync(docId) ?? "").Trim();
         if (stamped is "1000" or "2000") return stamped;
         return ((Dictionary<string, object?>)doc["header"]!).GetStr("salesOrg");

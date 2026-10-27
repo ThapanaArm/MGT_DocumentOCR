@@ -68,6 +68,9 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     // to the header, then to the signed-in user, as before.
     private async Task<string> SalesOrgAsync(Dictionary<string, object?> header, int? docId = null)
     {
+        // Separate MGT / GLC deployments (27 Oct 2026): a Sales Order on this site is always this
+        // site's company — see DeploymentCompany. The resolution below is kept for reference only.
+        if (DeploymentCompany.SalesOrg(config) is { Length: > 0 } site) return site;
         if (docId is int id)
         {
             var stamped = (await repo.GetCompanyAsync(id) ?? "").Trim();
@@ -216,7 +219,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         // be validated up front against the pre-routing module before OCR decides AP vs II.
         var apCat = ValidateApDocCategory(mod == "AP" ? "AP" : mod, apDocCategory);
         var (docId, _, note) = await ingest.IngestAsync(mod, stored, fname, size, ocr_, apCat, user, password,
-            await ImportCompanyAsync(company), jobStartedAt: jobStartedAt);
+            mod == "SO" ? DeploymentCompany.SalesOrg(config) : await ImportCompanyAsync(company), jobStartedAt: jobStartedAt);
         var outDoc = await repo.GetDocumentAsync(docId);
         outDoc["ocrNote"] = note ?? "";
         return Ok(outDoc);
@@ -247,7 +250,8 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         var batchId = Guid.NewGuid();
         var result = new List<object>();
         // Resolved once: every file in one batch is filed under the same company.
-        var importCompany = await ImportCompanyAsync(company);
+        // A Sales Order is always filed under this site's company (DeploymentCompany).
+        var importCompany = mod == "SO" ? DeploymentCompany.SalesOrg(config) : await ImportCompanyAsync(company);
         foreach (var file in files)
         {
             var stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
@@ -295,7 +299,9 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         page = page < 1 ? 1 : page;
         pageSize = Math.Clamp(pageSize, 1, 200);
         var r = await repo.ListDocumentsPagedAsync(module, status, apDocCategory, search, dateFrom, dateTo,
-            invModule, page, pageSize, allowed, await CompanyScopeAsync());
+            invModule, page, pageSize, allowed,
+            // The Sales Order list shows this site's company only (DeploymentCompany); other modules unchanged.
+            string.Equals(module, "SO", StringComparison.OrdinalIgnoreCase) ? DeploymentCompany.SalesOrg(config) : await CompanyScopeAsync());
         return Ok(new
         {
             results = r.Rows,
@@ -1660,7 +1666,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
 
         var user = await ActorAsync();
         var companyCode = await CompanyNameForPostAsync("SO", header, docId);
-        var salesOrg = await OwnCompanyAsync() is { Length: > 0 } own ? own : null;
+        var salesOrg = DeploymentCompany.SalesOrg(config); // this site's company (DeploymentCompany)
         var groups = SoDeliveryGroups.Build(header, lines, skipCharges: true); // this endpoint is GLC only
         var freightByGroup = SoCharges.FreightByGroup(header, lines, groups);
         if (groups.Count == 0)
