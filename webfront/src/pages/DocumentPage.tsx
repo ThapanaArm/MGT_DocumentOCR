@@ -464,6 +464,63 @@ function matchPoItem(items: SapPurchaseOrderItem[], line: DocLine): SapPurchaseO
   return undefined;
 }
 
+/* Which PO item does each invoice line bill?
+
+   Decided by the MONEY first, because that is the only thing both documents state in the same
+   terms: a PO item's quantity x net price is what the supplier may bill for it. On PO 2230000031
+   that settles all eleven lines on its own, including the trap the names set — the PO carries
+   material KIM0322-KR-S01 twice, "ROAD V8" at 25.00 (item 10) and "MY ROAD V8" at 24.50 (item
+   120), and the invoice bills 7,350 for 300 KG, which is 24.50. By name or by position that line
+   goes to item 10 and SAP posts against the wrong goods at the wrong price.
+
+   Only a UNIQUE hit counts. Two PO items worth the same amount leave the line for the next pass,
+   and a line that nothing identifies is left blank rather than given a number that looks checked.
+   Each PO item is used once: SAP answers a repeat with M8/321 "Document contains same order item
+   more than once" and takes nothing. */
+function matchLinesToPoItems(
+  lines: DocLine[],
+  items: SapPurchaseOrderItem[],
+): Map<number, SapPurchaseOrderItem> {
+  const out = new Map<number, SapPurchaseOrderItem>();
+  const unused = [...items];
+  const billable = lines
+    .map((l, i) => ({ l, i }))
+    .filter(({ l }) => !['VAT', 'WHT', 'DUTY'].includes(String(l.extCode || '').toUpperCase()))
+    .filter(({ l }) => (Number(l.amount) || 0) !== 0);
+  const take = (i: number, hit: SapPurchaseOrderItem) => {
+    out.set(i, hit);
+    const at = unused.indexOf(hit);
+    if (at >= 0) unused.splice(at, 1);
+  };
+  const value = (it: SapPurchaseOrderItem) => it.quantity * it.netPrice;
+  const sameMoney = (it: SapPurchaseOrderItem, amount: number) =>
+    Math.abs(value(it) - amount) <= 0.01;
+
+  // 1) amount AND quantity — the strongest statement either document makes.
+  for (const { l, i } of billable) {
+    const amount = Number(l.amount) || 0;
+    const qty = Number(l.qty) || 0;
+    const hits = unused.filter(
+      (it) => sameMoney(it, amount)
+        && (qty === 0 || Math.abs(it.quantity - qty) <= 0.001),
+    );
+    if (hits.length === 1) take(i, hits[0]);
+  }
+  // 2) the article code the read found, then the opening words — the same rule the backend uses.
+  for (const { l, i } of billable) {
+    if (out.has(i)) continue;
+    const hit = matchPoItem(unused, l);
+    if (hit) take(i, hit);
+  }
+  // 3) the amount alone, for a line whose quantity was read in a different unit.
+  for (const { l, i } of billable) {
+    if (out.has(i)) continue;
+    const hits = unused.filter((it) => sameMoney(it, Number(l.amount) || 0));
+    if (hits.length === 1) take(i, hits[0]);
+  }
+  return out;
+}
+
 /** The purchase order this invoice is posted against. MIRO's own "Purchasing Order" box (the one
  *  on the PO Reference tab, header.PurchasingOrder) is the SAP purchase order and wins; header
  *  poRef is the reference number the reader picked up off the shipping bundle, which is only the
@@ -482,6 +539,74 @@ function refDocumentFor(d: DocModel): string {
   return isInventoryPoDoc(d) ? 'PO' : 'DELIVERY_NOTE';
 }
 
+/* Fills the PO item on every goods line that has none, as position x 10 (10, 20, 30 ...) — the
+   numbering SAP uses when a purchase order's items were never deleted while it was being written.
+
+   It is a GUESS and is marked as one: each line it touches also gets extra.sapPoItemAuto, which
+   the PO Reference tab shows as an "auto" badge instead of the assigned tick, and which is cleared
+   the moment somebody types over the number. PO 2230000581 runs 10..110 straight through, but
+   2230000020 runs 10, 40, 50, 60 — a deleted item leaves a hole and every number after it is
+   wrong, which SAP reports as "M8/036 PO item 00001 does not exist", naming neither the line nor
+   the reason. The badge is what keeps a guessed number distinguishable from a checked one.
+
+   Seeded at load rather than left to a button because the button was missed: the grey placeholder
+   showing the same number read as "already filled in", so the table sat at 0 of 11 assigned while
+   looking complete. */
+function seedPoItems(d: DocModel): DocModel {
+  if (d.module !== 'AP' && d.module !== 'II') return d;
+  const h = d.header as Record<string, unknown>;
+  const poRef = String(h.PurchasingOrder ?? h.poRef ?? '').trim();
+  if (!poRef || !Array.isArray(d.lines)) return d;
+  // The goods receipt's own line number, filled on the same terms and for the same reason: the
+  // GR Item column showed a grey 1, 2, 3 ... that was only a placeholder, so eleven boxes looked
+  // filled while every one of them was empty. Only where a material document is named — without
+  // one SAP must not be sent a GR reference at all.
+  const hasMatDoc = String(h.refMatDoc ?? '').trim().length > 0;
+  let touched = false;
+  const lines = d.lines.map((l, i) => {
+    const extra = (l.extra ?? {}) as Record<string, unknown>;
+    // A PO item already there does not mean the GR item is: they are filled from different places
+    // and a document saved before the GR column existed has the first without the second.
+    if (String(extra.sapPoItem ?? '').trim()) {
+      if (!hasMatDoc || String(extra.sapGrItem ?? '').trim()) return l;
+      touched = true;
+      return { ...l, extra: { ...extra, sapGrItem: String(i + 1), sapGrItemAuto: '1' } };
+    }
+    // Tax and withholding rows are not goods and never name a PO item.
+    if (['VAT', 'WHT', 'DUTY'].includes(String(l.extCode ?? '').toUpperCase())) return l;
+    touched = true;
+    const next: Record<string, string> = {
+      ...(extra as Record<string, string>), sapPoItem: String((i + 1) * 10), sapPoItemAuto: '1',
+    };
+    if (hasMatDoc && !String(extra.sapGrItem ?? '').trim()) {
+      next.sapGrItem = String(i + 1);
+      next.sapGrItemAuto = '1';
+    }
+    return { ...l, extra: next };
+  });
+  return touched ? { ...d, lines } : d;
+}
+
+/* The Text box on Basic Data — SAP's BKTXT, what Finance reads in the supplier line-item list.
+   It is the same string the G/L rows carry as Item Text ("KIMEX,INV.2230000581"), so it is
+   filled from the first non-tax G/L row rather than typed again; with no G/L rows at all — a
+   PO-keyed document posts the goods against the purchase order, not as G/L lines — it is built
+   from the header the same way those rows are. Cut to 25 because that is all SAP keeps, so what
+   the box shows is what gets posted. Only an empty box is filled. */
+function seedHeaderText(d: DocModel): DocModel {
+  if (d.module !== 'AP' && d.module !== 'II') return d;
+  const h = d.header as Record<string, any>;
+  if (String(h.headerText ?? '').trim()) return d;
+  const taxAccounts = [GL_INPUT_TAX, GL_DEFERRED_INPUT_TAX].filter(Boolean);
+  const fromGl = ((h.glItems as Array<Record<string, any>>) || [])
+    .filter((g) => !taxAccounts.includes(String(g.glAccount ?? '').trim()))
+    .map((g) => String(g.itemText ?? '').trim())
+    .find((t) => t.length > 0 && t.toUpperCase() !== 'WHT');
+  const text = (fromGl || itemTextFor(h)).slice(0, 25);
+  if (!text) return d;
+  return { ...d, header: { ...h, headerText: text } };
+}
+
 function seedRefDocument(d: DocModel): DocModel {
   if (d.module !== 'AP' && d.module !== 'II') return d;
   const h = d.header;
@@ -496,6 +621,21 @@ function seedRefDocument(d: DocModel): DocModel {
   // already carries. Nothing filled it, so it sat empty on every PO document and had to be typed
   // again by hand.
   if (poRef && !String(h.PurchasingOrder ?? '').trim()) next.PurchasingOrder = poRef;
+  // The supplier's own invoice number — SAP keeps it as the document's Reference, and the PO
+  // Reference tab refuses to agree without it. On a shipping bundle the reader does read it, but
+  // under its own name: header.goodsInvoiceNo is the INVOICE NO. box at the head of FORM SHIPPING
+  // EXPENSE ("2230000581" on the KIMEX bundle), while header.invoiceNo — which the reader fills
+  // from the main supplier's tax invoice — stays empty. So the number was on the document all
+  // along and the tab still complained that it was missing.
+  // Goods documents only: on a delivery-cost document the invoice is the forwarder's own, and the
+  // goods supplier's number would be the wrong one to post against.
+  // poRef stands behind it: on these bundles the reference the reader picked up IS the supplier's
+  // invoice number (2230000581 on the KIMEX one, against purchase order 2230000020), and every
+  // export already falls back to it the same way — Or(invoiceNo, poRef).
+  const goodsInvoiceNo = String((h as Record<string, any>).goodsInvoiceNo ?? '').trim() || poRef;
+  if (isInventoryPoDoc(d) && goodsInvoiceNo && !String(h.invoiceNo ?? '').trim()) {
+    next.invoiceNo = goodsInvoiceNo;
+  }
   // The goods-receipt material document, needed whenever the PO item uses GR-based invoice
   // verification. The bundle is filed under it — "A-MatDoc_5000002095_2230000581.pdf" — so the
   // number is taken from the file name rather than typed again.
@@ -507,6 +647,17 @@ function seedRefDocument(d: DocModel): DocModel {
   if (!String(h.refMatDoc ?? '').trim() && !/^1\d/.test(vendorForGr.trim())) {
     const m = /MatDoc[_\s-]*(\d{6,12})/i.exec(String(d.fileName ?? ''));
     if (m) next.refMatDoc = m[1];
+  }
+  // The material document's own fiscal year — the YEAR THE GOODS RECEIPT WAS POSTED, which is not
+  // always the invoice's. It used to sit empty behind a grey placeholder, so it looked filled
+  // while the posting quietly fell back to the invoice's year; SAP then rejects the triple with
+  // M8/429 "Goods receipt item <doc> <year> 0001 is invalid", naming a year nobody chose.
+  // Seeded visibly so a wrong one can be seen and corrected.
+  const matDocForYear = String(next.refMatDoc ?? h.refMatDoc ?? '').trim();
+  if (matDocForYear && !String(h.refMatDocYear ?? '').trim()) {
+    const raw = String(h.postingDate ?? h.invoiceDate ?? '').trim();
+    const yr = /^(\d{4})/.exec(raw)?.[1] ?? String(new Date().getFullYear());
+    next.refMatDocYear = yr;
   }
   // Keyed against the purchase order, the document total IS the PO's goods total — both are the
   // Total Amount of the same PURCHASE ORDER page — so the comparison box is filled from it when
@@ -542,7 +693,8 @@ function poReferenceCheck(h: Record<string, any>): { ok: boolean; lines: string[
   if (poAmt > 0 && docAmt > 0 && Math.abs(poAmt - docAmt) > 0.005) {
     lines.push(`ยอดในเอกสาร ${docAmt.toLocaleString()} ไม่ตรงกับยอดตามใบสั่งซื้อ ${poAmt.toLocaleString()}`);
   }
-  if (poAmt === 0) lines.push('ยังไม่มียอดตามใบสั่งซื้อให้เทียบ (ช่อง PO / Invoice Amount ว่าง)');
+  // No complaint when the PO's own total is not known: it is only known once the purchase order
+  // has been read from SAP, which is a separate thing from the invoice being right.
   return { ok: lines.length === 0, lines };
 }
 
@@ -959,7 +1111,7 @@ export default function DocumentPage() {
       // Locked to Gemini (per Megachem) — the re-OCR engine is always Gemini regardless of which
       // engine last read the document.
       setReocrEngine('gemini');
-      setDoc(seedRefDocument(seedHeaderTaxCode(seedGlItems(seedTaxItems(seedWhtItems(d))))));
+      setDoc(seedHeaderText(seedPoItems(seedRefDocument(seedHeaderTaxCode(seedGlItems(seedTaxItems(seedWhtItems(d))))))));
       if (d.module === 'AP') loadApDocCategories();
       try {
         const chat = await getChat(d.docId);
@@ -1262,7 +1414,7 @@ export default function DocumentPage() {
   const doReocr = () =>
     guard(async () => {
       const d = await reocrDocument(doc.docId, reocrEngine, USER);
-      setDoc(seedRefDocument(seedHeaderTaxCode(seedGlItems(seedTaxItems(seedWhtItems(d))))));
+      setDoc(seedHeaderText(seedPoItems(seedRefDocument(seedHeaderTaxCode(seedGlItems(seedTaxItems(seedWhtItems(d))))))));
       setMap(null);
       manual.current = { header: {}, lines: {} };
       if (d.provider === 'failed')
@@ -2299,12 +2451,16 @@ export default function DocumentPage() {
     // Customs duty is not billed as an item but it is still paid to this vendor, so it counts
     // towards the net total even though it sits in the Tax tab.
     const dutyAmount = taxSum('DUTY');
+    // Rounded to the satang, because these are added up from the lines and binary floating point
+    // does not add money cleanly: 13,751.73 + 745.62 came out as 14497.349999999999 and the
+    // Amount box on Basic Data showed it exactly like that, digits and all.
+    const money = (v: number) => Math.round((Number(v) || 0) * 100) / 100;
     return {
       ...h,
-      subTotal,
-      vatAmount,
-      whtAmount: taxSum('WHT'),
-      totalAmount: subTotal + vatAmount + dutyAmount,
+      subTotal: money(subTotal),
+      vatAmount: money(vatAmount),
+      whtAmount: money(taxSum('WHT')),
+      totalAmount: money(subTotal + vatAmount + dutyAmount),
     };
   })();
 
@@ -2357,32 +2513,82 @@ export default function DocumentPage() {
      found (CSN084379) against the PO item's material and short text, then the first words of the
      description — so what the screen shows is what SAP will be sent. A line that matches nothing
      is left unassigned rather than given a guessed number. */
+  /* Writes a matched set onto the lines. Shared by "Assign all" (items read from SAP) and by the
+     pasted purchase-order table, so both routes assign by exactly the same rule — only the source
+     of the items differs. A matched number is NOT marked auto: it was decided against the real PO,
+     not guessed from the line's position. */
+  /* The Basic Data Text follows the Reference while nobody has written their own.
+
+     Both say the same thing — "KIMEX,INV.2230000031" against Reference 2230000031 — and the Text
+     was filled in once, when the document was first opened. Change the Reference afterwards and
+     the two drift apart: this document went to SAP with Reference 2230000031 and Text
+     "KIMEX,INV.2230000581", the number the shipping form carried before the purchase order was
+     corrected. So the Text is rebuilt whenever the Reference changes, but ONLY while it still
+     holds exactly what was generated from the old Reference — a text somebody typed is theirs. */
+  const editHeaderSynced = (k: string, v: string) => {
+    editHeader(k, v);
+    if (k !== 'invoiceNo') return;
+    const current = String(h.headerText ?? '').trim();
+    if (current.length > 0 && current !== itemTextFor(h).slice(0, 25)) return;
+    const next = itemTextFor({ ...h, invoiceNo: v }).slice(0, 25);
+    if (next && next !== current) editHeader('headerText', next);
+  };
+
+  const applyPoItems = (items: SapPurchaseOrderItem[]): number => {
+    const hits = matchLinesToPoItems(doc.lines || [], items);
+    hits.forEach((hit, i) => {
+      editLineExtra(i, 'sapPoItem', hit.item);
+      editLineExtra(i, 'sapPoItemAuto', '');
+      // The goods receipt's own numbering, re-guessed from the item we just settled. A receipt
+      // taken for the whole purchase order at once numbers its lines in PO item order, so PO item
+      // 120 is line 12, not line 1 — which is what the position-based guess sent, and what SAP
+      // refused as "Goods receipt item <doc> <year> 0001 is invalid". Still a guess (a partial or
+      // a second receipt numbers from 1 again), so it keeps the auto mark and only ever replaces
+      // another guess, never a number somebody checked.
+      const extra = (doc.lines?.[i]?.extra ?? {}) as Record<string, unknown>;
+      const guessed = String(extra.sapGrItemAuto ?? '').trim().length > 0
+        || String(extra.sapGrItem ?? '').trim().length === 0;
+      const n = Number(hit.item);
+      if (guessed && Number.isFinite(n) && n > 0 && n % 10 === 0) {
+        editLineExtra(i, 'sapGrItem', String(n / 10));
+        editLineExtra(i, 'sapGrItemAuto', '1');
+      }
+    });
+    return hits.size;
+  };
+
   const assignFromPo = () =>
     guard(async () => {
       const po = poNumberOf(h);
       if (!po) throw new Error('Enter the purchase order number first');
       setPoAssigning(true);
       try {
-        const r = await getSapPurchaseOrder(po);
+        // The gateway refuses this service in the test tenant (403, "no start authorization for
+        // API_PURCHASEORDER_PROCESS_SRV" — communication scenario SAP_COM_0053 is not open), and
+        // it will go on refusing it until Basis opens it. The raw message says nothing about what
+        // to do instead, and there IS something to do instead, so it says so.
+        const useThePasteButton =
+          ' — กด “วางตาราง PO” แล้ว copy ตาราง Item จากหน้า PO ใน Fiori มาวางแทนได้เลย ได้ผลเหมือนกัน';
+        let r;
+        try {
+          r = await getSapPurchaseOrder(po);
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          throw new Error(
+            /\b403\b|authorization/i.test(msg)
+              ? `SAP ยังไม่เปิดสิทธิ์อ่านใบสั่งซื้อให้ (API_PURCHASEORDER_PROCESS_SRV 403)${useThePasteButton}`
+              : msg + useThePasteButton,
+          );
+        }
         if (!r.configured) {
           throw new Error(
-            'The SAP purchase-order lookup is not configured (Sap:PurchaseOrder:BaseUrl) — '
-              + 'the item numbers cannot be read yet',
+            'ยังไม่ได้ตั้งค่าการอ่านใบสั่งซื้อจาก SAP (Sap:PurchaseOrder:BaseUrl)'
+              + useThePasteButton,
           );
         }
         setPoSapItems(r.items);
         setPoSapHead(r.head ?? null);
-        const unused = [...r.items];
-        let matched = 0;
-        (doc.lines || []).forEach((l, i) => {
-          if (['VAT', 'WHT', 'DUTY'].includes(String(l.extCode || '').toUpperCase())) return;
-          if ((Number(l.amount) || 0) === 0) return;
-          const hit = matchPoItem(unused, l);
-          if (!hit) return;
-          unused.splice(unused.indexOf(hit), 1);
-          editLineExtra(i, 'sapPoItem', hit.item);
-          matched += 1;
-        });
+        const matched = applyPoItems(r.items);
         showToast(
           matched === 0
             ? `Purchase order ${po} has ${r.count} item(s) but none matched these lines — assign by hand`
@@ -2854,8 +3060,32 @@ export default function DocumentPage() {
             groups={AP_TRADE_GROUPS}
             values={vendorTotals ?? h}
             posted={posted}
-            onEdit={editHeader}
+            onEdit={editHeaderSynced}
             extras={{
+              // What the figures on this tab come to in the company's own books. The invoice is
+              // in the supplier's currency — PROMPT bills in THB against a purchase order kept in
+              // USD — so the rate is the only thing that says whether 13,751.73 is a few hundred
+              // dollars or half a million baht. Shown rather than left to be discovered in SAP.
+              'Basic Data': (() => {
+                const cur = String(h.currency ?? '').trim().toUpperCase();
+                const rate = Number(h.exchangeRate) || 0;
+                const amount = Number((vendorTotals ?? h).totalAmount) || 0;
+                if (!cur || cur === 'THB') return null;
+                if (!rate) {
+                  return (
+                    <span className="hint">
+                      เอกสารเป็น {cur} — ปล่อยช่อง Exchange Rate ว่างไว้ SAP จะใช้อัตราในระบบ ณ วันลงบัญชี
+                      ถ้าอยากล็อกอัตราให้ตรงกับ PO (Fixed Exch.Rate) ให้กรอกลงไป
+                    </span>
+                  );
+                }
+                return (
+                  <span className="hint">
+                    1 {cur} = {rate.toLocaleString()} THB · {fmt(amount)} {cur} ≈{' '}
+                    <b>{fmt(Math.round(amount * rate * 100) / 100)} THB</b>
+                  </span>
+                );
+              })(),
               'PO Reference': (
                 <>
                   {(() => {
@@ -2917,7 +3147,7 @@ export default function DocumentPage() {
                           value={String(h.refMatDoc ?? '')}
                           onChange={(e) => editHeader('refMatDoc', e.target.value.replace(/\D/g, ''))}
                           disabled={locked}
-                          placeholder="5000002095"
+                          placeholder="เช่น 5000002095"
                           style={{ width: 170 }}
                         />
                       </label>
@@ -2927,7 +3157,7 @@ export default function DocumentPage() {
                           value={String(h.refMatDocYear ?? '')}
                           onChange={(e) => editHeader('refMatDocYear', e.target.value.replace(/\D/g, ''))}
                           disabled={locked}
-                          placeholder={String(new Date().getFullYear())}
+                          placeholder={`เช่น ${new Date().getFullYear()}`}
                           style={{ width: 100 }}
                         />
                       </label>
@@ -2961,14 +3191,22 @@ export default function DocumentPage() {
                       onAssignItem={
                         usePoCopy || locked
                           ? undefined
-                          : (i, item) => editLineExtra(i, 'sapPoItem', item)
+                          : (i, item) => {
+                              editLineExtra(i, 'sapPoItem', item);
+                              // Typed by a person = checked. Drops the "auto" badge.
+                              editLineExtra(i, 'sapPoItemAuto', '');
+                            }
                       }
                       onDelLine={usePoCopy || locked ? undefined : delLine}
                       matDoc={String(h.refMatDoc ?? '').trim()}
                       onGrItem={
                         usePoCopy || locked
                           ? undefined
-                          : (i, item) => editLineExtra(i, 'sapGrItem', item)
+                          : (i, item) => {
+                              editLineExtra(i, 'sapGrItem', item);
+                              // Typed by a person = checked, same as the PO item.
+                              editLineExtra(i, 'sapGrItemAuto', '');
+                            }
                       }
                       showCondition={
                         // Planned delivery costs clear the accrual the goods receipt made under a
@@ -3001,7 +3239,7 @@ export default function DocumentPage() {
           key={`${vendorFilter || 'all'}-${glRows.items.length}`}
           values={h}
           posted={posted}
-          onEdit={editHeader}
+          onEdit={editHeaderSynced}
           glItems={glRows.items}
           taxProps={taxProps}
           whtProps={whtProps}

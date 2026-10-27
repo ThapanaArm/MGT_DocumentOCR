@@ -54,6 +54,8 @@ public static partial class VisionPrompt
             "currency": "รหัสสกุลเงิน 3 ตัวอักษร เช่น THB", "paymentTerms": "เงื่อนไขการชำระเงิน",
             "goodsSupplier": "ชื่อผู้ขายสินค้าในช่อง SUPPLIER ที่หัวฟอร์ม FORM SHIPPING EXPENSE (เช่น KIMEX) ไม่ใช่ผู้ให้บริการขนส่ง ถ้าไม่มีให้ใส่สตริงว่าง",
             "goodsInvoiceNo": "เลขในช่อง INVOICE NO. ที่หัวฟอร์ม FORM SHIPPING EXPENSE (เช่น 2230000581) ถ้าไม่มีให้ใส่สตริงว่าง",
+            "exchangeRate": "อัตราแลกเปลี่ยนจากหน้าตารางอัตราแลกเปลี่ยนของธนาคารแห่งประเทศไทยที่แนบมาในชุดเอกสาร ให้เอาเฉพาะ \"อัตราขายถ่วงเฉลี่ย\" ของสกุลเงินในใบแจ้งหนี้ (เช่น USD = 33.5086) ตอบเป็นตัวเลขอย่างเดียว ถ้าในชุดไม่มีหน้านี้ให้ใส่สตริงว่าง ห้ามเดาหรือคำนวณเอง",
+            "exchangeRateDate": "วันที่ของตารางอัตราแลกเปลี่ยนหน้านั้น YYYY-MM-DD ถ้าไม่มีให้ใส่สตริงว่าง",
             "poTotalAmount": 0,
             "poCurrency": "",
             "poLines": [{"extCode": "รหัส/ล็อตสินค้าตามใบสั่งซื้อ", "desc": "ชื่อสินค้า",
@@ -241,6 +243,13 @@ public static partial class VisionPrompt
         "\n- (เฉพาะกรณีที่มีหน้า FORM SHIPPING EXPENSE) extCode = \"COST\" ของแถวในฟอร์มมีไว้บอกว่าเป็นค่าขนส่ง/พิธีการ/ค่าธรรมเนียม ไม่ใช่สินค้า " +
         "จะได้ไม่ถูกนำไปจับคู่กับรหัสสินค้าใน SAP ยกเว้นแถวภาษีและอากรที่ใช้ extCode เฉพาะของมัน (WHT, VAT, DUTY) ตามกติกาด้านล่าง " +
         "ส่วน desc ให้คงข้อความตามฟอร์ม เช่น \"OTHER : EDI\", \"STORAGE CHARGE\"" +
+        // The bundle carries the Bank of Thailand's daily rate sheet as evidence for the rate the
+        // purchase order was fixed at. Three columns sit side by side on it and only one is the
+        // one Accounting uses, so the column is named rather than left to be picked.
+        "\n- ถ้าในชุดเอกสารมีหน้าตารางอัตราแลกเปลี่ยนของธนาคารแห่งประเทศไทย ให้อ่าน header.exchangeRate จากคอลัมน์ " +
+        "\"อัตราขายถ่วงเฉลี่ย\" (คอลัมน์ขวาสุด) ของแถวสกุลเงินที่ตรงกับ header.currency เท่านั้น " +
+        "ห้ามใช้คอลัมน์ \"ซื้อตั๋วเงิน\" หรือ \"ซื้อเงินโอน\" และห้ามใช้ตัวเลขใหญ่ที่พาดหัวหน้าว่า \"อัตราแลกเปลี่ยนถัวเฉลี่ยถ่วงน้ำหนักระหว่างธนาคาร\" " +
+        "พร้อมอ่าน header.exchangeRateDate = วันที่ประจำของตารางนั้น (แปลง พ.ศ. เป็น ค.ศ. ด้วย)" +
         "\n- (เฉพาะกรณีที่มีหน้า FORM SHIPPING EXPENSE) แถว DO ในตารางให้ใส่เป็น line เฉพาะเมื่อผู้ให้บริการชิปปิ้ง (ช่อง SHIPPING ของฟอร์ม) " +
         "เป็น PROMPT หรือ CHEETAH เท่านั้น ถ้าเป็นรายอื่นห้ามใส่แถว DO แม้ในฟอร์มจะมียอดอยู่" +
         "\n- (เฉพาะกรณีที่มีหน้า FORM SHIPPING EXPENSE) แถวที่เป็นสกุลเงินต่างประเทศ เช่น \"OTHER : Oversea Charge (USD)\" " +

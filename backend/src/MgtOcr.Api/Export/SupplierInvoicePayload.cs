@@ -72,9 +72,26 @@ public static class SupplierInvoicePayload
         // fields EMPTY — Finance reconciles on Assignment, so it has to be on every line and on
         // the header, not only on the delivery-cost documents that happen to have G/L rows.
         var firstGl = glRows.FirstOrDefault(g => !SapImportSupplierInvoiceExcel.IsTaxAccountRow(g));
+        // goodsInvoiceNo is the INVOICE NO. at the head of FORM SHIPPING EXPENSE — the goods
+        // supplier's own number ("2230000581"), which the reader files under its own name while
+        // invoiceNo stays empty. It stands ahead of the PO number so a document posted straight
+        // from storage, without the screen having seeded it, still carries the real invoice.
         var assignment = Or(firstGl?.GetStr("assignment").Trim() ?? "",
-            Or(header.GetStr("invoiceNo").Trim(), poRef));
+            Or(header.GetStr("invoiceNo").Trim(),
+               Or(header.GetStr("goodsInvoiceNo").Trim(), poRef)));
         var itemText = Or(firstGl?.GetStr("itemText").Trim() ?? "", assignment);
+
+        // The Text box on Basic Data (BKTXT). The screen keeps it in header.headerText and it
+        // wins: somebody who typed there meant that text. Nothing read it before and the box was
+        // silently ignored.
+        //
+        // The fallbacks matter, because a PO-keyed invoice carries no G/L rows at all — the goods
+        // are posted against the purchase order — so firstGl is null and the old chain ended at
+        // `assignment`, a bare number. Document 5105600157 went to SAP with Text "2230000031"
+        // for that reason, where Accounting writes "KIMEX,INV.2230000031": supplier, then the
+        // reference. Composed here when there is no row to take it from.
+        var headerText = Or(header.GetStr("headerText").Trim(),
+            Or(firstGl?.GetStr("itemText").Trim() ?? "", ReferenceText(header)));
 
         // MIRO's Reference Document Category, the same choice the PO Reference tab shows:
         // 1 = goods, 2 = planned delivery costs, 3 = both.
@@ -182,8 +199,19 @@ public static class SupplierInvoicePayload
             // invoice — not the bundle's. Falls back to the document's number, then the PO.
             ["SupplierInvoiceIDByInvcgParty"] = Cut(
                 Or(vendor.Length > 0 ? InvoiceNoOf(taxRows) : "",
-                   Or(header.GetStr("invoiceNo").Trim(), poRef)), 16),
+                   Or(header.GetStr("invoiceNo").Trim(),
+                      Or(header.GetStr("goodsInvoiceNo").Trim(), poRef))), 16),
             ["DocumentCurrency"] = currency,
+            // Left empty SAP takes the rate from its own table for the posting date. Filled in,
+            // the posting uses exactly this rate — the same thing the purchase order's
+            // "Fixed Exch.Rate" does — so an invoice in the supplier's currency clears the
+            // accrual the goods receipt made rather than booking an exchange difference against
+            // it. Sent only when there is one, and never on a document already in company code
+            // currency, where SAP rejects a rate it has no use for.
+            ["ExchangeRate"] = !string.Equals(currency, "THB", StringComparison.OrdinalIgnoreCase)
+                && Num(header.Get("exchangeRate")) is var fx && fx > 0
+                ? F2(fx)
+                : null,
             ["InvoiceGrossAmount"] = F2(gross),
             ["AccountingDocumentType"] = Or(header.GetStr("sapDocType").Trim(), "RE"),
             // Thai tax reporting needs the business place on the document; SAP rejects the posting
@@ -195,7 +223,7 @@ public static class SupplierInvoicePayload
             // what Finance reconciles on, Header Text is what they read in the line-item list.
             // BKTXT is 25 characters, ZUONR is 18.
             ["AssignmentReference"] = Cut(assignment, 18),
-            ["DocumentHeaderText"] = Cut(itemText, 25),
+            ["DocumentHeaderText"] = Cut(headerText, 25),
             // The TEXT on the vendor (payables) line is its own field: DocumentHeaderText lands
             // on the document header (BKTXT) and leaves the line's own Text (BSEG-SGTXT) empty,
             // which is what Finance reads in the open-item list. 50 characters.
@@ -472,6 +500,30 @@ public static class SupplierInvoicePayload
     /// <summary>The fiscal year the goods receipt was posted in. SAP wants it beside the material
     /// document number; the posting date's year is it for a calendar fiscal year (both company
     /// codes here use one).</summary>
+    /// <summary>"&lt;SUPPLIER&gt;,INV.&lt;reference&gt;" — the shape Accounting writes on every
+    /// line ("KIMEX,INV.2230000031"). The reference is the one the document is posted under, so
+    /// the supplier's own invoice number comes first and the shipping form's INVOICE NO. and the
+    /// purchase order stand in behind it; the Text and the Reference then always name the same
+    /// document, which they did not when the purchase order was corrected after the read.</summary>
+    private static string ReferenceText(Dictionary<string, object?> header)
+    {
+        // The form's SUPPLIER box as printed; the document's own supplier name carries a legal
+        // suffix ("Kimex Co.,Ltd."), so that one is cut at its first space or comma.
+        var fromForm = header.GetStr("goodsSupplier").Trim();
+        var vendor = fromForm;
+        if (vendor.Length == 0)
+        {
+            var name = header.GetStr("vendorName").Trim();
+            var cut = name.IndexOfAny([' ', ',']);
+            vendor = cut > 0 ? name[..cut] : name;
+        }
+        vendor = vendor.ToUpperInvariant();
+        var no = Or(header.GetStr("invoiceNo").Trim(),
+            Or(header.GetStr("goodsInvoiceNo").Trim(), PoNumber(header)));
+        if (vendor.Length == 0) return no.Length > 0 ? $"INV.{no}" : "";
+        return no.Length > 0 ? $"{vendor},INV.{no}" : vendor;
+    }
+
     private static string FiscalYearOf(Dictionary<string, object?> header)
     {
         var raw = Or(header.GetStr("postingDate").Trim(), header.GetStr("invoiceDate").Trim());

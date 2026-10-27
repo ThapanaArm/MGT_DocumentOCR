@@ -58,7 +58,12 @@ export const GL_DUTY = '21229100';
 // The goods a purchase order covers. Not the freight account — SAP rejected all eleven rows when
 // they were posted there — and Accounting has not given the right one yet, so it stays blank.
 export const GL_PO_GOODS = '';
-export const GL_WITHHOLDING_TAX = '';
+// Withholding tax payable. Taken from the account picked by hand in SAP on the PROMPT LOGISTICS
+// document — 21431003 "WHT PGD 2,3,5..." — because the export left this blank and every
+// withholding row went out with no account at all, which SAP refuses. One account for every
+// withholding type is an assumption: Accounting should confirm whether PND 3 and PND 53, and the
+// different rates, really post to the same one.
+export const GL_WITHHOLDING_TAX = '21431003';
 
 export const TAX_CODES: Array<[string, string]> = [
   // Input tax
@@ -246,6 +251,11 @@ export const II_GROUPS: FieldGroup[] = [
       ['sapDocType', 'Document Type', 'select', SAP_DOC_TYPES], // 6)
       ['totalAmount', 'Amount'],            // 7)
       ['currency', 'Currency'],             // 8)
+      // Only meaningful when the invoice is not in the company code's own currency. Left empty
+      // SAP takes the rate from its own table for the posting date; filled in it posts at exactly
+      // this rate, the way the purchase order's "Fixed Exch.Rate" does, so the invoice clears the
+      // accrual the goods receipt made instead of throwing an exchange difference.
+      ['exchangeRate', 'Exchange Rate'],    // 8b)
       ['calculateTax', 'Calculate Tax', 'checkbox'], // 9)
       ['vatAmount', 'Tax Amount'],          // 10)
       ['taxCode', 'Tax Code', 'select', TAX_CODES], // 11)
@@ -323,6 +333,7 @@ export const AP_TRADE_GROUPS: FieldGroup[] = [
       ['postingDate', 'Posting Date'],     // 4)
       ['totalAmount', 'Amount'],           // 5)
       ['currency', 'Currency'],            // 6)
+      ['exchangeRate', 'Exchange Rate'],   // 6b)
       ['calculateTax', 'Calculate Tax', 'checkbox'], // 7)
       ['taxCode', 'Tax Code', 'select', TAX_CODES],             // 8)
       ['businessPlace', 'Business Place'], // 9)
@@ -341,9 +352,14 @@ export const AP_TRADE_GROUPS: FieldGroup[] = [
         ['SERVICE_ENTRY', 'Service Entry Sheet - Lean Services'],
       ]],
       ['PurchasingOrder','Purchasing Order'],
-      // The goods total the PO and the supplier's invoice must agree on. Shown here because a
-      // PO-referenced MIRO is posted against it, and because it is what the check below compares.
-      ['poTotalAmount', 'PO / Invoice Amount'],
+      // The supplier's own invoice number, as read off the scanned bundle — "2230000581" on the
+      // KIMEX one. SAP keeps it as the document's Reference and a PO-referenced MIRO is refused
+      // without it, so it belongs next to the purchase order rather than only on Basic Data: the
+      // warning about it appears on THIS tab, and this is the box that answers it.
+      // (The goods total that used to sit here compared the document with itself — it was filled
+      // from the document's own total — so it told nobody anything; the Totals panel above
+      // already shows the same figure.)
+      ['invoiceNo', 'Invoice No. (ตามเอกสารที่สแกน)'],
       ['refDocType', 'Reference Document Category', 'select', [
         ['1', 'Goods/service items'],
         ['2', 'Planned delivery costs'],

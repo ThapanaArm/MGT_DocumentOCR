@@ -11,12 +11,21 @@
    SEND_DISABLED_AP -- the AP/II "Confirm Submission to SAP" modal in DocumentPage.tsx
                        (MIRO / FB60 via API_SUPPLIERINVOICE_PROCESS_SRV). Open (20 Oct 2026).
 
+<<<<<<< HEAD
                        It is safe to leave open because this route cannot reach production at all,
                        by configuration rather than by this flag: Sap:SupplierInvoice carries its
                        OWN ActiveEnvironment ("dev"), so switching the rest of the system to Prod
                        does not drag it along, and its BaseUrl_Prod is deliberately EMPTY -- with
                        no URL the backend refuses to post instead of inventing a document number,
                        which is what it used to do (a fake "51" + six digits that existed nowhere).
+=======
+                       Safe to leave open because this route cannot reach production at all, by
+                       configuration rather than by this flag: Sap:SupplierInvoice carries its OWN
+                       ActiveEnvironment ("dev"), so switching the rest of the system to Prod does
+                       not drag it along, and its BaseUrl_Prod is deliberately EMPTY -- with no URL
+                       the backend refuses to post instead of inventing a document number, which is
+                       what it used to do (a fake "51" + six digits that existed nowhere).
+>>>>>>> feature/ap-invoice
 
                        Close it again if that stops being true -- if BaseUrl_Prod is ever filled
                        in, this is the switch that keeps users out until the route is trusted. */

@@ -51,6 +51,12 @@ public static class HeaderParser
             // row of the posted document carries them ("KIMEX,INV.2230000581"), while the shipping
             // agent who bills us appears only on the tax rows.
             ["goodsSupplier"] = "", ["goodsInvoiceNo"] = "",
+            // The Bank of Thailand rate sheet that travels with a shipping bundle. The purchase
+            // order is kept in the supplier's currency and the company's books in baht, so the
+            // rate decides what the invoice is worth — PO 2230000031 was fixed at 33.50860, the
+            // selling rate on the sheet for 03.08.2026. Read rather than typed again, and left
+            // empty when no sheet is in the bundle, which means SAP's own rate is used.
+            ["exchangeRate"] = "", ["exchangeRateDate"] = "",
         };
 
     // _po_number_date(): some forms (e.g. Henkel/European buyers) write PO number + buyer code +
