@@ -115,8 +115,15 @@ export default function PoReferenceTable({
     return a;
   }, {});
   const isDupe = (l: DocLine) => (itemCounts[assignedItemOf(l)] ?? 0) > 1;
+  /* The number was filled in by seedPoItems (position x 10), not read from SAP and not typed by
+     anyone. Shown as "auto" rather than the assigned tick so a guessed number is never mistaken
+     for a checked one — the whole class of bug behind M8/036 "PO item 00001 does not exist". */
+  const isAuto = (l: DocLine) =>
+    String((l.extra as Record<string, unknown> | undefined)?.sapPoItemAuto ?? '').trim().length > 0;
   const grItemOf = (l: DocLine) =>
     String((l.extra as Record<string, unknown> | undefined)?.sapGrItem ?? '').trim();
+  const isGrAuto = (l: DocLine) =>
+    String((l.extra as Record<string, unknown> | undefined)?.sapGrItemAuto ?? '').trim().length > 0;
   const showGr = !!onGrItem && !posted && !!(matDoc ?? '').trim();
   /* The condition types NTT DATA configured for MGT/GLC, from KUT-MM-PU-203 p.34. The PO
      carries one of these per charge and the invoice has to name the same one. */
@@ -172,6 +179,18 @@ export default function PoReferenceTable({
           </span>
         </div>
       )}
+    {lines.some(isAuto) && (
+      <div
+        className="card"
+        style={{ padding: '8px 12px', marginBottom: 10, borderLeft: '3px solid var(--warn, #e08900)' }}
+      >
+        <span className="hint">
+          ⚠️ บรรทัดที่ขึ้น <b>auto</b> คือเลขที่เติมตามลำดับบรรทัด (10, 20, 30…) <b>ยังไม่ได้ตรวจกับ PO</b>
+          {' '}— ใบแจ้งหนี้ที่เรียกเก็บแค่บางรายการ หรือ PO ที่เลขกระโดด จะผิดเกือบทุกบรรทัด
+          {' '}กด “วางตาราง PO” เพื่อให้จับคู่จากของจริงก่อนส่ง
+        </span>
+      </div>
+    )}
     <div className="tw">
       <table>
         <thead>
@@ -202,6 +221,13 @@ export default function PoReferenceTable({
                     {isDupe(l) ? (
                       <span className="badge b-fail" title="PO item นี้ถูกใช้ซ้ำในเอกสารเดียวกัน">
                         ซ้ำ
+                      </span>
+                    ) : assignedItemOf(l) && isAuto(l) ? (
+                      <span
+                        className="badge b-warn"
+                        title="เติมให้อัตโนมัติจากลำดับบรรทัด (×10) ยังไม่ได้ตรวจกับ PO ใน SAP — ถ้า PO มีเลขกระโดด เลขนี้จะผิด"
+                      >
+                        auto
                       </span>
                     ) : assignedItemOf(l) ? (
                       <i className="fa-solid fa-check" aria-label="Assigned" />
@@ -240,11 +266,12 @@ export default function PoReferenceTable({
                         <input
                           value={assignedItemOf(l)}
                           onChange={(e) => onAssignItem(i, e.target.value.replace(/\D/g, ''))}
-                          // The printed PO sheet numbers its rows 1, 2, 3 — SAP numbers the same
-                          // items 10, 20, 30. Showing the printed number here invited people to
-                          // type it, and SAP answered "PO item 00001 does not exist". Suggest the
-                          // SAP-shaped number instead; it is still only a suggestion, in grey.
-                          placeholder={String((i + 1) * 10)}
+                          // Must not read as a filled-in value. A bare "10" here looked exactly
+                          // like an assigned number, and a table sitting at 0 of 11 assigned
+                          // looked complete. The printed PO sheet's own 1, 2, 3 is not shown
+                          // either: typing it is what SAP answers with "PO item 00001 does not
+                          // exist".
+                          placeholder={`เช่น ${(i + 1) * 10}`}
                           inputMode="numeric"
                           style={{ width: 80 }}
                         />
@@ -300,10 +327,20 @@ export default function PoReferenceTable({
                       <input
                         value={grItemOf(l)}
                         onChange={(e) => onGrItem!(i, e.target.value.replace(/\D/g, ''))}
-                        placeholder={String(i + 1)}
+                        // "เช่น 1", never a bare "1": a grey number in an empty box reads as a
+                        // value that is already there, which is how eleven empty boxes passed for
+                        // filled ones.
+                        placeholder={`เช่น ${i + 1}`}
                         inputMode="numeric"
-                        style={{ width: 80 }}
-                        title={`รายการที่เท่าไรในใบรับของ ${matDoc}`}
+                        style={{
+                          width: 80,
+                          ...(isGrAuto(l) ? { borderColor: 'var(--warn, #e08900)' } : {}),
+                        }}
+                        title={
+                          isGrAuto(l)
+                            ? `เติมให้อัตโนมัติตามลำดับบรรทัด ยังไม่ได้ตรวจกับใบรับของ ${matDoc} — ถ้าลำดับไม่ตรง SAP จะฟ้อง M8/429`
+                            : `รายการที่เท่าไรในใบรับของ ${matDoc}`
+                        }
                       />
                     </td>
                   )}
