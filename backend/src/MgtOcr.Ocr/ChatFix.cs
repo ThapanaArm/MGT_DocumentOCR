@@ -53,6 +53,13 @@ public static partial class ChatFix
     [GeneratedRegex(@"\{.*\}", RegexOptions.Singleline)]
     private static partial Regex JsonObjectRegex();
 
+    // The person's message names Item Note 1 itself (EN/TH wording CS actually types), so an AI edit
+    // of extra.itemNote1 is what they asked for rather than the AI filling it on its own.
+    [GeneratedRegex(@"item\s*note|itemnote|หมายเหตุ\s*(รายการ|บรรทัด|สินค้า|item)|โน้ต\s*รายการ", RegexOptions.IgnoreCase)]
+    private static partial Regex ItemNoteRegex();
+
+    private static bool ItemNoteRequested(string message) => ItemNoteRegex().IsMatch(message ?? "");
+
     private static string Trunc(string s, int max) => string.IsNullOrEmpty(s) || s.Length <= max ? s : s.Substring(0, max) + "…";
 
     public static async Task<(ChatFixResult? Result, string? Error)> ChatFixDocumentAsync(string module, Dictionary<string, object?> header,
@@ -81,8 +88,13 @@ public static partial class ChatFix
         string priorLookupResults = "",
         // When true (an SO document on the MGT/Zoho side), the AI may reply with an "action" to run the
         // on-screen Zoho customer search itself instead of the backend SAP lookups above.
-        bool actionsEnabled = false)
+        bool actionsEnabled = false,
+        // When true (a GLC SO document), extra.itemNote1 belongs to the CS (26 Oct 2026): the AI is
+        // told not to fill/change it, and whatever it returns is replaced by the line's current value
+        // unless the person's own message asks about Item Note 1 (ItemNoteRequested).
+        bool protectItemNote1 = false)
     {
+        var itemNote1Locked = protectItemNote1 && !ItemNoteRequested(message);
         var materialBlock = "";
         if (materialOptions.Count > 0)
         {
@@ -140,6 +152,11 @@ public static partial class ChatFix
             "\"extra\":{\"deliveryDate\":\"YYYY-MM-DD\",\"itemNote1\":\"...\"} — ถ้าผู้ใช้สั่งให้เติม/แก้วันส่งรายบรรทัด " +
             "ให้ใส่/แก้ค่า extra.deliveryDate ของบรรทัดนั้น (รูปแบบ YYYY-MM-DD) และต้องคง key อื่นใน extra ไว้ครบ ห้ามลบทิ้ง " +
             "บรรทัดที่ไม่ได้แก้ให้คืน extra เดิมทั้งหมด\n" +
+            (protectItemNote1
+                ? "- extra.itemNote1 (Item Note 1) ของเอกสารนี้ผู้ใช้เป็นคนกรอกเอง ห้ามเติม/แก้/ลบ extra.itemNote1 " +
+                  "(ห้ามดึงจากเอกสารหรือภาพแนบมาใส่) ให้คืนค่าเดิมตามที่มีอยู่ทุกบรรทัด " +
+                  "ยกเว้นผู้ใช้สั่งให้แก้ Item Note 1 / หมายเหตุรายการ โดยตรงในข้อความล่าสุด\n"
+                : "") +
             (materialBlock.Length > 0
                 ? "- ถ้าผู้ใช้สั่งให้เปลี่ยนหรือเลือก Material/รหัสสินค้าของบรรทัดใด ให้เลือกรหัสที่ตรงที่สุดจากรายการ Material ด้านบนเท่านั้น " +
                   "แล้วใส่ไว้ในฟิลด์ \"materialCode\" ของบรรทัดนั้นในผลลัพธ์ ห้ามคิดรหัสขึ้นเองถ้าไม่มีในรายการ (ถ้าหาไม่เจอให้ปล่อย materialCode ว่างแล้วอธิบายใน reply แทน) " +
@@ -266,10 +283,15 @@ public static partial class ChatFix
                     // gone"). Start from the ORIGINAL line's extra (indices line up — the prompt forbids
                     // adding/removing lines), then overlay whatever extra the AI returned so a chat like
                     // "fill the delivery date per line" can set extra.deliveryDate without losing the rest.
-                    var mergedExtra = new Dictionary<string, object?>(
-                        (idx < lines.Count ? lines[idx].Get("extra") as Dictionary<string, object?> : null) ?? new());
+                    var origExtra = (idx < lines.Count ? lines[idx].Get("extra") as Dictionary<string, object?> : null) ?? new();
+                    var mergedExtra = new Dictionary<string, object?>(origExtra);
                     if (ln.Get("extra") is Dictionary<string, object?> aiExtra)
-                        foreach (var kv in aiExtra) mergedExtra[kv.Key] = kv.Value;
+                        foreach (var kv in aiExtra)
+                        {
+                            // GLC: the AI's itemNote1 never overwrites the CS's own value (or fills an empty one).
+                            if (itemNote1Locked && kv.Key == "itemNote1") continue;
+                            mergedExtra[kv.Key] = kv.Value;
+                        }
                     if (mergedExtra.Count > 0) outLine["extra"] = mergedExtra;
                     outLines.Add(outLine);
                     var mc = ln.GetStr("materialCode").Trim();

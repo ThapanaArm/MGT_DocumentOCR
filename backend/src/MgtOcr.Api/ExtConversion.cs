@@ -10,10 +10,12 @@ namespace MgtOcr.Api;
 // lives in the API project since MgtOcr.Data intentionally has no reference to MgtOcr.Ocr.
 public static partial class ExtConversion
 {
-    public static Dictionary<string, object?> ToExtDict(ParsedDocument pd) => new()
+    // ocrItemNote: false drops the OCR-read per-line note so extra.itemNote1 starts empty — see
+    // OcrPrefillsItemNote for which documents that applies to.
+    public static Dictionary<string, object?> ToExtDict(ParsedDocument pd, bool ocrItemNote = true) => new()
     {
         ["header"] = pd.Header,
-        ["lines"] = pd.Lines.Select(l => ToLineDict(l, HeaderDeliveryDate(pd.Header))).ToList(),
+        ["lines"] = pd.Lines.Select(l => ToLineDict(l, HeaderDeliveryDate(pd.Header), ocrItemNote)).ToList(),
         ["provider"] = pd.Provider,
         ["confidence"] = pd.Confidence,
         ["confidenceNote"] = pd.ConfidenceNote,
@@ -31,7 +33,7 @@ public static partial class ExtConversion
     // headerDeliveryDate: the document-level delivery date, used as the per-line default so the DETAIL
     // table's "Delivery Date" column is never blank when the PO only states one date for the whole
     // order. A per-line date the OCR actually read (LineItem.DueDate) always wins over it.
-    public static Dictionary<string, object?> ToLineDict(LineItem l, string? headerDeliveryDate = null)
+    public static Dictionary<string, object?> ToLineDict(LineItem l, string? headerDeliveryDate = null, bool ocrItemNote = true)
     {
         var d = new Dictionary<string, object?>
         {
@@ -43,7 +45,7 @@ public static partial class ExtConversion
         // SapPayloadBuilder (itemNote1 -> to_Text; deliveryDate -> per-line RequestedDeliveryDate and
         // the split-by-delivery-date grouping). Only added when the OCR found a value.
         var extra = new Dictionary<string, object?>();
-        if (!string.IsNullOrWhiteSpace(l.ItemNote)) extra["itemNote1"] = l.ItemNote;
+        if (ocrItemNote && !string.IsNullOrWhiteSpace(l.ItemNote)) extra["itemNote1"] = l.ItemNote;
         // Per-line delivery date: the OCR-read line date if present, otherwise the header date so the
         // column shows a value and same-date lines group into one Sales Order.
         var lineDate = !string.IsNullOrWhiteSpace(l.DueDate) ? l.DueDate.Trim() : headerDeliveryDate?.Trim();
@@ -64,6 +66,14 @@ public static partial class ExtConversion
         if (extra.Count > 0) d["extra"] = extra;
         return d;
     }
+
+    // Item Note 1 (26 Oct 2026): a GLC Sales Order (SalesOrg 2000 -> SAP to_Text ZI01) starts with
+    // extra.itemNote1 empty and the CS types it in the DETAIL table — OCR never prefills it, even if
+    // the prompt still returned an itemNote. MGT (1000 -> Zoho Status_Note) keeps the OCR prefill.
+    // Only an explicit GLC stamp turns it off: a document with no company keeps the old behaviour.
+    public static bool OcrPrefillsItemNote(string module, MgtOcr.Core.Config.AppConfig config, string? salesOrg) =>
+        !(string.Equals(module, "SO", StringComparison.OrdinalIgnoreCase)
+          && string.Equals(config.CompanyForSalesOrg(salesOrg?.Trim())?.Name, "GLC", StringComparison.OrdinalIgnoreCase));
 
     private static string? HeaderDeliveryDate(Dictionary<string, object?> header) =>
         header.TryGetValue("deliveryDate", out var v) ? v as string : null;

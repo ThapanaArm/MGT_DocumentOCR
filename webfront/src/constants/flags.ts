@@ -11,4 +11,4 @@ export const SEND_DISABLED = false;
    signed in with Microsoft lands on the password sign-in screen. Set back to true to turn SSO on
    again (VITE_AZURE_CLIENT_ID must still be set). The backend still accepts Microsoft tokens; this
    only hides it in the web app. */
-export const SSO_LOGIN_ENABLED = false;
+export const SSO_LOGIN_ENABLED = true;

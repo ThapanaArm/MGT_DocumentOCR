@@ -16,6 +16,11 @@ public static partial class VisionPrompt
     /// <param name="salesOrg">The company the document is filed under — "1000" MGT, "2000" GLC.
     /// Anything else (including empty) reads as GLC, which is how every document behaved before
     /// MGT came into scope.</param>
+    // The SO lines' itemNote entry in the schema below (leading comma included), so it can be cut
+    // out for GLC whatever the source file's line endings are.
+    [GeneratedRegex(@",\s*""itemNote"":\s*""[^""]*""")]
+    private static partial Regex SoItemNoteField();
+
     public static string Build(string module, string mode = "image", string salesOrg = "")
     {
         string fields = module == "SO" ? """
@@ -64,6 +69,11 @@ public static partial class VisionPrompt
                      "baseAmount": 0}]
         }
         """;
+        // GLC Sales Orders (explicit 2000 stamp only): Item Note 1 is typed by the CS, never read from
+        // the PO (26 Oct 2026), so the field is not asked for at all. ExtConversion still drops any
+        // itemNote that comes back regardless — this only saves the model the work.
+        if (module == "SO" && salesOrg.Trim() == CompanyRules.GlcSalesOrg)
+            fields = SoItemNoteField().Replace(fields, "");
 
         var intro = mode == "image"
             ? "อ่านเอกสารในภาพนี้ (ใบกำกับภาษี/ใบแจ้งหนี้/ใบสั่งซื้อภาษาไทยหรืออังกฤษ) แล้วดึงข้อมูลออกมา\n"

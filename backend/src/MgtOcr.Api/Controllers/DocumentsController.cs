@@ -467,7 +467,8 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         var reocrEngine = "gemini"; // Gemini only (Megachem, 7 Oct 2026)
         // Re-reading follows the company the document is already filed under, so a second read
         // never silently swaps MGT's rules for GLC's (CompanyRules treats an empty value as GLC).
-        var pd = await ocr.ExtractAsync(storedPath, module, reocrEngine, reocrPw, await repo.GetCompanyAsync(docId));
+        var docCompany = await repo.GetCompanyAsync(docId);
+        var pd = await ocr.ExtractAsync(storedPath, module, reocrEngine, reocrPw, docCompany);
         var durationMs = (int)(DateTime.UtcNow - t0).TotalMilliseconds;
         var filled = await repo.ApplyVendorMemoryAsync(module, pd.Header);
         if (filled.Count > 0)
@@ -507,7 +508,8 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
                 whtAmount = dn.Get("WhtAmount"), totalAmount = dn.Get("TotalAmount"), docId,
             });
         }
-        await repo.SaveLinesAsync(module, docId, pd.Lines.Select(l => ExtConversion.ToLineDict(l, pd.Header.GetValueOrDefault("deliveryDate") as string)).ToList());
+        var ocrItemNote = ExtConversion.OcrPrefillsItemNote(module, config, docCompany);
+        await repo.SaveLinesAsync(module, docId, pd.Lines.Select(l => ExtConversion.ToLineDict(l, pd.Header.GetValueOrDefault("deliveryDate") as string, ocrItemNote)).ToList());
         await repo.LogAuditAsync(docId, module, "REOCR", await ActorAsync(),
             detail: "Re-read document", fileName: fileNameOnDisk, ocrProvider: pd.Provider);
         var outDoc = await repo.GetDocumentAsync(docId);
@@ -717,7 +719,9 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             var enableThisRound = lookupsEnabled && iter < maxRounds - 1;
             (result, chatFixErr) = await ChatFix.ChatFixDocumentAsync(module, header, lines, history, promptMessage,
                 imageB64, imageMediaType, provider, config, materialOptions, shipToOptions, accountOptions,
-                enableThisRound, lookupLog.ToString(), actionsEnabled);
+                enableThisRound, lookupLog.ToString(), actionsEnabled,
+                // GLC: Item Note 1 is the CS's own entry -- the AI keeps its hands off it.
+                protectItemNote1: module == "SO" && isGlc);
             if (result == null)
             {
                 var (label, envVar) = ChatFixProviderLabel[provider];

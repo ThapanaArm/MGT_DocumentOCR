@@ -157,8 +157,9 @@ public static class SapPayloadBuilder
                     Pick(l.GetStr("salesEmployee"), header.GetStr("salesEmployee"), ""), "");
                 if (!string.IsNullOrWhiteSpace(lineSalesEmp))
                     item["YY1_SDSalesEmployeeI_SDI"] = lineSalesEmp;
-                // Item Note 1 (SD item long text). OCR-prefilled from the PO into
-                // extra.itemNote1 (editable by the CS), sent via the to_Item -> to_Text
+                // Item Note 1 (SD item long text). extra.itemNote1 is typed by the CS in the
+                // DETAIL table -- for GLC the OCR no longer prefills it (26 Oct 2026, see
+                // ExtConversion.OcrPrefillsItemNote) -- sent via the to_Item -> to_Text
                 // navigation as text ID ZI01 (Sap:SalesOrder:ItemNoteTextId). Emitted once
                 // per configured language (Sap:SalesOrder:ItemNoteLanguages, default
                 // "TH,EN") so the note shows whatever the SAP logon language. Sent only when
