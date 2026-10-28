@@ -29,7 +29,7 @@ public static class HeaderParser
     public static Dictionary<string, object?> BlankHeader(string module) => module == "SO"
         ? new Dictionary<string, object?>
         {
-            ["docType"] = "PURCHASE ORDER", ["poNo"] = "", ["poDate"] = "", ["customerName"] = "", ["customerTaxId"] = "",
+            ["docType"] = "PURCHASE ORDER", ["poNo"] = "", ["quoteRef"] = "", ["poDate"] = "", ["customerName"] = "", ["customerTaxId"] = "",
             ["customerAddress"] = "", ["shipToCode"] = "", ["shipToName"] = "", ["shipToAddress"] = "", ["deliveryDate"] = "", ["currency"] = "THB",
             ["paymentTerms"] = "", ["incoterms"] = "", ["subTotal"] = 0.0, ["vatAmount"] = 0.0,
             ["totalAmount"] = 0.0, ["remark"] = "",

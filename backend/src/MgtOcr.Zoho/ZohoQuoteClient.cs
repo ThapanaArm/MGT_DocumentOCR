@@ -52,6 +52,42 @@ public class ZohoQuoteClient(ZohoClient zoho)
         return list;
     }
 
+    /// <summary>One Quote by its Quote No. (e.g. 1QT0000266), with the id of its Deal -- a customer PO
+    /// can quote Megachem's own Quote No. (27 Oct 2026). Null when no single Quote has that number.</summary>
+    public async Task<(string Id, string? QuoteNo, string? Stage, string? DealId)?> FindByNoAsync(string quoteNo)
+    {
+        var no = (quoteNo ?? "").Trim();
+        if (no.Length == 0) return null;
+        var module = await ResolveModuleAsync();
+        var rows = await zoho.QueryCoqlAsync(module, "id, Quote_No, Quote_Stage, Deal_Name",
+            $"Quote_No = '{no.Replace("'", "''")}'", "Quote_No");
+        var hits = rows.Where(r => string.Equals((ZohoRecordFields.Str(r, "Quote_No") ?? "").Trim(), no, StringComparison.OrdinalIgnoreCase)).ToList();
+        if (hits.Count != 1) return null;
+        var id = ZohoRecordFields.Str(hits[0], "id");
+        if (string.IsNullOrEmpty(id)) return null;
+        return (id, ZohoRecordFields.Str(hits[0], "Quote_No"), ZohoRecordFields.Str(hits[0], "Quote_Stage"),
+            ZohoDealClient.LookupId(hits[0]["Deal_Name"]));
+    }
+
+    /// <summary>Megachem Quote numbers mentioned on a document: its quoteRef field plus anything in
+    /// its header / line text shaped like a Zoho Quote No. ("1QT0000266"). Upper-cased, distinct.</summary>
+    public static List<string> QuoteRefsIn(IEnumerable<string?> texts, string? quoteRef)
+    {
+        var found = new List<string>();
+        foreach (var t in texts.Prepend(quoteRef))
+        {
+            if (string.IsNullOrWhiteSpace(t)) continue;
+            foreach (System.Text.RegularExpressions.Match m in QuoteNoPattern.Matches(t))
+                found.Add(m.Value.ToUpperInvariant());
+        }
+        var r = (quoteRef ?? "").Trim();
+        if (found.Count == 0 && r.Length > 0) found.Add(r.ToUpperInvariant());
+        return found.Distinct().ToList();
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex QuoteNoPattern =
+        new(@"\b\d?QT\d{6,8}\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
+
     /// <summary>The Quote No. (auto-number) of a Quote, read back after creating it.</summary>
     public async Task<string?> QuoteNoAsync(string id)
     {

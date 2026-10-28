@@ -163,6 +163,29 @@ export interface ZohoDeal {
  *  Same value as ZohoSalesOrderController.NewDealId. */
 export const NEW_DEAL_ID = '__new__';
 
+/* One Quote by its Quote No. (GET /api/zoho/quotes/by-no/{no}) with its Deal's id -- a customer PO
+   may quote Megachem's own Quote No., which tells which Deal the PO belongs to. */
+export const getZohoQuoteByNo = (quoteNo: string) =>
+  api.get<{ id: string; quoteNo?: string | null; stage?: string | null; dealId?: string | null }>(
+    '/api/zoho/quotes/by-no/' + encodeURIComponent(quoteNo),
+  );
+
+/** Megachem Quote numbers on a document: header.quoteRef plus any "1QT0000266"-shaped text in the
+ *  header or lines (same rule as the backend's ZohoQuoteClient.QuoteRefsIn). */
+export function docQuoteRefs(header: Record<string, unknown>, lines: { desc?: unknown; extCode?: unknown; extra?: unknown }[]) {
+  const texts: string[] = [];
+  Object.entries(header).forEach(([k, v]) => { if (k !== 'quoteRef' && typeof v === 'string') texts.push(v); });
+  lines.forEach((l) => {
+    texts.push(String(l.desc ?? ''), String(l.extCode ?? ''));
+    const note = (l.extra as Record<string, unknown> | undefined)?.itemNote1;
+    if (typeof note === 'string') texts.push(note);
+  });
+  const ref = String(header.quoteRef ?? '').trim();
+  const found = [ref, ...texts].flatMap((t) => t.match(/\b\d?QT\d{6,8}\b/gi) || []).map((x) => x.toUpperCase());
+  if (!found.length && ref) found.push(ref.toUpperCase());
+  return [...new Set(found)];
+}
+
 /* Where a Deal opens in the Zoho CRM web screens: dealBase + the Deal's record id
    (GET /api/zoho/web-links). Read once per page load. */
 let zohoWebLinks: Promise<{ dealBase: string }> | null = null;
@@ -251,6 +274,8 @@ export interface ZohoSalesOrderFlow {
   quoteNo?: string | null;
   quoteStage?: string | null;
   quoteReason: string;
+  /** Megachem Quote numbers the PO refers to (OCR'd quoteRef + "1QT…" text on the document). */
+  quoteRefs?: string[];
 }
 
 export const getZohoSalesOrderPreview = (docId: number, dealId: string) =>

@@ -28,6 +28,7 @@ public static partial class VisionPrompt
           "header": {
             "docType": "ประเภทเอกสาร เช่น PURCHASE ORDER",
             "poNo": "เลขที่ใบสั่งซื้อของลูกค้า",
+            "quoteRef": "เลขที่ใบเสนอราคา (Quotation / Quote No. / Ref. Quotation) ที่ใบสั่งซื้อนี้อ้างถึง ถ้ามี เช่น 1QT0000266 หากไม่มีให้ใส่สตริงว่าง",
             "poDate": "วันที่เอกสาร รูปแบบ YYYY-MM-DD",
             "customerName": "ชื่อลูกค้า (นิติบุคคลที่ออกใบสั่งซื้อ ไม่ใช่บริษัทผู้ขาย/ผู้รับเอกสาร)",
             "customerTaxId": "เลขทะเบียนนิติบุคคล/ผู้เสียภาษี 13 หลักของลูกค้า",

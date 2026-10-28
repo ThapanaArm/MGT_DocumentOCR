@@ -33,6 +33,8 @@ import {
   searchZohoDeals,
   NEW_DEAL_ID,
   getZohoWebLinks,
+  getZohoQuoteByNo,
+  docQuoteRefs,
   type ZohoAccount,
   type ZohoShipToInfo,
   type ZohoDeal,
@@ -2284,7 +2286,9 @@ function MatchBadge({ deal, lines }: { deal: ZohoDeal; lines: DocModel['lines'] 
   );
 }
 
-function autoPickDeal(deals: ZohoDeal[], lines: DocModel['lines'], poNo?: string | null) {
+function autoPickDeal(deals: ZohoDeal[], lines: DocModel['lines'], poNo?: string | null, quoteDealId?: string | null) {
+  // The PO quotes one of Megachem's Quote Nos. and that Quote is on one of these Deals: that Deal.
+  if (quoteDealId && deals.some((d) => d.id === quoteDealId)) return quoteDealId;
   const po = String(poNo || '').trim().toLowerCase();
   const hits = deals.filter((d) => dealProductMatch(d, lines).ok);
   if (!hits.length) return NEW_DEAL_ID;
@@ -2344,6 +2348,25 @@ function ZohoDealCard({
     userPicked.current = true;
     onSelectId(id);
   };
+  // The Megachem Quote No. the PO refers to, if any, and that Quote's Deal (27 Oct 2026).
+  const quoteRefs = docQuoteRefs(doc.header as Record<string, unknown>, doc.lines);
+  const quoteRefsKey = quoteRefs.join(',');
+  const [quoteRef, setQuoteRef] = useState<{ quoteNo: string; dealId?: string | null } | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    setQuoteRef(null);
+    (async () => {
+      for (const no of quoteRefs) {
+        try {
+          const q = await getZohoQuoteByNo(no);
+          if (!cancelled) setQuoteRef({ quoteNo: q.quoteNo || no, dealId: q.dealId });
+          return;
+        } catch { /* not a Zoho Quote No. -- try the next */ }
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [quoteRefsKey]);
   const linesKey = doc.lines.map((l) => [l.materialCode ?? '', l.desc ?? '', l.qty, l.uom].join('|')).join(';');
 
   useEffect(() => {
@@ -2376,7 +2399,7 @@ function ZohoDealCard({
           userPicked.current = true;
           onSelectId(keep);
         } else {
-          onSelectId(autoPickDeal(r.deals, doc.lines, doc.header.poNo));
+          onSelectId(autoPickDeal(r.deals, doc.lines, doc.header.poNo, quoteRef?.dealId));
         }
       })
       .catch((e) => {
@@ -2395,9 +2418,9 @@ function ZohoDealCard({
   // material codes), as long as the person hasn't chosen a Deal themselves.
   useEffect(() => {
     if (!deals || userPicked.current) return;
-    onSelectId(autoPickDeal(deals, doc.lines, doc.header.poNo));
+    onSelectId(autoPickDeal(deals, doc.lines, doc.header.poNo, quoteRef?.dealId));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [deals, linesKey, doc.header.poNo]);
+  }, [deals, linesKey, doc.header.poNo, quoteRef?.dealId]);
 
   const hint = (text: string) => <div className="hint" style={{ padding: '6px 0' }}>{text}</div>;
   const deal = deals?.find((d) => d.id === selectedId);
@@ -2564,7 +2587,9 @@ function ZohoDealCard({
                     {userPicked.current
                       ? 'Chosen by you'
                       : deal
-                      ? `Picked automatically — ${deal.isWcd ? 'every product on the document is a Deal Item (quantities may differ from the forecast)' : 'every product and quantity matches this Deal'}`
+                      ? quoteRef?.dealId === deal.id
+                        ? `Picked automatically — the PO refers to Quote ${quoteRef.quoteNo}, which is on this Deal`
+                        : `Picked automatically — ${deal.isWcd ? 'every product on the document is a Deal Item (quantities may differ from the forecast)' : 'every product and quantity matches this Deal'}`
                       : selectedId === NEW_DEAL_ID
                       ? 'None of the open Deals has this document\'s products — Forecast Status No, Stage “Sales Order Created”'
                       : ''}

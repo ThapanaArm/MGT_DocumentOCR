@@ -13,7 +13,7 @@ namespace MgtOcr.Api.Controllers;
 // GET /api/zoho/account?name=oriental          (fallback — contains match)
 [ApiController]
 [Route("api/zoho")]
-public class ZohoAccountController(ZohoAccountClient client, ZohoClient zoho, ZohoDealClient deals,
+public class ZohoAccountController(ZohoAccountClient client, ZohoClient zoho, ZohoDealClient deals, ZohoQuoteClient quotes,
     ICurrentUserAccessor currentUser, AppConfig config) : ControllerBase, IAsyncActionFilter
 {
     // Zoho CRM is MGT's system (12 Oct 2026): a user of another company (GLC) gets 403 here instead
@@ -157,6 +157,18 @@ public class ZohoAccountController(ZohoAccountClient client, ZohoClient zoho, Zo
             return BadRequest(new { detail = "Provide 'q'" });
         var found = await deals.SearchByNameAsync(q, top);
         return Ok(new { count = found.Count, deals = found });
+    }
+
+    // GET /api/zoho/quotes/by-no/{no} — one Quote by its Quote No. (e.g. 1QT0000266) with its Deal's
+    // id: a customer PO may quote Megachem's own Quote No., which then tells the page which Deal the
+    // PO belongs to (27 Oct 2026).
+    [HttpGet("quotes/by-no/{no}")]
+    public async Task<IActionResult> GetQuoteByNo(string no)
+    {
+        var q = await quotes.FindByNoAsync(no);
+        return q is { } x
+            ? Ok(new { id = x.Id, quoteNo = x.QuoteNo, stage = x.Stage, dealId = x.DealId })
+            : NotFound(new { detail = "No single Zoho Quote has this Quote No." });
     }
 
     // GET /api/zoho/web-links — where a Deal opens in the Zoho CRM web screens (27 Oct 2026):

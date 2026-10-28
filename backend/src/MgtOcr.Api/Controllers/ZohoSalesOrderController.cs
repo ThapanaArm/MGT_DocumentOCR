@@ -145,7 +145,8 @@ public class ZohoSalesOrderController(
         string Subject, string? CustomerRef, string? DeliveryDate,
         string? PaymentTerms, string? PaymentCurrency, string? Incoterms, string? TaxId,
         List<MatchedLine> Lines, List<SkippedLine> Skipped,
-        List<Dictionary<string, object?>> UomRules, string SalesOrg, string? Remarks = null, bool NewDeal = false);
+        List<Dictionary<string, object?>> UomRules, string SalesOrg, string? Remarks = null, bool NewDeal = false,
+        List<string>? QuoteRefs = null);
 
     private async Task<string> ActorAsync(CancellationToken ct = default) =>
         (await currentUser.RequireAsync(ct)).AuditName;
@@ -324,7 +325,20 @@ public class ZohoSalesOrderController(
             // The document's Remark -> Zoho Sales Order "Remarks" (Multi Line, Megachem Zoho manual
             // AO-CRM-UM-2026-003 p.302-303). MGT/Zoho only: GLC/SAP carries notes in Item Note 1.
             Remarks: header.GetStr("remark") is { Length: > 0 } rm ? rm : null,
-            NewDeal: newDeal);
+            NewDeal: newDeal,
+            QuoteRefs: DocQuoteRefs(header, lines));
+    }
+
+    // Megachem Quote numbers the customer's PO refers to (27 Oct 2026): the OCR'd quoteRef plus any
+    // "1QT0000266"-shaped text in the header or the lines.
+    private static List<string> DocQuoteRefs(Dictionary<string, object?> header, List<Dictionary<string, object?>> lines)
+    {
+        var texts = header.Where(kv => kv.Key != "quoteRef").Select(kv => kv.Value as string)
+            .Concat(lines.SelectMany(l => new[]
+            {
+                l.GetStr("desc"), l.GetStr("extCode"), (l.Get("extra") as Dictionary<string, object?>).GetStr("itemNote1"),
+            }));
+        return ZohoQuoteClient.QuoteRefsIn(texts, header.GetStr("quoteRef"));
     }
 
     // A Zoho Material used as a Sales Order line source when it isn't one of the Deal's Items
@@ -342,11 +356,17 @@ public class ZohoSalesOrderController(
     // 1) a Quote whose Customer Ref is the document's PO no. (items matching wins among several);
     // 2) no PO match (e.g. the customer didn't quote a number): a Quote whose items match the
     //    document -- same materials, quantities and unit prices; 3) none -> a new Quote is created.
-    private async Task<QuotePlan> PlanQuoteAsync(ZohoDeal deal, string? customerRef, IReadOnlyList<ZohoSalesOrderLine> lines)
+    private async Task<QuotePlan> PlanQuoteAsync(ZohoDeal deal, string? customerRef, IReadOnlyList<ZohoSalesOrderLine> lines,
+        IReadOnlyList<string>? quoteRefs = null)
     {
-        if (string.IsNullOrEmpty(deal.Id)) return new(null, "New Deal — a new Quote will be created");
+        var refs = quoteRefs ?? [];
+        var refNote = refs.Count > 0 ? $" (the PO mentions Quote {string.Join(", ", refs)}, which is not on this Deal)" : "";
+        if (string.IsNullOrEmpty(deal.Id)) return new(null, "New Deal — a new Quote will be created" + refNote);
         var quotes = await quoteClient.FindByDealAsync(deal.Id);
-        if (quotes.Count == 0) return new(null, "The Deal has no Quote yet — a new Quote will be created");
+        // 0) The PO quotes Megachem's own Quote No. -- that Quote wins over every other rule.
+        var byNo = quotes.FirstOrDefault(q => refs.Contains((q.QuoteNo ?? "").Trim().ToUpperInvariant()));
+        if (byNo is not null) return new(byNo, $"The PO refers to Quote {byNo.QuoteNo}");
+        if (quotes.Count == 0) return new(null, "The Deal has no Quote yet — a new Quote will be created" + refNote);
         var po = (customerRef ?? "").Trim();
         var byRef = po.Length > 0 && po != "-"
             ? quotes.Where(q => string.Equals((q.CustomerRef ?? "").Trim(), po, StringComparison.OrdinalIgnoreCase)).ToList()
@@ -356,7 +376,7 @@ public class ZohoSalesOrderController(
         if (byRef.Count > 0) return new(byRef[0], $"Customer Ref {po} matches");
         hit = quotes.FirstOrDefault(q => QuoteItemsMatch(q, lines));
         if (hit is not null) return new(hit, "Items match (material, quantity, unit price)");
-        return new(null, $"None of the Deal's {quotes.Count} Quote(s) matches this document's Customer Ref or items — a new Quote will be created");
+        return new(null, $"None of the Deal's {quotes.Count} Quote(s) matches this document's Customer Ref or items — a new Quote will be created" + refNote);
     }
 
     private static bool QuoteItemsMatch(ZohoQuote q, IReadOnlyList<ZohoSalesOrderLine> lines)
@@ -454,7 +474,7 @@ public class ZohoSalesOrderController(
         ZohoShipToInfo? shipTo, List<SoGroup> groups, string actor)
     {
         QuotePlan plan;
-        try { plan = await PlanQuoteAsync(deal, a.CustomerRef, a.SoLines); }
+        try { plan = await PlanQuoteAsync(deal, a.CustomerRef, a.SoLines, a.QuoteRefs); }
         catch (Exception e)
         {
             log.LogWarning(e, "Could not read the Quotes of Deal {DealId} (doc {DocId})", deal.Id, docId);
@@ -538,7 +558,7 @@ public class ZohoSalesOrderController(
         string quoteAction, quoteReason; string? quoteNo = null, quoteStage = null;
         try
         {
-            var plan = await PlanQuoteAsync(d.Deal, d.CustomerRef, d.Lines.Select(ToSoLine).ToList());
+            var plan = await PlanQuoteAsync(d.Deal, d.CustomerRef, d.Lines.Select(ToSoLine).ToList(), d.QuoteRefs);
             quoteAction = plan.Quote is null ? "create" : "use";
             quoteReason = plan.Reason; quoteNo = plan.Quote?.QuoteNo; quoteStage = plan.Quote?.Stage;
         }
@@ -564,6 +584,7 @@ public class ZohoSalesOrderController(
                 quoteNo,
                 quoteStage,
                 quoteReason,
+                quoteRefs = d.QuoteRefs ?? [],
             },
             subject = d.Subject,
             customerRef = d.CustomerRef,
@@ -667,7 +688,8 @@ public class ZohoSalesOrderController(
             StillSkipped: stillSkipped,
             Doc: d.Doc,
             SoItemNos: resolvedLines.Select(l => l.ItemNo).ToList(),
-            NewDeal: d.NewDeal);
+            NewDeal: d.NewDeal,
+            QuoteRefs: d.QuoteRefs ?? []);
     }
 
     private record Assembled(
@@ -678,7 +700,8 @@ public class ZohoSalesOrderController(
         List<ZohoSalesOrderLine> SoLines, List<SkippedLine> StillSkipped,
         Dictionary<string, object?> Doc,
         List<string> SoItemNos, // itemNo of each SoLines entry (same order) -- used to cut per-delivery-date groups
-        bool NewDeal = false);
+        bool NewDeal = false,
+        List<string>? QuoteRefs = null);
 
     // POST /api/zoho/sales-order/create/{docId} { dealId, ...edited fields } — {docId} as a route
     // parameter (not buried inside the body) so DepartmentAccessFilter's docId-based module gate
@@ -998,7 +1021,7 @@ public class ZohoSalesOrderController(
         }
         var quotePart = new JsonObject();
         string quoteIdForSo = createdOnSend; string? quoteNoForSo = createdOnSend;
-        var plan = await PlanQuoteAsync(a.Deal, a.CustomerRef, a.SoLines);
+        var plan = await PlanQuoteAsync(a.Deal, a.CustomerRef, a.SoLines, a.QuoteRefs);
         quotePart["reason"] = plan.Reason;
         if (plan.Quote is { } pq)
         {
