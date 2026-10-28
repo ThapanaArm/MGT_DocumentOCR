@@ -29,6 +29,40 @@ public class AppConfig
     // existing Claude/Azure/Typhoon clients.
     public string GeminiApiKey { get; init; } = "";
     public string GeminiModel { get; init; } = "gemini-2.5-flash";
+    // Long AP bundles are read as a lead request plus groups of supporting pages; this many groups
+    // are sent at the same time (Ocr:ChunkParallelism). 1 = one after another, as before.
+    public int OcrChunkParallelism { get; init; } = 3;
+    // Page memory for AP/II bundles (sql/35_page_memory.sql, Ocr:PageMemory:*):
+    //   "off"    — nothing runs, nothing is recorded.
+    //   "shadow" — each page is classified (one small Gemini call on the page headers) and recorded
+    //              in ocr.DocPageMap, but the read itself is exactly as before. For measuring.
+    //   "on"     — the classification is used: the FORM SHIPPING EXPENSE / PURCHASE ORDER page is
+    //              found even on a scan without a text layer, and pages that carry no money or tax
+    //              (packing list, B/L, certificates, blank) are left out of the read. If that read
+    //              comes back empty the document is read again the old way.
+    public string OcrPageMemoryMode { get; init; } = "shadow";
+    // Bundles shorter than this are not classified (nothing to gain on a 3-page file).
+    public int OcrPageMemoryMinPages { get; init; } = 8;
+    // Model for the page classification call; blank = GeminiModel.
+    public string OcrPageMemoryModel { get; init; } = "";
+    // Backfill (PageMemoryBackfillWorker): go back over AP/II documents read before page memory
+    // existed. Text-layer anchors are free and certain; OcrPageMemoryBackfillClassify > 0 also runs
+    // the classifier on up to that many old documents (billed Gemini calls; for measuring only).
+    public bool OcrPageMemoryBackfill { get; init; }
+    public int OcrPageMemoryBackfillClassify { get; init; }
+    // TEST ONLY (Ocr:Duplicate:CopyUnchecked): a re-uploaded file is copied even from an earlier
+    // document nobody has checked yet (NEW / INCOMPLETE) — for measuring the time saved where
+    // documents cannot be mapped. Keep false in production.
+    public bool DuplicateCopyUnchecked { get; init; }
+    // Position hints (Ocr:PositionHints:Enabled): the main Gemini request reports where it found each
+    // header value and the line table ("_positions", saved in ocr.FieldPositionMemory), and is told
+    // which box held which field on earlier documents of the same type — one record per vendor tax ID
+    // (newest 3 vendors), so Gemini looks there first. Gemini still reads every value from the image.
+    public bool OcrPositionHints { get; init; }
+    // Thinking cap for every Gemini read (ReadTuning): Ocr:ThinkingBudget (Gemini 2.5, tokens; 0 = no
+    // thinking) or Ocr:ThinkingLevel (Gemini 3, e.g. "low"). Unset = model default, as before.
+    public int? OcrThinkingBudget { get; init; }
+    public string OcrThinkingLevel { get; init; } = "";
     public string OpenAiApiKey { get; init; } = "";
     public string OpenAiModel { get; init; } = "gpt-4o";
     // PaddleOCR-Standalone (local exe). Blank Cmd = look in C:\Program Files\PaddleOCR-CPU|GPU.

@@ -65,6 +65,46 @@ public static class PdfRasterizer
         return results;
     }
 
+    /// <summary>The top part of every page (heading, issuer, document title) as a small JPEG — what
+    /// the page classifier looks at. 90 dpi makes an A4 page ~745 px wide, which a vision model
+    /// bills as one image tile, and the title of a scanned page is still easy to read at that size.
+    /// <paramref name="fraction"/> is the share of the page height kept, from the top.</summary>
+    public static List<byte[]> RenderHeaderStripsToJpeg(string path, int maxPages, double fraction = 0.35, int dpi = 90, int quality = 70)
+    {
+        var bytes = File.ReadAllBytes(path);
+        var results = new List<byte[]>();
+        lock (PdfiumGate)
+        {
+            var n = Math.Min(maxPages, Conversion.GetPageCount(bytes, password: PdfPassword.Current));
+            for (var i = 0; i < n; i++) results.Add(HeaderStrip(bytes, i, fraction, dpi, quality));
+        }
+        return results;
+    }
+
+    /// <summary>One page's header strip (see RenderHeaderStripsToJpeg); null when the page does not exist.</summary>
+    public static byte[]? RenderHeaderStripToJpeg(string path, int pageIndex, double fraction = 0.35, int dpi = 90, int quality = 70)
+    {
+        var bytes = File.ReadAllBytes(path);
+        lock (PdfiumGate)
+        {
+            if (pageIndex < 0 || pageIndex >= Conversion.GetPageCount(bytes, password: PdfPassword.Current)) return null;
+            return HeaderStrip(bytes, pageIndex, fraction, dpi, quality);
+        }
+    }
+
+    // Caller holds PdfiumGate.
+    private static byte[] HeaderStrip(byte[] pdf, int pageIndex, double fraction, int dpi, int quality)
+    {
+        using var bmp = Conversion.ToImage(pdf, page: pageIndex, password: PdfPassword.Current, options: new RenderOptions(Dpi: dpi));
+        var h = Math.Max(1, (int)(bmp.Height * Math.Clamp(fraction, 0.1, 1.0)));
+        using var strip = new SKBitmap();
+        // ExtractSubset shares the page's pixels (no copy); it only fails on an empty bitmap, and then
+        // the whole page is encoded instead.
+        var src = bmp.ExtractSubset(strip, new SKRectI(0, 0, bmp.Width, h)) ? strip : bmp;
+        using var data = src.Encode(SKEncodedImageFormat.Jpeg, quality);
+        return data.ToArray();
+    }
+
     public static List<byte[]> RenderPagesToPng(string path, int maxPages, int dpi)
     {
         var bytes = File.ReadAllBytes(path);

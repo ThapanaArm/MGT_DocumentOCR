@@ -30,7 +30,9 @@ public static partial class GeminiOcr
         PooledConnectionLifetime = TimeSpan.FromMinutes(5),
     });
 
-    public static async Task<(ParsedDocument? Doc, string? Error)> VisionExtractAsync(string path, string module, AppConfig config, string salesOrg = "", string apDocCategory = "")
+    /// <param name="pageHint">Page memory: reference pictures of anchor pages from posted documents
+    /// (see PageMemory.cs). Null = none; the classifier still runs, it just has nothing to compare with.</param>
+    public static async Task<(ParsedDocument? Doc, string? Error)> VisionExtractAsync(string path, string module, AppConfig config, string salesOrg = "", string apDocCategory = "", PageMemoryHint? pageHint = null)
     {
         if (string.IsNullOrEmpty(config.GeminiApiKey))
             return (null, "GeminiApiKey is empty in config \u2014 appsettings Ocr:GeminiApiKey was not loaded by the running app (check which appsettings.json/appsettings.{Env}.json the process reads, and that it was restarted)");
@@ -63,6 +65,9 @@ public static partial class GeminiOcr
             {
                 ".jpg" or ".jpeg" => "image/jpeg", ".webp" => "image/webp", _ => "image/png",
             };
+            // The file page number (1-based) of each image in imgs, kept in step with every reorder
+            // below so page memory can say which pages were read.
+            var pageNos = Enumerable.Range(1, imgs.Count).ToList();
             if (imgs.Count == 0)
                 return (null, $"Could not rasterize '{Path.GetFileName(path)}' to images (renderer produced 0 pages \u2014 check the PDF rasterizer on the server)");
 
@@ -86,90 +91,200 @@ public static partial class GeminiOcr
                 // A bundle can hold one FORM per PO, so every form page is pulled to the front —
                 // including any that sits beyond the page cap (rendered on its own, replacing the
                 // last and least useful page).
-                var formSheet = new System.Text.RegularExpressions.Regex(@"FORM\s*SHIPPING\s*EXPENSE",
-                    System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-                // The title is a heading in a large font, and the layout-aware text reconstruction
-                // can split a heading into single letters, so whitespace is allowed between every
-                // letter — "PURCHASE ORDER" and "P U R C H A S E  O R D E R" both have to match.
-                var poSheet = new System.Text.RegularExpressions.Regex(
-                    @"P\s*U\s*R\s*C\s*H\s*A\s*S\s*E\s*O\s*R\s*D\s*E\s*R",
-                    System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-                // The form sheet is excluded from the PO's page list: it prints "PO. NO." and would
-                // otherwise be a candidate for being pulled to the front all over again.
-                var formIdxs = isPoRead
-                    ? PdfExtraction.FindPageIndexes(path, poSheet, formSheet)
-                    : PdfExtraction.FindPageIndexes(path, formSheet);
-                if (isPoRead && formIdxs.Count == 0)
-                {
-                    // No page announced itself as a purchase order — the heading may be an image, or
-                    // reconstructed in a shape no regex catches. The PO NUMBER is printed as plain
-                    // text on the same page and is the more reliable anchor: the shipping form
-                    // prints it too, which is exactly why the form is excluded here.
-                    var poNo = PoNumberFinder.FindInFileName(Path.GetFileName(path));
-                    if (poNo.Length == 0) poNo = PoNumberFinder.Find(PdfExtraction.PdfText(path));
-                    if (poNo.Length > 0)
-                        formIdxs = PdfExtraction.FindPageIndexes(path,
-                            new System.Text.RegularExpressions.Regex(System.Text.RegularExpressions.Regex.Escape(poNo)),
-                            formSheet);
-                    Log(formIdxs.Count > 0
-                        ? $"No PURCHASE ORDER heading found \u2014 using the {formIdxs.Count} page(s) that print PO {poNo}"
-                        : "No PURCHASE ORDER page found in the text layer \u2014 reading the first pages instead");
-                }
-                else if (isPoRead)
-                    Log($"PO read: purchase order page(s) {string.Join(", ", formIdxs.Select(i => i + 1))}");
+                var formIdxs = FindAnchorPageIndexes(path, isPoRead);
                 var formPageNos = formIdxs.Select(i => i + 1).ToList();
                 var formPages = new List<byte[]>();
+                var formPagesNos = new List<int>();
                 foreach (var idx in formIdxs)
                 {
-                    if (idx < imgs.Count) { formPages.Add(imgs[idx]); }
-                    else if (PdfRasterizer.RenderPageToJpeg(path, idx, dpi, quality) is { } extra) { formPages.Add(extra); }
+                    if (idx < imgs.Count) { formPages.Add(imgs[idx]); formPagesNos.Add(idx + 1); }
+                    else if (PdfRasterizer.RenderPageToJpeg(path, idx, dpi, quality) is { } extra) { formPages.Add(extra); formPagesNos.Add(idx + 1); }
                 }
                 if (formPages.Count > 0)
                 {
-                    foreach (var idx in formIdxs.Where(i => i < imgs.Count).OrderByDescending(i => i)) imgs.RemoveAt(idx);
-                    while (imgs.Count + formPages.Count > MaxPages) imgs.RemoveAt(imgs.Count - 1);
+                    foreach (var idx in formIdxs.Where(i => i < imgs.Count).OrderByDescending(i => i)) { imgs.RemoveAt(idx); pageNos.RemoveAt(idx); }
+                    while (imgs.Count + formPages.Count > MaxPages) { imgs.RemoveAt(imgs.Count - 1); pageNos.RemoveAt(pageNos.Count - 1); }
                     imgs.InsertRange(0, formPages);
+                    pageNos.InsertRange(0, formPagesNos);
                     formCount = formPages.Count;
-                    prompt = isPoRead
-                        ? $"สำคัญ: {formPages.Count} ภาพแรกคือหน้า PURCHASE ORDER (หน้า {string.Join(", ", formPageNos)} ของไฟล์) " +
-                          "lines ต้องมาจากตารางรายการสินค้า (Item / Description / Quantity / Unit Price / Amount) ในภาพเหล่านี้เท่านั้น " +
-                          "ห้ามใช้รายการจากหน้า FORM SHIPPING EXPENSE หรือใบแจ้งหนี้ค่าขนส่ง/ใบเสร็จในภาพอื่นเป็น lines " +
-                          "totalAmount ต้องเป็นยอด Total Amount ของหน้า PURCHASE ORDER ไม่ใช่ยอดรวมค่าขนส่ง " +
-                          (formPages.Count > 1
-                             ? "หน้า PURCHASE ORDER มีหลายหน้า (Page 1 of 2, 2 of 2) — ให้รวมรายการสินค้าจากทุกหน้าเรียงต่อกันตามเลข Item "
-                             : "") +
-                          "ภาพที่เหลือเป็นเอกสารประกอบ ใช้เพื่ออ้างอิงเท่านั้น ห้ามนำมาเป็น lines\n\n" + prompt
-                        : $"สำคัญ: {formPages.Count} ภาพแรกคือหน้า FORM SHIPPING EXPENSE (หน้า {string.Join(", ", formPageNos)} ของไฟล์) " +
-                             "lines ต้องมาจากตารางในภาพเหล่านี้เท่านั้น ห้ามใช้รายการจากใบแจ้งหนี้/ใบเสร็จในภาพอื่นเป็น lines " +
-                             (formPages.Count > 1
-                                ? "ฟอร์มมีหลายใบเพราะมีหลาย PO — ให้รวมรายการชื่อเดียวกันของ vendor เดียวกันจากทุกใบเป็นแถวเดียวโดยบวกยอดกัน " +
-                                  "และใส่ poRef เป็นเลข PO ทุกใบคั่นด้วย \", \" "
-                                : "") +
-                             "ภาพที่เหลือเป็นเอกสารประกอบ ให้ใช้เพื่อหายอดหัก ณ ที่จ่ายมาต่อท้าย lines ตามกติกาด้านล่าง\n\n" + prompt;
+                    prompt = AnchorPromptPrefix(isPoRead, formPages.Count, formPageNos) + prompt;
                 }
             }
-            // A long bundle cannot be read in one request: 22 pages timed out at 288s and again at
-            // 610s, because what takes the time is Gemini LOOKING at that many images, not sending
-            // them. So it is split — the FORM SHIPPING EXPENSE pages in one request (they carry the
-            // header and the cost lines), the supporting invoices and receipts in groups after it
-            // (they only contribute tax rows). Each request is small enough to answer in well under
-            // a minute, and the first one is MORE accurate on its own than it was buried in twenty
-            // other pages.
-            if (isPdf && imgs.Count > ChunkThreshold)
-                return await ChunkedAsync(imgs, formCount, mime, prompt, module, config, dpi, salesOrg, apDocCategory);
+            // ---- Page memory (PageMemory.cs, Ocr:PageMemory:Mode) ----
+            // The regex above only finds the anchor page through the text layer, which a scan does not
+            // have. The classifier looks at the top of every page instead. "shadow" runs it beside the
+            // read and only records the answer; "on" uses it to find the anchor and leave out pages
+            // that carry no money (packing list, B/L, certificates, blank).
+            var memMode = (config.OcrPageMemoryMode ?? "off").Trim().ToLowerInvariant();
+            var memEnabled = memMode is "shadow" or "on" && isPdf && module is "AP" or "II";
+            var anchorRole = PageRoles.AnchorFor(isPoRead);
+            var regexAnchorNos = pageNos.Take(formCount).ToList();
+            var classifyCount = Math.Min(pageCount, MaxPages);
+            Task<PageClassification?>? classifyTask = memEnabled && pageCount >= Math.Max(2, config.OcrPageMemoryMinPages)
+                ? Task.Run(() => ClassifyPagesAsync(path, classifyCount, anchorRole, pageHint, config))
+                : null;
 
-            // A file short enough to read in one request still needs the customs rows pointed at the
-            // customs vendor: the model fills vendorCode from the form when it can, but it leaves it
-            // blank often enough that the tax would otherwise land on the shipping agent.
-            var oneShot = await OneShotAsync(imgs, mime, prompt, module, config, dpi, TimeoutFor(imgs.Count));
-            if (oneShot.Doc != null && module is "AP" or "II") AssignTaxRowVendors(oneShot.Doc);
-            return oneShot;
+            var origImgs = imgs; var origNos = pageNos; var origFormCount = formCount; var origPrompt = prompt;
+            var planNote = "";
+            PageClassification? classification = null;
+            if (memMode == "on" && classifyTask != null)
+            {
+                classification = await classifyTask;
+                if (classification != null)
+                {
+                    var plan = PlanPages(classification, imgs, pageNos, formCount, prompt, isPoRead, anchorRole);
+                    if (plan.Changed)
+                    {
+                        (imgs, pageNos, formCount, prompt, planNote) = (plan.Imgs, plan.PageNos, plan.FormCount, plan.Prompt, plan.Note);
+                        Log($"Page memory (on): {planNote}");
+                    }
+                }
+            }
+
+            // Position hints (Ocr:PositionHints:Enabled). The main request also reports where it found
+            // each header value, and — when earlier documents of this type left such a record — is told
+            // which box held which field, per vendor. Off by default; supporting pages are never affected.
+            var positionHintUsed = false;
+            if (config.OcrPositionHints && (module is "AP" or "II"))
+            {
+                prompt = prompt + PositionInstructions(pageHint?.Positions);
+                positionHintUsed = !string.IsNullOrWhiteSpace(pageHint?.Positions);
+            }
+
+            var result = await ReadPlanAsync(imgs, formCount, prompt);
+            if (result.Doc != null) result.Doc.PositionHintUsed = positionHintUsed;
+            var readNos = pageNos;
+            if (planNote.Length > 0 && result.Doc != null && result.Doc.Lines.Count == 0)
+            {
+                // The narrowed read found nothing at all — never let page memory cost a document.
+                Log("Page memory (on): the read with the page plan found no lines — reading again the old way");
+                var again = await ReadPlanAsync(origImgs, origFormCount, origPrompt);
+                if (again.Doc != null)
+                {
+                    if (result.Doc.TokensIn != null || again.Doc.TokensIn != null)
+                    {
+                        again.Doc.TokensIn = (again.Doc.TokensIn ?? 0) + (result.Doc.TokensIn ?? 0);
+                        again.Doc.TokensOut = (again.Doc.TokensOut ?? 0) + (result.Doc.TokensOut ?? 0);
+                    }
+                    result = again;
+                    readNos = origNos;
+                    planNote = "Page memory: the narrowed read found no lines, so the whole document was read again";
+                }
+            }
+
+            if (classifyTask != null && classification == null && memMode == "shadow")
+            {
+                // Shadow only records — it must never make the user wait. The classifier normally
+                // finishes long before the read (header strips only); if it is still running a few
+                // seconds after the read, the page map is simply not recorded for this document.
+                try { classification = await classifyTask.WaitAsync(ShadowWait); }
+                catch (TimeoutException)
+                {
+                    classification = null;
+                    Log($"Page memory (shadow): the page classifier was still running {ShadowWait.TotalSeconds:0} s after the read — not recorded");
+                }
+                catch { classification = null; }
+            }
+            if (result.Doc != null && memEnabled)
+            {
+                if (classification?.TokensIn != null)
+                {
+                    // The classification is a billed request too.
+                    result.Doc.TokensIn = (result.Doc.TokensIn ?? 0) + classification.TokensIn;
+                    result.Doc.TokensOut = (result.Doc.TokensOut ?? 0) + (classification.TokensOut ?? 0);
+                    if (classification.ThinkingTokens != null)
+                        result.Doc.ThinkingTokens = (result.Doc.ThinkingTokens ?? 0) + classification.ThinkingTokens;
+                }
+                result.Doc.PageMap = BuildPageMap(path, classification, regexAnchorNos, anchorRole, readNos);
+                result.Doc.PageMemoryMode = memMode;
+                result.Doc.PageMemoryNote = planNote;
+            }
+            return result;
+
+            // The read itself, unchanged: one request for a short file, lead + supporting groups for a long one.
+            async Task<(ParsedDocument? Doc, string? Error)> ReadPlanAsync(List<byte[]> planImgs, int planFormCount, string planPrompt)
+            {
+                // A long bundle cannot be read in one request: 22 pages timed out at 288s and again at
+                // 610s, because what takes the time is Gemini LOOKING at that many images, not sending
+                // them. So it is split — the FORM SHIPPING EXPENSE pages in one request (they carry the
+                // header and the cost lines), the supporting invoices and receipts in groups after it
+                // (they only contribute tax rows). Each request is small enough to answer in well under
+                // a minute, and the first one is MORE accurate on its own than it was buried in twenty
+                // other pages.
+                if (isPdf && planImgs.Count > ChunkThreshold)
+                    return await ChunkedAsync(planImgs, planFormCount, mime, planPrompt, module, config, dpi, salesOrg, apDocCategory);
+
+                // A file short enough to read in one request still needs the customs rows pointed at the
+                // customs vendor: the model fills vendorCode from the form when it can, but it leaves it
+                // blank often enough that the tax would otherwise land on the shipping agent.
+                var oneShot = await OneShotAsync(planImgs, mime, planPrompt, module, config, dpi, TimeoutFor(planImgs.Count));
+                if (oneShot.Doc != null && module is "AP" or "II") AssignTaxRowVendors(oneShot.Doc);
+                return oneShot;
+            }
         }
         catch (Exception ex)
         {
             return (null, $"Gemini request failed: {ex.GetType().Name}: {ex.Message}");
         }
     }
+
+    /// <summary>The anchor pages found through the PDF's text layer (0-based): the FORM SHIPPING
+    /// EXPENSE sheets, or the PURCHASE ORDER sheets for "Goods/service items". Empty on a scan with
+    /// no text layer. Shared by the read and by the page-memory backfill.</summary>
+    internal static List<int> FindAnchorPageIndexes(string path, bool isPoRead)
+    {
+        var formSheet = new System.Text.RegularExpressions.Regex(@"FORM\s*SHIPPING\s*EXPENSE",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        // The title is a heading in a large font, and the layout-aware text reconstruction
+        // can split a heading into single letters, so whitespace is allowed between every
+        // letter — "PURCHASE ORDER" and "P U R C H A S E  O R D E R" both have to match.
+        var poSheet = new System.Text.RegularExpressions.Regex(
+            @"P\s*U\s*R\s*C\s*H\s*A\s*S\s*E\s*O\s*R\s*D\s*E\s*R",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        // The form sheet is excluded from the PO's page list: it prints "PO. NO." and would
+        // otherwise be a candidate for being pulled to the front all over again.
+        var formIdxs = isPoRead
+            ? PdfExtraction.FindPageIndexes(path, poSheet, formSheet)
+            : PdfExtraction.FindPageIndexes(path, formSheet);
+        if (isPoRead && formIdxs.Count == 0)
+        {
+            // No page announced itself as a purchase order — the heading may be an image, or
+            // reconstructed in a shape no regex catches. The PO NUMBER is printed as plain
+            // text on the same page and is the more reliable anchor: the shipping form
+            // prints it too, which is exactly why the form is excluded here.
+            var poNo = PoNumberFinder.FindInFileName(Path.GetFileName(path));
+            if (poNo.Length == 0) poNo = PoNumberFinder.Find(PdfExtraction.PdfText(path));
+            if (poNo.Length > 0)
+                formIdxs = PdfExtraction.FindPageIndexes(path,
+                    new System.Text.RegularExpressions.Regex(System.Text.RegularExpressions.Regex.Escape(poNo)),
+                    formSheet);
+            Log(formIdxs.Count > 0
+                ? $"No PURCHASE ORDER heading found \u2014 using the {formIdxs.Count} page(s) that print PO {poNo}"
+                : "No PURCHASE ORDER page found in the text layer \u2014 reading the first pages instead");
+        }
+        else if (isPoRead)
+            Log($"PO read: purchase order page(s) {string.Join(", ", formIdxs.Select(i => i + 1))}");
+        return formIdxs;
+    }
+
+    /// <summary>The instruction put in front of the prompt once the anchor pages have been moved to
+    /// the front of the images (unchanged wording; shared by the text-layer regex and page memory).</summary>
+    private static string AnchorPromptPrefix(bool isPoRead, int count, IEnumerable<int> filePageNos) => isPoRead
+        ? $"สำคัญ: {count} ภาพแรกคือหน้า PURCHASE ORDER (หน้า {string.Join(", ", filePageNos)} ของไฟล์) " +
+          "lines ต้องมาจากตารางรายการสินค้า (Item / Description / Quantity / Unit Price / Amount) ในภาพเหล่านี้เท่านั้น " +
+          "ห้ามใช้รายการจากหน้า FORM SHIPPING EXPENSE หรือใบแจ้งหนี้ค่าขนส่ง/ใบเสร็จในภาพอื่นเป็น lines " +
+          "totalAmount ต้องเป็นยอด Total Amount ของหน้า PURCHASE ORDER ไม่ใช่ยอดรวมค่าขนส่ง " +
+          (count > 1
+             ? "หน้า PURCHASE ORDER มีหลายหน้า (Page 1 of 2, 2 of 2) — ให้รวมรายการสินค้าจากทุกหน้าเรียงต่อกันตามเลข Item "
+             : "") +
+          "ภาพที่เหลือเป็นเอกสารประกอบ ใช้เพื่ออ้างอิงเท่านั้น ห้ามนำมาเป็น lines\n\n"
+        : $"สำคัญ: {count} ภาพแรกคือหน้า FORM SHIPPING EXPENSE (หน้า {string.Join(", ", filePageNos)} ของไฟล์) " +
+             "lines ต้องมาจากตารางในภาพเหล่านี้เท่านั้น ห้ามใช้รายการจากใบแจ้งหนี้/ใบเสร็จในภาพอื่นเป็น lines " +
+             (count > 1
+                ? "ฟอร์มมีหลายใบเพราะมีหลาย PO — ให้รวมรายการชื่อเดียวกันของ vendor เดียวกันจากทุกใบเป็นแถวเดียวโดยบวกยอดกัน " +
+                  "และใส่ poRef เป็นเลข PO ทุกใบคั่นด้วย \", \" "
+                : "") +
+             "ภาพที่เหลือเป็นเอกสารประกอบ ให้ใช้เพื่อหายอดหัก ณ ที่จ่ายมาต่อท้าย lines ตามกติกาด้านล่าง\n\n";
 
     /// <summary>Text-only structuring: another OCR engine (PaddleOCR) has already read the characters,
     /// so only the text goes to Gemini — no images — with the same JSON schema/rules as the Vision read.
@@ -217,17 +332,29 @@ public static partial class GeminiOcr
             var parts = new List<object> { new { text = prompt } };
             parts.AddRange(imgs.Select(b => (object)new { inline_data = new { mime_type = mime, data = Convert.ToBase64String(b) } }));
 
-            var body = new
+            // Thinking cap (ReadTuning): sent only when Ocr:ThinkingBudget / Ocr:ThinkingLevel or a read
+            // test asks for it; otherwise the request is exactly what it was.
+            var thinkingConfig = ReadTuning.ThinkingConfig(config);
+            string BuildPayload(bool withThinking)
             {
-                contents = new[] { new { role = "user", parts = (object)parts } },
                 // maxOutputTokens was 3000/8192: newer Gemini Flash models spend part of that budget on internal
                 // "thinking", so a longer invoice could be cut off mid-JSON (finishReason MAX_TOKENS) and fail
                 // to parse. responseMimeType makes Gemini emit bare JSON with no prose/code fences around it.
                 // (Kanomwan, 0cd227c)
-                generationConfig = new { temperature = 0, maxOutputTokens = 16384, responseMimeType = "application/json" },
-            };
+                var gen = new Dictionary<string, object>
+                {
+                    ["temperature"] = 0, ["maxOutputTokens"] = 16384, ["responseMimeType"] = "application/json",
+                };
+                if (withThinking && thinkingConfig != null) gen["thinkingConfig"] = thinkingConfig;
+                return JsonSerializer.Serialize(new
+                {
+                    contents = new[] { new { role = "user", parts = (object)parts } },
+                    generationConfig = gen,
+                });
+            }
             var url = $"https://generativelanguage.googleapis.com/v1beta/models/{config.GeminiModel}:generateContent?key={config.GeminiApiKey}";
-            var payload = JsonSerializer.Serialize(body);
+            var thinkingSent = thinkingConfig != null;
+            var payload = BuildPayload(thinkingSent);
 
             // Gemini's public endpoint frequently returns TRANSIENT errors — HTTP 503 (model
             // overloaded) and 429 (rate limit / quota) especially — and a large multi-page PDF can hit
@@ -260,6 +387,7 @@ public static partial class GeminiOcr
                         Content = new StringContent(payload, Encoding.UTF8, "application/json"),
                     };
                     using var cts = new CancellationTokenSource(timeout);
+                    var sentAt = System.Diagnostics.Stopwatch.StartNew();
                     using var resp = await Http.SendAsync(req, cts.Token);
                     var respText = await resp.Content.ReadAsStringAsync(cts.Token);
                     if (resp.IsSuccessStatusCode)
@@ -277,6 +405,13 @@ public static partial class GeminiOcr
                             var (tin, tout) = Usage(respText);
                             parsedDoc.TokensIn = tin;
                             parsedDoc.TokensOut = tout;
+                            // Measuring where the time goes (Megachem, 28 Oct 2026): the model's own
+                            // "thinking" is billed and timed apart from the answer, so it is kept
+                            // separately; one line per request shows pages / time / tokens.
+                            parsedDoc.ThinkingTokens = ThinkingTokens(respText);
+                            parsedDoc.PositionsJson = ExtractPositions(raw);
+                            Log($"Request done ({(thinkingSent ? "thinking capped" : "model default")}): {pageCount} image(s) at {dpi} dpi in {sentAt.ElapsedMilliseconds} ms - "
+                                + $"tokens in {tin?.ToString() ?? "?"}, answer {tout?.ToString() ?? "?"}, thinking {parsedDoc.ThinkingTokens?.ToString() ?? "0"}");
                             return (parsedDoc, null);
                         }
                         // 200 OK but the body held no parseable JSON. This is NOT a connection problem —
@@ -299,6 +434,15 @@ public static partial class GeminiOcr
                         + (transient ? $", attempt {attempt}/{maxAttempts}" : "")
                         + $"): {Trunc(respText, 400)}";
                     Log(lastErr);
+                    // A model that does not accept the thinking setting (budget vs level differ between
+                    // Gemini 2.5 and 3) answers 400 — read again without it rather than fail the document.
+                    if (status == 400 && thinkingSent && respText.Contains("thinking", StringComparison.OrdinalIgnoreCase))
+                    {
+                        Log($"Thinking setting rejected by model {config.GeminiModel} — reading without it");
+                        thinkingSent = false;
+                        payload = BuildPayload(false);
+                        continue;
+                    }
                     if (!transient || attempt == maxAttempts)
                         return (null, lastErr);
                 }
@@ -387,10 +531,29 @@ public static partial class GeminiOcr
         var mainVendorName = doc.Header.TryGetValue("vendorName", out var vn) ? vn?.ToString() ?? "" : "";
         var supporting = VisionPrompt.BuildSupporting(module, mainVendorName, salesOrg, apDocCategory);
         var skipped = 0;
+        // The supporting groups do not depend on each other, so they are read side by side instead
+        // of one after another (Ocr:ChunkParallelism, default 3; 1 = the old one-at-a-time read).
+        // A 40-page bundle is ~4 groups, and waiting for each in turn was most of its 70+ seconds.
+        // Results are still MERGED in page order below: MergeTaxRows keeps the first of two equal
+        // tax rows and upgrades it, so the merge order must not depend on which request came back
+        // first. Each request keeps its own retry on 429/503 (OneShotAsync).
+        var groups = new List<(int Start, List<byte[]> Pages)>();
         for (var i = 0; i < rest.Count; i += ChunkSize)
+            groups.Add((i, rest.Skip(i).Take(ChunkSize).ToList()));
+        var results = new (ParsedDocument? Doc, string? Err)[groups.Count];
+        using (var gate = new SemaphoreSlim(Math.Max(1, config.OcrChunkParallelism)))
         {
-            var chunk = rest.Skip(i).Take(ChunkSize).ToList();
-            var (part, perr) = await OneShotAsync(chunk, mime, supporting, module, config, dpi, TimeoutFor(chunk.Count));
+            await Task.WhenAll(groups.Select(async (g, gi) =>
+            {
+                await gate.WaitAsync();
+                try { results[gi] = await OneShotAsync(g.Pages, mime, supporting, module, config, dpi, TimeoutFor(g.Pages.Count)); }
+                finally { gate.Release(); }
+            }));
+        }
+        for (var gi = 0; gi < groups.Count; gi++)
+        {
+            var (i, chunk) = groups[gi];
+            var (part, perr) = results[gi];
             if (part == null)
             {
                 skipped++;
@@ -402,6 +565,7 @@ public static partial class GeminiOcr
             // under-state what it actually cost by most of the file.
             doc.TokensIn = (doc.TokensIn ?? 0) + (part.TokensIn ?? 0);
             doc.TokensOut = (doc.TokensOut ?? 0) + (part.TokensOut ?? 0);
+            if (part.ThinkingTokens != null) doc.ThinkingTokens = (doc.ThinkingTokens ?? 0) + part.ThinkingTokens;
             MergeTaxRows(doc, part, mainVendorName);
         }
 

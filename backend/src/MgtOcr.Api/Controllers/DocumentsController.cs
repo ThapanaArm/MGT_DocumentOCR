@@ -457,11 +457,14 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         var reocrJobNumber = await jobLog.NextJobNumberAsync();
         var reocrJob = await jobLog.StartAsync(reocrJobNumber, "OCR", docId: docId, module: module,
             provider: reocrEngine, fileName: fileNameOnDisk, performedBy: await ActorAsync());
+        // Page memory (AP/II): reference pictures in, this read's page map out (saved below).
+        var pageMemory = HttpContext.RequestServices.GetRequiredService<MgtOcr.Api.Services.PageMemoryStore>();
+        var pageHint = await pageMemory.LoadReadHintAsync(module, doc.GetStr("apDocCategory"));
         ParsedDocument pd;
         try
         {
             pd = await ocr.ExtractAsync(storedPath, module, reocrEngine, reocrPw, await repo.GetCompanyAsync(docId),
-                doc.GetStr("apDocCategory"));
+                doc.GetStr("apDocCategory"), pageHint);
         }
         catch (Exception ex)
         {
@@ -510,6 +513,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             });
         }
         await repo.SaveLinesAsync(module, docId, pd.Lines.Select(l => ExtConversion.ToLineDict(l, pd.Header.GetValueOrDefault("deliveryDate") as string)).ToList());
+        await pageMemory.SaveReadAsync(docId, module, doc.GetStr("apDocCategory"), pd);
         await repo.LogAuditAsync(docId, module, "REOCR", await ActorAsync(),
             detail: "Re-read document", fileName: fileNameOnDisk, ocrProvider: pd.Provider);
         var outDoc = await repo.GetDocumentAsync(docId);

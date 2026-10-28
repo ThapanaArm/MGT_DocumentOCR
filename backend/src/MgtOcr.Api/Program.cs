@@ -102,6 +102,16 @@ var appConfig = new AppConfig
     TyphoonModel = Get("Ocr:TyphoonModel", "typhoon-ocr"),
     GeminiApiKey = Get("Ocr:GeminiApiKey"),
     GeminiModel = Get("Ocr:GeminiModel", "gemini-2.5-flash"),
+    OcrChunkParallelism = GetInt("Ocr:ChunkParallelism", 3),
+    OcrPageMemoryMode = Get("Ocr:PageMemory:Mode", "shadow").ToLowerInvariant(),
+    OcrPageMemoryMinPages = GetInt("Ocr:PageMemory:MinPages", 8),
+    OcrPageMemoryModel = Get("Ocr:PageMemory:Model"),
+    OcrPageMemoryBackfill = GetBool("Ocr:PageMemory:Backfill", false),
+    OcrPageMemoryBackfillClassify = GetInt("Ocr:PageMemory:BackfillClassify", 0),
+    DuplicateCopyUnchecked = GetBool("Ocr:Duplicate:CopyUnchecked", false),
+    OcrPositionHints = GetBool("Ocr:PositionHints:Enabled", false),
+    OcrThinkingBudget = int.TryParse(Get("Ocr:ThinkingBudget"), out var thinkBudget) ? thinkBudget : null,
+    OcrThinkingLevel = Get("Ocr:ThinkingLevel"),
     OpenAiApiKey = Get("Ocr:OpenAiApiKey"),
     OpenAiModel = Get("Ocr:OpenAiModel", "gpt-4o"),
     PaddleOcrCmd = Get("Ocr:PaddleOcrCmd"),
@@ -204,6 +214,12 @@ builder.Services.AddSingleton<MgtOcr.Api.Auth.SingleSessionService>();
 // thread (many files at once would otherwise time out the upload request and hit the OCR rate limit).
 builder.Services.AddSingleton<OcrJobRepository>();
 builder.Services.AddSingleton<JobLogRepository>();
+// Page memory for AP bundles (sql/35_page_memory.sql): which page of a bundle is what.
+builder.Services.AddSingleton<MgtOcr.Api.Services.PageMemoryStore>();
+// Same file uploaded again (sql/36_file_hash.sql): copy the checked earlier document, warn on a re-post.
+builder.Services.AddSingleton<MgtOcr.Api.Services.FileDuplicateStore>();
+// Off unless Ocr:PageMemory:Backfill=true: fills ocr.DocPageMap for documents read before it existed.
+builder.Services.AddHostedService<MgtOcr.Api.Services.PageMemoryBackfillWorker>();
 builder.Services.AddSingleton<MgtOcr.Api.Services.DocumentIngestService>();
 builder.Services.AddHostedService<MgtOcr.Api.Services.OcrQueueWorker>();
 // Upload lifecycle: archive posted documents' files to SharePoint, then remove the local copy.
