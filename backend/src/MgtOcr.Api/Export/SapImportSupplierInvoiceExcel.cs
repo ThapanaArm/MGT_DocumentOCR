@@ -122,6 +122,16 @@ public static class SapImportSupplierInvoiceExcel
         string? vendorFilter = null)
     {
         vendorNames ??= new Dictionary<string, string>();
+        // An invoice that names a purchase order is posted in the PURCHASE ORDER's currency —
+        // SAP locks the field the moment the PO is entered and there is no way round it. The
+        // shipping agent bills in baht against a purchase order kept in dollars, so every figure
+        // on the document has to be divided by the rate the PO was priced at before it can be
+        // filed. Doing that by hand, box by box, is where 13,819.73 ends up labelled USD.
+        //
+        // The rate is the PO's own (header.exchangeRate, filled from PriceDetnExchangeRate when
+        // the purchase order is read), never a market rate: it is the rate the goods receipt
+        // accrued at, so it is the only one that clears that accrual to zero.
+        doc = InPurchaseOrderCurrency(doc);
         var header = (Dictionary<string, object?>)doc["header"]!;
         var glItems = ReadRows(header, "glItems");
         // A PO-referenced invoice (MIRO) never fills the G/L Account Items table on screen — that
@@ -673,6 +683,53 @@ public static class SapImportSupplierInvoiceExcel
         if (!DateTime.TryParse(value, out var d)) return;
         cell.Value = d;
         cell.Style.DateFormat.Format = "dd/MM/yyyy";
+    }
+
+    /// <summary>Every amount on the document, restated in the purchase order's currency.
+    ///
+    /// Applies only when the document says which currency the PO is in (header.poCurrency, filled
+    /// when the purchase order is read) and that differs from the document's own, and only when a
+    /// rate is known. Otherwise the document is returned untouched — a domestic invoice with no
+    /// purchase order behind it has nothing to convert and must not be touched.
+    ///
+    /// Each figure is divided and rounded on its own. The gross is NOT converted separately: the
+    /// file builds it from the rows it has just written, so the total always agrees with the lines
+    /// that make it up rather than drifting a satang away from them.</summary>
+    private static Dictionary<string, object?> InPurchaseOrderCurrency(Dictionary<string, object?> doc)
+    {
+        if (doc.Get("header") is not Dictionary<string, object?> h) return doc;
+        var from = h.GetStr("currency").Trim();
+        var to = h.GetStr("poCurrency").Trim();
+        var rate = Num(h.Get("exchangeRate"));
+        if (to.Length == 0 || from.Length == 0 || rate <= 0
+            || string.Equals(from, to, StringComparison.OrdinalIgnoreCase)) return doc;
+
+        // The keys that hold money. Named rather than guessed: a blanket "convert every number"
+        // would divide quantities and tax rates as well.
+        var moneyKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "amount", "price", "subTotal", "vatAmount", "whtAmount", "totalAmount",
+            "poTotalAmount", "baseAmount", "docCurrencyAmt", "amtFc", "unitPrice",
+        };
+
+        object? Walk(object? v) => v switch
+        {
+            Dictionary<string, object?> d => d.ToDictionary(
+                kv => kv.Key,
+                kv => moneyKeys.Contains(kv.Key) && Num(kv.Value) != 0
+                    ? Math.Round(Num(kv.Value) / rate, 2)
+                    : Walk(kv.Value)),
+            System.Collections.IEnumerable e and not string => e.Cast<object?>().Select(Walk).ToList(),
+            _ => v,
+        };
+
+        var converted = (Dictionary<string, object?>)Walk(doc)!;
+        var ch = (Dictionary<string, object?>)converted["header"]!;
+        ch["currency"] = to;
+        // Kept so the screen and the file agree on what the figures were converted from.
+        ch["sourceCurrency"] = from;
+        ch["exchangeRate"] = rate;
+        return converted;
     }
 
     private static void Money(IXLCell cell, double value)

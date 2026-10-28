@@ -33,7 +33,14 @@ public class SapPurchaseOrderController(SapPurchaseOrderClient client, ICurrentU
             // Supplier and company code come back with the items so the screen can say "this PO
             // belongs to Kimex 2000014 / company 2000" before anything is assigned.
             var head = await client.HeadAsync(po);
-            return Ok(new { purchaseOrder = po, configured = true, count = items.Count, items, head });
+            // The rate the PO was priced at, taken off its conditions. Shown on the invoice
+            // screen so the figure SAP will use is visible before anything is posted — it is not
+            // sent back, since SAP inherits it from the purchase order on its own.
+            var exchangeRate = SapPurchaseOrderClient.RateOf(items);
+            return Ok(new
+            {
+                purchaseOrder = po, configured = true, count = items.Count, items, head, exchangeRate,
+            });
         }
         catch (Exception ex)
         {

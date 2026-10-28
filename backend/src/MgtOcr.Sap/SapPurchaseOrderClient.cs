@@ -19,7 +19,32 @@ public record SapPurchaseOrderItem(
     decimal NetPrice,
     string Currency,
     string Plant,
-    string TaxCode);
+    string TaxCode,
+    IReadOnlyList<SapPoCondition> Conditions,
+    // The rate this item was priced at — PriceDetnExchangeRate, 33.50860 on PO 2230000031. SAP
+    // uses it for an invoice that names this PO, because it is the rate the goods receipt
+    // accrued at, so it is the figure the screen shows before anything is posted.
+    decimal ExchangeRate);
+
+/// <summary>One pricing element of a purchase order item, from to_PurchaseOrderPricingElement.
+///
+/// This is where the planned delivery costs live, and an invoice that settles them has to name
+/// the SAME condition the purchase order accrued under: the goods receipt credited the accrual
+/// per condition, and naming another one leaves it uncleared. The amounts also say what each
+/// charge is worth, which is how a cost line on the shipping form finds its condition without
+/// anyone opening the purchase order.
+///
+/// RateValue is what was typed into the PO, in RateCurrency (13,751.73 THB for ZLH1); Amount is
+/// the same figure in the purchase order's own currency (410.39 USD).</summary>
+public record SapPoCondition(
+    string Item,
+    string ConditionType,
+    decimal RateValue,
+    string RateCurrency,
+    decimal Amount,
+    string AmountCurrency,
+    bool IsGroupCondition,
+    bool IsForAccrual);
 
 /// <summary>The purchase order's own header — who it is for and which company placed it.
 ///
@@ -51,8 +76,10 @@ public class SapPurchaseOrderClient(AppConfig config, HttpClient httpClient)
         if (!Configured || po.Length == 0) return [];
 
         var filter = $"PurchaseOrder eq '{EscapeODataLiteral(po)}'";
+        // The conditions come along with the items in one call: a second round trip per item
+        // would be eleven more requests for a purchase order this size.
         var url = $"{config.SapPurchaseOrderBaseUrl.TrimEnd('/')}/A_PurchaseOrderItem" +
-                  $"?$filter={Uri.EscapeDataString(filter)}&$top=200&$format=json";
+                  $"?$filter={Uri.EscapeDataString(filter)}&$expand=to_PurchaseOrderPricingElement&$top=200&$format=json";
 
         var items = EnumerateResults(await GetJsonAsync(url))
             .Select(el => new SapPurchaseOrderItem(
@@ -65,7 +92,9 @@ public class SapPurchaseOrderClient(AppConfig config, HttpClient httpClient)
                 GetDecimal(el, "NetPriceAmount"),
                 GetString(el, "DocumentCurrency") ?? "",
                 GetString(el, "Plant") ?? "",
-                GetString(el, "TaxCode") ?? ""))
+                GetString(el, "TaxCode") ?? "",
+                Conditions(el),
+                ExchangeRateOf(el)))
             .Where(x => x.Item.Length > 0)
             .ToList();
 
@@ -104,6 +133,69 @@ public class SapPurchaseOrderClient(AppConfig config, HttpClient httpClient)
             return null;
         }
     }
+
+    /// <summary>The conditions expanded onto one item. The base price (PMP0) and the cash
+    /// discount placeholder (DCD1) are dropped: neither is a charge an invoice settles, and
+    /// leaving them in would offer "PMP0" in the condition picker beside the real ones.</summary>
+    private static List<SapPoCondition> Conditions(JsonElement item)
+    {
+        var result = new List<SapPoCondition>();
+        if (!item.TryGetProperty("to_PurchaseOrderPricingElement", out var node)) return result;
+        if (node.ValueKind != JsonValueKind.Object
+            || !node.TryGetProperty("results", out var arr)
+            || arr.ValueKind != JsonValueKind.Array) return result;
+        foreach (var el in arr.EnumerateArray())
+        {
+            var type = (GetString(el, "ConditionType") ?? "").Trim().ToUpperInvariant();
+            if (type.Length == 0 || type is "PMP0" or "DCD1") continue;
+            result.Add(new SapPoCondition(
+                GetString(el, "PurchaseOrderItem") ?? "",
+                type,
+                GetDecimal(el, "ConditionRateValue"),
+                GetString(el, "ConditionCurrency") ?? "",
+                GetDecimal(el, "ConditionAmount"),
+                GetString(el, "TransactionCurrency") ?? "",
+                IsFlag(el, "IsGroupCondition"),
+                IsFlag(el, "IsRelevantForAccrual")));
+        }
+        return result;
+    }
+
+    /// <summary>The rate SAP priced this item at, read straight off PriceDetnExchangeRate.
+    ///
+    /// Read over ALL the pricing rows, because the row that carries it is the base price PMP0 —
+    /// which Conditions() drops as not being a charge an invoice settles. The delivery-cost rows
+    /// that survive carry 1.00000, since they were entered in THB and need no translation;
+    /// taking the rate from those would report 1.00000 and quietly say the invoice needs no
+    /// conversion at all. So 0 and 1 both count as "nothing said".</summary>
+    private static decimal ExchangeRateOf(JsonElement item)
+    {
+        if (!item.TryGetProperty("to_PurchaseOrderPricingElement", out var node)) return 0m;
+        if (node.ValueKind != JsonValueKind.Object
+            || !node.TryGetProperty("results", out var arr)
+            || arr.ValueKind != JsonValueKind.Array) return 0m;
+        foreach (var el in arr.EnumerateArray())
+        {
+            var r = GetDecimal(el, "PriceDetnExchangeRate");
+            if (r > 1m) return r;
+        }
+        return 0m;
+    }
+
+    /// <summary>The purchase order's rate, from the first item that states one.</summary>
+    public static decimal RateOf(IEnumerable<SapPurchaseOrderItem> items)
+    {
+        foreach (var i in items) if (i.ExchangeRate > 0) return i.ExchangeRate;
+        return 0m;
+    }
+
+    /// <summary>SAP writes its booleans both ways here: "X" on the group-condition flag, a JSON
+    /// true on the accrual one.</summary>
+    private static bool IsFlag(JsonElement el, string name) =>
+        el.TryGetProperty(name, out var v)
+        && (v.ValueKind == JsonValueKind.True
+            || (v.ValueKind == JsonValueKind.String
+                && (v.GetString() ?? "").Trim() is "X" or "true" or "True"));
 
     private static int ItemNo(string item) => int.TryParse(item, out var n) ? n : int.MaxValue;
 

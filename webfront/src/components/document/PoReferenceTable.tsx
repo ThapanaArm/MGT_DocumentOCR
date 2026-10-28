@@ -59,6 +59,7 @@ export default function PoReferenceTable({
   onDelLine,
   onCondType,
   showCondition,
+  deliveryCostsOnly,
 }: {
   lines: DocLine[];
   poRef: string;
@@ -102,6 +103,14 @@ export default function PoReferenceTable({
   onCondType?: (i: number, code: string) => void;
   /** Reference Document Category is "Planned delivery costs" (2) or "both" (3). */
   showCondition?: boolean;
+  /** Category is "Planned delivery costs" (2) — costs only, no goods on this document.
+   *
+   *  Such an invoice is not assigned line by line: it settles the accrual by naming the PO's
+   *  condition, and the purchase order holds no item that answers to "STORAGE CHARGE". So the
+   *  assigned tick, the "n of m assigned" count and the goods-receipt item all go away, and
+   *  "Assign all" is left to do the one thing that still matters here — read the purchase order
+   *  for its currency, its rate and its conditions. */
+  deliveryCostsOnly?: boolean;
 }) {
   const total = lines.reduce((a, l) => a + num(l.amount), 0);
   const editable = !posted && !!onTaxCode;
@@ -124,7 +133,9 @@ export default function PoReferenceTable({
     String((l.extra as Record<string, unknown> | undefined)?.sapGrItem ?? '').trim();
   const isGrAuto = (l: DocLine) =>
     String((l.extra as Record<string, unknown> | undefined)?.sapGrItemAuto ?? '').trim().length > 0;
-  const showGr = !!onGrItem && !posted && !!(matDoc ?? '').trim();
+  // The goods receipt belongs to the goods. A delivery cost clears its accrual through the PO's
+  // condition and never names a material document line.
+  const showGr = !!onGrItem && !posted && !!(matDoc ?? '').trim() && !deliveryCostsOnly;
   /* The condition types NTT DATA configured for MGT/GLC, from KUT-MM-PU-203 p.34. The PO
      carries one of these per charge and the invoice has to name the same one. */
   const CONDITIONS: [string, string][] = [
@@ -152,7 +163,7 @@ export default function PoReferenceTable({
             <button className="btn sm" onClick={onAssignAll} disabled={assigning || !poRef}>
               <i className="fa-solid fa-link" /> {assigning ? 'Reading PO…' : 'Assign all'}
             </button>
-            {onAutoNumber && (
+            {onAutoNumber && !deliveryCostsOnly && (
               <button
                 className="btn sm ghost"
                 onClick={onAutoNumber}
@@ -173,9 +184,13 @@ export default function PoReferenceTable({
           <span className="hint">
             {!poRef
               ? 'Enter the purchase order number first'
-              : `${assignedCount} of ${lines.length} assigned${
-                  sapItemCount ? ` · ${sapItemCount} items on the PO` : ''
-                }`}
+              : deliveryCostsOnly
+                ? `อ่านใบสั่งซื้อเพื่อเอาสกุลเงิน อัตราแลกเปลี่ยน และ condition${
+                    sapItemCount ? ` · PO มี ${sapItemCount} รายการ` : ''
+                  }`
+                : `${assignedCount} of ${lines.length} assigned${
+                    sapItemCount ? ` · ${sapItemCount} items on the PO` : ''
+                  }`}
           </span>
         </div>
       )}
@@ -195,10 +210,14 @@ export default function PoReferenceTable({
       <table>
         <thead>
           <tr>
-            <th style={{ width: 80 }}>Assigned</th>
+            {/* Both columns are about goods. A delivery cost is settled by naming the PO's
+                condition, not by pointing at a PO item — the purchase order holds nothing that
+                answers to "STORAGE CHARGE", so every row read "Not assigned" for work that does
+                not exist on this kind of document. */}
+            {!deliveryCostsOnly && <th style={{ width: 80 }}>Assigned</th>}
             <th style={{ width: 100 }}>Invoice Item</th>
             <th>Short Text</th>
-            <th style={{ minWidth: 190 }}>Purchasing Document/Item</th>
+            {!deliveryCostsOnly && <th style={{ minWidth: 190 }}>Purchasing Document/Item</th>}
             {showCond && <th style={{ minWidth: 170 }}>Condition</th>}
             <th style={{ textAlign: 'right', minWidth: 110 }}>Amount</th>
             <th style={{ textAlign: 'right', minWidth: 110 }}>Quantity</th>
@@ -217,6 +236,7 @@ export default function PoReferenceTable({
               ).trim();
               return (
                 <tr key={i}>
+                  {!deliveryCostsOnly && (
                   <td>
                     {isDupe(l) ? (
                       <span className="badge b-fail" title="PO item นี้ถูกใช้ซ้ำในเอกสารเดียวกัน">
@@ -235,8 +255,10 @@ export default function PoReferenceTable({
                       <span className="badge b-warn">Not assigned</span>
                     )}
                   </td>
+                  )}
                   <td>{(i + 1) * 10}</td>
                   <td>{shortText(l)}</td>
+                  {!deliveryCostsOnly && (
                   <td>
                     {!poRef ? (
                       <span className="hint">—</span>
@@ -284,6 +306,7 @@ export default function PoReferenceTable({
                       </span>
                     )}
                   </td>
+                  )}
                   {showCond && (
                     <td>
                       {posted ? (

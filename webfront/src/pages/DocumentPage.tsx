@@ -552,6 +552,11 @@ function refDocumentFor(d: DocModel): string {
 function seedPoItems(d: DocModel): DocModel {
   if (d.module !== 'AP' && d.module !== 'II') return d;
   const h = d.header as Record<string, unknown>;
+  // Planned delivery costs are not assigned line by line the way goods are: they are settled by
+  // naming the PO's condition, and the purchase order has no item that corresponds to "STORAGE
+  // CHARGE". Numbering them 10, 20, 30 ... produced seven "auto" rows and a warning banner for
+  // work that does not exist on this kind of document.
+  if (String(h.refDocType ?? '').trim() === '2') return d;
   const poRef = String(h.PurchasingOrder ?? h.poRef ?? '').trim();
   if (!poRef || !Array.isArray(d.lines)) return d;
   // The goods receipt's own line number, filled on the same terms and for the same reason: the
@@ -2370,6 +2375,32 @@ export default function DocumentPage() {
      no way to assign it. */
   const usePoCopy = !isInventoryPoDoc(doc) && poGoodsLines.length > 0;
 
+  /* The rows the PO Reference grid shows, narrowed to the supplier picked in "Vendor in this
+     document". A shipping bundle carries several suppliers on one form and becomes one SAP
+     invoice per supplier, so a grid showing all of them contradicts the Totals card right above
+     it — vendor 4000002 reading "1 item · 200" while the grid listed fourteen rows adding up to
+     183,318.95.
+
+     `at` carries each shown row back to its position in the real line list: every edit on this
+     grid (tax code, PO item, GR item, condition, delete) is by index, and a filtered list
+     renumbers them. Without it, editing the first row of 4000002's grid would write to whatever
+     line happens to be first in the document.
+
+     A filter that matches nothing falls back to the whole list rather than showing an empty grid:
+     that is a document whose rows were never tagged with a supplier, not a document with no rows. */
+  const poGridLines = (() => {
+    const rows: DocLine[] = usePoCopy ? poGoodsLines : (doc.lines || []);
+    const all = { items: rows, at: rows.map((_, i) => i) };
+    if (!vendorFilter) return all;
+    const items: DocLine[] = [];
+    const at: number[] = [];
+    rows.forEach((l, i) => {
+      const code = String((l.extra as Record<string, unknown> | undefined)?.vendorCode ?? '').trim();
+      if ((code || mainVendorCode) === vendorFilter) { items.push(l); at.push(i); }
+    });
+    return items.length > 0 ? { items, at } : all;
+  })();
+
   /* MIRO's "Assign all": read the purchase order from SAP and tie each invoice line to the PO item
      it bills. Matched the way the backend matches when it posts — the lot/article code the read
      found (CSN084379) against the PO item's material and short text, then the first words of the
@@ -2450,6 +2481,55 @@ export default function DocumentPage() {
         }
         setPoSapItems(r.items);
         setPoSapHead(r.head ?? null);
+        // The rate the purchase order was priced at, shown in the Exchange Rate box. It is NOT
+        // sent with the invoice — SAP inherits it from the PO by itself, and sending our own
+        // would overrule it — but seeing it beside the figures is how a wrong one gets noticed:
+        // the document SAP proposed on 26.10 used 32.75880 from its own table while the goods
+        // were received at 33.50860, and nothing on screen said so. Only fills an empty box.
+        const poRate = Number(r.exchangeRate) || 0;
+        if (poRate > 0 && !String(h.exchangeRate ?? '').trim()) {
+          editHeader('exchangeRate', String(poRate));
+        }
+        // The purchase order's own currency. SAP locks an invoice that names a PO to it, so the
+        // export restates every figure in it before writing the file — the shipping agent bills
+        // in baht against a PO kept in dollars, and converting box by box on screen is how
+        // 13,819.73 ends up labelled USD. Stored even when it matches the document's own
+        // currency: that is what tells the export there is nothing to convert.
+        const poCurrency = r.items.map((i) => i.currency).find((c) => c && c.trim()) ?? '';
+        if (poCurrency && poCurrency !== String(h.poCurrency ?? '').trim()) {
+          editHeader('poCurrency', poCurrency);
+        }
+        // The condition each cost line settles, for a delivery-cost invoice. Matched on the
+        // amount as the PO states it: ZLH1 was entered as 13,751.73 THB and the shipping form
+        // bills exactly that, so the two meet without anyone reading the purchase order. Only a
+        // unique hit counts, and only a line with no condition chosen yet is touched.
+        if (['2', '3'].includes(String(h.refDocType ?? '').trim())) {
+          const conds = r.items.flatMap((i) => i.conditions ?? []);
+          (doc.lines || []).forEach((l, i) => {
+            const extra = (l.extra ?? {}) as Record<string, unknown>;
+            if (String(extra.deliveryCondType ?? '').trim()) return;
+            const amount = Number(l.amount) || 0;
+            if (amount === 0) return;
+            const hits = [...new Set(
+              conds
+                .filter((x) => Math.abs(x.rateValue - amount) <= 0.01
+                  || Math.abs(x.amount - amount) <= 0.01)
+                .map((x) => x.conditionType),
+            )];
+            if (hits.length === 1) editLineExtra(i, 'deliveryCondType', hits[0]);
+          });
+        }
+        // On a delivery-cost document the point of the button is the purchase order itself —
+        // its currency, its rate, its conditions — not matching lines to items. Those were read
+        // above; nothing else is assigned.
+        if (String(h.refDocType ?? '').trim() === '2') {
+          showToast(
+            poRate > 0
+              ? `อ่านใบสั่งซื้อ ${po} แล้ว — สกุล ${poCurrency || '-'} อัตรา ${poRate}`
+              : `อ่านใบสั่งซื้อ ${po} แล้ว (${r.count} รายการ)`,
+          );
+          return;
+        }
         const matched = applyPoItems(r.items);
         showToast(
           matched === 0
@@ -3030,13 +3110,21 @@ export default function DocumentPage() {
                       </span>
                     </div>
                   )}
-                  {String(h.refDocument ?? '').trim() === 'PO' ? (
+                  {/* The MIRO grid — Assign all, the PO item per line, the GR item, the
+                      condition — belongs to any document posted against a purchase order, not
+                      only to one whose Reference Document says "Purchase Order". A delivery-cost
+                      invoice is filed as "Delivery Note" with Category 2 and still names a PO,
+                      and on that combination the old mapping table used to appear instead: no way
+                      to assign an item, no Assign all, and so no rate or currency read from the
+                      PO either. The purchase order number is what decides it. */}
+                  {String(h.refDocument ?? '').trim() === 'PO' || poNumberOf(h).length > 0 ? (
                     // Keyed against the purchase order the goods are either the document's own
                     // lines (Document Type = Goods/service items) or the PO copy the read kept
                     // beside the delivery costs (header.poLines). The second has nowhere to save
                     // an edit, so the grid is read-only there.
                     <PoReferenceTable
-                      lines={usePoCopy ? poGoodsLines : doc.lines}
+                      key={vendorFilter || 'all'}
+                      lines={poGridLines.items}
                       poRef={poNumberOf(h)}
                       taxDate={String(h.invoiceDate ?? '').trim()}
                       headerTaxCode={String(h.taxCode ?? '').trim()}
@@ -3044,7 +3132,7 @@ export default function DocumentPage() {
                       onTaxCode={
                         usePoCopy
                           ? undefined
-                          : (i, code) => editLineExtra(i, 'taxCode', code)
+                          : (i, code) => editLineExtra(poGridLines.at[i], 'taxCode', code)
                       }
                       onAssignAll={usePoCopy || locked ? undefined : assignFromPo}
                       onAutoNumber={usePoCopy || locked ? undefined : autoNumberPoItems}
@@ -3056,22 +3144,25 @@ export default function DocumentPage() {
                         usePoCopy || locked
                           ? undefined
                           : (i, item) => {
-                              editLineExtra(i, 'sapPoItem', item);
+                              const at = poGridLines.at[i];
+                              editLineExtra(at, 'sapPoItem', item);
                               // Typed by a person = checked. Drops the "auto" badge.
-                              editLineExtra(i, 'sapPoItemAuto', '');
+                              editLineExtra(at, 'sapPoItemAuto', '');
                             }
                       }
-                      onDelLine={usePoCopy || locked ? undefined : delLine}
+                      onDelLine={usePoCopy || locked ? undefined : (i) => delLine(poGridLines.at[i])}
                       matDoc={String(h.refMatDoc ?? '').trim()}
                       onGrItem={
                         usePoCopy || locked
                           ? undefined
                           : (i, item) => {
-                              editLineExtra(i, 'sapGrItem', item);
+                              const at = poGridLines.at[i];
+                              editLineExtra(at, 'sapGrItem', item);
                               // Typed by a person = checked, same as the PO item.
-                              editLineExtra(i, 'sapGrItemAuto', '');
+                              editLineExtra(at, 'sapGrItemAuto', '');
                             }
                       }
+                      deliveryCostsOnly={String(h.refDocType ?? '').trim() === '2'}
                       showCondition={
                         // Planned delivery costs clear the accrual the goods receipt made under a
                         // PO condition, so each charge has to name its condition. The purchase
@@ -3082,7 +3173,7 @@ export default function DocumentPage() {
                       onCondType={
                         usePoCopy || locked
                           ? undefined
-                          : (i, code) => editLineExtra(i, 'deliveryCondType', code)
+                          : (i, code) => editLineExtra(poGridLines.at[i], 'deliveryCondType', code)
                       }
                     />
                   ) : (

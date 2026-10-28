@@ -282,6 +282,25 @@ export interface SapPurchaseOrderItem {
   currency: string;
   plant: string;
   taxCode: string;
+  /** The PO's own conditions for this item — ZFRE, ZLH1, ZED1 ... A planned delivery cost is
+   *  settled by naming the condition it was accrued under, so these are what the Condition
+   *  column offers. PMP0 (base price) and DCD1 are left out by the backend. */
+  conditions?: SapPoCondition[];
+  /** PriceDetnExchangeRate — the rate this item was priced at (33.50860 on PO 2230000031). */
+  exchangeRate?: number;
+}
+
+/** One condition on a PO item. `rateValue`/`rateCurrency` is what was typed into the PO
+ *  (13,751.73 THB), `amount`/`amountCurrency` the same in the PO's currency (410.39 USD). */
+export interface SapPoCondition {
+  item: string;
+  conditionType: string;
+  rateValue: number;
+  rateCurrency: string;
+  amount: number;
+  amountCurrency: string;
+  isGroupCondition: boolean;
+  isForAccrual: boolean;
 }
 
 /** The purchase order's own header — who it is for and under which company. Used to catch an
@@ -303,4 +322,6 @@ export const getSapPurchaseOrder = (purchaseOrder: string) =>
     count: number;
     items: SapPurchaseOrderItem[];
     head?: SapPurchaseOrderHead | null;
+    /** The rate the PO was priced at; 0 when the PO is already in company code currency. */
+    exchangeRate?: number;
   }>('/api/sap/purchase-order/' + encodeURIComponent(purchaseOrder.trim()));

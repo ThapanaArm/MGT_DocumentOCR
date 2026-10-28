@@ -202,16 +202,16 @@ public static class SupplierInvoicePayload
                    Or(header.GetStr("invoiceNo").Trim(),
                       Or(header.GetStr("goodsInvoiceNo").Trim(), poRef))), 16),
             ["DocumentCurrency"] = currency,
-            // Left empty SAP takes the rate from its own table for the posting date. Filled in,
-            // the posting uses exactly this rate — the same thing the purchase order's
-            // "Fixed Exch.Rate" does — so an invoice in the supplier's currency clears the
-            // accrual the goods receipt made rather than booking an exchange difference against
-            // it. Sent only when there is one, and never on a document already in company code
-            // currency, where SAP rejects a rate it has no use for.
-            ["ExchangeRate"] = !string.Equals(currency, "THB", StringComparison.OrdinalIgnoreCase)
-                && Num(header.Get("exchangeRate")) is var fx && fx > 0
-                ? F2(fx)
-                : null,
+            // NO ExchangeRate here. A_SupplierInvoice has no such property: sending it — even as
+            // null, which this dictionary serialises rather than drops — is answered with
+            // "Property 'ExchangeRate' is invalid" and the whole document is refused.
+            //
+            // Nothing is lost by that. An invoice naming a purchase order takes the rate the PO
+            // was priced at (PriceDetnExchangeRate, 33.50860 on PO 2230000031), which is the rate
+            // the goods receipt accrued at and so the only one that clears the accrual to zero;
+            // SAP applies it by itself. Without a PO it uses its own table for the posting date.
+            // The Exchange Rate box on screen is read from the PO and shown so the figure is
+            // visible before posting — it is not an input SAP accepts.
             ["InvoiceGrossAmount"] = F2(gross),
             ["AccountingDocumentType"] = Or(header.GetStr("sapDocType").Trim(), "RE"),
             // Thai tax reporting needs the business place on the document; SAP rejects the posting
