@@ -28,7 +28,9 @@ public record ZohoSalesOrderLine(
     string? Unit,
     decimal? ConversionRatio,
     string? SubUnit,
-    string? StatusNote = null);
+    string? StatusNote = null,
+    // From Zoho's Last Prices module (customer + material) -- written to the item's Last_Price column.
+    decimal? LastPrice = null);
 
 /// <summary>
 /// Zoho CRM "Sales Orders" module — write-only client used by the OCR→Zoho Sales Order creation
@@ -411,7 +413,8 @@ public class ZohoSalesOrderClient(ZohoClient zoho)
                 ["Product_Name"] = new JsonObject { ["id"] = it.MaterialId },
                 ["Quantity"] = it.Quantity,
             };
-            if (!string.IsNullOrWhiteSpace(it.Description)) row["Description"] = it.Description;
+            // No line Description (Megachem, 29 Oct 2026): the Material itself (Product_Name lookup +
+            // Material_Code) identifies the item in Zoho; the document's own wording is not sent.
             if (!string.IsNullOrWhiteSpace(it.StatusNote)) row["Status_Note"] = it.StatusNote;
             if (!string.IsNullOrWhiteSpace(it.MaterialCode)) row["Material_Code"] = it.MaterialCode;
             if (!string.IsNullOrWhiteSpace(it.MaterialGroup)) row["Material_Group"] = it.MaterialGroup;
@@ -419,6 +422,7 @@ public class ZohoSalesOrderClient(ZohoClient zoho)
             if (!string.IsNullOrWhiteSpace(it.Stock)) row["Stock"] = it.Stock;
             if (!string.IsNullOrWhiteSpace(it.LeadTimeDays)) row["L_T_Days"] = it.LeadTimeDays;
             if (it.UnitPrice is decimal up) row["Unit_Price"] = up;
+            if (it.LastPrice is decimal lp) row["Last_Price"] = lp;
             if (!string.IsNullOrWhiteSpace(it.Unit)) row["Unit1"] = it.Unit;
             if (it.ConversionRatio is decimal cr) row["Conversion_Ratio"] = cr;
             if (!string.IsNullOrWhiteSpace(it.SubUnit)) row["Sub_Unit"] = it.SubUnit;

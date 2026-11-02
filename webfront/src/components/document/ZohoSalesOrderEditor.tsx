@@ -11,7 +11,7 @@ import type {
 import CompareModal, { type CompareCandidateItem } from './CompareModal';
 import type { CompareField } from '../../api/compare';
 import { SEND_DISABLED } from '../../constants/flags';
-import DateInput from '../common/DateInput';
+import DateInput, { formatDate } from '../common/DateInput';
 import type { DeliveryDateGroup } from './SapSalesOrderEditor';
 import type { SoGroupState } from '../../api/documents';
 import SoGroupPanel, { groupStatus, type GroupShipToControl } from './SoGroupPanel';
@@ -129,9 +129,6 @@ export default function ZohoSalesOrderEditor({
                         {l.materialName && l.materialCode && <div className="hint">{l.materialName}</div>}
                       </td>
                       <td>
-                        <input type="text" value={e.description} disabled={posted} onChange={(ev) => onLineChange(l.itemNo, { description: ev.target.value })} style={{ width: '100%', minWidth: 220 }} />
-                      </td>
-                      <td>
                         <input type="text" value={e.quantity} disabled={posted} onChange={(ev) => onLineChange(l.itemNo, { quantity: ev.target.value })} style={{ width: 90 }} />
                       </td>
                       <td>
@@ -139,6 +136,21 @@ export default function ZohoSalesOrderEditor({
                       </td>
                       <td>
                         <input type="text" value={e.unitPrice} disabled={posted} onChange={(ev) => onLineChange(l.itemNo, { unitPrice: ev.target.value })} style={{ width: 110 }} />
+                      </td>
+                      <td style={{ whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
+                        {l.lastPrice != null ? (() => {
+                          const typed = Number(String(e.unitPrice).replace(/,/g, ''));
+                          const differs = e.unitPrice.trim() !== '' && Number.isFinite(typed) && Math.abs(typed - l.lastPrice) > 0.005;
+                          return (
+                            <span title={[l.lastPriceSo && `From ${l.lastPriceSo}`, l.lastPriceDate && `updated ${formatDate(l.lastPriceDate)}`].filter(Boolean).join(', ')}>
+                              <b style={{ color: differs ? 'var(--orange)' : undefined }}>
+                                {l.lastPrice.toLocaleString('en-US', { maximumFractionDigits: 2 })}
+                              </b>
+                              {differs && <i className="fa-solid fa-triangle-exclamation" style={{ color: 'var(--orange)', marginLeft: 4 }} title="Unit Price differs from the last price" />}
+                              {l.lastPriceDate && <div className="hint" style={{ fontSize: 11 }}>{formatDate(l.lastPriceDate)}</div>}
+                            </span>
+                          );
+                        })() : <span className="hint">—</span>}
                       </td>
                       <td style={{ whiteSpace: 'nowrap' }}>
                         {l.conversionRatio && l.subUnit ? (
@@ -262,6 +274,11 @@ export default function ZohoSalesOrderEditor({
         <p className="sec-title" style={{ marginTop: 20 }}>
           ORDERED ITEMS ({preview.lines.length})
         </p>
+        {preview.lastPriceError && (
+          <p className="hint" style={{ color: 'var(--orange)' }}>
+            <i className="fa-solid fa-triangle-exclamation" /> Last Price could not be read from Zoho: {preview.lastPriceError}
+          </p>
+        )}
         {preview.lines.length === 0 ? (
           <p className="hint">No document line is matched to a Deal Item yet — resolve the skipped lines below first.</p>
         ) : (
@@ -271,10 +288,10 @@ export default function ZohoSalesOrderEditor({
                 <tr>
                   <th>Line</th>
                   <th>Material (Zoho)</th>
-                  <th>Description</th>
                   <th>Qty</th>
                   <th>Unit</th>
                   <th>Unit Price</th>
+                  <th title="This customer's last price for the Material (Zoho Last Prices)">Last Price</th>
                   <th>Conversion</th>
                 </tr>
               </thead>
@@ -460,8 +477,8 @@ function ZohoFlowSteps({ flow, dealName, salesOrders }: { flow: ZohoSalesOrderFl
       kind: flow.newDeal ? 'create' : 'use',
       main: flow.newDeal ? 'New Deal for this customer' : dealName,
       sub: flow.newDeal
-        ? 'Not WCD · Forecast Status No · Stage “Sales Order Created”'
-        : flow.wcd ? 'WCD · Forecast Status Yes' : `Not WCD · Forecast Status ${flow.forecastStatus || 'blank'}`,
+        ? 'No forecast · Forecast Status No · Stage “Sales Order Created”'
+        : flow.wcd ? 'Forecast (WCD) · Forecast Status Yes' : `No forecast · Forecast Status ${flow.forecastStatus || 'blank'}`,
     },
     {
       title: 'Quote',

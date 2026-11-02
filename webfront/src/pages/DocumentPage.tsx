@@ -1605,7 +1605,7 @@ export default function DocumentPage() {
       const finishLine = async () => {
         await loadMasters(true);
         await setManualLine(i, matCode);
-        showToast(`Saved Material ${matCode} from the Deal`);
+        showToast(`Saved Material ${matCode} from Zoho`);
       };
 
       if (!docUnit || !zohoUnit || docUnit.toLowerCase() === zohoUnit.toLowerCase() || existingRuleMatchesZoho) {
@@ -2354,6 +2354,7 @@ export default function DocumentPage() {
           onSelectDeal={setSelectedDealId}
           onDealResolved={setResolvedDeal}
           dealItems={resolvedDeal?.items ?? []}
+          dealIsWcd={!!resolvedDeal?.isWcd}
           onUseZohoMaterial={saveZohoMaterial}
           detailContent={isMgt && showDetail ? <DetailTable {...detailProps} bare isMgt /> : undefined}
         />

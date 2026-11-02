@@ -13,7 +13,7 @@ namespace MgtOcr.Api.Controllers;
 // GET /api/zoho/account?name=oriental          (fallback — contains match)
 [ApiController]
 [Route("api/zoho")]
-public class ZohoAccountController(ZohoAccountClient client, ZohoClient zoho, ZohoDealClient deals, ZohoQuoteClient quotes,
+public class ZohoAccountController(ZohoAccountClient client, ZohoClient zoho, ZohoDealClient deals, ZohoQuoteClient quotes, ZohoMaterialClient materials, ZohoLastPriceClient lastPrices,
     ICurrentUserAccessor currentUser, AppConfig config) : ControllerBase, IAsyncActionFilter
 {
     // Zoho CRM is MGT's system (12 Oct 2026): a user of another company (GLC) gets 403 here instead
@@ -171,6 +171,29 @@ public class ZohoAccountController(ZohoAccountClient client, ZohoClient zoho, Zo
             : NotFound(new { detail = "No single Zoho Quote has this Quote No." });
     }
 
+    // GET /api/zoho/materials/search?q=... — Zoho Materials by code or name, for a line of a document
+    // with no Deal or a non-WCD Deal (27 Oct 2026).
+    [HttpGet("materials/search")]
+    public async Task<IActionResult> SearchMaterials([FromQuery] string q, [FromQuery] int top = 30)
+    {
+        if (string.IsNullOrWhiteSpace(q))
+            return BadRequest(new { detail = "Provide 'q'" });
+        var found = await materials.SearchAsync(q, Math.Clamp(top, 1, 100));
+        return Ok(new { count = found.Count, materials = found });
+    }
+
+    // GET /api/zoho/last-prices?account=1000939&codes=A,B — this customer's last price per Material
+    // Code from Zoho's Last Prices module, for the Material card (29 Oct 2026).
+    [HttpGet("last-prices")]
+    public async Task<IActionResult> GetLastPrices([FromQuery] string account, [FromQuery] string codes)
+    {
+        if (string.IsNullOrWhiteSpace(account) || string.IsNullOrWhiteSpace(codes))
+            return BadRequest(new { detail = "Provide 'account' and 'codes'" });
+        var list = codes.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Take(50);
+        var found = await lastPrices.FindForAccountAsync(account, list);
+        return Ok(new { prices = found.Values });
+    }
+
     // GET /api/zoho/web-links — where a Deal opens in the Zoho CRM web screens (27 Oct 2026):
     // dealBase + the Deal's record id. Deals are the "Potentials" tab in Zoho's own URLs.
     [HttpGet("web-links")]
@@ -178,6 +201,15 @@ public class ZohoAccountController(ZohoAccountClient client, ZohoClient zoho, Zo
     {
         var baseUrl = await zoho.GetWebBaseUrlAsync();
         return Ok(new { dealBase = $"{baseUrl}/tab/Potentials/" });
+    }
+
+    // GET /api/zoho/deals/{id}/detail — every filled field of one Deal (Zoho's own labels) plus its
+    // Deal Items table, for the Deal detail popup (29 Oct 2026).
+    [HttpGet("deals/{id}/detail")]
+    public async Task<IActionResult> GetDealDetail(string id)
+    {
+        var detail = await deals.GetDetailAsync(id);
+        return detail is null ? NotFound(new { detail = "Deal not found" }) : Ok(detail);
     }
 
     // GET /api/zoho/deals/{id} — one Deal by its Zoho record id (with Deal Items), used to

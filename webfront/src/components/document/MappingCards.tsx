@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { num } from '../../utils/format';
 import { formatDate } from '../common/DateInput';
 import type { DocHeader, DocModel, MapEntry, MapField, MapResult } from '../../api/documents';
@@ -34,6 +34,12 @@ import {
   NEW_DEAL_ID,
   getZohoWebLinks,
   getZohoQuoteByNo,
+  searchZohoMaterials,
+  getZohoLastPrices,
+  type ZohoLastPrice,
+  getZohoDealDetail,
+  type ZohoDealDetail,
+  type ZohoMaterialHit,
   docQuoteRefs,
   type ZohoAccount,
   type ZohoShipToInfo,
@@ -94,6 +100,34 @@ function StatusChip({ st }: { st: string }) {
   return <span className="badge b-idle">Pending Mapping</span>;
 }
 
+/* MGT: the matched Material's fields with Zoho wording (the mapping builds them with SAP labels), no
+   SAP-only Plant / base unit, and the unit calculation spelled out on the quantity row. */
+function zohoItemFields(r: MapEntry, line: DocModel['lines'][number]): MapField[] {
+  const rename: Record<string, string> = {
+    'SAP Code (Material)': 'Zoho Material Code',
+    'Material Code (internal)': 'Material Code (internal)',
+    'Quantity to SAP': 'Quantity to Zoho',
+  };
+  const fmt = (n: number) => n.toLocaleString('en-US', { maximumFractionDigits: 6 });
+  return (r.sap || [])
+    .filter((f) => !['Plant', 'Base Unit in SAP'].includes(f.label))
+    .map((f) => {
+      if (f.label !== 'Quantity to SAP') return { ...f, label: rename[f.label] ?? f.label };
+      const u = r.uom;
+      const qty = num(line.qty);
+      const factor = Number(u?.factor);
+      const docUom = String(line.uom || '').trim();
+      let calc = '';
+      if (u?.sapUom && qty > 0 && factor > 0 && factor !== 1) {
+        const per = 1 / factor;
+        calc = Math.abs(per - Math.round(per)) < 1e-6
+          ? `1 ${u.sapUom} = ${fmt(Math.round(per))} ${docUom}`
+          : `1 ${docUom} = ${fmt(factor)} ${u.sapUom}`;
+      }
+      return { ...f, label: 'Quantity to Zoho', value: calc ? `${f.value} (${calc})` : f.value };
+    });
+}
+
 function CmpCard({
   no,
   title,
@@ -102,8 +136,11 @@ function CmpCard({
   sapSlot,
   sapExtra,
   sourceLabel,
+  codeLabel = 'SAP',
   children,
 }: {
+  /** Name of the system the matched code belongs to, on the header badge ("SAP" / "Zoho"). */
+  codeLabel?: string;
   no: string | number;
   title: string;
   r: MapEntry;
@@ -127,8 +164,8 @@ function CmpCard({
         <b>{title}</b>
         <StatusChip st={st} />
         {r.sapCode && (
-          <span className="badge b-ok" title="Matched SAP master code — posted to SAP only after you submit">
-            SAP: {r.sapCode}
+          <span className="badge b-ok" title={`Matched ${codeLabel} code — sent to ${codeLabel} only after you submit`}>
+            {codeLabel}: {r.sapCode}
           </span>
         )}
         <span className="hint">{r.method || ''}</span>
@@ -942,12 +979,24 @@ function ZohoMaterialPanel({
   docCode,
   disabled,
   onUse,
+  allowZohoSearch,
+  accountCode,
+  docQty,
+  docUom,
 }: {
+  /** The matched customer's Zoho Account Code -- for its Last Price per Material. */
+  accountCode?: string;
+  /** The document line's own quantity and unit -- to show what they become in the Material's Unit. */
+  docQty?: unknown;
+  docUom?: string;
   dealItems: ZohoDealItem[];
   docDescription?: string;
   docCode?: string;
   disabled?: boolean;
   onUse: (item: ZohoDealItem) => void;
+  /** No Deal, or a non-WCD Deal (27 Oct 2026): the line may be any Zoho Material, so a search of
+   *  the whole Materials module is offered as well. A WCD Deal only takes its own items. */
+  allowZohoSearch?: boolean;
 }) {
   const [query, setQuery] = useState('');
   // Filters only when the person explicitly searches (Search button or Enter) -- not live as
@@ -955,8 +1004,14 @@ function ZohoMaterialPanel({
   const [appliedQuery, setAppliedQuery] = useState('');
   const runSearch = () => setAppliedQuery(query);
   const hint = (text: string) => <div className="hint" style={{ padding: '6px 0' }}>{text}</div>;
+  // Before any early return (hooks must run in the same order every render).
+  const dealLastPrices = useLastPrices(accountCode, (dealItems || []).map((it) => it.materialCode || ''));
+  const zohoSearch = allowZohoSearch ? (
+    <ZohoMaterialSearch docDescription={docDescription} disabled={disabled} onUse={onUse} open={!dealItems?.length} accountCode={accountCode}
+      docQty={docQty} docUom={docUom} />
+  ) : null;
   if (!dealItems || dealItems.length === 0)
-    return hint('Select a Deal first to load its Ordered Items from Zoho');
+    return zohoSearch ?? hint('Select a Deal first to load its Ordered Items from Zoho');
 
   const docDesc = (docDescription || '').trim();
   const code = (docCode || '').trim().toLowerCase();
@@ -991,6 +1046,8 @@ function ZohoMaterialPanel({
                   <b>{it.materialCode ? <Hl text={it.materialCode} against={[docCode]} /> : '(no code)'}</b>
                   {label ? <> — <Hl text={label} against={[docDesc, docCode]} /></> : ''}
                   {it.materialGroup && <div className="hint">{it.materialGroup}</div>}
+                  <ConversionLine unit={it.unit} ratio={it.conversionRatio} subUnit={it.subUnit} docQty={docQty} docUom={docUom} />
+                  <LastPriceLine price={dealLastPrices[(it.materialCode || '').trim().toUpperCase()]} />
                 </td>
                 <td>
                   <button
@@ -1025,7 +1082,174 @@ function ZohoMaterialPanel({
           {normalizedQuery && <span>Found {visible.length} matches</span>}
         </div>
       </div>
+      {dealLastPrices.__error && <div className="hint" style={{ color: 'var(--orange)' }}>Last Price could not be read from Zoho: {dealLastPrices.__error}</div>}
+      {zohoSearch}
     </>
+  );
+}
+
+/* This customer's last price per Material Code (Zoho Last Prices), keyed by upper-cased code. */
+function useLastPrices(accountCode: string | undefined, codes: string[]) {
+  // Why nothing could be read (shown under the list, so an empty Last Price is never a silent failure).
+  const [lastPriceError, setLastPriceError] = useState<string | null>(null);
+  const key = [...new Set(codes.map((c) => c.trim()).filter(Boolean))].sort().join(',');
+  const [prices, setPrices] = useState<Record<string, ZohoLastPrice>>({});
+  useEffect(() => {
+    setPrices({});
+    setLastPriceError(null);
+    if (!accountCode || !key) return;
+    let cancelled = false;
+    getZohoLastPrices(accountCode, key.split(','))
+      .then((r) => {
+        if (cancelled) return;
+        const map: Record<string, ZohoLastPrice> = {};
+        r.prices.forEach((p) => { map[p.materialCode.trim().toUpperCase()] = p; });
+        setPrices(map);
+      })
+      .catch((e) => { if (!cancelled) setLastPriceError(e?.message || 'Zoho CRM lookup failed'); });
+    return () => { cancelled = true; };
+  }, [accountCode, key]);
+  return { ...prices, __error: lastPriceError } as Record<string, ZohoLastPrice> & { __error?: string | null };
+}
+
+/* "1 DR = 160 KG", plus what the document's own quantity becomes in the Unit when the document is in
+   the sub-unit ("1,600 KG = 10 DR") -- the Sales Order is sent in the Unit. */
+function ConversionLine({ unit, ratio, subUnit, docQty, docUom }: {
+  unit?: string | null; ratio?: number | null; subUnit?: string | null; docQty?: unknown; docUom?: string;
+}) {
+  const r = Number(ratio);
+  if (!unit) return null;
+  const hasRatio = r > 0 && !!subUnit;
+  const qty = num(docQty);
+  const du = String(docUom || '').trim().toLowerCase();
+  const fmt = (n: number) => n.toLocaleString('en-US', { maximumFractionDigits: 3 });
+  const inUnit = hasRatio && qty > 0 && du === String(subUnit).trim().toLowerCase() ? qty / r : null;
+  return (
+    <div style={{ fontSize: 12, marginTop: 2 }}>
+      <span className="hint">Unit</span>{' '}
+      <b>{hasRatio ? `1 ${unit} = ${fmt(r)} ${subUnit}` : unit}</b>
+      {inUnit != null && <span className="hint"> · {fmt(qty)} {subUnit} = <b>{fmt(inUnit)} {unit}</b></span>}
+    </div>
+  );
+}
+
+function LastPriceLine({ price }: { price?: ZohoLastPrice }) {
+  if (!price) return null;
+  return (
+    <div style={{ fontSize: 12, marginTop: 2 }} title={price.salesOrderName ? `From ${price.salesOrderName}` : undefined}>
+      <span className="hint">Last Price</span>{' '}
+      <b style={{ fontVariantNumeric: 'tabular-nums' }}>{price.price.toLocaleString('en-US', { maximumFractionDigits: 2 })}</b>
+      {price.updateDate && <span className="hint"> · {formatDate(price.updateDate)}</span>}
+    </div>
+  );
+}
+
+/* Search the whole Zoho Materials module (code or name) for one document line -- shown when the
+   document has no Deal, or its Deal is not WCD, so the item doesn't have to be one of the Deal's
+   own items. Picking a result saves it as a CustomerMaterial, like picking a Deal item. */
+function ZohoMaterialSearch({
+  docDescription,
+  disabled,
+  onUse,
+  open,
+  accountCode,
+  docQty,
+  docUom,
+}: {
+  docDescription?: string;
+  disabled?: boolean;
+  onUse: (item: ZohoDealItem) => void;
+  /** Start opened with a first search (no Deal items to offer instead). */
+  open: boolean;
+  accountCode?: string;
+  docQty?: unknown;
+  docUom?: string;
+}) {
+  // First guess: the first word of the document's description that looks like a product word.
+  const firstWord = (docDescription || '').split(/[\s,/()]+/).find((w) => w.length >= 3) || '';
+  const [shown, setShown] = useState(open);
+  const [query, setQuery] = useState(firstWord);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [results, setResults] = useState<ZohoMaterialHit[] | null>(null);
+  const searchLastPrices = useLastPrices(accountCode, (results || []).map((m) => m.code || ''));
+  const run = (q: string) => {
+    const t = q.trim();
+    if (!t) return;
+    setBusy(true);
+    setError(null);
+    searchZohoMaterials(t)
+      .then((r) => setResults(r.materials))
+      .catch((e) => setError(e?.message || 'Zoho CRM search failed'))
+      .finally(() => setBusy(false));
+  };
+  useEffect(() => {
+    if (open && firstWord) run(firstWord);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  if (!shown)
+    return (
+      <div style={{ padding: '6px 0' }}>
+        <button className="btn sm" onClick={() => { setShown(true); if (query.trim()) run(query); }}>
+          <i className="fa-solid fa-magnifying-glass" /> Search all Zoho Materials
+        </button>
+      </div>
+    );
+
+  return (
+    <div style={{ padding: '6px 0', display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <div className="hint">
+        Search Zoho Materials by code or name (this document has no forecast Deal, so any Material can be used):
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <input
+          type="search"
+          className="txt"
+          style={{ minWidth: 240 }}
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') run(query); }}
+          placeholder="Material code or name…"
+          aria-label="Search Zoho Materials"
+        />
+        <button className="btn sm" onClick={() => run(query)} disabled={!query.trim() || busy}>
+          <i className="fa-solid fa-magnifying-glass" /> {busy ? 'Searching…' : 'Search Zoho'}
+        </button>
+      </div>
+      {error && <div className="hint">Zoho CRM search failed: {error}</div>}
+      {searchLastPrices.__error && <div className="hint" style={{ color: 'var(--orange)' }}>Last Price could not be read from Zoho: {searchLastPrices.__error}</div>}
+      {results && results.length === 0 && <div className="hint">No Material in Zoho matches “{query}”</div>}
+      {results && results.length > 0 && (
+        <table className="cmp">
+          <tbody>
+            {results.map((m) => (
+              <tr key={m.id}>
+                <td>
+                  <b>{m.code || '(no code)'}</b>
+                  {m.name ? <> — <Hl text={m.name} against={[docDescription]} /></> : ''}
+                  {m.materialGroup && <div className="hint">{m.materialGroup}</div>}
+                  <ConversionLine unit={m.unit} ratio={m.conversionRatio} subUnit={m.subUnit} docQty={docQty} docUom={docUom} />
+                  <LastPriceLine price={searchLastPrices[(m.code || '').trim().toUpperCase()]} />
+                </td>
+                <td>
+                  <button
+                    className="btn sm primary"
+                    disabled={disabled || !(m.code || '').trim()}
+                    onClick={() => onUse({
+                      materialId: m.id, materialCode: m.code, materialName: m.name, materialGroup: m.materialGroup,
+                      unit: m.unit, conversionRatio: m.conversionRatio, subUnit: m.subUnit,
+                    })}
+                  >
+                    Use &amp; Save
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
   );
 }
 
@@ -1819,6 +2043,62 @@ function ZohoShipToPanel({
    matched Zoho Account, every raw sub-field, purely as a side-by-side confirmation next to the
    document's own customerAddress. No "Use & Save" here: unlike Ship-to, there's no separate
    local master row to create -- the Sold-to address already lives on the Customer match itself. */
+/* A short summary of the matched Zoho Account under its name (29 Oct 2026): the Sold-to address
+   plus a few identifying fields -- branch, account type, sales employee, phone -- so the person can
+   see at a glance that it is the right customer. */
+function ZohoCustomerBrief({ customerCode, masters }: { customerCode?: string; masters: MastersData }) {
+  const accountCode: string | undefined = masters.customers.find((c) => c.CustomerCode === customerCode)?.ComcompyCodeSAP;
+  const [address, setAddress] = useState<string | null>(null);
+  const [fields, setFields] = useState<{ label: string; value: string }[]>([]);
+  const [state, setState] = useState<'idle' | 'loading' | 'error'>('idle');
+
+  useEffect(() => {
+    setAddress(null);
+    setFields([]);
+    if (!accountCode) return;
+    let cancelled = false;
+    setState('loading');
+    Promise.allSettled([getZohoAccountSoldToByCode(accountCode), getZohoAccountFullByCode(accountCode)])
+      .then(([sold, full]) => {
+        if (cancelled) return;
+        if (sold.status === 'fulfilled') setAddress(sold.value?.address || null);
+        if (full.status === 'fulfilled') {
+          const pick = (label: string) => full.value.fields.find((f) => String(f.label).toLowerCase() === label.toLowerCase())?.value;
+          setFields([
+            { label: 'Branch', value: pick('Branch Name') || '' },
+            { label: 'Account Type', value: pick('Account Type') || '' },
+            { label: 'Sales Employee', value: pick('Owner') || '' },
+            { label: 'Phone', value: pick('Phone') || '' },
+          ].filter((f) => f.value));
+        }
+        setState(sold.status === 'rejected' && full.status === 'rejected' ? 'error' : 'idle');
+      });
+    return () => { cancelled = true; };
+  }, [accountCode]);
+
+  if (!accountCode) return null;
+  if (state === 'loading') return <div className="hint" style={{ marginTop: 6 }}>Reading the customer from Zoho CRM…</div>;
+  if (state === 'error') return <div className="hint" style={{ marginTop: 6 }}>Zoho CRM customer details are temporarily unavailable.</div>;
+  if (!address && fields.length === 0) return null;
+  return (
+    <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px dashed var(--g300)', display: 'flex', flexDirection: 'column', gap: 4 }}>
+      {address && (
+        <div style={{ display: 'flex', gap: 6 }}>
+          <i className="fa-solid fa-location-dot" style={{ color: 'var(--g500)', marginTop: 3 }} />
+          <span style={{ overflowWrap: 'anywhere' }}>{address}</span>
+        </div>
+      )}
+      {fields.length > 0 && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '2px 14px' }}>
+          {fields.map((f) => (
+            <span key={f.label}><span className="hint">{f.label}</span> <b>{f.value}</b></span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ZohoSoldToAddressPanel({ customerCode, masters }: { customerCode?: string; masters: MastersData }) {
   const accountId: string | undefined = masters.customers.find(
     (c) => c.CustomerCode === customerCode,
@@ -2275,13 +2555,205 @@ function DealItemsList({ deal, lines }: { deal: ZohoDeal; lines: DocModel['lines
   );
 }
 
+/* Deal detail popup (29 Oct 2026, redesigned): summary first (stage, WCD, key numbers and dates),
+   then the rest of the Deal grouped into small sections, then the Deal Items table. Every filled
+   field still appears somewhere; only Zoho's bookkeeping is folded into the footer line. */
+const DEAL_NUMERIC = new Set([
+  'Grand_Total', 'Sub_Total', 'Total_Quantity', 'Amount', 'Probability', 'Expected_Revenue', 'Quantity', 'Unit_Price',
+  'Total_Amount', 'Total_Available', 'SO_Completed', 'SO_Cancelled', 'Price_Sub_Unit', 'Last_Price', 'Conversion_Ratio',
+  'Credit_Limit', 'Remaining_Balance', 'Outstanding_Amount',
+]);
+// Shown in the summary / footer instead of a section.
+const DEAL_SUMMARY = new Set([
+  'Deal_Name', 'Stage', 'Forecast_Status', 'Deal_Number', 'Grand_Total', 'Sub_Total', 'Total_Quantity', 'Closing_Date',
+  'Delivery_Date', 'Created_Time', 'Modified_Time', 'Created_By', 'Modified_By', 'Locked', 'Lock',
+  'Stage_Modified_Time', 'Sales_Cycle_Duration', 'Overall_Sales_Duration', 'Account_Code', 'Account_Name', 'Payment_Currency',
+]);
+const DEAL_SECTIONS: { title: string; apis: string[] }[] = [
+  { title: 'Customer', apis: ['Customer_Ref', 'Contact_Name', 'Tax_ID'] },
+  { title: 'Terms', apis: ['Payment_Terms', 'Incoterms', 'Type', 'Credit_Limit', 'Remaining_Balance', 'Outstanding_Amount'] },
+  { title: 'Sales', apis: ['Owner', 'Probability', 'Expected_Revenue', 'Next_Step', 'Lead_Source', 'Campaign_Source', 'Competitor', 'Reason_For_Loss__s'] },
+];
+// Deal Items columns in reading order; anything else follows.
+const ITEM_ORDER = ['Material_Code', 'Material_Name', 'Description_1', 'Quantity', 'Unit', 'Conversion_Ratio', 'Sub_Unit',
+  'Unit_Price', 'Total_Amount', 'Total_Available', 'SO_Completed', 'SO_Cancelled'];
+
+function dealValue(api: string | null | undefined, v: string): string {
+  if (!v) return '—';
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(v)) return `${formatDate(v.slice(0, 10))} ${v.slice(11, 16)}`;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return formatDate(v);
+  if (api && DEAL_NUMERIC.has(api) && v.trim() !== '' && !Number.isNaN(Number(v)))
+    return Number(v).toLocaleString('en-US', { maximumFractionDigits: 3 });
+  return v;
+}
+
+function DealDetailModal({ dealId, dealBase, onClose, onBack }: {
+  dealId: string | null;
+  dealBase: string | null;
+  onClose: () => void;
+  onBack?: () => void;
+}) {
+  const [detail, setDetail] = useState<ZohoDealDetail | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!dealId) return;
+    let cancelled = false;
+    setDetail(null);
+    setError(null);
+    getZohoDealDetail(dealId)
+      .then((d) => { if (!cancelled) setDetail(d); })
+      .catch((e) => { if (!cancelled) setError(e?.message || 'Could not read this Deal from Zoho CRM'); });
+    return () => { cancelled = true; };
+  }, [dealId]);
+
+  const byApi = new Map((detail?.fields || []).map((f) => [f.api || f.label, f]));
+  const val = (api: string) => byApi.get(api)?.value || '';
+  const wcd = val('Forecast_Status').toLowerCase() === 'yes';
+  const used = new Set<string>([...DEAL_SUMMARY, ...DEAL_SECTIONS.flatMap((x) => x.apis)]);
+  const sections = [
+    ...DEAL_SECTIONS.map((sec) => ({
+      title: sec.title,
+      rows: sec.apis.map((a) => byApi.get(a)).filter((f): f is NonNullable<typeof f> => !!f),
+    })),
+    { title: 'Other', rows: (detail?.fields || []).filter((f) => !used.has(f.api || f.label)) },
+  ].filter((sec) => sec.rows.length > 0);
+
+  // Items: columns in reading order, code + name shown together in one "Material" column.
+  const items = detail?.items;
+  const apis = items?.apis || items?.columns || [];
+  const colIdx = (api: string) => apis.indexOf(api);
+  const restCols = apis.map((a, i) => ({ a, i }))
+    .filter(({ a }) => !['Material_Code', 'Material_Name', 'Description_1'].includes(a))
+    .sort((x, y) => {
+      const ox = ITEM_ORDER.indexOf(x.a); const oy = ITEM_ORDER.indexOf(y.a);
+      return (ox < 0 ? 999 : ox) - (oy < 0 ? 999 : oy) || x.i - y.i;
+    });
+
+  // One compact line of "label value" pairs.
+  const fact = (label: string, value: string) => value ? (
+    <span style={{ whiteSpace: 'nowrap' }}><span className="hint">{label}</span> <b style={{ fontVariantNumeric: 'tabular-nums' }}>{value}</b></span>
+  ) : null;
+
+  return (
+    <Modal open={!!dealId} onClose={onClose} wide>
+      <ModalHeader title={detail ? detail.dealName : 'Deal details'} onClose={onClose} />
+      <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        {!detail && !error && <p className="hint">Reading the Deal from Zoho CRM…</p>}
+        {error && <p className="hint" style={{ color: 'var(--red)' }}>{error}</p>}
+        {detail && (
+          <>
+            {/* Summary: two dense lines */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, paddingBottom: 10, borderBottom: '1px solid var(--g200)' }}>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 14px', alignItems: 'center' }}>
+                {val('Stage') && <span className="badge b-ok">{val('Stage')}</span>}
+                <span className={'badge ' + (wcd ? 'b-ok' : 'b-idle')} title={`Forecast Status: ${val('Forecast_Status') || 'blank'}`}>
+                  {wcd ? 'Forecast (WCD)' : 'No forecast'}
+                </span>
+                {fact('Deal No.', val('Deal_Number'))}
+                {fact('Customer', [val('Account_Code'), val('Account_Name')].filter(Boolean).join(' — '))}
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 20px' }}>
+                {fact('Grand Total', [dealValue('Grand_Total', val('Grand_Total')), val('Payment_Currency')].filter((x) => x && x !== '—').join(' '))}
+                {fact('Qty', val('Total_Quantity') ? dealValue('Total_Quantity', val('Total_Quantity')) : '')}
+                {fact('Closing', val('Closing_Date') ? dealValue('Closing_Date', val('Closing_Date')) : '')}
+                {fact('Delivery', val('Delivery_Date') ? dealValue('Delivery_Date', val('Delivery_Date')) : '')}
+              </div>
+            </div>
+
+            {/* Every other field in one tight grid; section names are small row headers */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(190px, 1fr))', gap: '6px 18px' }}>
+              {sections.map((sec) => (
+                <Fragment key={sec.title}>
+                  <div className="hint" style={{
+                    gridColumn: '1 / -1', fontSize: 11, fontWeight: 700, letterSpacing: '.05em', marginTop: 4,
+                  }}>{sec.title.toUpperCase()}</div>
+                  {sec.rows.map((f, i) => (
+                    <div key={(f.api || f.label) + i} style={{ minWidth: 0, lineHeight: 1.3 }}>
+                      <div className="hint" style={{ fontSize: 11 }}>{f.label}</div>
+                      <div style={{ fontWeight: 600, overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' }}>{dealValue(f.api, f.value)}</div>
+                    </div>
+                  ))}
+                </Fragment>
+              ))}
+            </div>
+
+            {/* Deal Items */}
+            <section>
+              <div className="hint" style={{ fontSize: 11, fontWeight: 700, letterSpacing: '.05em', margin: '0 0 6px' }}>DEAL ITEMS ({items?.rows.length ?? 0})</div>
+              {items && items.rows.length > 0 ? (
+                <div className="tw" style={{ overflowX: 'auto' }}>
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Material</th>
+                        {restCols.map(({ a, i }) => (
+                          <th key={a} style={{ whiteSpace: 'nowrap', textAlign: DEAL_NUMERIC.has(a) ? 'right' : 'left' }}>{items.columns[i]}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {items.rows.map((r, ri) => {
+                        const code = colIdx('Material_Code') >= 0 ? r[colIdx('Material_Code')] : '';
+                        const name = (colIdx('Description_1') >= 0 && r[colIdx('Description_1')])
+                          || (colIdx('Material_Name') >= 0 ? r[colIdx('Material_Name')] : '');
+                        return (
+                          <tr key={ri}>
+                            <td style={{ minWidth: 220 }}>
+                              <b>{code || '—'}</b>
+                              {name && name !== code && <div className="hint">{name}</div>}
+                            </td>
+                            {restCols.map(({ a, i }) => (
+                              <td key={a} style={{
+                                whiteSpace: 'nowrap', textAlign: DEAL_NUMERIC.has(a) ? 'right' : 'left', fontVariantNumeric: 'tabular-nums',
+                              }}>{dealValue(a, r[i])}</td>
+                            ))}
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p className="hint">This Deal has no items.</p>
+              )}
+            </section>
+
+            {(val('Created_Time') || val('Modified_Time')) && (
+              <p className="hint" style={{ margin: 0, fontSize: 12 }}>
+                {val('Created_Time') && <>Created {dealValue('Created_Time', val('Created_Time'))}{val('Created_By') ? ` by ${val('Created_By')}` : ''}</>}
+                {val('Modified_Time') && <> · Modified {dealValue('Modified_Time', val('Modified_Time'))}{val('Modified_By') ? ` by ${val('Modified_By')}` : ''}</>}
+              </p>
+            )}
+          </>
+        )}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, flexWrap: 'wrap' }}>
+          {onBack && <button type="button" className="btn" onClick={onBack}><i className="fa-solid fa-arrow-left" /> Back to Deals</button>}
+          {dealId && dealBase && (
+            <a className="btn" href={dealBase + encodeURIComponent(dealId)} target="_blank" rel="noopener noreferrer">
+              Open in Zoho <i className="fa-solid fa-arrow-up-right-from-square" />
+            </a>
+          )}
+          <button type="button" className="btn primary" onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 function MatchBadge({ deal, lines }: { deal: ZohoDeal; lines: DocModel['lines'] }) {
   const m = dealProductMatch(deal, lines);
+  // Plain words (29 Oct 2026): what was compared and how many document items passed.
+  const what = deal.isWcd ? 'products' : 'products and quantities';
+  const items = `${m.total} item${m.total === 1 ? '' : 's'}`;
+  const text = m.ok
+    ? `All ${items} on the PO: ${what} match this Deal`
+    : `Only ${m.matched} of ${items} on the PO: ${what} match this Deal`;
   return (
     <span className={'badge ' + (m.ok ? 'b-ok' : 'b-warn')}
-      title={deal.isWcd ? 'WCD: products must match, quantities may differ' : 'Not WCD: products and quantities must match'}>
-      <i className={'fa-solid ' + (m.ok ? 'fa-check' : 'fa-triangle-exclamation')} /> {m.matched}/{m.total}{' '}
-      {deal.isWcd ? 'products' : 'products + qty'} match
+      title={deal.isWcd
+        ? 'Forecast (WCD) Deal: each PO item must be one of the Deal\'s products; quantities may differ from the forecast'
+        : 'No forecast: each PO item must match a Deal item in both product and quantity'}>
+      <i className={'fa-solid ' + (m.ok ? 'fa-check' : 'fa-triangle-exclamation')} /> {text}
     </span>
   );
 }
@@ -2339,7 +2811,10 @@ function ZohoDealCard({
   const userPicked = useRef(false);
   // "Change Deal" list open/closed, and the Zoho web address a Deal opens at (dealBase + id).
   const [listOpen, setListOpen] = useState(false);
-  const [staged, setStaged] = useState(''); // the Deal ticked in the "Change Deal" popup, until "Use this Deal"
+  const [staged, setStaged] = useState('');
+  // Deal detail popup: which Deal, and whether it was opened from the "Change Deal" list (Back returns there).
+  const [detailId, setDetailId] = useState<string | null>(null);
+  const [detailFromList, setDetailFromList] = useState(false); // the Deal ticked in the "Change Deal" popup, until "Use this Deal"
   const [dealBase, setDealBase] = useState<string | null>(null);
   useEffect(() => {
     getZohoWebLinks().then((r) => setDealBase(r.dealBase)).catch(() => setDealBase(null));
@@ -2486,7 +2961,7 @@ function ZohoDealCard({
         ) : !customerCode ? (
           <span className="badge b-idle">Waiting for customer</span>
         ) : selectedId === NEW_DEAL_ID ? (
-          <span className="badge b-idle"><i className="fa-solid fa-plus" /> New Deal · Not WCD</span>
+          <span className="badge b-idle"><i className="fa-solid fa-plus" /> New Deal · No forecast</span>
         ) : deal ? (
           <span className="badge b-ok"><i className="fa-solid fa-check" /> Deal selected</span>
         ) : null}
@@ -2508,7 +2983,7 @@ function ZohoDealCard({
           : !deals || deals.length === 0
           ? (
               <>
-                {hint('No open Deal found for this customer in Zoho CRM — not WCD: sending opens a new Deal (Forecast Status No, Stage “Sales Order Created”), then a Quote, then the Sales Order.')}
+                {hint('No open Deal found for this customer in Zoho CRM — no forecast: sending opens a new Deal (Forecast Status No, Stage “Sales Order Created”), then a Quote, then the Sales Order.')}
                 <div style={{ marginTop: 4 }}>
                   <div className="hint">
                     Not seeing it? A Deal you added won't show here if its Account wasn't linked
@@ -2571,13 +3046,13 @@ function ZohoDealCard({
                       <>
                         <span>Using Deal</span>
                         <b style={{ overflowWrap: 'anywhere' }}>{deal.dealName}</b>
-                        <span className={'badge ' + (deal.isWcd ? 'b-ok' : 'b-idle')}>{deal.isWcd ? 'WCD' : 'Not WCD'}</span>
+                        <span className={'badge ' + (deal.isWcd ? 'b-ok' : 'b-idle')}>{deal.isWcd ? 'Forecast (WCD)' : 'No forecast'}</span>
                         <MatchBadge deal={deal} lines={doc.lines} />
                       </>
                     ) : selectedId === NEW_DEAL_ID ? (
                       <>
                         <b>A new Deal will be opened</b>
-                        <span className="badge b-idle">Not WCD</span>
+                        <span className="badge b-idle">No forecast</span>
                       </>
                     ) : (
                       <b>No Deal selected</b>
@@ -2595,11 +3070,10 @@ function ZohoDealCard({
                       : ''}
                   </span>
                 </div>
-                {deal && dealBase && (
-                  <a className="btn sm" href={dealBase + encodeURIComponent(deal.id)} target="_blank" rel="noopener noreferrer"
-                    title="Open this Deal in Zoho CRM">
-                    Open in Zoho <i className="fa-solid fa-arrow-up-right-from-square" />
-                  </a>
+                {deal && (
+                  <button type="button" className="btn sm" onClick={() => { setDetailFromList(false); setDetailId(deal.id); }}>
+                    <i className="fa-solid fa-circle-info" /> Details
+                  </button>
                 )}
                 <button type="button" className="btn sm" onClick={() => { setStaged(selectedId); setListOpen(true); }}>
                   Change… <span className="hint">({deals.length} open)</span>
@@ -2645,7 +3119,7 @@ function ZohoDealCard({
                   <div style={{ flex: '1 1 320px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
                     <b style={{ overflowWrap: 'anywhere' }}>{d.dealName}</b>
                     <span style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
-                      <span className={'badge ' + (d.isWcd ? 'b-ok' : 'b-idle')}>{d.isWcd ? 'WCD' : 'Not WCD'}</span>
+                      <span className={'badge ' + (d.isWcd ? 'b-ok' : 'b-idle')}>{d.isWcd ? 'Forecast (WCD)' : 'No forecast'}</span>
                       <MatchBadge deal={d} lines={doc.lines} />
                       <span className="badge b-idle">{d.stage}</span>
                       <span className="hint">
@@ -2655,12 +3129,18 @@ function ZohoDealCard({
                     </span>
                     <DealItemsList deal={d} lines={doc.lines} />
                   </div>
-                  {dealBase && (
-                    <a href={dealBase + encodeURIComponent(d.id)} target="_blank" rel="noopener noreferrer"
-                      title="Open this Deal in Zoho CRM" aria-label="Open this Deal in Zoho CRM" onClick={(e) => e.stopPropagation()}>
-                      <i className="fa-solid fa-arrow-up-right-from-square" />
-                    </a>
-                  )}
+                  <span style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+                    <button type="button" className="btn sm" title="Show everything on this Deal"
+                      onClick={(e) => { e.stopPropagation(); setListOpen(false); setDetailFromList(true); setDetailId(d.id); }}>
+                      <i className="fa-solid fa-circle-info" /> Details
+                    </button>
+                    {dealBase && (
+                      <a href={dealBase + encodeURIComponent(d.id)} target="_blank" rel="noopener noreferrer"
+                        title="Open this Deal in Zoho CRM" aria-label="Open this Deal in Zoho CRM" onClick={(e) => e.stopPropagation()}>
+                        <i className="fa-solid fa-arrow-up-right-from-square" />
+                      </a>
+                    )}
+                  </span>
                 </div>
               );
             })}
@@ -2671,7 +3151,7 @@ function ZohoDealCard({
                 style={{ color: staged === NEW_DEAL_ID ? 'var(--brand)' : 'var(--g500)', marginTop: 3 }} />
               <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 4 }}>
                 <b>Open a new Deal</b>
-                <span className="hint">None of these fit — not WCD, Forecast Status No, Stage “Sales Order Created”</span>
+                <span className="hint">None of these fit — no forecast (Forecast Status No), Stage “Sales Order Created”</span>
               </div>
             </div>
           </div>
@@ -2684,6 +3164,12 @@ function ZohoDealCard({
           </div>
         </div>
       </Modal>
+      <DealDetailModal
+        dealId={detailId}
+        dealBase={dealBase}
+        onClose={() => setDetailId(null)}
+        onBack={detailFromList ? () => { setDetailId(null); setListOpen(true); } : undefined}
+      />
       <CompareModal<ZohoDeal>
         open={aiOpen}
         onClose={() => setAiOpen(false)}
@@ -2958,6 +3444,9 @@ interface Props {
   /** MGT/Zoho only: the matched Deal's Ordered Items, shown as the material candidates in the
    *  per-line Material cards (there is no global Zoho material search). */
   dealItems?: ZohoDealItem[];
+  /** MGT/Zoho only: the selected Deal is WCD (Forecast Status Yes) -- then lines may only be its own
+   *  items; otherwise (no Deal / not WCD) the Material cards can also search all Zoho Materials. */
+  dealIsWcd?: boolean;
   /** MGT/Zoho only: pick a Deal Ordered Item for line i and save it as a CustomerMaterial mapping. */
   onUseZohoMaterial?: (i: number, item: ZohoDealItem) => void;
 }
@@ -2997,6 +3486,7 @@ export default function MappingCards({
   onDealResolved,
   detailContent,
   dealItems,
+  dealIsWcd,
   onUseZohoMaterial,
 }: Props) {
   const { ocrProviders } = useMeta();
@@ -3187,6 +3677,7 @@ export default function MappingCards({
         no={n}
         title="Customer"
         r={c}
+        codeLabel={isMgt ? 'Zoho' : 'SAP'}
         picker={
           <>
             {headerSel('customers', 'customer', c.code)}
@@ -3250,10 +3741,13 @@ export default function MappingCards({
             // populated section below (n.3 Credit & Payment Terms) -- showing them here too,
             // usually blank, was confusing duplication. Name + Tax Registration No (the actual
             // identity-match fields) stay.
-            <SideList
-              items={(c.sap || []).filter((f) => !['Sales Org / Channel / Div', 'Payment Terms', 'Currency'].includes(f.label))}
-              side="sap"
-            />
+            <>
+              <SideList
+                items={(c.sap || []).filter((f) => !['Sales Org / Channel / Div', 'Payment Terms', 'Currency'].includes(f.label))}
+                side="sap"
+              />
+              <ZohoCustomerBrief customerCode={c.code} masters={masters} />
+            </>
           ) : (
             // GLC (SAP): same SAP field list, but the "Payment Terms" row is filled live from the
             // SAP customer master (mapped code -> text), inline with the rest of the customer data.
@@ -3479,7 +3973,8 @@ export default function MappingCards({
         no={`${nMat}.${i + 1}`}
         title={`Item — Row ${i + 1}`}
         r={r}
-        sourceLabel={isMgt ? 'Data from Zoho CRM (Deal)' : undefined}
+        codeLabel={isMgt ? 'Zoho' : 'SAP'}
+        sourceLabel={isMgt ? 'Data from Zoho CRM' : undefined}
         picker={
           <>
             {/* Type to search the CustomerMaterial options by description/code and pick a
@@ -3539,6 +4034,8 @@ export default function MappingCards({
                     onUse={(m) => onUseSapMaterial(i, m)}
                     fallback={<SideList items={r.sap} side="sap" />}
                   />
+                ) : isMgt ? (
+                  <SideList items={zohoItemFields(r, l)} side="sap" />
                 ) : undefined
               )
             : isMgt ? (
@@ -3547,6 +4044,10 @@ export default function MappingCards({
                 docDescription={l.desc}
                 docCode={l.extCode}
                 disabled={posted}
+                allowZohoSearch={!dealIsWcd}
+                accountCode={map.header.customer?.code || undefined}
+                docQty={l.qty}
+                docUom={l.uom}
                 onUse={(it) => {
                   onUseZohoMaterial?.(i, it);
                   setMatSapOpen((prev) => ({ ...prev, [i]: false }));

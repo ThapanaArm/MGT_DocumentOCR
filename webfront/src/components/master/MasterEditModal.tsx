@@ -55,6 +55,11 @@ export default function MasterEditModal({
 }) {
   const { guard, showToast } = useAppState();
   const [form, setForm] = useState<MasterRow>({});
+  // Unit Conversion "Factor" can be typed either way round (29 Oct 2026): "1 document unit = ? order
+  // units" (what is stored) or "1 order unit = ? document units" (e.g. 1 DR = 160 KG), converted to
+  // the stored factor. 'auto' = the second way whenever the factor is below 1.
+  const [factorMode, setFactorMode] = useState<'auto' | 'doc' | 'order'>('auto');
+  const [perOrderDraft, setPerOrderDraft] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   // Delete asks inside this popup (no browser confirm box, no popup-on-popup).
   const [confirmingDel, setConfirmingDel] = useState(false);
@@ -220,7 +225,8 @@ export default function MasterEditModal({
     : def.cols;
   // uoms labels read the same for MGT and GLC now (Document Unit / Order Unit / Factor), so the
   // old per-company "Zoho Unit" relabel is gone — labels come straight from MASTER_DEF.
-  const fieldLabel = (c: (typeof def.cols)[number]) => c.l;
+  const fieldLabel = (c: (typeof def.cols)[number]) =>
+    state.tab === 'uoms' && c.k === 'Factor' ? 'Factor' : c.l;
 
   // Live worked example under the uoms form: shows what the row being typed will do to a line.
   const uomPreview = (() => {
@@ -231,8 +237,11 @@ export default function MasterEditModal({
     if (!Number.isFinite(factor) || factor <= 0) return `1 ${ext} = ? ${sap} — fill in the Factor.`;
     // Matches MappingEngine.ConvertUom: sapQty = docQty * Factor (1 document unit = Factor order units).
     if (factor === 1) return `A line that says 100 ${ext} is sent as 100 ${sap}.`;
-    const qty = Number((100 * factor).toFixed(6));
-    return `1 ${ext} = ${factor} ${sap}, so a line that says 100 ${ext} is sent as ${qty} ${sap}.`;
+    const per = Number((1 / factor).toFixed(6));
+    // Show a document quantity that converts to a round number when the Factor is "1 / n".
+    const sample = factor < 1 && Number.isInteger(per) ? per * 10 : 100;
+    const qty = Number((sample * factor).toFixed(6));
+    return `1 ${sap} = ${per} ${ext} (1 ${ext} = ${Number(factor.toFixed(9))} ${sap}), so a line that says ${sample.toLocaleString('en-US')} ${ext} is sent as ${qty.toLocaleString('en-US')} ${sap}  (${sample.toLocaleString('en-US')} × ${Number(factor.toFixed(9))} = ${qty.toLocaleString('en-US')}).`;
   })();
   const editing = state.rowKey != null;
   const existing = editing
@@ -295,6 +304,38 @@ export default function MasterEditModal({
             maxLength={c.maxLen}
             emptyLabel={uomMaterial ? '— Select a SAP unit —' : '— Select unit —'}
           />
+        ) : state!.tab === 'uoms' && c.k === 'Factor' ? (
+          (() => {
+            const ext = String(form.ExtUom ?? '').trim() || 'document unit';
+            const ord = String(form.SapUom ?? '').trim().toUpperCase() || 'order unit';
+            const f = Number(form.Factor);
+            const perOrder = factorMode === 'order' || (factorMode === 'auto' && f > 0 && f < 1);
+            const perOrderValue = f > 0 ? String(Number((1 / f).toFixed(6))) : '';
+            return (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                <span className="hint">1 {perOrder ? ord : ext} =</span>
+                {perOrder ? (
+                  <input id={'master-' + c.k} style={{ width: 110 }} inputMode="decimal"
+                    value={perOrderDraft ?? perOrderValue}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setPerOrderDraft(v);
+                      const n = Number(v);
+                      setField('Factor', n > 0 ? String(Number((1 / n).toPrecision(12))) : '');
+                    }}
+                    onBlur={() => setPerOrderDraft(null)} />
+                ) : (
+                  <input id={'master-' + c.k} style={{ width: 110 }} inputMode="decimal" maxLength={c.maxLen}
+                    value={form[c.k] ?? ''} onChange={(e) => setField(c.k, e.target.value)} />
+                )}
+                <span className="hint">{perOrder ? ext : ord}</span>
+                <button type="button" className="btn sm" title="Swap: type the factor the other way round"
+                  onClick={() => { setPerOrderDraft(null); setFactorMode(perOrder ? 'doc' : 'order'); }}>
+                  <i className="fa-solid fa-right-left" /> Swap
+                </button>
+              </div>
+            );
+          })()
         ) : (
           <input id={'master-' + c.k} maxLength={c.maxLen} value={form[c.k] ?? ''} onChange={(e) => setField(c.k, e.target.value)} />
         )}

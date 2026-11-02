@@ -41,6 +41,11 @@ public record ZohoDeal(
     public bool IsWcd => string.Equals(ForecastStatus?.Trim(), "Yes", StringComparison.OrdinalIgnoreCase);
 }
 
+public record ZohoDetailField(string Label, string Value, string? Api = null);
+public record ZohoDetailTable(List<string> Columns, List<List<string>> Rows, List<string>? Apis = null);
+/// <summary>Everything on one Deal for the detail popup -- see ZohoDealClient.GetDetailAsync.</summary>
+public record ZohoDealDetail(string Id, string DealName, List<ZohoDetailField> Fields, ZohoDetailTable? Items);
+
 /// <summary>One line of a Deal to create (non-WCD Deal opened by the OCR flow -- see
 /// ZohoDealClient.BuildCreateRecord). Quantity/price/unit come from the document.</summary>
 public record ZohoNewDealLine(
@@ -50,7 +55,8 @@ public record ZohoNewDealLine(
     string? MaterialGroup,
     decimal Quantity,
     decimal? UnitPrice,
-    string? Unit);
+    string? Unit,
+    decimal? LastPrice = null);
 
 /// <summary>
 /// Zoho CRM "Deals" module — read-only search used by the Deal-matching step of the OCR→Zoho
@@ -189,6 +195,99 @@ public class ZohoDealClient(ZohoClient zoho)
             CreatedTime: full["Created_Time"]?.ToString());
     }
 
+    // ── Deal detail popup (29 Oct 2026): every filled field of one Deal, labelled as in Zoho ──────
+
+    // Zoho's own bookkeeping fields, never useful to a person reading the Deal.
+    private static readonly HashSet<string> DetailSkip = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "id", "Layout", "Tag", "Record_Image", "Locked__s", "Last_Activity_Time",
+    };
+
+    // Subform column labels from the manual (5.6.9) where the api_name doesn't read well on its own.
+    private static readonly Dictionary<string, string> ItemColumnLabels = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["Material_Name"] = "Material Name", ["Description_1"] = "Material Description", ["L_T_Days"] = "L/T (Days)",
+        ["Ship_via"] = "Ship via", ["Price_Sub_Unit"] = "Price/Sub Unit", ["Total_Amount"] = "Amount",
+        ["SO_Completed"] = "SO Completed", ["SO_Cancelled"] = "SO Cancelled", ["Status_Note"] = "Status / Note",
+    };
+
+    /// <summary>
+    /// Every non-empty field of a Deal, labelled with Zoho's own field labels (settings/fields) in
+    /// the module's field order, plus its Deal Items subform as a table (all non-empty columns).
+    /// Null when the Deal doesn't exist.
+    /// </summary>
+    public async Task<ZohoDealDetail?> GetDetailAsync(string dealId)
+    {
+        var module = await ResolveModuleAsync();
+        var rec = await zoho.GetByIdAsync(module, dealId);
+        if (rec is null) return null;
+
+        var labels = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var order = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            var i = 0;
+            foreach (var node in await zoho.GetFieldsAsync(module))
+            {
+                if (node is not JsonObject f || Str(f, "api_name") is not { Length: > 0 } api) continue;
+                labels[api] = Str(f, "field_label") ?? api;
+                order[api] = i++;
+            }
+        }
+        catch { /* labels are a nicety: fall back to the api_name */ }
+
+        var fields = new List<(string Api, ZohoDetailField Field)>();
+        ZohoDetailTable? items = null;
+        foreach (var kv in rec)
+        {
+            if (kv.Key.StartsWith('$') || kv.Key.EndsWith("__s") || DetailSkip.Contains(kv.Key)) continue;
+            if (kv.Value is JsonArray arr && arr.Count > 0 && arr[0] is JsonObject first
+                && (first.ContainsKey("Material_Name") || first.ContainsKey("Quantity")))
+            {
+                items = ItemsTable(arr);
+                continue;
+            }
+            var value = DetailValue(kv.Value);
+            if (string.IsNullOrWhiteSpace(value)) continue;
+            fields.Add((kv.Key, new ZohoDetailField(labels.TryGetValue(kv.Key, out var l) ? l : kv.Key.Replace('_', ' '), value, kv.Key)));
+        }
+        // Zoho's own field order (settings/fields); fields it doesn't list go last, as they came.
+        var ordered = fields
+            .Select((x, idx) => (x.Field, Rank: order.TryGetValue(x.Api, out var o) ? o : 10000 + idx))
+            .OrderBy(x => x.Rank)
+            .Select(x => x.Field)
+            .ToList();
+        return new ZohoDealDetail(dealId, Str(rec, "Deal_Name") ?? "", ordered, items);
+    }
+
+    private static ZohoDetailTable ItemsTable(JsonArray rows)
+    {
+        // Columns: every key that has a value in at least one row, in first-seen order.
+        var cols = new List<string>();
+        foreach (var r in rows.OfType<JsonObject>())
+            foreach (var kv in r)
+                if (!kv.Key.StartsWith('$') && !kv.Key.EndsWith("__s") && !string.Equals(kv.Key, "id", StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(kv.Key, "Parent_Id", StringComparison.OrdinalIgnoreCase)
+                    && !cols.Contains(kv.Key) && !string.IsNullOrWhiteSpace(DetailValue(kv.Value)))
+                    cols.Add(kv.Key);
+        var data = rows.OfType<JsonObject>().Select(r => cols.Select(c => DetailValue(r[c]) ?? "").ToList()).ToList();
+        return new ZohoDetailTable(
+            cols.Select(c => ItemColumnLabels.TryGetValue(c, out var l) ? l : c.Replace('_', ' ')).ToList(), data, cols);
+    }
+
+    // A plain value as text; a lookup ({id, name}) as its name; Yes/No for booleans; a list joined.
+    private static string? DetailValue(JsonNode? n) => n switch
+    {
+        null => null,
+        JsonValue v when v.TryGetValue<bool>(out var b) => b ? "Yes" : "No",
+        JsonValue v when v.TryGetValue<string>(out var s) => s,
+        JsonValue v => v.ToString(),
+        JsonObject o when o["name"] is JsonValue nv && nv.TryGetValue<string>(out var name) => name,
+        JsonObject => null,
+        JsonArray arr => string.Join(", ", arr.Select(DetailValue).Where(x => !string.IsNullOrWhiteSpace(x))),
+        _ => null,
+    };
+
     // Stage of a Deal the OCR flow opens itself (Megachem, 27 Oct 2026): the Sales Order is created
     // right after it, so it starts at "Sales Order Created" (manual 5.6.4.4).
     public const string NewDealStage = "Sales Order Created";
@@ -235,10 +334,10 @@ public class ZohoDealClient(ZohoClient zoho)
                     ["Quantity"] = Math.Max(1, (long)Math.Round(l.Quantity, MidpointRounding.AwayFromZero)),
                 };
                 ZohoRecordFields.Put(row, "Material_Code", l.MaterialCode);
-                ZohoRecordFields.Put(row, "Description_1", l.Description);
                 ZohoRecordFields.Put(row, "Material_Group", l.MaterialGroup);
                 ZohoRecordFields.Put(row, "Unit", l.Unit);
                 if (l.UnitPrice is decimal up) row["Unit_Price"] = up;
+                if (l.LastPrice is decimal lp) row["Last_Price"] = lp;
                 rows.Add(row);
             }
             record[_itemsField] = rows;

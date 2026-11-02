@@ -81,7 +81,7 @@ public static class ZohoRecordFields
             ["Product_Name"] = new JsonObject { ["id"] = it.MaterialId },
             ["Quantity"] = it.Quantity,
         };
-        if (!string.IsNullOrWhiteSpace(it.Description)) row["Description"] = it.Description;
+        // No line Description (Megachem, 29 Oct 2026) -- Product_Name + Material_Code identify the item.
         if (!string.IsNullOrWhiteSpace(it.StatusNote)) row["Status_Note"] = it.StatusNote;
         if (!string.IsNullOrWhiteSpace(it.MaterialCode)) row["Material_Code"] = it.MaterialCode;
         if (!string.IsNullOrWhiteSpace(it.MaterialGroup)) row["Material_Group"] = it.MaterialGroup;
@@ -89,6 +89,7 @@ public static class ZohoRecordFields
         if (!string.IsNullOrWhiteSpace(it.Stock)) row["Stock"] = it.Stock;
         if (!string.IsNullOrWhiteSpace(it.LeadTimeDays)) row["L_T_Days"] = it.LeadTimeDays;
         if (it.UnitPrice is decimal up) row["Unit_Price"] = up;
+        if (it.LastPrice is decimal lp) row["Last_Price"] = lp;
         if (!string.IsNullOrWhiteSpace(it.Unit)) row[unitField] = it.Unit;
         if (it.ConversionRatio is decimal cr) row["Conversion_Ratio"] = cr;
         if (!string.IsNullOrWhiteSpace(it.SubUnit)) row["Sub_Unit"] = it.SubUnit;

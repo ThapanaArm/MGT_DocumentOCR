@@ -151,6 +151,7 @@ var appConfig = new AppConfig
     ],
     ZohoAccountsUrl = Get($"ZohoConfig:{zohoEnv}:AccountsUrl", "https://accounts.zoho.com"),
     ZohoApiDomain = Get($"ZohoConfig:{zohoEnv}:ApiDomain", "https://www.zohoapis.com"),
+    ZohoWebUrl = Get($"ZohoConfig:{zohoEnv}:WebUrl"),
     ZohoClientId = Get($"ZohoConfig:{zohoEnv}:ClientId"),
     ZohoClientSecret = cfg[$"ZohoConfig:{zohoEnv}:ClientSecret"] ?? "", // not trimmed — a secret may (rarely) matter byte-for-byte
     ZohoRefreshToken = Get($"ZohoConfig:{zohoEnv}:RefreshToken"),
@@ -231,6 +232,7 @@ builder.Services.AddSingleton<MgtOcr.Zoho.ZohoDealClient>();
 builder.Services.AddSingleton<MgtOcr.Zoho.ZohoSalesOrderClient>();
 builder.Services.AddSingleton<MgtOcr.Zoho.ZohoQuoteClient>();
 builder.Services.AddSingleton<MgtOcr.Zoho.ZohoMaterialClient>();
+builder.Services.AddSingleton<MgtOcr.Zoho.ZohoLastPriceClient>();
 
 builder.Services.AddMgtOcrAuth(appConfig, builder.Environment, startupLog);
 

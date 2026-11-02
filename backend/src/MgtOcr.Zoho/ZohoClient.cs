@@ -75,9 +75,13 @@ public class ZohoClient(AppConfig config, ILogger<ZohoClient> logger)
     public async Task<string> GetWebBaseUrlAsync()
     {
         if (_webBase is not null) return _webBase;
-        var host = new Uri(ApiDomain).Host;                     // www.zohoapis.com
+        // Set per environment in appsettings (ZohoConfig:{env}:WebUrl) -- always wins.
+        if (!string.IsNullOrWhiteSpace(config.ZohoWebUrl)) return _webBase = config.ZohoWebUrl.Trim().TrimEnd('/');
+        var host = new Uri(ApiDomain).Host;                     // www.zohoapis.com / sandbox.zohoapis.com
         var dc = host.Contains("zohoapis.") ? host[(host.IndexOf("zohoapis.", StringComparison.Ordinal) + "zohoapis.".Length)..] : "com";
-        var baseUrl = $"https://crm.zoho.{dc}/crm";
+        // The sandbox API (sandbox.zohoapis.*) belongs to the crmsandbox.zoho.* web screens.
+        var crmHost = host.StartsWith("sandbox.", StringComparison.OrdinalIgnoreCase) ? $"crmsandbox.zoho.{dc}" : $"crm.zoho.{dc}";
+        var baseUrl = $"https://{crmHost}/crm";
         try
         {
             string token = await GetAccessTokenAsync();

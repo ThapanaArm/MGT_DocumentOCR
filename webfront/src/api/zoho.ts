@@ -163,6 +163,37 @@ export interface ZohoDeal {
  *  Same value as ZohoSalesOrderController.NewDealId. */
 export const NEW_DEAL_ID = '__new__';
 
+/* Zoho Materials by code or name (GET /api/zoho/materials/search) -- for a line when the document has
+   no Deal or a non-WCD Deal. */
+export interface ZohoMaterialHit {
+  id: string; name?: string | null; code?: string | null; materialGroup?: string | null;
+  /** Selling unit, how many sub-units make one, and the sub-unit (e.g. DR, 160, KG). */
+  unit?: string | null; conversionRatio?: number | null; subUnit?: string | null;
+}
+export const searchZohoMaterials = (query: string, top = 30) =>
+  api.get<{ count: number; materials: ZohoMaterialHit[] }>(
+    '/api/zoho/materials/search?q=' + encodeURIComponent(query) + '&top=' + top,
+  );
+
+/* Every filled field of one Deal (Zoho's own labels) + its Deal Items table -- the Deal detail popup.
+   Backend: GET /api/zoho/deals/{id}/detail (ZohoDealClient.GetDetailAsync). */
+export interface ZohoDealDetail {
+  id: string;
+  dealName: string;
+  /** api = Zoho api_name, used to group and format the popup. */
+  fields: { label: string; value: string; api?: string | null }[];
+  items?: { columns: string[]; rows: string[][]; apis?: string[] | null } | null;
+}
+export const getZohoDealDetail = (dealId: string) =>
+  api.get<ZohoDealDetail>('/api/zoho/deals/' + encodeURIComponent(dealId) + '/detail');
+
+/* This customer's last price per Material Code (Zoho Last Prices module) -- GET /api/zoho/last-prices. */
+export interface ZohoLastPrice { materialCode: string; price: number; updateDate?: string | null; salesOrderName?: string | null }
+export const getZohoLastPrices = (accountCode: string, materialCodes: string[]) =>
+  api.get<{ prices: ZohoLastPrice[] }>(
+    '/api/zoho/last-prices?account=' + encodeURIComponent(accountCode) + '&codes=' + encodeURIComponent(materialCodes.join(',')),
+  );
+
 /* One Quote by its Quote No. (GET /api/zoho/quotes/by-no/{no}) with its Deal's id -- a customer PO
    may quote Megachem's own Quote No., which tells which Deal the PO belongs to. */
 export const getZohoQuoteByNo = (quoteNo: string) =>
@@ -240,6 +271,11 @@ export interface ZohoSalesOrderPreviewLine {
    *  1 order unit = conversionRatio subUnit. Null when no conversion applies. */
   conversionRatio?: number | null;
   subUnit?: string | null;
+  /** This customer's last price for the Material (Zoho Last Prices module), per Unit -- reference only. */
+  lastPrice?: number | null;
+  lastPriceDate?: string | null;
+  /** The Sales Order that last price came from. */
+  lastPriceSo?: string | null;
 }
 
 export interface ZohoSalesOrderPreview {
@@ -256,6 +292,8 @@ export interface ZohoSalesOrderPreview {
   remarks?: string | null;
   paymentTermsOptions: string[];
   paymentCurrencyOptions: string[];
+  /** Why the Last Price column is empty, when Zoho's Last Prices module could not be read. */
+  lastPriceError?: string | null;
   lines: ZohoSalesOrderPreviewLine[];
   skipped: ZohoSalesOrderSkippedLine[];
   /** Zoho chain Deal -> Quote -> Sales Order: what the send will do before the Sales Order. */

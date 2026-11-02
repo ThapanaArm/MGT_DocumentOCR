@@ -172,6 +172,10 @@ public class AppConfig
     // any shared environment, same as SapPassword/LocalAuthSigningKey.
     public string ZohoAccountsUrl { get; init; } = "https://accounts.zoho.com";
     public string ZohoApiDomain { get; init; } = "https://www.zohoapis.com";
+    // Base address of the Zoho CRM web screens for "Open in Zoho" links, e.g.
+    // https://crmsandbox.zoho.com/crm/sandboxf4 (sandbox) or https://crm.zoho.com/crm/org12345678
+    // (prod). Blank = worked out from ApiDomain + GET /crm/v8/org (ZohoClient.GetWebBaseUrlAsync).
+    public string ZohoWebUrl { get; init; } = "";
     public string ZohoClientId { get; init; } = "";
     public string ZohoClientSecret { get; init; } = "";
     public string ZohoRefreshToken { get; init; } = "";
