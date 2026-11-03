@@ -3224,7 +3224,7 @@ function CustomerCandidatesPanel({
     const sapName = rows.map((r) => s(r.CompanyNameSAP)).find(Boolean) || '';
     const taxId = rows.map((r) => s(r.TaxId)).find(Boolean) || '';
     const shipTos = masters.shiptos.filter((x) => s(x.SalesOrg) === companyCode && s(x.CustomerCode) === code);
-    return { code, docNames, sapName, taxId, shipTos };
+    return { code, rows, docNames, sapName, taxId, shipTos };
   });
   return (
     <div style={{ padding: '6px 0' }}>
@@ -3250,6 +3250,7 @@ function CustomerCandidatesPanel({
                 {it.sapName ? <> — {it.sapName}</> : null}
                 {it.docNames.length > 0 && <div className="hint">Name on documents: {it.docNames.join(' / ')}</div>}
                 {it.taxId && <div className="hint">Tax ID: {it.taxId}</div>}
+                <CandidateSoldToAddress code={it.code} rows={it.rows} isMgt={isMgt} />
                 <div className="hint">
                   Ship-to:{' '}
                   {it.shipTos.length === 0
@@ -3273,6 +3274,61 @@ function CustomerCandidatesPanel({
         The name on this document will be remembered for the code you choose.
       </small>
       )}
+    </div>
+  );
+}
+
+/* The customer's own (Sold-to / billing) address for one candidate code — not a Ship-to — so two
+   codes with the same name and Tax ID (head office vs branch) can be told apart. Taken from the
+   Customer master row when it was saved with an address (Use & Save from SAP/Zoho fills
+   HouseNumber/Street.../PostCode), otherwise read live: Zoho Account Sold-to for MGT, the SAP
+   Business Partner address for GLC. */
+const joinAddress = (parts: unknown[]) => parts.map((p) => String(p ?? '').trim()).filter(Boolean).join(' ');
+
+function CandidateSoldToAddress({ code, rows, isMgt }: { code: string; rows: Record<string, any>[]; isMgt?: boolean }) {
+  const fromMaster =
+    rows
+      .map((r) => joinAddress([r.HouseNumber, r.Street, r.Street2, r.Street3, r.Street4, r.Street5, r.District, r.DifferenceCity, r.City, r.PostCode]))
+      .find(Boolean) || '';
+  const [live, setLive] = useState('');
+  const [state, setState] = useState<'idle' | 'loading' | 'done' | 'error'>('idle');
+
+  useEffect(() => {
+    if (fromMaster || !code) return;
+    let cancelled = false;
+    setState('loading');
+    const stripZeros = (v: string) => v.replace(/^0+/, '');
+    const lookup: Promise<string> = isMgt
+      ? getZohoAccountSoldToByCode(code).then((i) =>
+          i
+            ? joinAddress([i.houseNumber, i.street, i.street2, i.street3, i.street4, i.street5, i.district, i.differenceCity, i.city, i.postCode]) ||
+              String(i.address ?? '').trim()
+            : '',
+        )
+      : searchSapBusinessPartner({ code, top: 5 }).then((r) => {
+          const bp = r.results.find((b) => stripZeros(String(b.businessPartnerId ?? '')) === stripZeros(code));
+          return bp
+            ? joinAddress([bp.addressHouseNumber, bp.addressStreet, bp.addressStreet2, bp.addressStreet3, bp.addressStreet4, bp.addressStreet5,
+                bp.addressDistrict, bp.addressDifferenceCity, bp.addressCity, bp.addressPostalCode])
+            : '';
+        });
+    lookup
+      .then((a) => { if (!cancelled) { setLive(a); setState('done'); } })
+      .catch(() => { if (!cancelled) setState('error'); });
+    return () => { cancelled = true; };
+  }, [code, fromMaster, isMgt]);
+
+  const text = fromMaster || live;
+  return (
+    <div className="hint">
+      Address:{' '}
+      {text
+        ? text
+        : state === 'loading'
+          ? `reading from ${isMgt ? 'Zoho CRM' : 'SAP'}…`
+          : state === 'error'
+            ? `${isMgt ? 'Zoho CRM' : 'SAP'} is not available right now`
+            : 'none on file'}
     </div>
   );
 }
@@ -3390,6 +3446,9 @@ interface Props {
   /** GLC Sales Order: mark a line as a freight charge (sent as the Freight condition, not an item),
    *  as an item, or '' = let the system decide from the line's wording (utils/soCharges). */
   onSetLineCharge?: (i: number, value: 'freight' | 'item' | '') => void;
+  /** Confirm a row added after the last mapping run (Add Row): runs the mapping again so the new
+   *  row gets matched, without scrolling the page. */
+  onConfirmLine?: () => void;
   /** GLC Sales Order only: the full Sales Employee pick list (DB master + live SAP), the per-line
    *  history suggestion (who handled this customer+material last time), and the setter that stores
    *  the chosen Person ID on the line (extra.salesEmployee → SAP item field YY1_SDSalesEmployeeI_SDI). */
@@ -3468,6 +3527,7 @@ export default function MappingCards({
   onUseSapMaterial,
   onAddUomRule,
   onSetLineCharge,
+  onConfirmLine,
   salesEmployees,
   lineSalesEmpSuggest,
   onSetLineSalesEmployee,
@@ -3912,16 +3972,50 @@ export default function MappingCards({
   // Conversion sub-section is hidden for MGT (an MGT Sales Order goes to Zoho, not SAP).
   const matCards = doc.lines.map((l, i) => {
     const r = map.lines[i];
-    // Mapping result from before lines were added (stale until the next Run Mapping) — no card yet.
-    if (!r) return null;
-    const u = r.unit || { doc: [], sap: [], status: 'idle' };
-
     // Withholding tax / VAT / customs-duty rows are taxes, not items — they are recorded in the
     // Tax and Withholding Tax tabs and have no material to match. Offering a material search for
     // "VAT 7% <vendor> <invoice no>" only produces unrelated suggestions, so no card is drawn.
     // Checked on the line itself as well as the mapping status, so the card disappears even on a
     // mapping result produced before the backend learned to skip them.
     const taxRow = ['WHT', 'VAT', 'DUTY'].includes(String(l.extCode || '').trim().toUpperCase());
+    // Row added after the last mapping run (Add Row) — no mapping result for it yet. Show a
+    // placeholder card with a Confirm button that maps it (same as Step 2, without scrolling).
+    if (!r) {
+      if (taxRow) return null;
+      const docText = [l.extCode, l.desc].filter((x) => String(x ?? '').trim()).join(' — ');
+      return (
+        <div key={i} className="cmp-card">
+          <div className="cmp-head">
+            <span className="cmp-no">{`${nMat}.${i + 1}`}</span>
+            <b>{`Item — Row ${i + 1}`}</b>
+            <span className="badge b-idle">New row</span>
+            <div className="sp" />
+            {!posted && onConfirmLine && (
+              <button
+                className="btn primary sm"
+                onClick={onConfirmLine}
+                disabled={!docText}
+                title={docText ? 'Map this new row' : 'Enter the item code or description first'}
+              >
+                <i className="fa-solid fa-check" /> Confirm
+              </button>
+            )}
+          </div>
+          <div className="cmp-body">
+            <div className="cmp-col">
+              <div className="cmp-label"><i className="fa-solid fa-file-lines" /> Data from Document</div>
+              <div className="hint">{docText || 'Empty row — enter the item code / description in the Detail table first.'}</div>
+            </div>
+            <div className="cmp-arrow">→</div>
+            <div className="cmp-col sap">
+              <div className="cmp-label"><i className="fa-solid fa-building-columns" /> {isMgt ? 'Data from Zoho CRM' : 'Data from SAP'}</div>
+              <div className="hint">Click Confirm to match this row.</div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+    const u = r.unit || { doc: [], sap: [], status: 'idle' };
     if (taxRow || r.status === 'skip') return null;
 
     // GLC freight charge (SHIPPING / ค่าขนส่ง): no Material to match -- its amount is sent as the

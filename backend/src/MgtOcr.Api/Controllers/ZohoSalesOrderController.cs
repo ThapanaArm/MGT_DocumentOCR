@@ -589,8 +589,20 @@ public class ZohoSalesOrderController(
             quoteAction = "unknown"; quoteReason = "Could not read the Deal's Quotes from Zoho CRM: " + e.Message;
         }
         var (previewLastPrices, lastPriceError) = await LastPricesWithErrorAsync(d.Deal.AccountCode, d.Lines.Select(l => l.MaterialCode), docId);
-        var paymentTermsOptions = await soClient.GetPicklistOptionsAsync("Payment_Terms");
-        var paymentCurrencyOptions = await soClient.GetPicklistOptionsAsync("Payment_Currency");
+        // The dropdown options only decorate the editor (blank = "use Deal default"), so a slow or
+        // failing Zoho settings/fields call must not fail the whole preview: give it 20 s, then
+        // carry on with empty lists. The second lookup reads the cached field list.
+        List<string> paymentTermsOptions = [], paymentCurrencyOptions = [];
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            paymentTermsOptions = await soClient.GetPicklistOptionsAsync("Payment_Terms", cts.Token);
+            paymentCurrencyOptions = await soClient.GetPicklistOptionsAsync("Payment_Currency", cts.Token);
+        }
+        catch (Exception e)
+        {
+            log.LogWarning(e, "Preview: could not read the Payment Terms / Currency picklists from Zoho CRM");
+        }
 
         return Ok(new
         {

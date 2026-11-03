@@ -1,6 +1,6 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useAppState } from '../../../state/AppState';
-import { mapDocument, type DocModel, type MapResult } from '../../../api/documents';
+import { mapDocument, type DocModel, type MapEntry, type MapResult } from '../../../api/documents';
 import { num } from '../../../utils/format';
 import { WHT_CODE_RATE } from '../../../constants/fields';
 
@@ -23,13 +23,19 @@ export function useDocumentEditor(user: string) {
   const [doc, setDoc] = useState<DocModel | null>(null);
   const [map, setMap] = useState<MapResult | null>(null);
   const [failed, setFailed] = useState(false);
+  // true = the document was edited after the last mapping run. The last result stays on screen
+  // (it used to be wiped with setMap(null), which collapsed the Mapping cards and made the page
+  // jump up on every keystroke / Add Row); the page shows a "re-run mapping" banner and blocks
+  // Step 3 until runMap() succeeds again, so a stale result can never be sent.
+  const [mapStale, setMapStale] = useState(false);
+  useEffect(() => { if (!map) setMapStale(false); }, [map]);
   const manual = useRef<{ header: Record<string, string>; lines: Record<string, string> }>({
     header: {},
     lines: {},
   });
 
   const runMap = useCallback(
-    async (silent: boolean, forDoc?: DocModel) => {
+    async (silent: boolean, forDoc?: DocModel, opts?: { scroll?: boolean }) => {
       const d = forDoc || doc;
       if (!d) return;
       const res = await guard(() =>
@@ -43,6 +49,7 @@ export function useDocumentEditor(user: string) {
       if (res) {
         setDoc(res.document);
         setMap(res);
+        setMapStale(false);
         if (!silent) {
           showToast(
             res.pass
@@ -50,7 +57,9 @@ export function useDocumentEditor(user: string) {
               : 'Still incomplete: ' + res.errors.length + ' item(s) — please review and select data',
             res.pass ? 'success' : 'info',
           );
-          document.querySelector('.content')?.scrollTo({ top: 0, behavior: 'smooth' }); window.scrollTo({ top: 0, behavior: 'smooth' });
+          if (opts?.scroll !== false) {
+            document.querySelector('.content')?.scrollTo({ top: 0, behavior: 'smooth' }); window.scrollTo({ top: 0, behavior: 'smooth' });
+          }
         }
       }
     },
@@ -58,9 +67,13 @@ export function useDocumentEditor(user: string) {
   );
 
   // ---- editing handlers ----
-  const patchDoc = (fn: (d: DocModel) => DocModel) => {
+  // fixMapLines keeps the last result's per-line rows aligned with doc.lines when a line is
+  // removed (cards/tables index map.lines[i] by document line). An added line needs nothing: it has
+  // no row yet and the cards/tables already show it as "Pending Mapping".
+  const patchDoc = (fn: (d: DocModel) => DocModel, fixMapLines?: (lines: MapEntry[]) => MapEntry[]) => {
     setDoc((prev) => (prev ? fn(prev) : prev));
-    setMap(null);
+    if (fixMapLines) setMap((m) => (m ? { ...m, lines: fixMapLines(m.lines || []) } : m));
+    setMapStale(true);
   };
   const editHeader = (k: string, v: string) =>
     patchDoc((d) => ({ ...d, header: { ...d.header, [k]: v } }));
@@ -88,7 +101,10 @@ export function useDocumentEditor(user: string) {
       ],
     }));
   const delLine = (i: number) =>
-    patchDoc((d) => ({ ...d, lines: d.lines.filter((_l, j) => j !== i) }));
+    patchDoc(
+      (d) => ({ ...d, lines: d.lines.filter((_l, j) => j !== i) }),
+      (lines) => lines.filter((_l, j) => j !== i),
+    );
 
   const editGlItem = (i: number, k: string, v: string) =>
     setDoc((d) => {
@@ -179,6 +195,7 @@ export function useDocumentEditor(user: string) {
     setDoc,
     map,
     setMap,
+    mapStale,
     failed,
     setFailed,
     manual,

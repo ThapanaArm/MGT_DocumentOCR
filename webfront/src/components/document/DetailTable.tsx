@@ -139,6 +139,9 @@ interface Props {
    *  onEditLineExtra only changes the page's in-memory copy, and SAP/Zoho Send read the STORED
    *  document, so without this an edited note was never saved (lost on refresh, never sent). */
   onCommitLineExtra?: () => void;
+  /** Confirm a row added after the last mapping run (Add Row): runs the mapping again so the new
+   *  row gets matched, without scrolling the page. */
+  onConfirmLine?: () => void;
   onManualLine: (i: number, value: string) => void;
   onDelLine: (i: number) => void;
   onAddLine: () => void;
@@ -173,6 +176,7 @@ export default function DetailTable({
   onEditLine,
   onEditLineExtra,
   onCommitLineExtra,
+  onConfirmLine,
   onManualLine,
   onDelLine,
   onAddLine,
@@ -467,6 +471,20 @@ export default function DetailTable({
                         <UomCell map={map} i={i} posted={posted} onAddUomRule={onAddUomRule} />
                       </td>
                       <td style={{ whiteSpace: 'nowrap' }}>
+                        {/* Row added after the last mapping run: Confirm maps it (same as Step 2). */}
+                        {map && !r && !posted && onConfirmLine && (() => {
+                          const empty = !String(l.extCode ?? '').trim() && !String(l.desc ?? '').trim();
+                          return (
+                            <button
+                              className="btn primary sm"
+                              onClick={onConfirmLine}
+                              disabled={empty}
+                              title={empty ? 'Enter the item code or description first' : 'Map this new row'}
+                            >
+                              <i className="fa-solid fa-check" /> Confirm
+                            </button>
+                          );
+                        })()}
                         {r &&
                           (r.status === 'charge' ? (
                             <span className="badge b-idle"><i className="fa-solid fa-truck" /> Freight</span>

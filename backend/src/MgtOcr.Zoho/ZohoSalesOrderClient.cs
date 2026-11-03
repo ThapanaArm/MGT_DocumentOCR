@@ -93,6 +93,52 @@ public class ZohoSalesOrderClient(ZohoClient zoho)
     private string? _orderedItemsField;
     private (string? DataType, string? LookupModule)? _shipToNameMeta;
 
+    // Sales Orders field metadata (settings/fields) is large and Zoho can be slow to return it --
+    // a Preview once hit the 120 s HttpClient timeout here. Every caller (Ordered Items subform,
+    // Ship_to_Name shape, Payment Terms / Currency picklists) reads the same list, so it is fetched
+    // once and kept for FieldsTtl (this client is a singleton). Kept as JSON text and parsed per
+    // call so concurrent requests never share one mutable JsonNode tree. Concurrent callers share
+    // one in-flight fetch; a caller's CancellationToken only stops ITS wait, the fetch itself
+    // carries on and fills the cache for the next request. A failed refresh falls back to the
+    // last good copy when there is one.
+    private static readonly TimeSpan FieldsTtl = TimeSpan.FromMinutes(30);
+    private readonly object _fieldsGate = new();
+    private Task<string>? _fieldsFetch;
+    private string? _fieldsJson;
+    private DateTime _fieldsAtUtc;
+
+    private async Task<JsonArray> GetSalesOrderFieldsAsync(CancellationToken ct = default)
+    {
+        static JsonArray Parse(string json) => JsonNode.Parse(json) as JsonArray ?? new JsonArray();
+        var cachedJson = _fieldsJson;
+        if (cachedJson is not null && DateTime.UtcNow - _fieldsAtUtc < FieldsTtl) return Parse(cachedJson);
+
+        Task<string> fetch;
+        lock (_fieldsGate)
+        {
+            if (_fieldsFetch is null || _fieldsFetch.IsCompleted) _fieldsFetch = FetchSalesOrderFieldsAsync();
+            fetch = _fieldsFetch;
+        }
+        try
+        {
+            return Parse(await fetch.WaitAsync(ct));
+        }
+        catch when (cachedJson is not null)
+        {
+            return Parse(cachedJson); // stale but still the real field list
+        }
+    }
+
+    private async Task<string> FetchSalesOrderFieldsAsync()
+    {
+        var module = await ResolveModuleAsync();
+        var fields = await zoho.GetFieldsAsync(module);
+        var json = fields.ToJsonString();
+        _fieldsJson = json;
+        _fieldsAtUtc = DateTime.UtcNow;
+        return json;
+    }
+
     private async Task<string> ResolveModuleAsync()
     {
         if (_module is not null) return _module;
@@ -155,8 +201,7 @@ public class ZohoSalesOrderClient(ZohoClient zoho)
     private async Task<string> ResolveOrderedItemsFieldAsync()
     {
         if (_orderedItemsField is not null) return _orderedItemsField;
-        var module = await ResolveModuleAsync();
-        var fields = await zoho.GetFieldsAsync(module);
+        var fields = await GetSalesOrderFieldsAsync();
 
         // Prefer the subform field explicitly labelled "Ordered Items" (the manual's own name for
         // this subform); fall back to whichever subform field is on the module at all, since a
@@ -196,8 +241,7 @@ public class ZohoSalesOrderClient(ZohoClient zoho)
     private async Task<(string? DataType, string? LookupModule)> ResolveShipToNameFieldAsync()
     {
         if (_shipToNameMeta is { } cached) return cached;
-        var module = await ResolveModuleAsync();
-        var fields = await zoho.GetFieldsAsync(module);
+        var fields = await GetSalesOrderFieldsAsync();
         foreach (var node in fields)
         {
             if (node is not JsonObject f) continue;
@@ -219,10 +263,9 @@ public class ZohoSalesOrderClient(ZohoClient zoho)
     /// Zoho expects back on write -- falling back to display_value only if actual_value is absent.
     /// Empty list if the field isn't found or isn't a picklist.
     /// </summary>
-    public async Task<List<string>> GetPicklistOptionsAsync(string fieldApiName)
+    public async Task<List<string>> GetPicklistOptionsAsync(string fieldApiName, CancellationToken ct = default)
     {
-        var module = await ResolveModuleAsync();
-        var fields = await zoho.GetFieldsAsync(module);
+        var fields = await GetSalesOrderFieldsAsync(ct);
         foreach (var node in fields)
         {
             if (node is not JsonObject f) continue;

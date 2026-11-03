@@ -611,7 +611,7 @@ export default function DocumentPage() {
   // same regardless of SAP vs Zoho). Everything else on this page -- loading, re-OCR, chat,
   // split, master-edit, and the SAP/Zoho-specific steps -- consumes these.
   const {
-    doc, setDoc, map, setMap, failed, setFailed, manual, runMap,
+    doc, setDoc, map, setMap, mapStale, failed, setFailed, manual, runMap,
     editHeader, editLine, editLineExtra, addLine, delLine,
     editGlItem, addGlItem, delGlItem,
     editTaxItem, addTaxItem, delTaxItem,
@@ -958,6 +958,11 @@ export default function DocumentPage() {
     void runMap(true, next);
     const n = new Set(groups).size;
     showToast(n > 1 ? `Items split into ${n} Sales Orders` : 'All items are on one Sales Order', 'success');
+  };
+  // Confirm button on a row added after the last mapping (Detail table / Mapping card): the same
+  // re-map as Step 2, with its result toast, but the page stays where the person is working.
+  const confirmNewRow = () => {
+    if (!locked) void runMap(false, undefined, { scroll: false });
   };
   // Uploaded file of a never-posted document is removed after the retention period (FileCleanupWorker).
   const retention = fileRetention(doc, doc.retentionHours);
@@ -1983,6 +1988,7 @@ export default function DocumentPage() {
     // Save + re-map silently (same path setLineSalesEmployee uses), so the note is stored and
     // the SAP/Zoho payload — built from the stored document — includes it.
     onCommitLineExtra: () => { if (!locked) runMap(true); },
+    onConfirmLine: confirmNewRow,
     onManualLine: setManualLine,
     onDelLine: delLine,
     onAddLine: addLine,
@@ -2319,6 +2325,19 @@ export default function DocumentPage() {
         </div>
       </div>
 
+      {/* Edited after the last mapping run: keep the cards on screen, ask for a re-run. */}
+      {map && mapStale && !locked && (
+        <div className="result warn">
+          <h3>
+            <span className="badge b-warn"><i className="fa-solid fa-triangle-exclamation" /> Data changed</span>
+            The document was edited after the last mapping. Re-run mapping to update the results before Step 3.
+          </h3>
+          <button className="btn primary sm" onClick={() => runMap(false, undefined, { scroll: false })} disabled={posted || isSplit}>
+            <i className="fa-solid fa-arrows-rotate" /> Re-run Mapping
+          </button>
+        </div>
+      )}
+
       {/* Mapping cards */}
       {map && (
         <MappingCards
@@ -2337,6 +2356,7 @@ export default function DocumentPage() {
           onQuickAddMaterial={quickAddMaterial}
           onUseSapMaterial={useSapMaterial}
           onSetLineCharge={setLineCharge}
+          onConfirmLine={confirmNewRow}
           onAddUomRule={addUomRule}
           salesEmployees={salesEmps}
           lineSalesEmpSuggest={lineSalesEmpSuggest}
@@ -2450,7 +2470,7 @@ export default function DocumentPage() {
         />
       )}
 
-      {isMgt && map && !isSplit && (
+      {isMgt && map && !mapStale && !isSplit && (
         <ZohoSalesOrderStep
           ref={zohoStepRef}
           doc={doc}
@@ -2472,7 +2492,7 @@ export default function DocumentPage() {
         />
       )}
 
-      {!isMgt && doc.module === 'SO' && map && !isSplit && (
+      {!isMgt && doc.module === 'SO' && map && !mapStale && !isSplit && (
         <SapSalesOrderStep
           ref={sapStepRef}
           doc={doc}
@@ -2516,7 +2536,7 @@ export default function DocumentPage() {
             <button
               className="btn success"
               onClick={() => zohoStepRef.current?.open()}
-              disabled={!(map && !posted && !isSplit)}
+              disabled={!(map && !mapStale && !posted && !isSplit)}
             >
               ⎋ Step 3 · Review Sales Order
             </button>
@@ -2528,7 +2548,7 @@ export default function DocumentPage() {
             <button
               className="btn success"
               onClick={() => sapStepRef.current?.open()}
-              disabled={!(map && map.pass && !posted && !isSplit)}
+              disabled={!(map && !mapStale && map.pass && !posted && !isSplit)}
             >
               ⎋ Step 3 · Review and send to SAP
             </button>
@@ -2537,19 +2557,21 @@ export default function DocumentPage() {
             <button
               className="btn success"
               onClick={() => setPostOpen(true)}
-              disabled={!(map && map.pass && !posted && !isSplit)}
+              disabled={!(map && !mapStale && map.pass && !posted && !isSplit)}
             >
               ⎋ Step 3 · Review and send to SAP
             </button>
           )}
           {!isMgt && doc.module !== 'SO' && (
-            <button className="btn" onClick={openPayload} disabled={!(map && map.pass)}>
+            <button className="btn" onClick={openPayload} disabled={!(map && !mapStale && map.pass)}>
               {'{}'} View Payload
             </button>
           )}
           <div style={{ flex: 1 }} />
           <span className="hint">
-            {isSplit
+            {map && mapStale && !locked
+              ? 'Data changed — run Step 2 (Data Mapping) again before Step 3'
+              : isSplit
               ? 'This document has been split into other Sales Orders'
               : posted
                 ? isMgt
