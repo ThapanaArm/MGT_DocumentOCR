@@ -42,6 +42,58 @@ public class SapClient(AppConfig config, HttpClient httpClient)
         }
     }
 
+    /// <summary>Reads a supplier invoice back from API_SUPPLIERINVOICE_PROCESS_SRV with its PO lines,
+    /// so what SAP holds can be set against what was sent. Never throws: (false, message) on any
+    /// failure, because a reconciliation that cannot read one invoice should still report the rest.</summary>
+    public async Task<(bool Ok, string Body)> GetSupplierInvoiceAsync(string supplierInvoice, string fiscalYear)
+    {
+        var baseUrl = config.SapSupplierInvoiceBaseUrl;
+        if (string.IsNullOrWhiteSpace(baseUrl)) return (false, "Sap:SupplierInvoice base URL is not configured");
+        static string Esc(string v) => (v ?? "").Trim().Replace("'", "''");
+        var url = $"{baseUrl.TrimEnd('/')}/A_SupplierInvoice(SupplierInvoice='{Esc(supplierInvoice)}',FiscalYear='{Esc(fiscalYear)}')"
+                  + $"?$expand=to_SuplrInvcItemPurOrdRef&$format=json&sap-client={config.SapClient}";
+        try
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Get, url);
+            if (!string.IsNullOrWhiteSpace(config.SapSupplierInvoiceAuthHeader))
+                req.Headers.TryAddWithoutValidation("Authorization", config.SapSupplierInvoiceAuthHeader);
+            req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+            using var resp = await httpClient.SendAsync(req, cts.Token);
+            var text = await resp.Content.ReadAsStringAsync(cts.Token);
+            return (resp.IsSuccessStatusCode, text);
+        }
+        catch (Exception e)
+        {
+            return (false, e.Message);
+        }
+    }
+
+    /// <summary>Every supplier-invoice line booked against a purchase order (goods and planned
+    /// delivery costs alike), raw JSON of A_SuplrInvcItemPurOrdRef. (false, message) on failure.</summary>
+    public async Task<(bool Ok, string Body)> GetInvoiceLinesForPoAsync(string purchaseOrder)
+    {
+        var baseUrl = config.SapSupplierInvoiceBaseUrl;
+        if (string.IsNullOrWhiteSpace(baseUrl)) return (false, "Sap:SupplierInvoice base URL is not configured");
+        var filter = Uri.EscapeDataString($"PurchaseOrder eq '{(purchaseOrder ?? "").Trim().Replace("'", "''")}'");
+        var url = $"{baseUrl.TrimEnd('/')}/A_SuplrInvcItemPurOrdRef?$filter={filter}&$top=1000&$format=json&sap-client={config.SapClient}";
+        try
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Get, url);
+            if (!string.IsNullOrWhiteSpace(config.SapSupplierInvoiceAuthHeader))
+                req.Headers.TryAddWithoutValidation("Authorization", config.SapSupplierInvoiceAuthHeader);
+            req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+            using var resp = await httpClient.SendAsync(req, cts.Token);
+            var text = await resp.Content.ReadAsStringAsync(cts.Token);
+            return (resp.IsSuccessStatusCode, text);
+        }
+        catch (Exception e)
+        {
+            return (false, e.Message);
+        }
+    }
+
     public async Task<SapPostResult> PostAsync(string module, Dictionary<string, object?> payload)
     {
         var endpoint = payload.GetValueOrDefault("_target") as string ?? "";
@@ -153,7 +205,17 @@ public class SapClient(AppConfig config, HttpClient httpClient)
             var root = doc.RootElement;
             var d = root.TryGetProperty("d", out var dEl) ? dEl : root;
             var sapDocNo = TryGetString(d, "SalesOrder") ?? TryGetString(d, "SupplierInvoice") ?? "";
-            return new SapPostResult(true, false, sapDocNo, endpoint, "Document created in SAP successfully", JsonSerializer.Deserialize<object>(d.GetRawText()));
+            // What SAP says it actually did with a supplier invoice. Sent "A" (parked) and got a
+            // posted document back once (5105600162), and the message only ever said "created" —
+            // so the status from SAP's own response is now written into the message, which lands
+            // in ocr.PostLog. Sent vs returned is then visible per attempt without a debugger.
+            var sentStatus = body.GetValueOrDefault("SupplierInvoiceStatus") as string;
+            var gotStatus = TryGetString(d, "SupplierInvoiceStatus");
+            var message = sentStatus is null && gotStatus is null
+                ? "Document created in SAP successfully"
+                : $"Document created in SAP successfully — SupplierInvoiceStatus sent '{sentStatus ?? "(none)"}', "
+                  + $"returned by SAP '{gotStatus ?? "(not in response)"}'";
+            return new SapPostResult(true, false, sapDocNo, endpoint, message, JsonSerializer.Deserialize<object>(d.GetRawText()));
         }
         catch (Exception e)
         {

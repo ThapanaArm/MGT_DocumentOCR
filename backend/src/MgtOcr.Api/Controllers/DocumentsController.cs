@@ -309,6 +309,16 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     {
         var d = await repo.GetDocumentAsync(docId);
         d["retentionHours"] = config.DraftRetentionHoursFor(d.GetStr("module"));   // UI: "file will be removed in ..." warning
+        if (d.GetStr("module") is "AP" or "II")
+        {
+            // One AP bundle can create one SAP invoice per supplier. Keep the compact legacy
+            // SapDocNo field intact and expose the per-supplier IDs from PostLog for the detail UI.
+            await using var conn = await GetDbAsync();
+            var numbers = await conn.QueryAsync<string>(
+                "SELECT SapDocNo FROM ocr.PostLog WHERE DocId=@docId AND Module IN ('AP','II') AND Success=1 AND ISNULL(SapDocNo,'')<>'' ORDER BY LogId",
+                new { docId });
+            d["sapDocNos"] = numbers.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        }
         return Ok(d);
     }
 
@@ -335,6 +345,68 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         await repo.LogAuditAsync(docId, module, "UPDATE", await ActorAsync(),
             detail: "Edited document data", fileName: doc.GetStr("fileName"));
         return Ok(await repo.GetDocumentAsync(docId));
+    }
+
+    [HttpPost("api/documents/{docId:int}/reopen-deleted-ap-invoice")]
+    public async Task<IActionResult> ReopenDeletedApInvoice(int docId, [FromBody] Dictionary<string, object?> rawBody)
+    {
+        var body = JsonBodyHelpers.Unwrap(rawBody);
+        var sapDocNo = body.GetStr("sapDocNo").Trim();
+        if (sapDocNo.Length == 0) throw new HttpApiException(400, "Enter the SAP invoice number that was deleted");
+
+        var doc = await repo.GetDocumentAsync(docId);
+        var module = doc.GetStr("module");
+        if (module is not ("AP" or "II"))
+            throw new HttpApiException(400, "This action is only available for AP supplier invoices");
+        if (doc.GetStr("status") is not ("POSTED" or "PARTIAL"))
+            throw new HttpApiException(400, "This AP document is already open for editing");
+
+        var user = await ActorAsync();
+        var docT = DocumentTables.For(module).Doc;
+        await using (var conn = await GetDbAsync())
+        await using (var tx = await conn.BeginTransactionAsync())
+        {
+            // Only the explicitly named successful SAP invoice is made eligible for retry.
+            // Its original PostLog row remains for history but is deactivated for duplicate
+            // protection. The audit log below records the user's confirmation. Other supplier
+            // invoices stay successful and will be skipped by the existing duplicate protection.
+            var changed = await conn.ExecuteAsync("""
+                ;WITH target AS (
+                    SELECT TOP (1) * FROM ocr.PostLog
+                     WHERE DocId=@docId AND Module=@module AND SapDocNo=@sapDocNo AND Success=1
+                     ORDER BY LogId DESC
+                )
+                UPDATE target SET Success=0
+                """, new { docId, module, sapDocNo }, tx);
+            if (changed == 0)
+                throw new HttpApiException(404,
+                    $"Successful SAP invoice {sapDocNo} was not found in this document's submission history");
+
+            var remainingSapDocNo = await conn.ExecuteScalarAsync<string?>("""
+                SELECT TOP (1) SapDocNo FROM ocr.PostLog
+                 WHERE DocId=@docId AND Module IN ('AP','II') AND Success=1 AND ISNULL(SapDocNo,'')<>''
+                 ORDER BY LogId
+                """, new { docId }, tx);
+            await conn.ExecuteAsync($"""
+                UPDATE {docT}
+                   SET Status='MAPPED', SapDocNo=@remainingSapDocNo,
+                       PostedAt=NULL, PostedBy=NULL, UpdatedAt=SYSDATETIME()
+                 WHERE DocId=@docId
+                """, new { docId, remainingSapDocNo }, tx);
+            await tx.CommitAsync();
+        }
+
+        await repo.LogAuditAsync(docId, module, "REOPEN_AP_INVOICE", user,
+            detail: $"User confirmed SAP invoice {sapDocNo} was deleted; enabled retry for that supplier invoice only");
+        var reopened = await repo.GetDocumentAsync(docId);
+        await using (var conn = await GetDbAsync())
+        {
+            var numbers = await conn.QueryAsync<string>(
+                "SELECT SapDocNo FROM ocr.PostLog WHERE DocId=@docId AND Module IN ('AP','II') AND Success=1 AND ISNULL(SapDocNo,'')<>'' ORDER BY LogId",
+                new { docId });
+            reopened["sapDocNos"] = numbers.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        }
+        return Ok(reopened);
     }
 
     [HttpPost("api/documents/{docId:int}/category")]
@@ -1431,6 +1503,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             // SAP first: only SAP knows its item numbers (10, 40, 50, 60 — numbered with gaps).
             var poRef = Export.SupplierInvoicePayload.PoNumber(header);
             var poItems = new List<MgtOcr.Sap.SapPurchaseOrderItem>();
+            var goodsReceiptItems = new List<System.Text.Json.JsonElement>();
             // The lookup is skipped entirely once every goods line already names its PO item:
             // the person assigned them on the PO Reference tab, and those numbers are what the
             // payload uses anyway. That also keeps the flow working while the communication
@@ -1438,8 +1511,12 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             // lookup with 403 "You do not have start authorization for R3TR IWSV
             // API_PURCHASEORDER_PROCESS_SRV", which says nothing about the invoice itself.
             var assignedByHand = Export.SupplierInvoicePayload.AllItemsAssignedByHand(doc);
-            if (poRef.Length > 0 && Export.SapImportSupplierInvoiceExcel.IsPoKeyed(doc)
-                && sapPo.Configured && !assignedByHand)
+            // A planned-delivery-cost document (Reference Document Category 2 or 3) needs the PO
+            // too: its charges are spread over the PO items that accrued each condition, and only
+            // the purchase order says which items those are.
+            var isDeliveryCostDoc = header.GetStr("refDocType").Trim() is "2" or "3";
+            if (poRef.Length > 0 && sapPo.Configured
+                && ((Export.SapImportSupplierInvoiceExcel.IsPoKeyed(doc) && !assignedByHand) || isDeliveryCostDoc))
             {
                 try { poItems = await sapPo.ItemsAsync(poRef); }
                 catch (Exception ex) when (!forPost)
@@ -1456,6 +1533,28 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
                         + "PO items -- assign them by hand on the PO Reference tab, or have Basis add "
                         + "API_PURCHASEORDER_PROCESS_SRV (communication scenario SAP_COM_0053) to this "
                         + $"user's communication arrangement: {ex.Message}");
+                }
+            }
+            // Planned-delivery-cost lines must only be assigned to PO items that have a net goods
+            // receipt. Read GRs from SAP before building the payload; fail closed on submit so a
+            // missing API authorization can never send costs to unreceived PO items.
+            if (poRef.Length > 0 && isDeliveryCostDoc)
+            {
+                try
+                {
+                    if (!sapPo.Configured)
+                        throw new InvalidOperationException("Sap:PurchaseOrder is not configured");
+                    goodsReceiptItems = await sapPo.GoodsReceiptItemsAsync(poRef);
+                }
+                catch (Exception ex) when (!forPost)
+                {
+                    logger.LogWarning(ex, "[AP] Goods-receipt lookup failed for {Po} (preview)", poRef);
+                }
+                catch (Exception ex)
+                {
+                    throw new HttpApiException(502,
+                        $"Could not read goods receipts for PO {poRef} from SAP. Planned delivery costs "
+                        + $"cannot be sent safely until API_MATERIAL_DOCUMENT_SRV is configured and authorized: {ex.Message}");
                 }
             }
             var apCompany = (await ExportCompanyAsync(Convert.ToInt32(doc.Get("docId") ?? 0)))?.CompanyCode
@@ -1476,12 +1575,12 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             if (vendors.Count <= 1)
             {
                 var only = Export.SupplierInvoicePayload.Build(
-                    doc, apCompany, party, poItems, source, apTerms);
-                return ([only], res);
+                    doc, apCompany, party, poItems, source, apTerms, goodsReceiptItems: goodsReceiptItems);
+                return ([MapVendors(only)], res);
             }
             var split = vendors
-                .Select(v => Export.SupplierInvoicePayload.Build(
-                    doc, apCompany, v, poItems, source, apTerms, v))
+                .Select(v => MapVendors(Export.SupplierInvoicePayload.Build(
+                    doc, apCompany, v, poItems, source, apTerms, v, goodsReceiptItems)))
                 .ToList();
             return (split, res);
         }
@@ -1489,6 +1588,48 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         var payload = SapPayloadBuilder.BuildPayload(config, module, header, lines, res, pm, source);
         return ([payload], res);
     }
+
+    /// <summary>Swaps vendor codes and goods-receipt material documents for the ones the target
+    /// SAP tenant uses (Sap:SupplierInvoice:VendorMap_ / MatDocMap_{Dev|Prod}): the invoicing
+    /// party, every delivery-cost line's FreightSupplier and every PO line's ReferenceDocument.
+    /// The document itself is left alone: re-coding its lines detaches the Tax tab rows, which are
+    /// keyed on the original code.</summary>
+    private Dictionary<string, object?> MapVendors(Dictionary<string, object?> payload)
+    {
+        var matDocs = config.SapSupplierInvoiceMatDocMap;
+        if (matDocs.Count > 0
+            && payload.GetValueOrDefault("to_SuplrInvcItemPurOrdRef") is System.Collections.IEnumerable grLines)
+            foreach (var it in grLines)
+                if (it is Dictionary<string, object?> row && row.GetValueOrDefault("ReferenceDocument") is string md
+                    && matDocs.TryGetValue(md.Trim(), out var testMd))
+                    row["ReferenceDocument"] = testMd;
+
+        var map = config.SapSupplierInvoiceVendorMap;
+        if (map.Count == 0) return payload;
+        string To(string code) => map.TryGetValue(code.Trim(), out var v) ? v : code;
+        if (payload.GetValueOrDefault("InvoicingParty") is string party && party.Length > 0)
+            payload["InvoicingParty"] = To(party);
+        if (payload.GetValueOrDefault("to_SuplrInvcItemPurOrdRef") is System.Collections.IEnumerable items)
+            foreach (var it in items)
+                if (it is Dictionary<string, object?> row && row.GetValueOrDefault("FreightSupplier") is string fs && fs.Length > 0)
+                {
+                    var mapped = To(fs);
+                    // A freight supplier that maps onto the invoicing party is the ordinary case and
+                    // is left out, exactly as the builder does for an unmapped one.
+                    row["FreightSupplier"] = string.Equals(mapped, payload.GetValueOrDefault("InvoicingParty") as string,
+                        StringComparison.OrdinalIgnoreCase) ? null : mapped;
+                }
+        return payload;
+    }
+
+    private sealed class PostedBefore
+    {
+        public string? PayloadJson { get; set; }
+        public string? SapDocNo { get; set; }
+    }
+
+    private static string PostedKey(string party, string reference) =>
+        $"{party.Trim()}|{reference.Trim()}";
 
     // stored_manual(): reconstructs the manual-override shape from what's already confirmed in the
     // DB (partnerCode/shipToCode/materialCode per line), so payload/post reflect what the user last saw.
@@ -1521,6 +1662,215 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             payload = payloads.Count == 1 ? payloads[0] : (object)payloads,
             pass = res.Get("pass"),
             errors = res["errors"],
+        });
+    }
+
+    // GET /api/documents/123/sap-check
+    // Reconciliation: what this document sends to SAP (the same payload Step 3 would post now) set
+    // against what SAP holds —
+    //   goods     : quantity and amount per PO line vs the PO item (OrderQuantity × NetPrice)
+    //   shipping  : each delivery-cost line (PO item + condition) vs that condition on the PO,
+    //               plus a total per condition
+    //   invoices  : every supplier invoice already created for this document, read back from SAP
+    //               (status, gross, sum of PO lines) vs the payload that created it
+    //   sapConditionsRaw : the PO's delivery-cost rows exactly as SAP returns them
+    // Read-only: nothing is posted, nothing in the document changes.
+    [HttpGet("api/documents/{docId:int}/sap-check")]
+    public async Task<IActionResult> SapCheck(int docId)
+    {
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        static double D(object? v) =>
+            v is null ? 0 : double.TryParse(Convert.ToString(v, System.Globalization.CultureInfo.InvariantCulture),
+                System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var d) ? d : 0;
+        static double J(JsonElement el, string name) =>
+            el.TryGetProperty(name, out var p)
+                ? p.ValueKind == JsonValueKind.Number ? p.GetDouble()
+                : p.ValueKind == JsonValueKind.String && double.TryParse(p.GetString(), System.Globalization.NumberStyles.Any,
+                    System.Globalization.CultureInfo.InvariantCulture, out var d) ? d : 0
+                : 0;
+        static int ItemNo(string s) => int.TryParse((s ?? "").Trim(), out var n) ? n : -1;
+        const double lineTolerance = 0.01, conditionTolerance = 1.00;
+
+        var doc = await repo.GetDocumentAsync(docId);
+        var header = doc.Get("header") as Dictionary<string, object?> ?? new Dictionary<string, object?>();
+        var po = Export.SupplierInvoicePayload.PoNumber(header);
+
+        // ---- SAP side: the purchase order ----
+        List<MgtOcr.Sap.SapPurchaseOrderItem> poItems = [];
+        List<Dictionary<string, string?>> conditionsRaw = [];
+        string? poError = null;
+        if (po.Length == 0) poError = "This document names no purchase order";
+        else if (!sapPo.Configured) poError = "Sap:PurchaseOrder is not configured";
+        else
+        {
+            try
+            {
+                poItems = await sapPo.ItemsAsync(po);
+                conditionsRaw = await sapPo.PricingRawAsync(po);
+            }
+            catch (Exception ex) { poError = ex.Message; }
+        }
+        var rate = (double)MgtOcr.Sap.SapPurchaseOrderClient.RateOf(poItems);
+
+        // ---- Our side: exactly what Step 3 would send now ----
+        List<Dictionary<string, object?>> payloads = [];
+        string? payloadError = null;
+        try { (payloads, _) = await PayloadForAsync(doc); }
+        catch (Exception ex) { payloadError = ex.Message; }
+
+        var goods = new List<object>();
+        var shipping = new List<Dictionary<string, object?>>();
+        foreach (var p in payloads)
+        {
+            var vendor = p.GetStr("InvoicingParty");
+            if (p.GetValueOrDefault("to_SuplrInvcItemPurOrdRef") is not System.Collections.IEnumerable rows) continue;
+            foreach (var o in rows)
+            {
+                if (o is not Dictionary<string, object?> r) continue;
+                var item = r.GetStr("PurchaseOrderItem");
+                var poItem = poItems.FirstOrDefault(i => ItemNo(i.Item) == ItemNo(item));
+                var amount = Math.Round(D(r.Get("SupplierInvoiceItemAmount")), 2);
+                var currency = r.GetStr("DocumentCurrency");
+
+                if (r.GetValueOrDefault("_deliveryCost") is true)
+                {
+                    var cond = r.GetStr("SuplrInvcDeliveryCostCndnType");
+                    var c = poItem?.Conditions.FirstOrDefault(x =>
+                        string.Equals(x.ConditionType, cond, StringComparison.OrdinalIgnoreCase));
+                    // SAP keeps the condition in the PO currency (Amount, 410.39 USD); the invoice is
+                    // in baht, so the SAP figure is brought over at the PO's own rate — the rate the
+                    // goods receipt accrued at.
+                    double? sapInDocCurrency = c is null ? null
+                        : string.Equals(c.AmountCurrency, currency, StringComparison.OrdinalIgnoreCase) ? (double)c.Amount
+                        : rate > 0 ? Math.Round((double)c.Amount * rate, 2)
+                        : null;
+                    shipping.Add(new Dictionary<string, object?>
+                    {
+                        ["vendor"] = vendor, ["poItem"] = item, ["condition"] = cond,
+                        ["sentAmount"] = amount, ["currency"] = currency,
+                        ["sapConditionAmount"] = c?.Amount, ["sapConditionCurrency"] = c?.AmountCurrency,
+                        ["sapRateValue"] = c?.RateValue, ["sapRateCurrency"] = c?.RateCurrency,
+                        ["sapInDocCurrency"] = sapInDocCurrency,
+                        ["diff"] = sapInDocCurrency is null ? null : Math.Round(amount - sapInDocCurrency.Value, 2),
+                        ["status"] = poItem is null ? "PO_ITEM_NOT_FOUND"
+                            : c is null ? "CONDITION_NOT_ON_PO_ITEM"
+                            : sapInDocCurrency is null ? "NO_RATE_TO_COMPARE"
+                            : Math.Abs(amount - sapInDocCurrency.Value) <= conditionTolerance ? "MATCH" : "DIFFERENT",
+                    });
+                }
+                else
+                {
+                    var qty = D(r.Get("QuantityInPurchaseOrderUnit"));
+                    double? sapQty = poItem is null ? null : (double)poItem.Quantity;
+                    double? sapAmount = poItem is null ? null : Math.Round((double)(poItem.Quantity * poItem.NetPrice), 2);
+                    var qtyOk = sapQty is not null && Math.Abs(qty - sapQty.Value) <= 0.001;
+                    var amtOk = sapAmount is not null
+                        && string.Equals(poItem!.Currency, currency, StringComparison.OrdinalIgnoreCase)
+                        && Math.Abs(amount - sapAmount.Value) <= lineTolerance;
+                    goods.Add(new
+                    {
+                        vendor, poItem = item, material = poItem?.Material, text = poItem?.Text,
+                        sentQty = qty, sapQty, unit = poItem?.Unit, qtyDiff = sapQty is null ? (double?)null : Math.Round(qty - sapQty.Value, 3),
+                        sentAmount = amount, currency, sapAmount, sapCurrency = poItem?.Currency,
+                        amountDiff = sapAmount is null ? (double?)null : Math.Round(amount - sapAmount.Value, 2),
+                        status = poItem is null ? "PO_ITEM_NOT_FOUND" : qtyOk && amtOk ? "MATCH" : !qtyOk ? "QTY_DIFFERENT" : "AMOUNT_DIFFERENT",
+                    });
+                }
+            }
+        }
+
+        // Totals per condition: what we send in all vs what the PO accrued for that condition.
+        var shippingByCondition = shipping
+            .GroupBy(s => s["condition"] as string ?? "")
+            .Select(g =>
+            {
+                var sent = Math.Round(g.Sum(s => D(s["sentAmount"])), 2);
+                var sapAll = poItems.SelectMany(i => i.Conditions)
+                    .Where(c => string.Equals(c.ConditionType, g.Key, StringComparison.OrdinalIgnoreCase)).ToList();
+                double? sap = sapAll.Count == 0 ? null
+                    : rate > 0 ? Math.Round(sapAll.Sum(c => (double)c.Amount) * rate, 2) : null;
+                return new
+                {
+                    condition = g.Key, sentTotal = sent,
+                    sapTotalPoCurrency = sapAll.Sum(c => c.Amount), sapTotalInDocCurrency = sap, poRate = rate,
+                    diff = sap is null ? (double?)null : Math.Round(sent - sap.Value, 2),
+                    status = sap is null ? "NOT_COMPARABLE" : Math.Abs(sent - sap.Value) <= conditionTolerance ? "MATCH" : "DIFFERENT",
+                };
+            })
+            .ToList();
+
+        // ---- Invoices already created: read each back from SAP ----
+        var invoices = new List<object>();
+        await using (var conn = await GetDbAsync())
+        {
+            var posted = await conn.QueryAsync<PostedBefore>(
+                "SELECT PayloadJson, SapDocNo FROM ocr.PostLog WHERE DocId=@docId AND Success=1 AND ISNULL(SapDocNo,'')<>''",
+                new { docId });
+            foreach (var row in posted)
+            {
+                double sentGross = 0, sentLines = 0;
+                string sentStatus = "", year = DateTime.Today.Year.ToString(inv);
+                try
+                {
+                    using var pj = JsonDocument.Parse(row.PayloadJson ?? "{}");
+                    var root = pj.RootElement;
+                    sentGross = J(root, "InvoiceGrossAmount");
+                    sentStatus = root.TryGetProperty("SupplierInvoiceStatus", out var ss) ? ss.ToString() : "";
+                    if (root.TryGetProperty("to_SuplrInvcItemPurOrdRef", out var lines) && lines.ValueKind == JsonValueKind.Array)
+                        foreach (var l in lines.EnumerateArray()) sentLines += J(l, "SupplierInvoiceItemAmount");
+                    // PostingDate went out as /Date(ms)/ — its year is the invoice's fiscal year here.
+                    if (root.TryGetProperty("PostingDate", out var pd) && pd.ValueKind == JsonValueKind.String
+                        && System.Text.RegularExpressions.Regex.Match(pd.GetString() ?? "", @"\d+") is { Success: true } m
+                        && long.TryParse(m.Value, out var ms))
+                        year = DateTimeOffset.FromUnixTimeMilliseconds(ms).UtcDateTime.Year.ToString(inv);
+                }
+                catch (JsonException) { /* an unreadable log row still gets its SAP side reported */ }
+
+                var (ok, body) = await sap.GetSupplierInvoiceAsync(row.SapDocNo ?? "", year);
+                object sapSide;
+                if (!ok) sapSide = new { error = body.Length > 500 ? body[..500] : body };
+                else
+                {
+                    using var sj = JsonDocument.Parse(body);
+                    var d = sj.RootElement.TryGetProperty("d", out var dd) ? dd : sj.RootElement;
+                    double sapLines = 0;
+                    if (d.TryGetProperty("to_SuplrInvcItemPurOrdRef", out var node)
+                        && node.ValueKind == JsonValueKind.Object && node.TryGetProperty("results", out var res)
+                        && res.ValueKind == JsonValueKind.Array)
+                        foreach (var l in res.EnumerateArray()) sapLines += J(l, "SupplierInvoiceItemAmount");
+                    sapSide = new
+                    {
+                        status = d.TryGetProperty("SupplierInvoiceStatus", out var st) ? st.ToString() : null,
+                        gross = J(d, "InvoiceGrossAmount"),
+                        poLinesTotal = Math.Round(sapLines, 2),
+                        currency = d.TryGetProperty("DocumentCurrency", out var cu) ? cu.ToString() : null,
+                        invoicingParty = d.TryGetProperty("InvoicingParty", out var ip) ? ip.ToString() : null,
+                        reference = d.TryGetProperty("SupplierInvoiceIDByInvcgParty", out var rf) ? rf.ToString() : null,
+                    };
+                }
+                invoices.Add(new
+                {
+                    supplierInvoice = row.SapDocNo, fiscalYear = year,
+                    sent = new { status = sentStatus, gross = Math.Round(sentGross, 2), poLinesTotal = Math.Round(sentLines, 2) },
+                    sap = sapSide,
+                });
+            }
+        }
+
+        return Ok(new
+        {
+            docId, purchaseOrder = po, poRate = rate, poError, payloadError,
+            summary = new
+            {
+                goodsLines = goods.Count,
+                goodsMismatches = goods.Count(g => (string)g.GetType().GetProperty("status")!.GetValue(g)! != "MATCH"),
+                shippingLines = shipping.Count,
+                shippingMismatches = shipping.Count(s => (s["status"] as string) != "MATCH"),
+                conditionsDifferent = shippingByCondition.Count(c => c.status != "MATCH"),
+                invoicesCreated = invoices.Count,
+            },
+            goods, shipping, shippingByCondition, invoices,
+            sapConditionsRaw = conditionsRaw,
         });
     }
 
@@ -1560,8 +1910,42 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         var postJobNumber = await jobLog.JobNumberForDocumentAsync(docId);
         var postJob = await jobLog.StartAsync(postJobNumber, "SAP_POST", docId: docId, module: module,
             provider: "sap", fileName: doc.GetStr("fileName"), performedBy: user);
+        // A bundle that failed half way already has some suppliers' invoices in SAP. Pressing
+        // Step 3 again must not send those again — SAP would refuse them as duplicates (M8/804)
+        // and, since the loop stops at the first refusal, the suppliers after them would never be
+        // reached. So every supplier invoice already logged as created for this document (same
+        // invoicing party + same reference) is skipped and reported with its SAP number.
+        var alreadyCreated = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (module is "AP" or "II")
+        {
+            await using var prevConn = await GetDbAsync();
+            var prev = await prevConn.QueryAsync<PostedBefore>(
+                "SELECT PayloadJson, SapDocNo FROM ocr.PostLog WHERE DocId=@docId AND Success=1 AND ISNULL(SapDocNo,'')<>''",
+                new { docId });
+            foreach (var row in prev)
+            {
+                try
+                {
+                    using var pj = JsonDocument.Parse(row.PayloadJson ?? "{}");
+                    var root = pj.RootElement;
+                    var key = PostedKey(
+                        root.TryGetProperty("InvoicingParty", out var ip) ? ip.ToString() : "",
+                        root.TryGetProperty("SupplierInvoiceIDByInvcgParty", out var rf) ? rf.ToString() : "");
+                    if (key.Length > 1) alreadyCreated[key] = row.SapDocNo ?? "";
+                }
+                catch (JsonException) { /* an unreadable old log row is not a reason to block posting */ }
+            }
+        }
+        var skipped = new HashSet<Dictionary<string, object?>>();
         foreach (var p in payloads)
         {
+            if (alreadyCreated.TryGetValue(PostedKey(p.GetStr("InvoicingParty"), p.GetStr("SupplierInvoiceIDByInvcgParty")), out var done))
+            {
+                skipped.Add(p);
+                results.Add((p, new MgtOcr.Sap.SapPostResult(true, false, done, "",
+                    $"Already created earlier as {done} — not sent again")));
+                continue;
+            }
             // Stop at the first refusal: posting the rest would scatter half a bundle across SAP
             // and leave the person reconciling it by hand.
             var one = await sap.PostAsync(module, p);
@@ -1584,6 +1968,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         {
             foreach (var (p, one) in results)
             {
+                if (skipped.Contains(p)) continue;   // logged when it was actually created
                 await conn.ExecuteAsync("""
                     INSERT ocr.PostLog(DocId,Module,SapDocNo,Endpoint,PayloadJson,Success,Message,PostedBy,SalesOrg)
                     VALUES(@docId,@module,@sapDocNo,@endpoint,@payloadJson,@success,@message,@user,@salesOrg)
@@ -1600,8 +1985,17 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             // POSTED only when every supplier's invoice was taken: a partly posted bundle stays
             // open so the person can see it is not finished.
             if (allOk)
+            {
+                // AP/II can produce one SAP invoice per supplier, but Document.SapDocNo is a
+                // short single-document field. Keep the first SAP key there; every supplier's
+                // full key is already stored in its own PostLog row and returned in the response.
+                // The shared SO flow keeps its existing joined-number behavior unchanged.
+                var documentSapDocNo = module is "AP" or "II"
+                    ? results.Select(x => x.Result.SapDocNo).FirstOrDefault(n => !string.IsNullOrWhiteSpace(n)) ?? ""
+                    : Cut50(sapDocNos);
                 await conn.ExecuteAsync($"UPDATE {docT} SET Status='POSTED', SapDocNo=@sapDocNo, CompanyCode=@companyCode, PostedAt=SYSDATETIME(), PostedBy=@user, UpdatedAt=SYSDATETIME() WHERE DocId=@docId",
-                    new { sapDocNo = Cut50(sapDocNos), companyCode, user, docId }, tx);
+                    new { sapDocNo = documentSapDocNo, companyCode, user, docId }, tx);
+            }
             await tx.CommitAsync();
         }
         // Queue the source file for SharePoint (real posts only, not simulation). Best effort:
@@ -1649,7 +2043,16 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
                 + (sapDocNos.Length > 0 ? $": {sapDocNos}" : "")
                 + (allOk ? "" : $" — {r.Message}")
             : r.Message;
+        // Shipping documents go in PARKED (SupplierInvoicePayload sets SupplierInvoiceStatus "A"):
+        // say so, so nobody reads "created" as "posted".
+        if (allOk && payloads.Any(p => p.GetStr("SupplierInvoiceStatus") == "A"))
+            summary = $"สร้าง Draft (Parked) ใน SAP แล้ว: {sapDocNos} — ยังไม่ Post / Simulate รอ AP ตรวจและ Post เอง";
 
+        var resultDocument = await repo.GetDocumentAsync(docId);
+        if (module is "AP" or "II")
+            resultDocument["sapDocNos"] = results.Where(x => x.Result.Success)
+                .Select(x => x.Result.SapDocNo).Where(n => !string.IsNullOrWhiteSpace(n))
+                .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         return Ok(new
         {
             success = allOk,
@@ -1658,7 +2061,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             endpoint = r.Endpoint,
             message = summary,
             vendors = perVendor,
-            document = await repo.GetDocumentAsync(docId),
+            document = resultDocument,
         });
     }
 

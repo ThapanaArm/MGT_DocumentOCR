@@ -124,12 +124,31 @@ public class AppConfig
     // tenant is not something a misread setting elsewhere should be able to cause.
     public string SapSupplierInvoiceBaseUrl { get; init; } = "";
     public string SapSupplierInvoiceAuthHeader { get; init; } = "";
+    // Vendor codes translated at the moment a supplier invoice is SENT, read from
+    // Sap:SupplierInvoice:VendorMap_{Dev|Prod}. The test tenant numbers suppliers differently from
+    // production (PROMPT is 4000357 in production, 1000134 in test), and changing the code on the
+    // document itself detaches its Tax tab rows. Empty = send the codes exactly as the document has them.
+    public IReadOnlyDictionary<string, string> SapSupplierInvoiceVendorMap { get; init; } =
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    // Same idea for the goods-receipt material document (ReferenceDocument on a PO line), read from
+    // Sap:SupplierInvoice:MatDocMap_{Dev|Prod}: the bundle carries production's number
+    // (A-MatDoc_5000002095_...) while the test tenant's GR for the same PO is another one.
+    public IReadOnlyDictionary<string, string> SapSupplierInvoiceMatDocMap { get; init; } =
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
     // Purchase Order lookup — API_PURCHASEORDER_PROCESS_SRV, read-only. A supplier invoice has to
     // name the PO ITEM it is billing (PurchaseOrderItem 10, 20, …), and that number exists only in
     // SAP; the shipping form does not carry it. Blank BaseUrl = not configured = no lookup.
     public string SapPurchaseOrderBaseUrl { get; init; } = "";
     public string SapPurchaseOrderAuthHeader { get; init; } = "";
+
+    // Goods receipts — API_MATERIAL_DOCUMENT_SRV (communication scenario SAP_COM_0108), read-only,
+    // for the PO / GR / invoice reconciliation. Its own auth header because the communication user
+    // of that arrangement need not be the one the PO service accepts; empty = use the PO one.
+    public string SapMaterialDocumentBaseUrl { get; init; } = "";
+    public string SapMaterialDocumentAuthHeader { get; init; } = "";
+    // "dev" / "prod" — which tenant the supplier-invoice routes point at, stamped on reconciliation rows.
+    public string SapSupplierInvoiceEnvironment { get; init; } = "dev";
 
     // One row per legal entity (Sales Organization + Company Code + Plant) this system posts
     // Sales Orders for. Per user: Plant is what identifies the company in practice (e.g. 2100 =

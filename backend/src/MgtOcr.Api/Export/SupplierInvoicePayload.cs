@@ -34,7 +34,8 @@ public static class SupplierInvoicePayload
         IReadOnlyList<SapPurchaseOrderItem> poItems,
         Dictionary<string, object?>? source = null,
         string paymentTerms = "",
-        string vendorFilter = "")
+        string vendorFilter = "",
+        IReadOnlyList<System.Text.Json.JsonElement>? goodsReceiptItems = null)
     {
         var header = doc.Get("header") as Dictionary<string, object?> ?? new Dictionary<string, object?>();
         var poRef = PoNumber(header);
@@ -112,7 +113,7 @@ public static class SupplierInvoicePayload
         // takes automatic postings only, in the test tenant and in production alike.
         var deliveryCosts = wantsDeliveryCosts
             ? DeliveryCostItems(doc, poRef, currency, header.GetStr("taxCode").Trim(),
-                invoicingParty, itemText, Mine, purOrdRef.Count)
+                invoicingParty, itemText, Mine, purOrdRef.Count, poItems, goodsReceiptItems)
             : [];
         purOrdRef.AddRange(deliveryCosts);
 
@@ -176,16 +177,28 @@ public static class SupplierInvoicePayload
             });
         }
 
-        var gross = purOrdRef.Sum(PoAmount)
-            + glAccountItems.Sum(i => Num(((Dictionary<string, object?>)i).Get("SupplierInvoiceItemAmount")))
-            + taxItems.Sum(i => Num(((Dictionary<string, object?>)i).Get("TaxAmount")));
+        // Shipping documents (delivery costs, duty, fees — anything that is not a plain goods
+        // invoice against a PO) go to SAP PARKED, not posted: AP opens the draft, checks it and
+        // posts it themselves. Goods invoices (INVENTORY_PO) keep posting as before.
+        var park = !isPoKeyed;
+
+        // Gross = what the lines add up to, with each G/L line SIGNED by its Debit/Credit code.
+        // The old sum added every G/L line as positive, so a credit (H) line pushed the gross UP
+        // instead of down and the draft opened in SAP with a balance that was not zero.
+        var gross = SumOfParts(purOrdRef, glAccountItems, taxItems);
         // A document whose own total was read and reviewed wins over the sum of its parts: the
         // difference is the rounding SAP books as Purchase Variance, and it can only do that if we
         // state the real invoice total.
         // Only when the whole document is being posted: header.totalAmount is the bundle's total,
         // so using it for one supplier's share would bill that supplier for everybody's costs.
         var stated = vendor.Length == 0 ? Num(header.Get("totalAmount")) : 0;
-        if (stated > 0) gross = stated;
+        if (stated > 0)
+        {
+            // A parked document must open in SAP with Balance 0 — nobody posts it here, so there is
+            // no Purchase Variance to soak up the difference. Satang rounding is moved onto the
+            // largest line; anything bigger is a real mismatch and is refused before sending.
+            gross = park ? BalanceToStated(stated, gross, purOrdRef, glAccountItems, taxItems) : stated;
+        }
 
         var payload = new Dictionary<string, object?>
         {
@@ -248,9 +261,65 @@ public static class SupplierInvoicePayload
         if (glAccountItems.Count > 0) payload["to_SupplierInvoiceItemGLAcct"] = glAccountItems;
         if (taxItems.Count > 0) payload["to_SupplierInvoiceTax"] = taxItems;
 
+        // "A" = Parked: the invoice gets its SAP number and waits for AP, unposted and unsimulated.
+        if (park) payload["SupplierInvoiceStatus"] = "A";
+
         var wht = Num(header.Get("whtAmount"));
         if (wht > 0) payload["_wht"] = new Dictionary<string, object?> { ["WithholdingTaxAmount"] = F2(wht) };
         return payload;
+    }
+
+    /// <summary>Largest difference between the stated invoice total and the sum of its lines
+    /// that is treated as rounding (THB/USD satang across many lines). Above it the document
+    /// is refused so a person can see which line is wrong.</summary>
+    private const double RoundingTolerance = 1.00;
+
+    private static double ItemAmount(object item) =>
+        Num(((Dictionary<string, object?>)item).Get("SupplierInvoiceItemAmount"));
+
+    private static bool IsCredit(object item) =>
+        string.Equals(((Dictionary<string, object?>)item).GetStr("DebitCreditCode"), "H",
+            StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>What SAP's Balance compares the Gross against: PO-reference lines, G/L lines
+    /// (debit +, credit −) and the tax rows.</summary>
+    private static double SumOfParts(List<object> purOrdRef, List<object> glAccountItems, List<object> taxItems) =>
+        Math.Round(
+            purOrdRef.Sum(PoAmount)
+            + glAccountItems.Sum(i => IsCredit(i) ? -ItemAmount(i) : ItemAmount(i))
+            + taxItems.Sum(i => Num(((Dictionary<string, object?>)i).Get("TaxAmount"))),
+            2);
+
+    /// <summary>Makes the lines add up to the stated total so the parked draft opens with
+    /// Balance 0. A difference within <see cref="RoundingTolerance"/> is added to the largest
+    /// debit line; a bigger one is refused with the figures, before anything reaches SAP.</summary>
+    private static double BalanceToStated(
+        double stated, double sumOfParts, List<object> purOrdRef, List<object> glAccountItems, List<object> taxItems)
+    {
+        var diff = Math.Round(stated - sumOfParts, 2);
+        if (diff == 0) return stated;
+
+        if (Math.Abs(diff) > RoundingTolerance)
+            throw new MgtOcr.Core.HttpApiException(400,
+                $"ยอดรวมในเอกสาร {F2(stated)} ไม่เท่ากับผลรวมรายการ {F2(sumOfParts)} (ต่างกัน {F2(diff)}) — "
+                + $"เกินเศษปัด {F2(RoundingTolerance)} จึงยังไม่ส่งเข้า SAP เพราะ Draft จะเปิดมาโดย Balance ไม่เป็น 0\n\n"
+                + $"รายการตาม PO {F2(purOrdRef.Sum(PoAmount))} · "
+                + $"G/L Debit {F2(glAccountItems.Where(i => !IsCredit(i)).Sum(ItemAmount))} · "
+                + $"G/L Credit {F2(glAccountItems.Where(IsCredit).Sum(ItemAmount))} · "
+                + $"VAT {F2(taxItems.Sum(i => Num(((Dictionary<string, object?>)i).Get("TaxAmount"))))}\n"
+                + "ตรวจยอด Total, บรรทัด VAT และบรรทัดที่ลงฝั่ง Credit (เช่น WHT / ภาษีซื้อรอเรียกเก็บ) แล้ว Mapping ใหม่");
+
+        var target = purOrdRef.Concat(glAccountItems.Where(i => !IsCredit(i)))
+            .OrderByDescending(ItemAmount)
+            .FirstOrDefault();
+        if (target == null)
+            throw new MgtOcr.Core.HttpApiException(400,
+                $"ยอดรวมต่างจากผลรวมรายการ {F2(diff)} แต่ไม่มีบรรทัดฝั่ง Debit ให้ปัดเศษเข้า");
+
+        var row = (Dictionary<string, object?>)target;
+        row["SupplierInvoiceItemAmount"] = F2(ItemAmount(target) + diff);
+        row["_roundingAdjusted"] = F2(diff);   // "_" keys are stripped before the POST
+        return stated;
     }
 
     private static double PoAmount(object item) =>
@@ -340,13 +409,55 @@ public static class SupplierInvoicePayload
     private static List<object> DeliveryCostItems(
         Dictionary<string, object?> doc, string poRef, string headerCurrency, string headerTaxCode,
         string invoicingParty, string itemText,
-        Func<Dictionary<string, object?>, bool> mine, int startNo)
+        Func<Dictionary<string, object?>, bool> mine, int startNo,
+        IReadOnlyList<SapPurchaseOrderItem>? poItems = null,
+        IReadOnlyList<System.Text.Json.JsonElement>? goodsReceiptItems = null)
     {
         var result = new List<object>();
         if (doc.Get("lines") is not System.Collections.IEnumerable lines) return result;
 
+        // Every delivery-cost condition the purchase order holds, item by item, as SAP returned it.
+        // Empty when the PO could not be read; then only lines the person completed by hand go out.
+        var poConds = (poItems ?? [])
+            .SelectMany(i => i.Conditions.Select(c => (Item: i.Item, Cond: c)))
+            .Where(x => x.Cond.ConditionType.Trim().Length > 0)
+            .ToList();
+
+        // A PO condition can be present on an item before any goods have arrived. SAP will reject
+        // planned delivery costs on that item (M8_2155 for split-valuated stock), so determine
+        // eligible items from the net received quantity, reversing 102/122/162 and credit-side
+        // movements. Normalize the SAP item number because one API can return "00010" and another
+        // "10" for the same item.
+        static string ItemKey(string value) =>
+            int.TryParse(value.Trim(), out var number) ? number.ToString(System.Globalization.CultureInfo.InvariantCulture) : value.Trim();
+        static string? GrString(System.Text.Json.JsonElement row, string name) =>
+            row.ValueKind == System.Text.Json.JsonValueKind.Object
+            && row.TryGetProperty(name, out var value)
+                ? value.ValueKind == System.Text.Json.JsonValueKind.String ? value.GetString()
+                : value.ValueKind == System.Text.Json.JsonValueKind.Number ? value.ToString() : null
+                : null;
+        static double GrNumber(System.Text.Json.JsonElement row, string name) =>
+            double.TryParse(GrString(row, name), System.Globalization.NumberStyles.Any,
+                System.Globalization.CultureInfo.InvariantCulture, out var amount)
+                ? amount : 0;
+        static bool GrReversal(System.Text.Json.JsonElement row) =>
+            string.Equals(GrString(row, "DebitCreditCode"), "H", StringComparison.OrdinalIgnoreCase)
+            || GrString(row, "GoodsMovementType") is "102" or "122" or "162";
+        var receivedItems = (goodsReceiptItems ?? [])
+            .Where(row => !string.IsNullOrWhiteSpace(GrString(row, "PurchaseOrderItem")))
+            .GroupBy(row => ItemKey(GrString(row, "PurchaseOrderItem")!))
+            .Where(group => group.Sum(row => (GrReversal(row) ? -1 : 1)
+                * GrNumber(row, "QuantityInEntryUnit")) > 0.000001)
+            .Select(group => group.Key)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        // Pass 1: each cost line with the condition it settles. The screen hides the PO item for a
+        // "Planned delivery costs" document (category 2) — the charge belongs to a CONDITION, which
+        // the goods receipt accrued on several PO items at once — so the item is usually empty here
+        // and is worked out from the purchase order in pass 2.
         var missing = new List<string>();
-        var no = startNo;
+        var charges = new List<(string Cond, string PoItem, string Step, string Count, string Vendor,
+            string TaxCode, string Desc, double Amount)>();
         foreach (var raw in lines)
         {
             if (raw is not Dictionary<string, object?> l) continue;
@@ -358,46 +469,127 @@ public static class SupplierInvoicePayload
             if (!mine(extra)) continue;
 
             var cndnType = Or(extra.GetStr("deliveryCondType").Trim(), extra.GetStr("condType").Trim());
-            var poItem = extra.GetStr("sapPoItem").Trim();
-            if (cndnType.Length == 0 || poItem.Length == 0)
+            if (cndnType.Length == 0 && poConds.Count > 0)
             {
-                missing.Add($"\"{Cut(l.GetStr("desc"), 40)}\" ("
-                    + (poItem.Length == 0 ? "ยังไม่ได้ผูกรายการ PO" : $"PO item {poItem}")
-                    + (cndnType.Length == 0 ? ", ยังไม่ได้เลือก Condition" : "") + ")");
+                // Same rule as the screen's "Assign all": the PO condition whose amount the line
+                // bills exactly, and only when exactly one condition type answers.
+                var hits = poConds
+                    .Where(x => Math.Abs((double)x.Cond.Amount - amount) <= 0.01
+                             || Math.Abs((double)x.Cond.RateValue - amount) <= 0.01)
+                    .Select(x => x.Cond.ConditionType.Trim())
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                if (hits.Count == 1) cndnType = hits[0];
+            }
+            if (cndnType.Length == 0)
+            {
+                missing.Add($"\"{Cut(l.GetStr("desc"), 40)}\" (ยังไม่ได้เลือก Condition)");
+                continue;
+            }
+            charges.Add((cndnType.ToUpperInvariant(), extra.GetStr("sapPoItem").Trim(),
+                extra.GetStr("deliveryCondStep").Trim(), extra.GetStr("deliveryCondCount").Trim(),
+                extra.GetStr("vendorCode").Trim(), Or(extra.GetStr("taxCode").Trim(), headerTaxCode),
+                l.GetStr("desc").Trim(), amount));
+        }
+
+        // Pass 2: one SAP line per (PO item, condition). Several charges on the form usually settle
+        // the same condition (DO, storage, trucking, labour… are all ZLH1 Local Handling), and SAP
+        // takes one line per PO item and condition — so they are summed first, then spread over the
+        // PO items that accrued that condition, in proportion to what each item accrued. That is
+        // what MIRO does when it proposes planned delivery costs; the satang left over by rounding
+        // goes to the largest share so the lines still add up to the invoice exactly.
+        var rows = new List<(string PoItem, string Cond, string Step, string Count, string Vendor,
+            string TaxCode, string Text, double Amount)>();
+        foreach (var g in charges.GroupBy(c => (c.Cond, c.PoItem, c.Vendor, c.TaxCode)))
+        {
+            var total = Math.Round(g.Sum(c => c.Amount), 2);
+            var text = string.Join(", ", g.Select(c => c.Desc).Where(d => d.Length > 0).Distinct());
+            var one = g.Count() == 1 ? g.First() : default;
+            var step = g.Count() == 1 ? one.Step : "";
+            var count = g.Count() == 1 ? one.Count : "";
+
+            if (g.Key.PoItem.Length > 0)
+            {
+                if (!receivedItems.Contains(ItemKey(g.Key.PoItem)))
+                {
+                    missing.Add($"\"{Cut(text, 40)}\" (PO item {g.Key.PoItem} ยังไม่มี GR สุทธิ)");
+                    continue;
+                }
+                rows.Add((g.Key.PoItem, g.Key.Cond, step, count, g.Key.Vendor, g.Key.TaxCode, text, total));
                 continue;
             }
 
-            var row = new Dictionary<string, object?>
+            var holders = poConds
+                .Where(x => string.Equals(x.Cond.ConditionType.Trim(), g.Key.Cond, StringComparison.OrdinalIgnoreCase)
+                    && x.Cond.Amount != 0
+                    && receivedItems.Contains(ItemKey(x.Item)))
+                .GroupBy(x => x.Item)
+                .Select(h => (Item: h.Key, Weight: (double)h.Sum(x => Math.Abs(x.Cond.Amount))))
+                .Where(h => h.Weight > 0)
+                .OrderBy(h => h.Item.PadLeft(10, '0'))
+                .ToList();
+            if (holders.Count == 0)
             {
-                ["SupplierInvoiceItem"] = (++no).ToString(),
-                ["PurchaseOrder"] = poRef,
-                ["PurchaseOrderItem"] = poItem,
-                ["DocumentCurrency"] = headerCurrency,
-                ["SupplierInvoiceItemAmount"] = F2(amount),
-                ["SuplrInvcDeliveryCostCndnType"] = cndnType,
-                // A condition entered more than once on the same PO item is told apart by its
-                // step and counter. Sent only when the person has them — on a PO with one
-                // condition of each type per item SAP finds it from the type alone.
-                ["SuplrInvcDeliveryCostCndnStep"] = extra.GetStr("deliveryCondStep").Trim() is { Length: > 0 } st ? st : null,
-                ["SuplrInvcDeliveryCostCndnCount"] = extra.GetStr("deliveryCondCount").Trim() is { Length: > 0 } cnt ? cnt : null,
-                // The supplier the condition names on the purchase order. Omitted when it is the
-                // one being invoiced, which is the ordinary case — SAP then uses the document's
-                // own invoicing party.
-                ["FreightSupplier"] = extra.GetStr("vendorCode").Trim() is { Length: > 0 } fs
-                    && !string.Equals(fs, invoicingParty.Trim(), StringComparison.OrdinalIgnoreCase) ? fs : null,
-                ["TaxCode"] = Or(extra.GetStr("taxCode").Trim(), headerTaxCode),
-                ["SupplierInvoiceItemText"] = Cut(Or(l.GetStr("desc").Trim(), itemText), 50),
-                ["_deliveryCost"] = true,
-            };
-            result.Add(row);
+                missing.Add($"\"{Cut(text, 40)}\" (" + (poConds.Count == 0
+                    ? "อ่าน PO จาก SAP ไม่ได้ จึงหารายการ PO ให้ไม่ได้"
+                    : $"PO {poRef} ไม่มี Condition {g.Key.Cond} ที่ตั้งค้างไว้") + ")");
+                continue;
+            }
+
+            var weightSum = holders.Sum(h => h.Weight);
+            var shares = holders
+                .Select(h => (h.Item, h.Weight, Amount: Math.Round(total * h.Weight / weightSum, 2)))
+                .ToList();
+            var rest = Math.Round(total - shares.Sum(x => x.Amount), 2);
+            if (rest != 0)
+            {
+                var big = shares.IndexOf(shares.OrderByDescending(x => x.Weight).First());
+                shares[big] = (shares[big].Item, shares[big].Weight, Math.Round(shares[big].Amount + rest, 2));
+            }
+            foreach (var sh in shares.Where(x => x.Amount != 0))
+                rows.Add((sh.Item, g.Key.Cond, "", "", g.Key.Vendor, g.Key.TaxCode, text, sh.Amount));
         }
 
         if (missing.Count > 0)
             throw new MgtOcr.Core.HttpApiException(400,
-                $"ค่าใช้จ่ายที่จะตัดกับ PO {poRef} ยังไม่ครบ — แต่ละบรรทัดต้องมีทั้ง **รายการใน PO** และ "
-                + "**Condition** (ZFRE / ZLH1 / ZED1 / ZFE2 / ZINS / ZIM1 / ZOVS / ZOTH) ที่ตั้งไว้ใน PO "
-                + "เพราะ SAP ใช้ condition เป็นตัวบอกว่าจะไปล้าง accrual ตัวไหน เดาแทนไม่ได้\n\n"
+                $"ค่าใช้จ่ายที่จะตัดกับ PO {poRef} ยังไม่ครบ — แต่ละบรรทัดต้องเลือก **Condition** "
+                + "(ZFRE / ZLH1 / ZED1 / ZFE2 / ZINS / ZIM1 / ZOVS / ZOTH) ให้ตรงกับที่ตั้งไว้ใน PO "
+                + "ระบบจะกระจายยอดไปตามรายการใน PO ที่มี Condition นั้นให้เอง\n\n"
                 + "บรรทัดที่ยังขาด: " + string.Join(" · ", missing));
+
+        // Same PO item + condition from two groups (e.g. one with a tax code typed by hand) would be
+        // refused by SAP as a duplicate, so they are merged here.
+        var no = startNo;
+        foreach (var r in rows.GroupBy(r => (r.PoItem, r.Cond, r.Vendor, r.TaxCode)))
+        {
+            var first = r.First();
+            var single = r.Count() == 1;
+            var amount = Math.Round(r.Sum(x => x.Amount), 2);
+            var text = string.Join(", ", r.Select(x => x.Text).Where(t => t.Length > 0).Distinct());
+            result.Add(new Dictionary<string, object?>
+            {
+                ["SupplierInvoiceItem"] = (++no).ToString(),
+                ["PurchaseOrder"] = poRef,
+                ["PurchaseOrderItem"] = r.Key.PoItem,
+                ["DocumentCurrency"] = headerCurrency,
+                ["SupplierInvoiceItemAmount"] = F2(amount),
+                ["SuplrInvcDeliveryCostCndnType"] = r.Key.Cond,
+                // A condition entered more than once on the same PO item is told apart by its
+                // step and counter. Sent only when the person typed them for a single line — on a
+                // PO with one condition of each type per item SAP finds it from the type alone.
+                ["SuplrInvcDeliveryCostCndnStep"] = single && first.Step.Length > 0 ? first.Step : null,
+                ["SuplrInvcDeliveryCostCndnCount"] = single && first.Count.Length > 0 ? first.Count : null,
+                // The supplier the condition names on the purchase order. Omitted when it is the
+                // one being invoiced, which is the ordinary case — SAP then uses the document's
+                // own invoicing party.
+                ["FreightSupplier"] = r.Key.Vendor.Length > 0
+                    && !string.Equals(r.Key.Vendor, invoicingParty.Trim(), StringComparison.OrdinalIgnoreCase)
+                        ? r.Key.Vendor : null,
+                ["TaxCode"] = r.Key.TaxCode,
+                ["SupplierInvoiceItemText"] = Cut(Or(text, itemText), 50),
+                ["_deliveryCost"] = true,
+            });
+        }
 
         return result;
     }

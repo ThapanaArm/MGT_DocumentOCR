@@ -138,7 +138,18 @@ var appConfig = new AppConfig
     SapBillingAuthHeader = Get("Sap:Billing:AuthHeader"),
     SapSupplierInvoiceBaseUrl = Get($"Sap:SupplierInvoice:BaseUrl_{Cap(sapSupplierInvoiceEnv)}"),
     SapSupplierInvoiceAuthHeader = Get("Sap:SupplierInvoice:AuthHeader", Get("Sap:BusinessPartner:AuthHeader")),
+    SapSupplierInvoiceVendorMap = cfg.GetSection($"Sap:SupplierInvoice:VendorMap_{Cap(sapSupplierInvoiceEnv)}")
+        .GetChildren()
+        .Where(c => !string.IsNullOrWhiteSpace(c.Value))
+        .ToDictionary(c => c.Key.Trim(), c => c.Value!.Trim(), StringComparer.OrdinalIgnoreCase),
+    SapSupplierInvoiceMatDocMap = cfg.GetSection($"Sap:SupplierInvoice:MatDocMap_{Cap(sapSupplierInvoiceEnv)}")
+        .GetChildren()
+        .Where(c => !string.IsNullOrWhiteSpace(c.Value))
+        .ToDictionary(c => c.Key.Trim(), c => c.Value!.Trim(), StringComparer.OrdinalIgnoreCase),
     SapPurchaseOrderBaseUrl = Get($"Sap:PurchaseOrder:BaseUrl_{Cap(sapPurchaseOrderEnv)}"),
+    SapMaterialDocumentBaseUrl = Get($"Sap:MaterialDocument:BaseUrl_{Cap(sapPurchaseOrderEnv)}"),
+    SapMaterialDocumentAuthHeader = Get("Sap:MaterialDocument:AuthHeader", Get("Sap:PurchaseOrder:AuthHeader")),
+    SapSupplierInvoiceEnvironment = sapSupplierInvoiceEnv,
     SapPurchaseOrderAuthHeader = Get("Sap:PurchaseOrder:AuthHeader", Get("Sap:BusinessPartner:AuthHeader")),
     // MGT/GLC: SalesOrganization/CompanyCode/DefaultPlant per company (see CompanyProfile).
     // Defaults match what was already hardcoded per-module before this existed, so an

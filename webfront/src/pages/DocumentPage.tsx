@@ -12,6 +12,7 @@ import {
   getRawText,
   learnMaterial,
   postToSap,
+  reopenDeletedApInvoice,
   reocrDocument,
   setDocCategory,
   type ChatMessage,
@@ -1350,6 +1351,23 @@ export default function DocumentPage() {
       } finally {
         setPosting(false);
       }
+    });
+
+  const reopenDeletedAp = () =>
+    guard(async () => {
+      const sapDocNo = window.prompt(
+        'Enter the SAP invoice number you deleted (for example, 5105600172):',
+        doc.sapDocNo || '',
+      )?.trim();
+      if (!sapDocNo) return;
+      if (!window.confirm(
+        `Confirm that SAP invoice ${sapDocNo} was deleted. Only this supplier invoice will be eligible for retry; other successful invoices will remain protected from duplicate submission.`,
+      )) return;
+
+      const reopened = await reopenDeletedApInvoice(doc.docId, sapDocNo);
+      setDoc(reopened);
+      setPostError(null);
+      showToast(`AP invoice ${sapDocNo} reopened for correction`, 'success');
     });
 
   /* Why the "Confirm send to SAP" button is greyed out. It used to hang off a single
@@ -2693,18 +2711,45 @@ export default function DocumentPage() {
         (() => {
           const toZoho =
             doc.module === 'SO' && (doc.companyCode ? String(doc.companyCode).toUpperCase() === 'MGT' : isMgt);
+          const sapDocumentNumbers =
+            (doc.module === 'AP' || doc.module === 'II') && doc.sapDocNos?.length
+              ? doc.sapDocNos.join(', ')
+              : doc.sapDocNo;
           return (
             <div className="result ok">
               <h3>
                 <i className="fa-solid fa-check" /> {toZoho ? 'Sent to Zoho CRM successfully' : 'Sent to SAP S/4HANA successfully'}
               </h3>
               <div>
-                {toZoho ? 'Zoho Sales Order' : 'SAP Document'}: <code>{doc.sapDocNo}</code> | {moduleLabel(doc.module)} |{' '}
+                {toZoho ? 'Zoho Sales Order' : 'SAP Document'}: <code>{sapDocumentNumbers}</code> | {moduleLabel(doc.module)} |{' '}
                 {dt(doc.postedAt)}
               </div>
+              {(doc.module === 'AP' || doc.module === 'II') && (
+                <div className="row" style={{ marginTop: 12 }}>
+                  <button className="btn" onClick={reopenDeletedAp}>
+                    Reopen after deleting an SAP invoice
+                  </button>
+                  <span className="hint">
+                    Use only after deleting that parked invoice in SAP. Other supplier invoices stay protected.
+                  </span>
+                </div>
+              )}
             </div>
           );
         })()
+      )}
+
+      {partial && (doc.module === 'AP' || doc.module === 'II') && (
+        <div className="result warn">
+          <h3><i className="fa-solid fa-circle-exclamation" /> Some supplier invoices were sent to SAP</h3>
+          <div>After deleting a parked invoice in SAP, reopen only that invoice here to correct and retry it.</div>
+          <div className="row" style={{ marginTop: 12 }}>
+            <button className="btn" onClick={reopenDeletedAp}>
+              Reopen after deleting an SAP invoice
+            </button>
+            <span className="hint">Other successful supplier invoices remain protected from duplicate submission.</span>
+          </div>
+        </div>
       )}
 
       {fileExpired && (

@@ -39,6 +39,7 @@ export interface DocModel {
   apDocCategory?: string;
   partnerCode?: string;
   sapDocNo?: string;
+  sapDocNos?: string[];
   postedAt?: string;
   createdAt?: string;
   createdBy?: string;
@@ -157,6 +158,9 @@ export const postToSap = (id: number, user: string) =>
     endpoint?: string;
     message?: string;
   }>('/api/documents/' + id + '/post', { user });
+
+export const reopenDeletedApInvoice = (id: number, sapDocNo: string) =>
+  api.post<DocModel>('/api/documents/' + id + '/reopen-deleted-ap-invoice', { sapDocNo });
 
 /* Sales Order: one Sales Order PER DELIVERY DATE, all sent from this one document (replaces the
    old split into child documents). One entry per delivery-date group (key = date YYYY-MM-DD,

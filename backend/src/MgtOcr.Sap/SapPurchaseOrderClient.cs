@@ -104,6 +104,81 @@ public class SapPurchaseOrderClient(AppConfig config, HttpClient httpClient)
         return items;
     }
 
+    /// <summary>Any entity set of the purchase-order service, raw (e.g. "A_PurchaseOrder('2230000035')",
+    /// "A_PurchaseOrderScheduleLine?$filter=..."). For the reconciliation, which needs fields the
+    /// typed records do not carry (document date, material group, delivery date).</summary>
+    public async Task<List<JsonElement>> RawAsync(string entityAndQuery)
+    {
+        if (!Configured) return [];
+        var sep = entityAndQuery.Contains('?') ? "&" : "?";
+        var json = await GetJsonAsync($"{config.SapPurchaseOrderBaseUrl.TrimEnd('/')}/{entityAndQuery}{sep}$format=json");
+        using var doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(json) ? "{}" : json);
+        var root = doc.RootElement;
+        var d = root.TryGetProperty("d", out var dd) ? dd : root;
+        if (d.TryGetProperty("results", out var arr) && arr.ValueKind == JsonValueKind.Array)
+            return arr.EnumerateArray().Select(e => e.Clone()).ToList();
+        return d.ValueKind == JsonValueKind.Object ? [d.Clone()] : [];
+    }
+
+    /// <summary>Goods-receipt items of a purchase order — API_MATERIAL_DOCUMENT_SRV /
+    /// A_MaterialDocumentItem. Raw, every field SAP sends. Empty when the service is not configured.</summary>
+    public async Task<List<JsonElement>> GoodsReceiptItemsAsync(string purchaseOrder)
+    {
+        var po = (purchaseOrder ?? "").Trim();
+        var baseUrl = config.SapMaterialDocumentBaseUrl;
+        if (string.IsNullOrWhiteSpace(baseUrl) || po.Length == 0) return [];
+        var url = $"{baseUrl.TrimEnd('/')}/A_MaterialDocumentItem" +
+                  $"?$filter={Uri.EscapeDataString($"PurchaseOrder eq '{EscapeODataLiteral(po)}'")}&$top=500&$format=json";
+        using var req = new HttpRequestMessage(HttpMethod.Get, url);
+        var auth = string.IsNullOrWhiteSpace(config.SapMaterialDocumentAuthHeader)
+            ? config.SapPurchaseOrderAuthHeader : config.SapMaterialDocumentAuthHeader;
+        if (!string.IsNullOrWhiteSpace(auth)) req.Headers.TryAddWithoutValidation("Authorization", auth);
+        else ApplyAuth(req);
+        req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        using var resp = await httpClient.SendAsync(req, cts.Token);
+        var text = await resp.Content.ReadAsStringAsync(cts.Token);
+        if (!resp.IsSuccessStatusCode)
+            throw new Exception($"SAP material-document lookup failed: {(int)resp.StatusCode} {Trunc(text, 300)}");
+        return EnumerateResults(text).Select(e => e.Clone()).ToList();
+    }
+
+    /// <summary>Every pricing row of the PO except the base price and cash discount, with ALL the
+    /// scalar fields SAP sends for it. For the reconciliation endpoint: it shows the condition
+    /// values exactly as SAP holds them, and whatever supplier field the service exposes on a
+    /// delivery-cost condition (M8287 "different invoicing party planned for del. costs" comes
+    /// from that field), without this class having to know the field's name in advance.</summary>
+    public async Task<List<Dictionary<string, string?>>> PricingRawAsync(string purchaseOrder)
+    {
+        var po = (purchaseOrder ?? "").Trim();
+        var result = new List<Dictionary<string, string?>>();
+        if (!Configured || po.Length == 0) return result;
+
+        var url = $"{config.SapPurchaseOrderBaseUrl.TrimEnd('/')}/A_PurchaseOrderItem" +
+                  $"?$filter={Uri.EscapeDataString($"PurchaseOrder eq '{EscapeODataLiteral(po)}'")}" +
+                  "&$expand=to_PurchaseOrderPricingElement&$top=200&$format=json";
+        foreach (var item in EnumerateResults(await GetJsonAsync(url)))
+        {
+            if (!item.TryGetProperty("to_PurchaseOrderPricingElement", out var node)
+                || node.ValueKind != JsonValueKind.Object
+                || !node.TryGetProperty("results", out var arr)
+                || arr.ValueKind != JsonValueKind.Array) continue;
+            foreach (var el in arr.EnumerateArray())
+            {
+                var type = (GetString(el, "ConditionType") ?? "").Trim().ToUpperInvariant();
+                if (type.Length == 0 || type is "PMP0" or "DCD1") continue;
+                var row = new Dictionary<string, string?>();
+                foreach (var prop in el.EnumerateObject())
+                {
+                    if (prop.Name.StartsWith("__") || prop.Value.ValueKind is JsonValueKind.Object or JsonValueKind.Array) continue;
+                    row[prop.Name] = prop.Value.ValueKind == JsonValueKind.String ? prop.Value.GetString() : prop.Value.ToString();
+                }
+                result.Add(row);
+            }
+        }
+        return result;
+    }
+
     /// <summary>The PO header (supplier, company code, currency). Never throws for a PO that is
     /// not there — the items call is the one that decides whether the PO could be read.</summary>
     public async Task<SapPurchaseOrderHead?> HeadAsync(string purchaseOrder)
