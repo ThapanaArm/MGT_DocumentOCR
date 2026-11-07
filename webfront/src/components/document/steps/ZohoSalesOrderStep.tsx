@@ -245,11 +245,22 @@ const ZohoSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function Zoho
   };
 
   const buildEdits = (): ZohoSalesOrderEdits => {
-    const mappedShipTo = shipTos.find((item) => String(item.SapShipToCode ?? '') === String(map.header.shipTo.code ?? ''));
+    const shipToMatch = map.header.shipTo;
+    const matchedCode = String(shipToMatch?.code ?? '').trim();
+    const customerCode = String(map.header.customer?.code ?? '').trim();
+    const mappedShipTo = shipTos.find((item) =>
+      matchedCode !== '' && String(item.SapShipToCode ?? '').trim() === matchedCode
+      && String(item.CustomerCode ?? '').trim() === customerCode
+      && String(item.SalesOrg ?? '').trim() === salesOrg);
+    // A successful saved mapping remains valid when the browser's master list is stale.
+    // Use that same mapping for both the Send guard and the outgoing payload.
+    const matchedShipTo = matchedCode && ['ok', 'manual'].includes(shipToMatch?.status)
+      ? { code: matchedCode, address: String(doc.header.shipToAddress ?? '') }
+      : undefined;
     const shipTo = selectedShipTo || (mappedShipTo ? {
       code: String(mappedShipTo.ShipToCode ?? mappedShipTo.SapShipToCode ?? ''),
       address: String(mappedShipTo.ShipToAddress ?? mappedShipTo.Address ?? ''),
-    } : undefined);
+    } : matchedShipTo);
     return {
       ...Object.fromEntries(Object.entries(header).map(([key, value]) => [key, value || undefined])),
       shipTo,

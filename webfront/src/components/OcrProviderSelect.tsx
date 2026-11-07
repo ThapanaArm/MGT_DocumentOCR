@@ -1,16 +1,10 @@
 import type { OcrProvider } from '../api/masters';
 
-/* Reading-engine picker. Per Megachem the engine was locked to Gemini everywhere; PaddleOCR was then
-   added as a trial alternative, so the document-reading engine is now a choice between exactly these
-   ids (anything else in the provider list stays hidden):
-     gemini         — Gemini Vision reads the page images
-     paddle_gemini  — PaddleOCR (local) reads the text, Gemini structures it (text only, cheaper)
-     paddle         — PaddleOCR + built-in rules, no AI cost
-   Engines that are not ready on the server (exe missing / no key) are shown disabled.
+/* Reading-engine picker. Every module reads with Gemini Vision only — ChatGPT Vision was removed
+   (4 Nov 2026) so the reading cost is billed on one provider. Engines without a configured API key are disabled.
    Callers that pass no `choices` (Compare modal) keep the old read-only Gemini label. */
-// Gemini only (Megachem, 7 Oct 2026): PaddleOCR is no longer offered. With one id the picker
-// renders the read-only Gemini label; the backend also forces Gemini.
 export const READ_ENGINE_IDS = ['gemini'];
+export const AP_READ_ENGINE_IDS = ['gemini'];
 
 export default function OcrProviderSelect(props: {
   id?: string;

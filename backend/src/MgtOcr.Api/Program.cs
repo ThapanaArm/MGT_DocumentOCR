@@ -142,6 +142,7 @@ var appConfig = new AppConfig
         .GetChildren()
         .Where(c => !string.IsNullOrWhiteSpace(c.Value))
         .ToDictionary(c => c.Key.Trim(), c => c.Value!.Trim(), StringComparer.OrdinalIgnoreCase),
+    SapSupplierInvoiceTaxBaseClearingAccount = Get("Sap:SupplierInvoice:TaxBaseClearingAccount"),
     SapSupplierInvoiceMatDocMap = cfg.GetSection($"Sap:SupplierInvoice:MatDocMap_{Cap(sapSupplierInvoiceEnv)}")
         .GetChildren()
         .Where(c => !string.IsNullOrWhiteSpace(c.Value))
@@ -217,6 +218,9 @@ builder.Services.AddSingleton<OcrJobRepository>();
 builder.Services.AddSingleton<JobLogRepository>();
 builder.Services.AddSingleton<MgtOcr.Api.Services.DocumentIngestService>();
 builder.Services.AddHostedService<MgtOcr.Api.Services.OcrQueueWorker>();
+// Step 3 send queue (sql/32_sap_post_queue.sql): one document to SAP at a time, first come first served.
+builder.Services.AddSingleton<SapPostQueueRepository>();
+builder.Services.AddHostedService<MgtOcr.Api.Services.SapPostQueueWorker>();
 // Upload lifecycle: archive posted documents' files to SharePoint, then remove the local copy.
 // Both workers exit immediately unless Archive:Enabled / Archive:CleanupEnabled are true.
 builder.Services.AddHttpClient(nameof(MgtOcr.Api.Services.GraphArchiveClient));

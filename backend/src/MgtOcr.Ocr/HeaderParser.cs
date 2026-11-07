@@ -17,6 +17,10 @@ public class ParsedDocument
     // Tesseract/Azure/Typhoon leave these null. Mirrors ext.get("tokensIn"/"cost"/etc.) in Python.
     public int? TokensIn { get; set; }
     public int? TokensOut { get; set; }
+    // How many PAGES this read actually sent to the model. Gemini bills per token, not per
+    // page, so this is not a billing figure -- it is what lets cost and time be divided per
+    // page on the usage report. A chunked read sums the pages of every chunk (see GeminiOcr).
+    public int? Pages { get; set; }
     public decimal? Cost { get; set; }
     public decimal? CostIn { get; set; }
     public decimal? CostOut { get; set; }
@@ -57,6 +61,11 @@ public static class HeaderParser
             // selling rate on the sheet for 03.08.2026. Read rather than typed again, and left
             // empty when no sheet is in the bundle, which means SAP's own rate is used.
             ["exchangeRate"] = "", ["exchangeRateDate"] = "",
+            // Every invoice / receipt behind a shipping bundle, with its own totals and the COSTS
+            // heading of the form it belongs to (Local / Fee / Insurance / Overseas). The screen
+            // adds them up per heading and checks them against the FORM SHIPPING EXPENSE, which is
+            // what the cost lines are read from. Must be listed here or the parser drops it.
+            ["sourceDocs"] = new List<object?>(),
         };
 
     // _po_number_date(): some forms (e.g. Henkel/European buyers) write PO number + buyer code +

@@ -3,7 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { useAppState } from '../state/AppState';
 import CategoryOptions, { categoryLabel } from '../components/CategoryOptions';
 import { useMeta } from '../state/MetaContext';
-import { deleteDocument, listDocumentsPaged, type DocumentsPage, type InboxRow } from '../api/documents';
+import { deleteDocument, listDocumentsPaged, reconcileAllPurchaseOrders, type DocumentsPage, type InboxRow } from '../api/documents';
 import { dt, fileRetention, fmt, moduleLabel, statusBadge } from '../utils/format';
 import { OCR_PROVIDER_SHORT } from '../constants/fields';
 import type { ModuleCode } from '../api/types';
@@ -102,6 +102,7 @@ export default function InboxPage() {
   const [selected, setSelected] = useState<Map<number, InboxRow>>(() => new Map());
   const [confirmRows, setConfirmRows] = useState<InboxRow[] | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [reconcilingAll, setReconcilingAll] = useState(false);
   useEffect(() => { setSelected(new Map()); }, [mod, category, from, to, invTab, searchQ]);
 
   const deletable = (r: InboxRow) => r.Status !== 'POSTED' && r.Status !== 'PARTIAL';
@@ -143,6 +144,22 @@ export default function InboxPage() {
     else showToast(`Deleted ${ok}, could not delete ${failed.length}: #${failed.join(', #')}`, 'error');
     reload();
   };
+  const captureReconciliationLogs = () =>
+    guard(async () => {
+      setReconcilingAll(true);
+      try {
+        const batch = await reconcileAllPurchaseOrders();
+        const completed = batch.results.filter((r) => !r.error);
+        const failed = batch.results.filter((r) => !!r.error);
+        const goodsRows = completed.reduce((sum, r) => sum + (r.goodsRows ?? 0), 0);
+        const shippingRows = completed.reduce((sum, r) => sum + (r.shippingRows ?? 0), 0);
+        const message = `Saved reconciliation logs for ${completed.length}/${batch.purchaseOrders} PO(s): ${goodsRows} goods row(s), ${shippingRows} shipping row(s)`
+          + (failed.length ? ` · ${failed.length} PO(s) failed; check API results/logs` : '');
+        showToast(message, failed.length ? 'info' : 'success');
+      } finally {
+        setReconcilingAll(false);
+      }
+    });
   const docLabel = (r: InboxRow) =>
     `#${r.DocId}` + (r.DocNo ? ` · ${r.DocNo}` : '') + (r.PartnerName ? ` · ${r.PartnerName}` : '');
 
@@ -174,6 +191,17 @@ export default function InboxPage() {
               <option value="">All Document Types</option>
               <CategoryOptions items={apDocCategories ?? []} />
             </select>
+          )}
+          {isInvoice && (
+            <button
+              className="btn sm"
+              onClick={captureReconciliationLogs}
+              disabled={reconcilingAll}
+              title="Read SAP and append reconciliation log snapshots for all POs referenced by AP/II invoices"
+            >
+              <i className={`fa-solid ${reconcilingAll ? 'fa-spinner fa-spin' : 'fa-clipboard-check'}`} />{' '}
+              {reconcilingAll ? 'Reading all AP POs…' : 'Capture reconciliation logs'}
+            </button>
           )}
           <button className="btn sm" onClick={reload}>
             <i className="fa-solid fa-arrow-rotate-right" /> Refresh

@@ -11,7 +11,8 @@ import {
   getPayload,
   getRawText,
   learnMaterial,
-  postToSap,
+  postToSapQueued,
+  reconcilePurchaseOrder,
   reopenDeletedApInvoice,
   reocrDocument,
   setDocCategory,
@@ -39,10 +40,11 @@ import {
 } from '../constants/fields';
 import { SEND_DISABLED_AP } from '../constants/flags';
 import { dt, fileRetention, fmt, fmtCost, intFmt, moduleLabel, statusBadge } from '../utils/format';
+import ShippingCheck from '../components/document/ShippingCheck';
 import { findDupes } from '../utils/dupes';
 import Steps from '../components/Steps';
 import Modal, { ModalHeader } from '../components/Modal';
-import OcrProviderSelect, { READ_ENGINE_IDS } from '../components/OcrProviderSelect';
+import OcrProviderSelect, { AP_READ_ENGINE_IDS, READ_ENGINE_IDS } from '../components/OcrProviderSelect';
 import FieldGrid from '../components/document/FieldGrid';
 import TabbedGroups from '../components/document/TabbedGroups';
 import DetailTable from '../components/document/DetailTable';
@@ -610,6 +612,53 @@ function seedHeaderText(d: DocModel): DocModel {
   return { ...d, header: { ...h, headerText: text } };
 }
 
+/* The PO condition a cost line settles, worked out from the document itself — no PO lookup.
+   The FORM SHIPPING EXPENSE sheet files every row under a COSTS heading (Local / Fee / Insurance /
+   Overseas, read into extra.costType), and that heading is the condition: Local is ZLH1 Local
+   Handling, Fee ZFE2, Insurance ZINS, Overseas ZOVS. A few charges are named more precisely by the
+   row itself (EXCISE → ZED1 Excise Duty, import duty → ZIM1), so the description is checked first.
+   Tax and withholding rows settle no condition. Empty when nothing on the line says. */
+const COST_TYPE_CONDITION: Record<string, string> = {
+  LOCAL: 'ZLH1', FEE: 'ZFE2', INSURANCE: 'ZINS', OVERSEAS: 'ZOVS',
+};
+function conditionFromDocument(l: DocLine): string {
+  const ext = String(l.extCode ?? '').trim().toUpperCase();
+  if (ext === 'VAT' || ext === 'WHT') return '';
+  const extra = (l.extra ?? {}) as Record<string, unknown>;
+  const desc = String(l.desc ?? '').toUpperCase();
+  if (/^\s*(VAT|WITHHOLDING)/.test(desc)) return '';
+  if (/EXCISE|สรรพสามิต/.test(desc)) return 'ZED1';
+  if (ext === 'DUTY' || /IMPORT\s*DUTY|อากรขาเข้า/.test(desc)) return 'ZIM1';
+  if (/INSURANCE|ประกัน/.test(desc)) return 'ZINS';
+  const byHeading = COST_TYPE_CONDITION[String(extra.costType ?? '').trim().toUpperCase()];
+  if (byHeading) return byHeading;
+  if (/OVERSEA/.test(desc)) return 'ZOVS';
+  if (/\bFEE\b|ค่าธรรมเนียม/.test(desc)) return 'ZFE2';
+  // A forwarder's bill is local handling unless it says otherwise: DO, storage, trucking,
+  // labour, shipping service, EDI … are all filed under Local on the form.
+  return 'ZLH1';
+}
+
+/* Fills the condition on every cost line of a delivery-cost document that has none, from the
+   document (above). Marked extra.deliveryCondAuto so "Assign all" may still correct it against
+   the purchase order; a condition the person picked is never touched. */
+function seedDeliveryConditions(d: DocModel): DocModel {
+  if (d.module !== 'AP' && d.module !== 'II') return d;
+  if (!['2', '3'].includes(String(d.header.refDocType ?? '').trim())) return d;
+  if (!Array.isArray(d.lines)) return d;
+  let touched = false;
+  const lines = d.lines.map((l) => {
+    const extra = (l.extra ?? {}) as Record<string, unknown>;
+    if (String(extra.deliveryCondType ?? '').trim()) return l;
+    if (!(Number(l.amount) || 0)) return l;
+    const cond = conditionFromDocument(l);
+    if (!cond) return l;
+    touched = true;
+    return { ...l, extra: { ...extra, deliveryCondType: cond, deliveryCondAuto: '1' } };
+  });
+  return touched ? { ...d, lines } : d;
+}
+
 function seedRefDocument(d: DocModel): DocModel {
   if (d.module !== 'AP' && d.module !== 'II') return d;
   const h = d.header;
@@ -619,7 +668,16 @@ function seedRefDocument(d: DocModel): DocModel {
   // MIRO's Reference Document Category is the same choice the person already made on import, so it
   // follows it: against the purchase order = the goods ("1"), by the delivery = the delivery costs
   // ("2"). Only seeded when the read left it blank.
-  if (!String(h.refDocType ?? '').trim()) next.refDocType = isInventoryPoDoc(d) ? '1' : '2';
+  // The Document Type chosen on import decides it. The reader also guesses refDocType from the page
+  // (VisionPrompt), and on a forwarder's bill of DO / storage / trucking it can answer "1" — which
+  // turned a "Planned delivery costs" document into a goods invoice with PO items 10, 20, 30 guessed
+  // by position (document #877). A guess that contradicts the category is corrected; "3" (both) is
+  // left alone because it is a real choice on either.
+  const curRefType = String(h.refDocType ?? '').trim();
+  const cat = String(d.apDocCategory ?? '').trim().toUpperCase();
+  const wantRefType = isInventoryPoDoc(d) ? '1' : cat === 'INVENTORY' ? '2' : '';
+  if (!curRefType) next.refDocType = isInventoryPoDoc(d) ? '1' : '2';
+  else if (wantRefType && curRefType !== '3' && curRefType !== wantRefType) next.refDocType = wantRefType;
   // MIRO's PO Reference tab has its own Purchasing Order box, holding the same number the header
   // already carries. Nothing filled it, so it sat empty on every PO document and had to be typed
   // again by hand.
@@ -1052,6 +1110,7 @@ export default function DocumentPage() {
   // SAP's own words when it refused the document, shown inside the confirmation dialog.
   const [postError, setPostError] = useState<string | null>(null);
   const [posting, setPosting] = useState(false);
+  const [reconciling, setReconciling] = useState(false);
   const sapStepRef = useRef<SalesOrderStepHandle | null>(null);
   const zohoStepRef = useRef<SalesOrderStepHandle | null>(null);
   // Mapping owns the selected Deal/Ship-to seam; the Zoho Step owns preview, editable payload,
@@ -1102,10 +1161,9 @@ export default function DocumentPage() {
         setFailed(true);
         return;
       }
-      // Locked to Gemini (per Megachem) — the re-OCR engine is always Gemini regardless of which
-      // engine last read the document.
+      // Re-reading always uses Gemini (ChatGPT Vision removed 4 Nov 2026), whatever read the document first.
       setReocrEngine('gemini');
-      setDoc(seedHeaderText(seedPoItems(seedRefDocument(seedHeaderTaxCode(seedGlItems(seedTaxItems(seedWhtItems(d))))))));
+      setDoc(seedHeaderText(seedDeliveryConditions(seedPoItems(seedRefDocument(seedHeaderTaxCode(seedGlItems(seedTaxItems(seedWhtItems(d)))))))));
       if (d.module === 'AP') loadApDocCategories();
       try {
         const chat = await getChat(d.docId);
@@ -1286,7 +1344,7 @@ export default function DocumentPage() {
   const doReocr = () =>
     guard(async () => {
       const d = await reocrDocument(doc.docId, reocrEngine, USER);
-      setDoc(seedHeaderText(seedPoItems(seedRefDocument(seedHeaderTaxCode(seedGlItems(seedTaxItems(seedWhtItems(d))))))));
+      setDoc(seedHeaderText(seedDeliveryConditions(seedPoItems(seedRefDocument(seedHeaderTaxCode(seedGlItems(seedTaxItems(seedWhtItems(d)))))))));
       setMap(null);
       manual.current = { header: {}, lines: {} };
       if (d.provider === 'failed')
@@ -1329,7 +1387,15 @@ export default function DocumentPage() {
         // here and sent straight away would never reach SAP — it would post whatever was stored
         // last. So the current lines are saved first, every time.
         await runMap(true);
-        const r = await postToSap(doc.docId, USER);
+        // Through the send queue: SAP takes one document at a time, oldest first, so two people
+        // pressing Step 3 on the same purchase order no longer collide (ME/006).
+        let toldPosition = -1;
+        const r = await postToSapQueued(doc.docId, (s) => {
+          if (s.status === 1 && s.position > 0 && s.position !== toldPosition) {
+            toldPosition = s.position;
+            showToast(`รอคิวส่ง SAP — มี ${s.position} เอกสารก่อนหน้า`, 'info');
+          }
+        });
         setDoc(r.document);
         // SAP refusing the document comes back as 200 with success = false (the attempt is
         // logged either way). Showing that as "Created successfully" sent people looking for a
@@ -1347,6 +1413,23 @@ export default function DocumentPage() {
           `${r.simulated ? 'Simulation completed' : 'Document created in SAP successfully'}${sapReference}`,
           'success',
         );
+        // Only AP supplier invoices with a PO feed the PO/GR reconciliation snapshots. Run it
+        // after SAP accepted the invoice; a reconciliation read failure must never undo or hide
+        // the successful SAP result. The button below lets users retry and backfill older AP docs.
+        const poRef = String(h.poRef ?? '').trim();
+        if ((doc.module === 'AP' || doc.module === 'II') && poRef && !r.simulated) {
+          setReconciling(true);
+          void reconcilePurchaseOrder(poRef, doc.docId)
+            .then((recon) => showToast(
+              `PO ${poRef} reconciliation saved: ${recon.goodsRows} goods row(s), ${recon.shippingRows} shipping row(s)`,
+              'success',
+            ))
+            .catch((error: unknown) => showToast(
+              `SAP invoice was created, but PO reconciliation did not finish: ${error instanceof Error ? error.message : String(error)}`,
+              'error',
+            ))
+            .finally(() => setReconciling(false));
+        }
         document.querySelector('.content')?.scrollTo({ top: 0, behavior: 'smooth' }); window.scrollTo({ top: 0, behavior: 'smooth' });
       } finally {
         setPosting(false);
@@ -1368,6 +1451,23 @@ export default function DocumentPage() {
       setDoc(reopened);
       setPostError(null);
       showToast(`AP invoice ${sapDocNo} reopened for correction`, 'success');
+    });
+
+  const refreshApReconciliation = () =>
+    guard(async () => {
+      const po = String(h.poRef ?? '').trim();
+      if (!po || !['AP', 'II'].includes(doc.module) || !posted) return;
+      setReconciling(true);
+      try {
+        const result = await reconcilePurchaseOrder(po, doc.docId);
+        const warning = result.warnings?.length ? ` · ${result.warnings.length} SAP warning(s)` : '';
+        showToast(
+          `PO ${po} reconciled: ${result.goodsRows} goods row(s), ${result.shippingRows} shipping row(s) saved${warning}`,
+          'success',
+        );
+      } finally {
+        setReconciling(false);
+      }
     });
 
   /* Why the "Confirm send to SAP" button is greyed out. It used to hang off a single
@@ -1469,7 +1569,10 @@ export default function DocumentPage() {
   const changeCategory = (v: string) =>
     guard(async () => {
       const d = await setDocCategory(doc.docId, v, USER);
-      setDoc(d);
+      // Switching between "Planned delivery costs" and "Goods/service items" must move MIRO's
+      // Reference Document Category with it — it used to keep the old value, so a document moved to
+      // Planned delivery costs still opened its PO Reference tab as goods.
+      setDoc(seedDeliveryConditions(seedRefDocument({ ...d, header: { ...d.header, refDocType: '', refDocument: '' } })));
     });
 
   // ---- quick-add master flows ----
@@ -2408,11 +2511,18 @@ export default function DocumentPage() {
      that is a document whose rows were never tagged with a supplier, not a document with no rows. */
   const poGridLines = (() => {
     const rows: DocLine[] = usePoCopy ? poGoodsLines : (doc.lines || []);
-    const all = { items: rows, at: rows.map((_, i) => i) };
+    // On a delivery-cost document the VAT / WHT / duty rows belong on the Tax and Withholding Tax
+    // tabs — they are never sent as PO lines — so the grid shows the cost lines only.
+    const costsOnly = !usePoCopy && String(h.refDocType ?? '').trim() === '2';
+    const keep = (l: DocLine) => !costsOnly
+      || !(['VAT', 'WHT'].includes(String(l.extCode ?? '').trim().toUpperCase())
+        || /^\s*(VAT|WITHHOLDING)/i.test(String(l.desc ?? '')));
+    const kept = rows.map((l, i) => ({ l, i })).filter((x) => keep(x.l));
+    const all = { items: kept.map((x) => x.l), at: kept.map((x) => x.i) };
     if (!vendorFilter) return all;
     const items: DocLine[] = [];
     const at: number[] = [];
-    rows.forEach((l, i) => {
+    kept.forEach(({ l, i }) => {
       const code = String((l.extra as Record<string, unknown> | undefined)?.vendorCode ?? '').trim();
       if ((code || mainVendorCode) === vendorFilter) { items.push(l); at.push(i); }
     });
@@ -2523,9 +2633,15 @@ export default function DocumentPage() {
         // unique hit counts, and only a line with no condition chosen yet is touched.
         if (['2', '3'].includes(String(h.refDocType ?? '').trim())) {
           const conds = r.items.flatMap((i) => i.conditions ?? []);
+          const onPo = new Set(conds.map((x) => x.conditionType.trim().toUpperCase()));
           (doc.lines || []).forEach((l, i) => {
             const extra = (l.extra ?? {}) as Record<string, unknown>;
-            if (String(extra.deliveryCondType ?? '').trim()) return;
+            const current = String(extra.deliveryCondType ?? '').trim().toUpperCase();
+            // A condition the person chose stays. One filled from the document stays too when the
+            // PO really holds it; when it does not, it is re-matched below on the amount.
+            if (current && (extra.deliveryCondAuto !== '1' || onPo.has(current))) return;
+            if (current) editLineExtra(i, 'deliveryCondType', '');
+            if (['VAT', 'WHT'].includes(String(l.extCode ?? '').trim().toUpperCase())) return;
             const amount = Number(l.amount) || 0;
             if (amount === 0) return;
             const hits = [...new Set(
@@ -2863,7 +2979,7 @@ export default function DocumentPage() {
               providers={allProviders}
               value={reocrEngine}
               onChange={setReocrEngine}
-              choices={READ_ENGINE_IDS}
+              choices={doc.module === 'AP' || doc.module === 'II' ? AP_READ_ENGINE_IDS : READ_ENGINE_IDS}
             />
           )}
           <button
@@ -3027,6 +3143,18 @@ export default function DocumentPage() {
           </div>
           <div className="card-b">{totalsFields}</div>
         </div>
+      )}
+
+      {/* Shipping cost check: FORM SHIPPING EXPENSE vs the invoices / receipts behind it, per COSTS
+          heading (Local / Insurance / Fee / Overseas). A heading that does not agree shows its DIFF
+          in red. Shown only when the bundle has form lines or supporting documents. */}
+      {(doc.module === 'AP' || doc.module === 'II') && (
+        <ShippingCheck
+          doc={doc}
+          posted={posted}
+          // header values are plain JSON; editHeader is typed for strings only
+          onDocsChange={(docs) => editHeader('sourceDocs', docs as unknown as string)}
+        />
       )}
 
       {/* MIRO trade groups (AP) */}
@@ -3218,7 +3346,7 @@ export default function DocumentPage() {
                       onCondType={
                         usePoCopy || locked
                           ? undefined
-                          : (i, code) => editLineExtra(poGridLines.at[i], 'deliveryCondType', code)
+                          : (i, code) => { editLineExtra(poGridLines.at[i], 'deliveryCondType', code); editLineExtra(poGridLines.at[i], 'deliveryCondAuto', ''); }
                       }
                     />
                   ) : (
@@ -3343,6 +3471,12 @@ export default function DocumentPage() {
           {!isMgt && doc.module !== 'SO' && (
             <button className="btn" onClick={openPayload} disabled={!(map && map.pass)}>
               {'{}'} View Payload
+            </button>
+          )}
+          {!isMgt && ['AP', 'II'].includes(doc.module) && posted && String(h.poRef ?? '').trim() && (
+            <button className="btn" onClick={refreshApReconciliation} disabled={reconciling}>
+              <i className={`fa-solid ${reconciling ? 'fa-spinner fa-spin' : 'fa-arrows-rotate'}`} />{' '}
+              {reconciling ? 'Reading SAP…' : 'Refresh PO reconciliation'}
             </button>
           )}
           <div style={{ flex: 1 }} />

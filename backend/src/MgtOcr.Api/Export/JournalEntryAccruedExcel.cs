@@ -28,8 +28,11 @@ namespace MgtOcr.Api.Export;
 /// </summary>
 public static class JournalEntryAccruedExcel
 {
-    private const string TemplateFile = "JournalEntry_Accrued.xlsx";
-    private const string SheetName = "Accrued ";   // the template's own sheet name, trailing space and all
+    // SAP's own template, downloaded from the Upload General Journal Entries app (sheet "Data").
+    // The copy Accounting had sent (sheet "Accrued ") was refused by the app with "You've changed
+    // the template. Restore the template or download it again" — the app checks the sheet.
+    private const string TemplateFile = "JournalEntry_Upload.xlsx";
+    private const string SheetName = "Data";
     private const int HeaderRow = 11;
     private const int FirstLineRow = 17;
 
@@ -54,7 +57,14 @@ public static class JournalEntryAccruedExcel
     private const int L_CostCenter = 11;    // K  KOSTL
     private const int L_ValueDate = 15;     // O  VALUT
     private const int L_Assignment = 18;    // R  ZUONR
-    private const int L_BusinessPlace = 19; // S  BUPLA
+    // Columns S..W are SAP's own (VBUND, SEGMENT, PROF_*). Fields the template does not carry are
+    // added after them with their technical names, as the template's note says to.
+    private const int L_BusinessPlace = 24; // X  BUPLA
+    // A line on a tax account needs its base (F5A375). FWBAS only works together with TXDAT —
+    // without the tax date the upload dumps (SAP KBA 3238953).
+    private const int L_TaxBase = 25;       // Y  FWBAS
+    private const int L_TaxDate = 26;       // Z  TXDAT
+    private const int TechRow = 15, LabelRow = 16, HeaderTechRow = 9, HeaderLabelRow = 10;
 
     // Journal entry type for a plain G/L posting, as the sample uses.
     private const string EntryType = "SA";
@@ -68,7 +78,7 @@ public static class JournalEntryAccruedExcel
         DateTime postingDate)
     {
         var header = (Dictionary<string, object?>)doc["header"]!;
-        var rows = DeferredVatReversal.Pairs(doc);
+        var rows = DeferredRows(doc);
         if (rows.Count == 0) return null;
 
         var templatePath = FindTemplate()
@@ -79,6 +89,12 @@ public static class JournalEntryAccruedExcel
 
         using var wb = new XLWorkbook(templatePath);
         var ws = wb.Worksheet(SheetName);
+        // SAP's template ships a second, empty batch as an example (row 19 "2 · Header", its header
+        // labels on 20–21, the header values row 22, its line items from row 24). Left in, the
+        // upload fails with "Please fill in the header information. (line 22)". This file carries
+        // one batch, so everything after its own line-item block goes.
+        if (ws.LastRowUsed() is { } last && last.RowNumber() >= FirstLineRow)
+            ws.Rows(FirstLineRow, last.RowNumber()).Delete();
 
         var currency = Or(header.GetStr("currency").Trim(), "THB");
         // The supplier's invoice number identifies the entry, the same way the supplier-invoice
@@ -93,17 +109,31 @@ public static class JournalEntryAccruedExcel
         Text(ws.Cell(HeaderRow, H_HeaderText), DeferredVatReversal.Reference(header));
         Text(ws.Cell(HeaderRow, H_Currency), Cut(currency, 5));
         Text(ws.Cell(HeaderRow, H_Reference), Cut(reference, 16));
+        Text(ws.Cell(HeaderTechRow, H_Branch), "BRNCH");
+        Text(ws.Cell(HeaderLabelRow, H_Branch), "Branch Number (4)");
         Text(ws.Cell(HeaderRow, H_Branch), HeadOfficeBusinessPlace);
-
-        var row = FirstLineRow;
-        foreach (var (text, assignment, amount) in rows)
+        foreach (var (col, tech, label) in new[]
+                 {
+                     (L_BusinessPlace, "BUPLA", "Business Place (4)"),
+                     (L_TaxBase, "FWBAS", "Tax Base Amount"),
+                     (L_TaxDate, "TXDAT", "Tax Date"),
+                 })
         {
-            // Debit the claimable account …
-            Line(ws, row++, companyCode, DeferredVatReversal.GlInputTax, text, assignment, amount,
-                debit: true, DeferredVatReversal.InputTaxCode, postingDate);
-            // … and credit the deferred one, clearing what the invoice parked there.
-            Line(ws, row++, companyCode, DeferredVatReversal.GlDeferredInputTax, text, assignment, amount,
-                debit: false, DeferredVatReversal.DeferredTaxCode, postingDate);
+            Text(ws.Cell(TechRow, col), tech);
+            Text(ws.Cell(LabelRow, col), label);
+        }
+
+        // One pair per tax invoice, as the RPA "Input VAT" voucher posts it (SRS Record Automatic
+        // Journal Voucher, topic 3): Dr 11720000 V1 / Cr 11730000 D1, Item Text = the issuer,
+        // Assignment = the issuer's tax ID, base and tax date of that tax invoice.
+        var row = FirstLineRow;
+        foreach (var r in rows)
+        {
+            var taxDate = r.TaxDate ?? postingDate;
+            Line(ws, row++, companyCode, DeferredVatReversal.GlInputTax, r.Text, r.Assignment, r.Amount,
+                debit: true, DeferredVatReversal.InputTaxCode, postingDate, r.Base, taxDate);
+            Line(ws, row++, companyCode, DeferredVatReversal.GlDeferredInputTax, r.Text, r.Assignment, r.Amount,
+                debit: false, DeferredVatReversal.DeferredTaxCode, postingDate, r.Base, taxDate);
         }
 
         using var ms = new MemoryStream();
@@ -113,7 +143,7 @@ public static class JournalEntryAccruedExcel
 
     private static void Line(
         IXLWorksheet ws, int row, string companyCode, string account, string text, string assignment,
-        double amount, bool debit, string taxCode, DateTime valueDate)
+        double amount, bool debit, string taxCode, DateTime valueDate, double taxBase, DateTime taxDate)
     {
         Text(ws.Cell(row, L_CompanyCode), Cut(companyCode, 4));
         Text(ws.Cell(row, L_Account), Cut(account, 10));
@@ -124,6 +154,42 @@ public static class JournalEntryAccruedExcel
         Date(ws.Cell(row, L_ValueDate), valueDate);
         Text(ws.Cell(row, L_Assignment), Cut(assignment, 18));
         Text(ws.Cell(row, L_BusinessPlace), HeadOfficeBusinessPlace);
+        if (taxBase > 0)
+        {
+            Money(ws.Cell(row, L_TaxBase), taxBase);
+            Date(ws.Cell(row, L_TaxDate), taxDate);
+        }
+    }
+
+    private sealed record DeferredRow(string Text, string Assignment, double Amount, double Base, DateTime? TaxDate);
+
+    /// <summary>The deferred (D-code) tax rows of the document, one per tax invoice.</summary>
+    private static List<DeferredRow> DeferredRows(Dictionary<string, object?> doc)
+    {
+        var list = new List<DeferredRow>();
+        foreach (var t in DeferredVatReversal.EffectiveTaxRows(doc))
+        {
+            var amount = Num(t.Get("docCurrencyAmt"));
+            if (amount == 0) continue;
+            var code = t.GetStr("taxCode").Trim();
+            var kind = t.GetStr("taxKind").Trim();
+            var deferred = kind.Length > 0
+                ? string.Equals(kind, "DEFERRED", StringComparison.OrdinalIgnoreCase)
+                : code.StartsWith('D') || code.StartsWith('d');
+            if (!deferred) continue;
+            var issuer = t.GetStr("issuerName").Trim().ToUpperInvariant();
+            var docNo = t.GetStr("taxDocNo").Trim();
+            var taxId = t.GetStr("issuerTaxId").Trim();
+            var baseAmt = Num(t.Get("baseAmount"));
+            if (baseAmt <= 0) baseAmt = Math.Round(amount / 0.07, 2);
+            DateTime? taxDate = DateTime.TryParse(t.GetStr("taxDocDate").Trim(), System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.None, out var d) ? d : null;
+            list.Add(new DeferredRow(
+                Text: Or(issuer, docNo),
+                Assignment: Or(taxId, docNo),
+                Amount: amount, Base: baseAmt, TaxDate: taxDate));
+        }
+        return list;
     }
 
     private static void Text(IXLCell cell, string value)

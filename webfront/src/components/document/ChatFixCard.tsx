@@ -55,7 +55,7 @@ function ImageLightbox({ url, onClose }: { url: string; onClose: () => void }) {
   );
 }
 
-const CHAT_MODEL_IDS = ['claude', 'gemini', 'openai'];
+const CHAT_MODEL_IDS = ['claude', 'gemini'];
 
 function readImageFile(file: File): Promise<string> {
   return new Promise((resolve, reject) => {

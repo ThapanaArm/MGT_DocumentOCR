@@ -35,8 +35,14 @@ public static class SupplierInvoicePayload
         Dictionary<string, object?>? source = null,
         string paymentTerms = "",
         string vendorFilter = "",
-        IReadOnlyList<System.Text.Json.JsonElement>? goodsReceiptItems = null)
+        IReadOnlyList<System.Text.Json.JsonElement>? goodsReceiptItems = null,
+        string taxBaseClearingAccount = "",
+        Func<string, string>? sameParty = null)
     {
+        // Two codes for the same SAP supplier — the test tenant's 1000134 and production's 4000357
+        // are both PROMPT — are one supplier here. Without this the rows tagged 4000357 (the
+        // Cargoport and Port Authority VAT) became a document of their own with no lines at all.
+        string Party(string code) => sameParty == null ? code.Trim() : sameParty(code.Trim());
         var header = doc.Get("header") as Dictionary<string, object?> ?? new Dictionary<string, object?>();
         var poRef = PoNumber(header);
         var currency = Or(header.GetStr("currency").Trim(), "THB");
@@ -54,10 +60,10 @@ public static class SupplierInvoicePayload
             if (vendor.Length == 0) return true;
             // A row the read could not tag belongs to the document's own supplier.
             var v = Or(r.GetStr("vendorCode").Trim(), mainVendor);
-            return string.Equals(v, vendor, StringComparison.OrdinalIgnoreCase);
+            return string.Equals(Party(v), Party(vendor), StringComparison.OrdinalIgnoreCase);
         }
         var glRows = SapImportSupplierInvoiceExcel.GlRowsFor(doc).Where(Mine).ToList();
-        var taxRows = DeferredVatReversal.TaxRows(doc).Where(Mine).ToList();
+        var taxRows = DeferredVatReversal.EffectiveTaxRows(doc).Where(Mine).ToList();
         var isPoKeyed = SapImportSupplierInvoiceExcel.IsPoKeyed(doc);
 
         // Goods-receipt reference. A PO item flagged for GR-based invoice verification (the
@@ -113,7 +119,7 @@ public static class SupplierInvoicePayload
         // takes automatic postings only, in the test tenant and in production alike.
         var deliveryCosts = wantsDeliveryCosts
             ? DeliveryCostItems(doc, poRef, currency, header.GetStr("taxCode").Trim(),
-                invoicingParty, itemText, Mine, purOrdRef.Count, poItems, goodsReceiptItems)
+                invoicingParty, itemText, Mine, purOrdRef.Count, poItems, goodsReceiptItems, taxRows)
             : [];
         purOrdRef.AddRange(deliveryCosts);
 
@@ -177,6 +183,292 @@ public static class SupplierInvoicePayload
             });
         }
 
+        // A tax row whose base no line on this invoice stands for. The Customs Department's receipt
+        // is the case: it bills a 200.00 fee, but the import VAT on it (V1 26,228.00) is 7 % of the
+        // DECLARED VALUE of the goods (374,685.71), which is not a line of this invoice at all. SAP
+        // refuses a tax code that no item carries (FF812 "Tax code V1 also exists"). So the missing
+        // base is put on the document as two G/L lines on a clearing account — debit WITH the tax
+        // code, credit back WITHOUT it (VX). They cancel each other out, the Gross is unchanged, and
+        // the input VAT is booked by SAP on its real base with the tax invoice's own details.
+        // A shipping bundle posted the way Accounting does (below: lines on VX, every VAT as a G/L
+        // line on its tax account with its own base) has no "tax row without a line" to solve — the
+        // VAT no longer sits on the Tax tab at all. Solving it here anyway only refused documents
+        // the later step books fine (FF812 "D1 17,633.00 … ไม่มีรายการในใบนี้ให้ผูก Tax Code" on a
+        // PILOT bundle whose lines are all a different code).
+        var vatAsGlLines = !isPoKeyed && !calcTax
+            && purOrdRef.Any(i => ((Dictionary<string, object?>)i).Get("_deliveryCost") is true);
+        if (!isPoKeyed && !vatAsGlLines)
+        {
+            double BaseCarried(string code) =>
+                purOrdRef.Where(i => string.Equals(((Dictionary<string, object?>)i).GetStr("TaxCode").Trim(), code, StringComparison.OrdinalIgnoreCase))
+                    .Sum(PoAmount)
+                + glAccountItems.Where(i => string.Equals(((Dictionary<string, object?>)i).GetStr("TaxCode").Trim(), code, StringComparison.OrdinalIgnoreCase))
+                    .Sum(i => IsCredit(i) ? -ItemAmount(i) : ItemAmount(i));
+            var orphanBases = taxRows
+                .Where(t => t.GetStr("taxCode").Trim() is { Length: > 0 } c && !c.Equals("VX", StringComparison.OrdinalIgnoreCase)
+                            && Num(t.Get("docCurrencyAmt")) != 0)
+                .GroupBy(t => t.GetStr("taxCode").Trim().ToUpperInvariant())
+                .Select(g => (Code: g.Key, Base: Math.Round(g.Sum(t => Num(t.Get("baseAmount"))), 2),
+                              Docs: string.Join(", ", g.Select(t => t.GetStr("taxDocNo").Trim()).Where(x => x.Length > 0))))
+                .ToList();
+            // Codes the delivery-cost lines will pick up from the Tax tab (AutoTaxCodes) are
+            // already on purOrdRef here, so only what is still uncovered remains.
+            foreach (var (code, baseAmt, docs) in orphanBases)
+            {
+                var missing = Math.Round(baseAmt - BaseCarried(code), 2);
+                if (missing <= 1.00) continue;
+                if (string.IsNullOrWhiteSpace(taxBaseClearingAccount))
+                {
+                    // Accounting's own way (posted document 5100001372, THE CUSTOMS DEPARTMENT): the
+                    // charge lines carry the VAT code — Fee 199.98 and Import Tax 2,514.14 both on V1 —
+                    // and the input tax is the amount on the customs receipt, entered as it stands
+                    // (1,935.00, not 7 % of the lines). So the lines still on VX take this code and the
+                    // tax row goes as read. SAP books it only with the tax entered, not calculated.
+                    if (calcTax)
+                        throw new MgtOcr.Core.HttpApiException(400,
+                            $"ภาษี {code} {F2(baseAmt)} ({docs}) คิดจากมูลค่าที่ไม่ได้อยู่ในใบนี้ (เช่น VAT นำเข้าของกรมศุลฯ) — "
+                            + "ต้องเอาติ๊ก Calculate Tax ออก ให้ส่งยอดภาษีตามใบเสร็จ");
+                    // SAP only takes a tax amount up to the base the lines carry ("The tax amount must
+                    // not be greater than the tax base"). 5100001372 passed because its Import Tax line
+                    // (2,514.14) was larger than the VAT (1,935.00); a receipt that bills only a 200.00
+                    // fee next to 26,228.00 of import VAT cannot be posted this way.
+                    var free = purOrdRef.Concat(glAccountItems).Cast<Dictionary<string, object?>>()
+                        .Where(r => r.GetStr("TaxCode").Trim() is var tc && (tc.Length == 0 || tc.Equals("VX", StringComparison.OrdinalIgnoreCase)))
+                        .ToList();
+                    var taxOfCode = taxRows.Where(t => t.GetStr("taxCode").Trim().Equals(code, StringComparison.OrdinalIgnoreCase))
+                        .Sum(t => Num(t.Get("docCurrencyAmt")));
+                    var lineBase = free.Sum(r => Num(r.Get("SupplierInvoiceItemAmount"))) + BaseCarried(code);
+                    if (free.Count > 0 && taxOfCode > lineBase + 0.009)
+                    {
+                        // Accounting's way for a receipt whose VAT is larger than its lines — posted
+                        // document 5105604031 (THE CUSTOMS DEPARTMENT, 0152-091171, PO 2230000565:
+                        // FTA goods, no import duty, Fee 200.00 next to import VAT 26,228.00):
+                        //   PO lines   Fee ZFE2 200.00 on VX
+                        //   G/L item   Dr 11720000 Input tax 26,228.00, tax code V1,
+                        //              Assignment 0152-091171, Text THE CUSTOMS DEPARTMENT
+                        //   Tax tab    VX, base 200.00, tax 0.00 (entered manually)
+                        // The VAT goes in as a G/L line on the input-tax account instead of a tax
+                        // row, so SAP's "tax must not exceed the tax base" never applies.
+                        foreach (var t in taxRows.Where(t => t.GetStr("taxCode").Trim().Equals(code, StringComparison.OrdinalIgnoreCase)))
+                        {
+                            var amt = Num(t.Get("docCurrencyAmt"));
+                            if (amt == 0) continue;
+                            var deferred = string.Equals(t.GetStr("taxKind").Trim(), "DEFERRED", StringComparison.OrdinalIgnoreCase)
+                                || code.StartsWith('D');
+                            glAccountItems.Add(new Dictionary<string, object?>
+                            {
+                                ["SupplierInvoiceItem"] = (++itemNo).ToString(),
+                                ["CompanyCode"] = companyCode,
+                                ["GLAccount"] = deferred ? DeferredVatReversal.GlDeferredInputTax : DeferredVatReversal.GlInputTax,
+                                ["DocumentCurrency"] = currency,
+                                ["SupplierInvoiceItemAmount"] = F2(amt),
+                                ["DebitCreditCode"] = "S",
+                                ["TaxCode"] = code,
+                                ["AssignmentReference"] = Cut(Or(t.GetStr("taxDocNo").Trim(), assignment), 18),
+                                ["SupplierInvoiceItemText"] = Cut(Or(t.GetStr("issuerName").Trim().ToUpperInvariant(), itemText), 50),
+                                // A line on a tax account must carry the base it was taxed on, or
+                                // SAP refuses to post it: F5A375 "Enter the tax base amounts for
+                                // account 0011720000" — here the declared value on the receipt.
+                                ["TaxBaseAmountInTransCrcy"] = F2(Num(t.Get("baseAmount")) > 0
+                                    ? Num(t.Get("baseAmount")) : Math.Round(amt / 0.07, 2)),
+                                ["_vatAsGlLine"] = code,
+                            });
+                        }
+                        taxItems.RemoveAll(x => ((Dictionary<string, object?>)x).GetStr("TaxCode").Trim()
+                            .Equals(code, StringComparison.OrdinalIgnoreCase));
+                        var vxBase = Math.Round(free.Where(r => purOrdRef.Contains(r)).Sum(r => Num(r.Get("SupplierInvoiceItemAmount"))), 2);
+                        if (vxBase > 0 && !taxItems.Any(x => ((Dictionary<string, object?>)x).GetStr("TaxCode").Trim()
+                                .Equals("VX", StringComparison.OrdinalIgnoreCase)))
+                            taxItems.Add(new Dictionary<string, object?>
+                            {
+                                ["TaxCode"] = "VX",
+                                ["DocumentCurrency"] = currency,
+                                ["TaxBaseAmountInTransCrcy"] = F2(vxBase),
+                                ["TaxAmount"] = F2(0),
+                            });
+                        continue;
+                    }
+                    var marked = 0;
+                    foreach (var row in free) { row["TaxCode"] = code; marked++; }
+                    if (marked == 0)
+                        throw new MgtOcr.Core.HttpApiException(400,
+                            $"ภาษี {code} {F2(baseAmt)} ({docs}) ไม่มีรายการในใบนี้ให้ผูก Tax Code — SAP จะไม่รับ (FF812)");
+                    continue;
+                }
+                var text = Cut($"Tax base {code} {docs}".Trim(), 50);
+                glAccountItems.Add(new Dictionary<string, object?>
+                {
+                    ["SupplierInvoiceItem"] = (++itemNo).ToString(),
+                    ["CompanyCode"] = companyCode,
+                    ["GLAccount"] = taxBaseClearingAccount.Trim(),
+                    ["DocumentCurrency"] = currency,
+                    ["SupplierInvoiceItemAmount"] = F2(missing),
+                    ["DebitCreditCode"] = "S",
+                    ["TaxCode"] = code,
+                    ["AssignmentReference"] = Cut(assignment, 18),
+                    ["SupplierInvoiceItemText"] = text,
+                    ["_taxBase"] = code,
+                });
+                glAccountItems.Add(new Dictionary<string, object?>
+                {
+                    ["SupplierInvoiceItem"] = (++itemNo).ToString(),
+                    ["CompanyCode"] = companyCode,
+                    ["GLAccount"] = taxBaseClearingAccount.Trim(),
+                    ["DocumentCurrency"] = currency,
+                    ["SupplierInvoiceItemAmount"] = F2(missing),
+                    ["DebitCreditCode"] = "H",
+                    ["TaxCode"] = "VX",
+                    ["AssignmentReference"] = Cut(assignment, 18),
+                    ["SupplierInvoiceItemText"] = text,
+                    ["_taxBase"] = code,
+                });
+            }
+        }
+
+        // ONE document per supplier, the way Accounting posts a shipping bundle (PRD, PO 2230000565:
+        // Local 5105604030 and Fee 5105604031, one number each; 5100001131 PROMPT 18,325.99): every
+        // delivery-cost line on VX, and each tax invoice's VAT as a G/L line on the tax account —
+        // D1 → 11730000 Deferred input tax, V1 → 11720000 Input tax — with its own base. Before, a
+        // condition billed under two tax codes (PROMPT's D1 service next to VX advances) had to go
+        // out as two documents (M8/321 / FF812), which is not how Accounting books it.
+        double accrualDelta = 0;
+        if (vatAsGlLines)
+        {
+            // The invoicing party's own tax invoice keeps a line of its own; the receipts it paid on
+            // our behalf (Cargoport, the Port Authority …) go on ONE line per tax code, the way
+            // Accounting posts them (5100001131: PROMPT 105.00 D1, then 782.99 D1 = Cargoport 744.35
+            // + Port Authority 38.64).
+            var ownInvoice = Or(vendor.Length > 0 ? InvoiceNoOf(taxRows) : "", header.GetStr("invoiceNo").Trim());
+            var vatLines = new List<(string Code, bool Own, bool Deferred, double Amount, double Base, string DocNo, string Issuer)>();
+            foreach (var t in taxRows)
+            {
+                var code = t.GetStr("taxCode").Trim().ToUpperInvariant();
+                var amt = Num(t.Get("docCurrencyAmt"));
+                if (code.Length == 0 || code == "VX" || amt == 0) continue;
+                // Already booked as a G/L line above (the customs import VAT).
+                if (glAccountItems.Any(g => ((Dictionary<string, object?>)g).GetStr("_vatAsGlLine") == code
+                        && Math.Abs(Num(((Dictionary<string, object?>)g).Get("SupplierInvoiceItemAmount")) - amt) < 0.005
+                        && ((Dictionary<string, object?>)g).GetStr("AssignmentReference") == Cut(Or(t.GetStr("taxDocNo").Trim(), assignment), 18)))
+                    continue;
+                var deferred = string.Equals(t.GetStr("taxKind").Trim(), "DEFERRED", StringComparison.OrdinalIgnoreCase)
+                    || code.StartsWith('D');
+                var docNo = t.GetStr("taxDocNo").Trim();
+                vatLines.Add((code, ownInvoice.Length > 0 && string.Equals(docNo, ownInvoice, StringComparison.OrdinalIgnoreCase),
+                    deferred, amt, Num(t.Get("baseAmount")) > 0 ? Num(t.Get("baseAmount")) : Math.Round(amt / 0.07, 2),
+                    docNo, t.GetStr("issuerName").Trim().ToUpperInvariant()));
+            }
+            foreach (var g in vatLines.GroupBy(v => (v.Code, v.Deferred, Key: v.Own ? "OWN|" + v.DocNo : "PAID-ON-BEHALF")))
+            {
+                var items = g.ToList();
+                var amt = Math.Round(items.Sum(v => v.Amount), 2);
+                var docs = items.Select(v => v.DocNo).Where(d => d.Length > 0).Distinct().ToList();
+                var text = string.Join(" / ", items.Select(v => v.Issuer.Length > 0 && v.DocNo.Length > 0
+                    ? $"{v.Issuer},INV.{v.DocNo}" : Or(v.Issuer, v.DocNo)).Distinct());
+                glAccountItems.Add(new Dictionary<string, object?>
+                {
+                    ["SupplierInvoiceItem"] = "0",
+                    ["CompanyCode"] = companyCode,
+                    ["GLAccount"] = g.Key.Deferred ? DeferredVatReversal.GlDeferredInputTax : DeferredVatReversal.GlInputTax,
+                    ["DocumentCurrency"] = currency,
+                    ["SupplierInvoiceItemAmount"] = F2(amt),
+                    ["DebitCreditCode"] = "S",
+                    ["TaxCode"] = g.Key.Code,
+                    ["TaxBaseAmountInTransCrcy"] = F2(Math.Round(items.Sum(v => v.Base), 2)),
+                    ["AssignmentReference"] = Cut(Or(docs.FirstOrDefault() ?? "", assignment), 18),
+                    ["SupplierInvoiceItemText"] = Cut(Or(text, itemText), 50),
+                    ["_vatAsGlLine"] = g.Key.Code,
+                    ["_vatDocs"] = string.Join(", ", docs),
+                });
+            }
+            // Lines: VX, and one line per PO item + condition again.
+            var merged = new List<object>();
+            foreach (var grp in purOrdRef.Cast<Dictionary<string, object?>>()
+                         .GroupBy(r => r.Get("_deliveryCost") is true
+                             ? $"{r.GetStr("PurchaseOrder")}|{r.GetStr("PurchaseOrderItem")}|{r.GetStr("SuplrInvcDeliveryCostCndnType")}|{r.GetStr("FreightSupplier")}"
+                             : Guid.NewGuid().ToString()))
+            {
+                var first = new Dictionary<string, object?>(grp.First());
+                if (first.Get("_deliveryCost") is true)
+                {
+                    first["TaxCode"] = "VX";
+                    if (grp.Count() > 1)
+                    {
+                        first["SupplierInvoiceItemAmount"] = F2(Math.Round(grp.Sum(r => Num(r.Get("SupplierInvoiceItemAmount"))), 2));
+                        if (grp.All(r => r.Get("QuantityInPurchaseOrderUnit") != null))
+                            first["QuantityInPurchaseOrderUnit"] = F3(Math.Round(grp.Sum(r => Num(r.Get("QuantityInPurchaseOrderUnit"))), 3));
+                        first["SupplierInvoiceItemText"] = Cut(string.Join(", ",
+                            grp.Select(r => r.GetStr("SupplierInvoiceItemText")).Where(x => x.Length > 0).Distinct()), 50);
+                        first["SuplrInvcDeliveryCostCndnStep"] = null;
+                        first["SuplrInvcDeliveryCostCndnCount"] = null;
+                    }
+                }
+                merged.Add(first);
+            }
+            // Line = what the PO accrued, Gross = what the invoice says, the satang in between is
+            // SAP's to book as Purchase Variance — Accounting's way (PRD 5100001132: Fee accrued
+            // 200.05, receipt 200.00 → line 200.05, Purchase Variance 0.05 Cr). With the line at the
+            // receipt's 200.00 instead, SAP took the difference as a price change of the goods and
+            // put it on Stock in Trade (TEST 5100000074: accrued 199.71, 0.29 to 11511001).
+            // Only a small difference is treated this way; a bigger one is a real price difference
+            // and the line keeps the invoice's amount.
+            foreach (var line in merged.Cast<Dictionary<string, object?>>().Where(l => l.Get("_deliveryCost") is true))
+            {
+                var accrued = Num(line.Get("_accrued"));
+                var amount = Num(line.Get("SupplierInvoiceItemAmount"));
+                var diff = Math.Round(accrued - amount, 2);
+                if (accrued > 0 && Math.Abs(diff) > AccrualVarianceTolerance)
+                    line["_accrualUnknown"] =
+                        $"{line.GetStr("SuplrInvcDeliveryCostCndnType")} PO {line.GetStr("PurchaseOrder")}/{line.GetStr("PurchaseOrderItem")} "
+                        + $"ค้างไว้ {F2(accrued)} แต่ใบเรียกเก็บ {F2(amount)} (ต่าง {F2(-diff)}) — ส่วนต่างจะเข้าต้นทุนสินค้า (Stock in Trade) "
+                        + "ตรวจยอด condition ใน PO ก่อน Post";
+                if (accrued <= 0 || diff == 0 || Math.Abs(diff) > AccrualVarianceTolerance) continue;
+                line["SupplierInvoiceItemAmount"] = F2(accrued);
+                line["_accrualAdjusted"] = F2(diff);
+                accrualDelta = Math.Round(accrualDelta + diff, 2);
+            }
+            // The difference goes on a Purchase Variance G/L item of our own, exactly as Accounting
+            // keys it (5105604031, G/L Account Items: H 52110001 Purchase Variance 0.05, VX,
+            // Assignment 2230000565). Left to SAP's automatic small-difference posting, the TEST
+            // tenant's account determination pointed at 52060000, which its chart of accounts does
+            // not have. With the line here the document also opens Balance 0.
+            if (accrualDelta != 0)
+                glAccountItems.Add(new Dictionary<string, object?>
+                {
+                    ["SupplierInvoiceItem"] = "0",
+                    ["CompanyCode"] = companyCode,
+                    ["GLAccount"] = PurchaseVarianceAccount,
+                    ["DocumentCurrency"] = currency,
+                    ["SupplierInvoiceItemAmount"] = F2(Math.Abs(accrualDelta)),
+                    // Lines raised to the accrual → credit the variance; lowered → debit it.
+                    ["DebitCreditCode"] = accrualDelta > 0 ? "H" : "S",
+                    ["TaxCode"] = "VX",
+                    ["AssignmentReference"] = Cut(poRef, 18),
+                    ["_purchaseVariance"] = true,
+                });
+            purOrdRef.Clear();
+            purOrdRef.AddRange(merged);
+            for (var pi = 0; pi < purOrdRef.Count; pi++)
+                ((Dictionary<string, object?>)purOrdRef[pi])["SupplierInvoiceItem"] = (pi + 1).ToString();
+            // Tax tab: the lines' VX base with no tax (5105604031: VX, base 200.00, tax 0.00).
+            taxItems.Clear();
+            var vxBase = Math.Round(purOrdRef.Sum(PoAmount), 2);
+            if (vxBase > 0)
+                taxItems.Add(new Dictionary<string, object?>
+                {
+                    ["TaxCode"] = "VX",
+                    ["DocumentCurrency"] = currency,
+                    ["TaxBaseAmountInTransCrcy"] = F2(vxBase),
+                    ["TaxAmount"] = F2(0),
+                });
+        }
+
+        // G/L items are numbered on their own, from 1 — not after the PO lines. SAP checks each
+        // list separately: with one ZFE2 line and the two tax-base lines numbered 2 and 3 it refused
+        // the Customs Department's invoice with MM_IV_SI_API/006 "Items must be numbered
+        // sequentially. Item 0002 should be number 0001".
+        for (var gi = 0; gi < glAccountItems.Count; gi++)
+            ((Dictionary<string, object?>)glAccountItems[gi])["SupplierInvoiceItem"] = (gi + 1).ToString();
+
         // Shipping documents (delivery costs, duty, fees — anything that is not a plain goods
         // invoice against a PO) go to SAP PARKED, not posted: AP opens the draft, checks it and
         // posts it themselves. Goods invoices (INVENTORY_PO) keep posting as before.
@@ -186,6 +478,20 @@ public static class SupplierInvoicePayload
         // The old sum added every G/L line as positive, so a credit (H) line pushed the gross UP
         // instead of down and the draft opened in SAP with a balance that was not zero.
         var gross = SumOfParts(purOrdRef, glAccountItems, taxItems);
+        // With "Calculate Tax" ticked no tax node is sent and SAP works the VAT out from each
+        // line's tax code — but it still adds that VAT to the debits, so the Gross has to carry it
+        // too. Left out, the draft opened with Balance = −VAT (5105600180: debits 13,903.12 vs gross
+        // 13,766.24, −136.88 = D1 112.00 + V1 24.88). The amounts on the Tax tab are what SAP will
+        // calculate for those lines, so they are added here even though the rows are not sent.
+        var calcTaxByCode = calcTax
+            ? taxRows.Where(t => t.GetStr("taxCode").Trim().Length > 0)
+                .GroupBy(t => t.GetStr("taxCode").Trim().ToUpperInvariant())
+                .ToDictionary(g => g.Key, g => Math.Round(g.Sum(t => Num(t.Get("docCurrencyAmt"))), 2))
+            : new Dictionary<string, double>();
+        if (calcTax)
+            gross = Math.Round(gross + taxRows
+                .Where(t => t.GetStr("taxCode").Trim().Length > 0)
+                .Sum(t => Num(t.Get("docCurrencyAmt"))), 2);
         // A document whose own total was read and reviewed wins over the sum of its parts: the
         // difference is the rounding SAP books as Purchase Variance, and it can only do that if we
         // state the real invoice total.
@@ -197,7 +503,9 @@ public static class SupplierInvoicePayload
             // A parked document must open in SAP with Balance 0 — nobody posts it here, so there is
             // no Purchase Variance to soak up the difference. Satang rounding is moved onto the
             // largest line; anything bigger is a real mismatch and is refused before sending.
-            gross = park ? BalanceToStated(stated, gross, purOrdRef, glAccountItems, taxItems) : stated;
+            // Lines set to the accrual on purpose leave that difference for Purchase Variance —
+            // balancing them back onto a line would undo it.
+            gross = park && accrualDelta == 0 ? BalanceToStated(stated, gross, purOrdRef, glAccountItems, taxItems) : stated;
         }
 
         var payload = new Dictionary<string, object?>
@@ -230,7 +538,12 @@ public static class SupplierInvoicePayload
             // Thai tax reporting needs the business place on the document; SAP rejects the posting
             // without it on these company codes.
             ["BusinessPlace"] = businessPlace,
-            ["BusinessSectionCode"] = branch,
+            // Section Code is OUR tax branch (the screen's "Bus.Place/Sectn" 0000), not the
+            // supplier's branch: header.branch is the supplier's ("Branch Code" in KUT-FI-AP-201),
+            // and a supplier at branch 00001 would have sent a section code we do not have.
+            // The supplier's branch has no field in A_SupplierInvoice — SAP takes it from the
+            // business partner master.
+            ["BusinessSectionCode"] = businessPlace,
             ["TaxIsCalculatedAutomatically"] = calcTax,
             // The vendor (payables) line SAP creates takes these from the header: Assignment is
             // what Finance reconciles on, Header Text is what they read in the line-item list.
@@ -257,6 +570,25 @@ public static class SupplierInvoicePayload
         var terms = Or(header.GetStr("paymentTermsCode").Trim(), paymentTerms.Trim());
         if (terms.Length is > 0 and <= 4) payload["PaymentTerms"] = terms;
 
+        // Payment tab (KUT-FI-AP-201 p.37) — sent only when the document has them; otherwise SAP
+        // takes them from the supplier master, as before.
+        void Opt(string field, string value, int max)
+        {
+            value = value.Trim();
+            if (value.Length > 0 && value.Length <= max) payload[field] = value;
+        }
+        Opt("PaymentMethod", header.GetStr("paymentMethod"), 1);
+        Opt("PaymentBlockingReason", header.GetStr("paymentBlock"), 1);
+        Opt("HouseBank", header.GetStr("houseBank"), 5);
+        Opt("HouseBankAccount", header.GetStr("bankAccountId"), 5);
+        Opt("BPBankAccountInternalID", header.GetStr("partnerBank"), 4);
+        if (SapPayloadBuilder.ODataDate(header.Get("baselineDate")) is { } baseline)
+            payload["DueCalculationBaseDate"] = baseline;
+        // Basic Data → Transaction: Credit Memo (KG / RS document type, or the screen says so).
+        if (header.GetStr("transaction").Contains("credit", StringComparison.OrdinalIgnoreCase)
+            || header.GetStr("sapDocType").Trim() is "KG" or "RS")
+            payload["SupplierInvoiceIsCreditMemo"] = "X";
+
         if (purOrdRef.Count > 0) payload["to_SuplrInvcItemPurOrdRef"] = purOrdRef;
         if (glAccountItems.Count > 0) payload["to_SupplierInvoiceItemGLAcct"] = glAccountItems;
         if (taxItems.Count > 0) payload["to_SupplierInvoiceTax"] = taxItems;
@@ -266,7 +598,128 @@ public static class SupplierInvoicePayload
 
         var wht = Num(header.Get("whtAmount"));
         if (wht > 0) payload["_wht"] = new Dictionary<string, object?> { ["WithholdingTaxAmount"] = F2(wht) };
+
+        // Withholding Tax tab (KUT-FI-AP-201 p.40): the rows of the screen's WHT tab
+        // (header.whtItems — type, code, base, amount), this supplier's only. Until now they were
+        // kept in "_wht", which is stripped before sending, so SAP never saw any withholding.
+        // A row without a type or code is not sent: SAP refuses a type the supplier master does
+        // not carry, and the type is Accounting's to choose (TI/TJ/TK at invoice, OA/OB/OC at payment).
+        var whtNode = new List<object>();
+        foreach (var w in ReadWhtRows(header).Where(Mine))
+        {
+            var type = w.GetStr("wtType").Trim().ToUpperInvariant();
+            var code = w.GetStr("whtCode").Trim();
+            if (type.Length != 2 || code.Length == 0 || code.Length > 2) continue;
+            var baseFc = Num(w.Get("baseFc"));
+            var amtFc = Num(w.Get("amtFc"));
+            if (baseFc == 0 && amtFc == 0) continue;
+            var row = new Dictionary<string, object?>
+            {
+                ["WithholdingTaxType"] = type,
+                ["WithholdingTaxCode"] = code,
+                ["DocumentCurrency"] = currency,
+            };
+            if (baseFc > 0)
+            {
+                row["WithholdingTaxBaseAmount"] = F2(baseFc);
+                row["WhldgTaxBaseIsEnteredManually"] = true;
+            }
+            if (amtFc > 0)
+            {
+                row["ManuallyEnteredWhldgTaxAmount"] = F2(amtFc);
+                row["WhldgTaxIsEnteredManually"] = true;
+            }
+            whtNode.Add(row);
+        }
+        if (whtNode.Count > 0) payload["to_SupplierInvoiceWhldgTax"] = whtNode;
+        if (calcTax) payload["_calcTaxByCode"] = calcTaxByCode;
         return payload;
+    }
+
+    /// <summary>Splits one supplier's invoice into one SAP document per tax code when SAP could
+    /// not take it as one.
+    ///
+    /// SAP takes ONE line per (PO item, condition) in an invoice, with one tax code (M8/321). A
+    /// forwarder's bill often settles one condition under two tax codes — on PO 2230000033 the
+    /// whole ZLH1 (17,438 THB) sits on item 10 only, while Prompt bills 1,500 of it as its own
+    /// VAT-able service (D1) and the rest as advances (VX). As one document that is either M8/321
+    /// or FF812, and the person had to split it by hand in SAP. Here it is split before sending:
+    /// each part takes the lines of its tax code, the tax rows of that code, its own gross, and a
+    /// reference of its own (the first keeps the original, the next get -2, -3 …) so SAP's
+    /// duplicate check and our "already created" check tell them apart. G/L lines go with the
+    /// largest part; withholding goes with the part that carries the VAT-able service.
+    /// A document with no repeated (PO item, condition) is returned as it is.</summary>
+    public static List<Dictionary<string, object?>> SplitByTaxCode(Dictionary<string, object?> payload)
+    {
+        if (payload.GetValueOrDefault("to_SuplrInvcItemPurOrdRef") is not List<object> items || items.Count < 2)
+            return [payload];
+        static Dictionary<string, object?> D(object o) => (Dictionary<string, object?>)o;
+        static string Key(object o) =>
+            $"{D(o).GetStr("PurchaseOrder")}|{D(o).GetStr("PurchaseOrderItem").Trim().TrimStart('0')}|{D(o).GetStr("SuplrInvcDeliveryCostCndnType")}";
+        if (items.GroupBy(Key).All(g => g.Count() == 1)) return [payload];
+
+        static string PartKey(object o) =>
+            $"{D(o).GetStr("TaxCode").Trim().ToUpperInvariant()}|{D(o).GetStr("FreightSupplier").Trim()}";
+        var parts = items.GroupBy(PartKey)
+            .Select(g => g.ToList())
+            .OrderByDescending(g => g.Sum(PoAmount))
+            .ToList();
+        // Two lines of the same tax code on the same item and condition cannot be told apart by
+        // splitting on tax code; that is a merge the builder already does, so it does not happen.
+        if (parts.Any(p => p.GroupBy(Key).Any(g => g.Count() > 1))) return [payload];
+
+        var taxes = payload.GetValueOrDefault("to_SupplierInvoiceTax") as List<object> ?? [];
+        var gl = payload.GetValueOrDefault("to_SupplierInvoiceItemGLAcct") as List<object> ?? [];
+        var calcByCode = payload.GetValueOrDefault("_calcTaxByCode") as Dictionary<string, double> ?? [];
+        var reference = payload.GetStr("SupplierInvoiceIDByInvcgParty");
+        static bool Exempt(string code) => code is "" or "VX";
+
+        // Withholding is on the supplier's own service, which is the VAT-able part.
+        var whtPart = parts.FindIndex(p => p.Any(i => !Exempt(D(i).GetStr("TaxCode").Trim().ToUpperInvariant())));
+        if (whtPart < 0) whtPart = 0;
+
+        var result = new List<Dictionary<string, object?>>();
+        for (var k = 0; k < parts.Count; k++)
+        {
+            var codes = parts[k].Select(i => D(i).GetStr("TaxCode").Trim().ToUpperInvariant()).ToHashSet();
+            var part = new Dictionary<string, object?>(payload);
+            var no = 0;
+            var lines = parts[k].Select(i =>
+            {
+                var row = new Dictionary<string, object?>(D(i)) { ["SupplierInvoiceItem"] = (++no).ToString() };
+                return (object)row;
+            }).ToList();
+            var partGl = k == 0 ? gl : [];
+            // Part 0 also takes the G/L lines (and so their tax codes) and any tax row whose code no
+            // part's lines carry — the import VAT with its clearing-account base travels as a unit.
+            if (k == 0)
+            {
+                foreach (var g in gl) codes.Add(D(g).GetStr("TaxCode").Trim().ToUpperInvariant());
+                foreach (var t in taxes)
+                {
+                    var tc = D(t).GetStr("TaxCode").Trim().ToUpperInvariant();
+                    if (!parts.Any(p => p.Any(i => D(i).GetStr("TaxCode").Trim().ToUpperInvariant() == tc))) codes.Add(tc);
+                }
+            }
+            var partTaxes = taxes.Where(t => codes.Contains(D(t).GetStr("TaxCode").Trim().ToUpperInvariant())).ToList();
+
+            part["to_SuplrInvcItemPurOrdRef"] = lines;
+            if (partTaxes.Count > 0) part["to_SupplierInvoiceTax"] = partTaxes; else part.Remove("to_SupplierInvoiceTax");
+            if (partGl.Count > 0) part["to_SupplierInvoiceItemGLAcct"] = partGl; else part.Remove("to_SupplierInvoiceItemGLAcct");
+            if (k != whtPart) { part.Remove("_wht"); part.Remove("to_SupplierInvoiceWhldgTax"); }
+
+            var gross = SumOfParts(lines, partGl, partTaxes)
+                + codes.Sum(c => calcByCode.TryGetValue(c, out var v) ? v : 0);
+            part["InvoiceGrossAmount"] = F2(Math.Round(gross, 2));
+            if (k > 0)
+            {
+                var suffix = "-" + (k + 1);
+                part["SupplierInvoiceIDByInvcgParty"] = Cut(reference, 16 - suffix.Length) + suffix;
+            }
+            part["_splitByTaxCode"] = $"{k + 1}/{parts.Count} ({string.Join(", ", codes)})";
+            result.Add(part);
+        }
+        return result;
     }
 
     /// <summary>Largest difference between the stated invoice total and the sum of its lines
@@ -322,11 +775,50 @@ public static class SupplierInvoicePayload
         return stated;
     }
 
+    /// <summary>Largest gap between an invoice line and the PO's accrual that is still rounding
+    /// (left to Purchase Variance) rather than a price difference.</summary>
+    private const double AccrualVarianceTolerance = 1.00;
+
+    /// <summary>Purchase Variance (YCOA, Primary Costs) — where Accounting books the satang between
+    /// the PO's accrual and the invoice.</summary>
+    private const string PurchaseVarianceAccount = "52110001";
+
     private static double PoAmount(object item) =>
         Num(((Dictionary<string, object?>)item).Get("SupplierInvoiceItemAmount"));
 
     /// <summary>This supplier's own invoice number, read off the tax rows the screen's Tax tab
     /// holds (Tax Invoice No.). Empty when the rows carry none.</summary>
+    /// <summary>header.whtItems as dictionaries (the screen's Withholding Tax tab).</summary>
+    private static List<Dictionary<string, object?>> ReadWhtRows(Dictionary<string, object?> header)
+    {
+        var rows = new List<Dictionary<string, object?>>();
+        switch (header.Get("whtItems"))
+        {
+            case System.Collections.Generic.IEnumerable<object?> list:
+                foreach (var o in list)
+                    if (o is Dictionary<string, object?> d) rows.Add(d);
+                    else if (o is System.Text.Json.JsonElement je && je.ValueKind == System.Text.Json.JsonValueKind.Object)
+                        rows.Add(je.EnumerateObject().ToDictionary(p => p.Name, p => (object?)(p.Value.ValueKind switch
+                        {
+                            System.Text.Json.JsonValueKind.Number => p.Value.GetDouble(),
+                            System.Text.Json.JsonValueKind.String => p.Value.GetString(),
+                            _ => p.Value.ToString(),
+                        })));
+                break;
+            case System.Text.Json.JsonElement arr when arr.ValueKind == System.Text.Json.JsonValueKind.Array:
+                foreach (var je in arr.EnumerateArray())
+                    if (je.ValueKind == System.Text.Json.JsonValueKind.Object)
+                        rows.Add(je.EnumerateObject().ToDictionary(p => p.Name, p => (object?)(p.Value.ValueKind switch
+                        {
+                            System.Text.Json.JsonValueKind.Number => p.Value.GetDouble(),
+                            System.Text.Json.JsonValueKind.String => p.Value.GetString(),
+                            _ => p.Value.ToString(),
+                        })));
+                break;
+        }
+        return rows;
+    }
+
     private static string InvoiceNoOf(IEnumerable<Dictionary<string, object?>> taxRows) =>
         taxRows.Select(t => t.GetStr("taxDocNo").Trim()).FirstOrDefault(v => v.Length > 0) ?? "";
 
@@ -335,7 +827,7 @@ public static class SupplierInvoicePayload
     /// One shipping bundle is one piece of paper but several suppliers' invoices, and SAP takes
     /// one invoicing party per document. A document with a single supplier returns that one, so
     /// the caller can treat both cases the same way.</summary>
-    public static List<string> VendorsOf(Dictionary<string, object?> doc)
+    public static List<string> VendorsOf(Dictionary<string, object?> doc, Func<string, string>? sameParty = null)
     {
         var header = doc.Get("header") as Dictionary<string, object?> ?? new Dictionary<string, object?>();
         var main = Or(doc.GetStr("partnerCode").Trim(), header.GetStr("vendorCode").Trim());
@@ -343,6 +835,7 @@ public static class SupplierInvoicePayload
         void Add(string v)
         {
             var code = Or(v.Trim(), main);
+            if (sameParty != null && code.Length > 0) code = sameParty(code);
             if (code.Length > 0 && !seen.Contains(code, StringComparer.OrdinalIgnoreCase)) seen.Add(code);
         }
         // Keyed against a purchase order there is only ever the one supplier.
@@ -406,12 +899,64 @@ public static class SupplierInvoicePayload
     /// purchase order carries them, but the read of it is refused in this tenant (403 on
     /// API_PURCHASEORDER_PROCESS_SRV, SAP_COM_0053), so they are what the person set on the PO
     /// Reference tab.</summary>
+    /// <summary>Gives the cost lines the tax code the Tax tab says they carry.
+    ///
+    /// The Tax tab holds one row per tax invoice with its code and BASE ("D1 105.00 on 1,500.00 —
+    /// PROMPT PI-2608011"). SAP needs lines carrying that code whose amounts add up to that base;
+    /// with every line left on VX it refuses the document (FF812 "Tax code D1 also exists") and the
+    /// person had to work out which line was the base. Here, for each code whose base is not yet
+    /// covered by lines of that code, the VX lines that add up EXACTLY to the missing base are given
+    /// the code — one line if one matches, otherwise the smallest combination. Nothing is changed
+    /// when no combination matches to the satang (the base is then part of a line, and only a person
+    /// can split it), or when a line already has a code other than the default.</summary>
+    private static List<(string Cond, string PoItem, string Step, string Count, string Vendor,
+        string TaxCode, string Desc, double Amount)> AutoTaxCodes(
+        List<(string Cond, string PoItem, string Step, string Count, string Vendor,
+            string TaxCode, string Desc, double Amount)> charges,
+        IReadOnlyList<Dictionary<string, object?>>? taxRows, string headerTaxCode)
+    {
+        if (taxRows == null || taxRows.Count == 0 || charges.Count == 0) return charges;
+        static bool Exempt(string c) => c.Length == 0 || c.Equals("VX", StringComparison.OrdinalIgnoreCase);
+        var defaultCode = Or(headerTaxCode, "VX");
+        var need = taxRows
+            .Where(t => !Exempt(t.GetStr("taxCode").Trim()) && Num(t.Get("baseAmount")) > 0)
+            .GroupBy(t => t.GetStr("taxCode").Trim().ToUpperInvariant())
+            .Select(g => (Code: g.Key, Base: Math.Round(g.Sum(t => Num(t.Get("baseAmount"))), 2)))
+            .ToList();
+        var list = charges.ToList();
+        foreach (var (code, baseAmt) in need)
+        {
+            var covered = list.Where(c => c.TaxCode.Equals(code, StringComparison.OrdinalIgnoreCase)).Sum(c => c.Amount);
+            var missing = Math.Round(baseAmt - covered, 2);
+            if (missing <= 0.009) continue;
+            var free = list.Select((c, i) => (c, i))
+                .Where(x => Exempt(x.c.TaxCode) || x.c.TaxCode.Equals(defaultCode, StringComparison.OrdinalIgnoreCase))
+                .Where(x => x.c.Amount > 0)
+                .ToList();
+            if (free.Count == 0 || free.Count > 18) continue;
+            int[]? best = null;
+            for (var mask = 1; mask < (1 << free.Count); mask++)
+            {
+                var bits = System.Numerics.BitOperations.PopCount((uint)mask);
+                if (best != null && bits >= best.Length) continue;
+                double sum = 0;
+                for (var b = 0; b < free.Count; b++) if ((mask & (1 << b)) != 0) sum += free[b].c.Amount;
+                if (Math.Abs(sum - missing) <= 0.01)
+                    best = Enumerable.Range(0, free.Count).Where(b => (mask & (1 << b)) != 0).Select(b => free[b].i).ToArray();
+            }
+            if (best == null) continue;
+            foreach (var i in best) list[i] = list[i] with { TaxCode = code };
+        }
+        return list;
+    }
+
     private static List<object> DeliveryCostItems(
         Dictionary<string, object?> doc, string poRef, string headerCurrency, string headerTaxCode,
         string invoicingParty, string itemText,
         Func<Dictionary<string, object?>, bool> mine, int startNo,
         IReadOnlyList<SapPurchaseOrderItem>? poItems = null,
-        IReadOnlyList<System.Text.Json.JsonElement>? goodsReceiptItems = null)
+        IReadOnlyList<System.Text.Json.JsonElement>? goodsReceiptItems = null,
+        IReadOnlyList<Dictionary<string, object?>>? taxRows = null)
     {
         var result = new List<object>();
         if (doc.Get("lines") is not System.Collections.IEnumerable lines) return result;
@@ -463,6 +1008,10 @@ public static class SupplierInvoicePayload
             if (raw is not Dictionary<string, object?> l) continue;
             var ext = l.GetStr("extCode").Trim();
             if (ext is "VAT" or "WHT") continue;          // those travel on their own nodes
+            // A tax row the read did not tag ("VAT 7% PROMPT LOGISTICS …", "Withholding Tax 3% …")
+            // is still a tax row, not a charge against the PO.
+            if (System.Text.RegularExpressions.Regex.IsMatch(l.GetStr("desc"), @"^\s*(VAT|WITHHOLDING)",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase)) continue;
             var amount = Num(l.Get("amount"));
             if (amount == 0) continue;
             var extra = l.Get("extra") as Dictionary<string, object?> ?? new Dictionary<string, object?>();
@@ -483,14 +1032,34 @@ public static class SupplierInvoicePayload
             }
             if (cndnType.Length == 0)
             {
+                // Same rule the screen seeds with: the COSTS heading the FORM SHIPPING EXPENSE files
+                // the row under names the condition (Local ZLH1, Fee ZFE2, Insurance ZINS, Overseas
+                // ZOVS) — used only when the PO holds it, or the PO could not be read.
+                var byHeading = extra.GetStr("costType").Trim().ToUpperInvariant() switch
+                {
+                    "LOCAL" => "ZLH1", "FEE" => "ZFE2", "INSURANCE" => "ZINS", "OVERSEAS" => "ZOVS", _ => "",
+                };
+                if (byHeading.Length > 0 && (poConds.Count == 0
+                    || poConds.Any(x => string.Equals(x.Cond.ConditionType.Trim(), byHeading, StringComparison.OrdinalIgnoreCase))))
+                    cndnType = byHeading;
+            }
+            if (cndnType.Length == 0)
+            {
                 missing.Add($"\"{Cut(l.GetStr("desc"), 40)}\" (ยังไม่ได้เลือก Condition)");
                 continue;
             }
-            charges.Add((cndnType.ToUpperInvariant(), extra.GetStr("sapPoItem").Trim(),
+            // A PO item the screen numbered by position (10, 20, 30 … with the "auto" badge) is a
+            // guess for goods lines and means nothing for a delivery cost — the condition decides
+            // which items it clears — so it is dropped and the item is worked out from the PO.
+            var autoItem = extra.GetStr("sapPoItemAuto").Trim() is { Length: > 0 } ai
+                && !string.Equals(ai, "false", StringComparison.OrdinalIgnoreCase) && ai != "0";
+            charges.Add((cndnType.ToUpperInvariant(), autoItem ? "" : extra.GetStr("sapPoItem").Trim(),
                 extra.GetStr("deliveryCondStep").Trim(), extra.GetStr("deliveryCondCount").Trim(),
                 extra.GetStr("vendorCode").Trim(), Or(extra.GetStr("taxCode").Trim(), headerTaxCode),
                 l.GetStr("desc").Trim(), amount));
         }
+
+        charges = AutoTaxCodes(charges, taxRows, headerTaxCode);
 
         // Pass 2: one SAP line per (PO item, condition). Several charges on the form usually settle
         // the same condition (DO, storage, trucking, labour… are all ZLH1 Local Handling), and SAP
@@ -500,71 +1069,217 @@ public static class SupplierInvoicePayload
         // goes to the largest share so the lines still add up to the invoice exactly.
         var rows = new List<(string PoItem, string Cond, string Step, string Count, string Vendor,
             string TaxCode, string Text, double Amount)>();
-        foreach (var g in charges.GroupBy(c => (c.Cond, c.PoItem, c.Vendor, c.TaxCode)))
-        {
-            var total = Math.Round(g.Sum(c => c.Amount), 2);
-            var text = string.Join(", ", g.Select(c => c.Desc).Where(d => d.Length > 0).Distinct());
-            var one = g.Count() == 1 ? g.First() : default;
-            var step = g.Count() == 1 ? one.Step : "";
-            var count = g.Count() == 1 ? one.Count : "";
+        var groups = charges.GroupBy(c => (c.Cond, c.PoItem, c.Vendor, c.TaxCode))
+            .Select(g => (Key: g.Key,
+                          Total: Math.Round(g.Sum(c => c.Amount), 2),
+                          Text: string.Join(", ", g.Select(c => c.Desc).Where(d => d.Length > 0).Distinct()),
+                          Step: g.Count() == 1 ? g.First().Step : "",
+                          Count: g.Count() == 1 ? g.First().Count : ""))
+            .ToList();
 
-            if (g.Key.PoItem.Length > 0)
+        // Lines where the person chose the PO item themselves go exactly there.
+        foreach (var g in groups.Where(g => g.Key.PoItem.Length > 0))
+        {
+            if (!receivedItems.Contains(ItemKey(g.Key.PoItem)))
             {
-                if (!receivedItems.Contains(ItemKey(g.Key.PoItem)))
-                {
-                    missing.Add($"\"{Cut(text, 40)}\" (PO item {g.Key.PoItem} ยังไม่มี GR สุทธิ)");
-                    continue;
-                }
-                rows.Add((g.Key.PoItem, g.Key.Cond, step, count, g.Key.Vendor, g.Key.TaxCode, text, total));
+                missing.Add($"\"{Cut(g.Text, 40)}\" (PO item {g.Key.PoItem} ยังไม่มี GR สุทธิ)");
                 continue;
             }
+            rows.Add((g.Key.PoItem, g.Key.Cond, g.Step, g.Count, g.Key.Vendor, g.Key.TaxCode, g.Text, g.Total));
+        }
 
-            var holders = poConds
-                .Where(x => string.Equals(x.Cond.ConditionType.Trim(), g.Key.Cond, StringComparison.OrdinalIgnoreCase)
-                    && x.Cond.Amount != 0
-                    && receivedItems.Contains(ItemKey(x.Item)))
+        // The rest are placed per condition. SAP allows ONE line per (PO item, condition) in an
+        // invoice (M8/321 "Document contains same order item more than once"), and that line has a
+        // single tax code and supplier. So when one condition is billed under several tax codes
+        // (ZLH1 as VX for DO/trucking, V1 for storage, D1 for Prompt's own service), each tax code
+        // gets its OWN PO items: the largest group takes the largest item plus any spare ones, the
+        // others one item each. With a single tax code nothing changes — it is spread over every
+        // eligible item in proportion to what each accrued, as MIRO proposes.
+        foreach (var byCond in groups.Where(g => g.Key.PoItem.Length == 0)
+                                     .GroupBy(g => g.Key.Cond, StringComparer.OrdinalIgnoreCase))
+        {
+            var cond = byCond.Key;
+            var condGroups = byCond.OrderByDescending(g => Math.Abs(g.Total)).ToList();
+            var condText = string.Join(", ", condGroups.Select(g => g.Text).Where(t => t.Length > 0));
+
+            var matchingConditions = poConds
+                .Where(x => string.Equals(x.Cond.ConditionType.Trim(), cond, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            var conditionHolders = matchingConditions
+                .Where(x => x.Cond.Amount != 0)
                 .GroupBy(x => x.Item)
                 .Select(h => (Item: h.Key, Weight: (double)h.Sum(x => Math.Abs(x.Cond.Amount))))
                 .Where(h => h.Weight > 0)
-                .OrderBy(h => h.Item.PadLeft(10, '0'))
+                .ToList();
+            // Items already taken for this condition by a line with a PO item typed by hand.
+            var taken = rows.Where(r => string.Equals(r.Cond, cond, StringComparison.OrdinalIgnoreCase))
+                .Select(r => ItemKey(r.PoItem)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var holders = conditionHolders
+                .Where(h => receivedItems.Contains(ItemKey(h.Item)) && !taken.Contains(ItemKey(h.Item)))
+                .OrderByDescending(h => h.Weight).ThenBy(h => h.Item.PadLeft(10, '0'))
                 .ToList();
             if (holders.Count == 0)
             {
-                missing.Add($"\"{Cut(text, 40)}\" (" + (poConds.Count == 0
-                    ? "อ่าน PO จาก SAP ไม่ได้ จึงหารายการ PO ให้ไม่ได้"
-                    : $"PO {poRef} ไม่มี Condition {g.Key.Cond} ที่ตั้งค้างไว้") + ")");
+                var reason = poConds.Count == 0
+                    ? "อ่าน PO จาก SAP ไม่ได้ จึงตรวจ condition ของ PO ไม่ได้"
+                    : matchingConditions.Count == 0
+                        ? $"เลือก {cond} ใน invoice แล้ว แต่ PO {poRef} ไม่มี condition {cond} ตั้งค้างไว้"
+                        : conditionHolders.Count == 0
+                            ? $"PO {poRef} มี condition {cond} แต่ไม่มียอดสะสมให้ตัด"
+                            : $"PO {poRef} มี condition {cond} ที่ item {string.Join(", ", conditionHolders.Select(h => h.Item))} แต่ยังไม่พบ GR สุทธิของ item ที่ยังว่าง";
+                missing.Add($"\"{Cut(condText, 40)}\" ({reason})");
                 continue;
             }
+            // Assign: one item per group (largest group ↔ largest item), spare items to the largest group.
+            // When there are more groups than items, groups share items (round robin); the repeated
+            // (item, condition) lines are then sent as separate documents by SplitByTaxCode.
+            var assigned = condGroups.Select((g, i) => new List<(string Item, double Weight)> { holders[i % holders.Count] }).ToList();
+            for (var i = condGroups.Count; i < holders.Count; i++) assigned[0].Add(holders[i]);
 
-            var weightSum = holders.Sum(h => h.Weight);
-            var shares = holders
-                .Select(h => (h.Item, h.Weight, Amount: Math.Round(total * h.Weight / weightSum, 2)))
-                .ToList();
-            var rest = Math.Round(total - shares.Sum(x => x.Amount), 2);
-            if (rest != 0)
+            for (var gi = 0; gi < condGroups.Count; gi++)
             {
-                var big = shares.IndexOf(shares.OrderByDescending(x => x.Weight).First());
-                shares[big] = (shares[big].Item, shares[big].Weight, Math.Round(shares[big].Amount + rest, 2));
+                var g = condGroups[gi];
+                var mineItems = assigned[gi];
+                var weightSum = mineItems.Sum(h => h.Weight);
+                var shares = mineItems
+                    .Select(h => (h.Item, h.Weight, Amount: Math.Round(g.Total * h.Weight / weightSum, 2)))
+                    .ToList();
+                var rest = Math.Round(g.Total - shares.Sum(x => x.Amount), 2);
+                if (rest != 0)
+                {
+                    var big = shares.IndexOf(shares.OrderByDescending(x => x.Weight).First());
+                    shares[big] = (shares[big].Item, shares[big].Weight, Math.Round(shares[big].Amount + rest, 2));
+                }
+                var single = mineItems.Count == 1;
+                foreach (var sh in shares.Where(x => x.Amount != 0))
+                    rows.Add((sh.Item, cond, single ? g.Step : "", single ? g.Count : "",
+                        g.Key.Vendor, g.Key.TaxCode, g.Text, sh.Amount));
             }
-            foreach (var sh in shares.Where(x => x.Amount != 0))
-                rows.Add((sh.Item, g.Key.Cond, "", "", g.Key.Vendor, g.Key.TaxCode, text, sh.Amount));
         }
+
+        // Two lines on the same PO item + condition with different tax codes or suppliers cannot be
+        // one SAP line; they stay separate here and SplitByTaxCode sends them as separate documents.
 
         if (missing.Count > 0)
             throw new MgtOcr.Core.HttpApiException(400,
-                $"ค่าใช้จ่ายที่จะตัดกับ PO {poRef} ยังไม่ครบ — แต่ละบรรทัดต้องเลือก **Condition** "
-                + "(ZFRE / ZLH1 / ZED1 / ZFE2 / ZINS / ZIM1 / ZOVS / ZOTH) ให้ตรงกับที่ตั้งไว้ใน PO "
-                + "ระบบจะกระจายยอดไปตามรายการใน PO ที่มี Condition นั้นให้เอง\n\n"
-                + "บรรทัดที่ยังขาด: " + string.Join(" · ", missing));
+                $"ยังจับคู่ค่าใช้จ่ายกับ PO {poRef} ไม่ได้ — เลือก Condition ใน invoice อย่างเดียวไม่พอ ต้องมี Condition เดียวกันตั้งไว้บน PO และมี GR สุทธิในรายการ PO นั้นด้วย\n\n"
+                + "รายละเอียด: " + string.Join(" · ", missing));
 
         // Same PO item + condition from two groups (e.g. one with a tax code typed by hand) would be
         // refused by SAP as a duplicate, so they are merged here.
+        // Delivery-cost QUANTITY. The goods receipt accrued each condition against the quantity
+        // received (PO history: ZLH1 520.40 USD on 3,000 KG), and SAP prices the invoice line per
+        // unit. Sent with no quantity, the line is 0 KG: SAP calls the price "too high", ignores the
+        // PO item and leaves the whole amount as Balance (5105600203: "Order item 2230000033 00010
+        // will be ignored", Balance 15,938.00). So each line carries its share of the received
+        // quantity, by its share of what the condition accrued on that item; when the document
+        // settles the condition in full (the usual case) the shares add up to the received quantity
+        // exactly, split across however many documents the tax codes make.
+        var receivedQty = (goodsReceiptItems ?? [])
+            .Where(row => !string.IsNullOrWhiteSpace(GrString(row, "PurchaseOrderItem")))
+            .GroupBy(row => ItemKey(GrString(row, "PurchaseOrderItem")!))
+            .ToDictionary(g => g.Key,
+                g => g.Sum(row => (GrReversal(row) ? -1 : 1) * GrNumber(row, "QuantityInEntryUnit")),
+                StringComparer.OrdinalIgnoreCase);
+        var poItemByKey = (poItems ?? []).GroupBy(i => ItemKey(i.Item))
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+        // The rate the goods receipt itself converted at, worked back from its goods line: the THB
+        // the GR posted for the goods (TotalGoodsMvtAmtInCCCrcy) over what those goods cost in the
+        // PO's currency (quantity × net price). A delivery cost the PO holds in USD was accrued at
+        // that same rate — PO 2230000056: goods 381,998.04 THB for 11,400.00 USD = 33.5086, and ZFE2
+        // 5.96 USD × 33.5086 = 199.71, the accrual on the PO history. The PO's own pricing rate
+        // (PriceDetnExchangeRate) is not it: on another PO it gave 199.24 against an accrual of
+        // 190.99, and the 8.25 between went to Stock in Trade. Null when it cannot be worked out.
+        double? GrRateFor(string item)
+        {
+            if (!poItemByKey.TryGetValue(ItemKey(item), out var pi) || pi.NetPrice <= 0) return null;
+            var grRows = (goodsReceiptItems ?? [])
+                .Where(r => ItemKey(GrString(r, "PurchaseOrderItem") ?? "") == ItemKey(item))
+                .ToList();
+            var thb = grRows.Sum(r => (GrReversal(r) ? -1 : 1) * GrNumber(r, "TotalGoodsMvtAmtInCCCrcy"));
+            var qty = grRows.Sum(r => (GrReversal(r) ? -1 : 1) * GrNumber(r, "QuantityInEntryUnit"));
+            if (thb <= 0 || qty <= 0) return null;
+            var rate = thb / (qty * (double)pi.NetPrice);
+            // A price per 100 units, or a field the tenant does not send, gives nonsense; a rate
+            // far from the PO's own is not trusted.
+            if (pi.ExchangeRate > 0 && Math.Abs(rate - (double)pi.ExchangeRate) > (double)pi.ExchangeRate * 0.2) return null;
+            return rate;
+        }
+        bool Differs(string? cur) =>
+            !string.IsNullOrWhiteSpace(cur) && !string.Equals(cur.Trim(), headerCurrency, StringComparison.OrdinalIgnoreCase);
+        IEnumerable<SapPoCondition> CondsOf(SapPurchaseOrderItem pi, string cond) =>
+            pi.Conditions.Where(c => string.Equals(c.ConditionType.Trim(), cond, StringComparison.OrdinalIgnoreCase));
+        // Was the CONDITION itself typed in a foreign currency (ZFE2 5.96 USD), or in THB on a USD
+        // purchase order (ZLH1 17,437.88 THB)? Only the first is converted at the GR's rate; the
+        // second accrues the THB that was typed, whatever the rates.
+        bool TypedForeign(SapPurchaseOrderItem pi, string cond) => CondsOf(pi, cond).Any(c => Differs(c.RateCurrency));
+        double AccruedInDocCurrency(string item, string cond)
+        {
+            if (!poItemByKey.TryGetValue(ItemKey(item), out var pi)) return 0;
+            var amt = (double)CondsOf(pi, cond).Sum(c => Math.Abs(c.Amount));
+            var cur = pi.Conditions.Select(c => c.AmountCurrency).FirstOrDefault(c => !string.IsNullOrWhiteSpace(c)) ?? pi.Currency;
+            if (Differs(cur))
+            {
+                var rate = TypedForeign(pi, cond)
+                    ? GrRateFor(item) ?? (pi.ExchangeRate > 0 ? (double)pi.ExchangeRate : 0)
+                    : (pi.ExchangeRate > 0 ? (double)pi.ExchangeRate : 0);
+                amt *= rate;
+            }
+            return amt;
+        }
+        // Known to the satang: a condition typed in THB, or one typed in a foreign currency whose
+        // GR rate could be worked out. Otherwise (API_MATERIAL_DOCUMENT_SRV sends no goods amount
+        // on this tenant) the line keeps the invoice's own amount and the person is told.
+        // PO 2230000061 settled it: purchasing types the condition in USD at the PO's own rate
+        // (ZLH1 13,766.24 THB / 33.5086 = 410.83 USD), and the goods receipt accrues it back at that
+        // same rate — PRD's Fee 5.97 USD × 33.5086 = 200.04, exactly the BzWE. So the PO's rate is
+        // the accrual's rate. A gap that is more than rounding means the PO holds a different
+        // figure (ZFE2 typed 5.70 for 5.97 → 191.00 against a 200.00 receipt): reported, not hidden.
+        bool AccrualIsExact(string item, string cond) => poItemByKey.ContainsKey(ItemKey(item));
+        // The service does not say reliably which currency ConditionAmount is in for a condition
+        // typed in THB on a USD order, so both readings are tried — as it stands and converted at
+        // the PO's rate — and the one nearer the invoice line is taken.
+        double AccrualNear(string item, string cond, double invoiceAmount)
+        {
+            var converted = Math.Round(AccruedInDocCurrency(item, cond), 2);
+            if (!poItemByKey.TryGetValue(ItemKey(item), out var pi)) return converted;
+            var raw = Math.Round((double)CondsOf(pi, cond).Sum(c => Math.Abs(c.Amount)), 2);
+            return Math.Abs(raw - invoiceAmount) < Math.Abs(converted - invoiceAmount) ? raw : converted;
+        }
+        var qtyOf = new Dictionary<(string, string, string, string), double>();
+        foreach (var byItemCond in rows.GroupBy(r => (Item: ItemKey(r.PoItem), Cond: r.Cond.ToUpperInvariant())))
+        {
+            if (!receivedQty.TryGetValue(byItemCond.Key.Item, out var gotQty) || gotQty <= 0) continue;
+            var parts = byItemCond.GroupBy(r => (r.PoItem, r.Cond, r.Vendor, r.TaxCode))
+                .Select(g => (g.Key, Amount: g.Sum(x => x.Amount))).ToList();
+            var docTotal = parts.Sum(l => l.Amount);
+            if (docTotal <= 0) continue;
+            var accrued = AccruedInDocCurrency(byItemCond.Key.Item, byItemCond.Key.Cond);
+            // Always the received quantity, all of it: a shipping invoice settles the condition in
+            // full, which is how Accounting posts it (PRD 5105604004: ZINS on 10,146 + 3,382 + 1,600
+            // KG, the whole GR). Scaling it by amount ÷ accrual trusted an accrual worked out from
+            // the PO's pricing fields — when that came out wrong (TEST 5105600256: 13.528 KG of the
+            // GR) SAP cleared only that share of the accrual (43.90 of 1,983) and booked the rest,
+            // 1,939.10, to Stock in Trade.
+            var docQty = gotQty;
+            docQty = Math.Round(docQty, 3);
+            var given = 0.0;
+            for (var i = 0; i < parts.Count; i++)
+            {
+                var q = i == parts.Count - 1 ? Math.Round(docQty - given, 3) : Math.Round(docQty * parts[i].Amount / docTotal, 3);
+                given += q;
+                qtyOf[parts[i].Key] = q;
+            }
+        }
+
         var no = startNo;
         foreach (var r in rows.GroupBy(r => (r.PoItem, r.Cond, r.Vendor, r.TaxCode)))
         {
             var first = r.First();
             var single = r.Count() == 1;
             var amount = Math.Round(r.Sum(x => x.Amount), 2);
+            var hasQty = qtyOf.TryGetValue(r.Key, out var lineQty) && lineQty > 0;
+            var unit = poItemByKey.TryGetValue(ItemKey(r.Key.PoItem), out var poIt) ? poIt.Unit : "";
             var text = string.Join(", ", r.Select(x => x.Text).Where(t => t.Length > 0).Distinct());
             result.Add(new Dictionary<string, object?>
             {
@@ -574,6 +1289,8 @@ public static class SupplierInvoicePayload
                 ["DocumentCurrency"] = headerCurrency,
                 ["SupplierInvoiceItemAmount"] = F2(amount),
                 ["SuplrInvcDeliveryCostCndnType"] = r.Key.Cond,
+                ["QuantityInPurchaseOrderUnit"] = hasQty && unit.Length > 0 ? F3(lineQty) : null,
+                ["PurchaseOrderQuantityUnit"] = hasQty && unit.Length > 0 ? unit : null,
                 // A condition entered more than once on the same PO item is told apart by its
                 // step and counter. Sent only when the person typed them for a single line — on a
                 // PO with one condition of each type per item SAP finds it from the type alone.
@@ -588,6 +1305,11 @@ public static class SupplierInvoicePayload
                 ["TaxCode"] = r.Key.TaxCode,
                 ["SupplierInvoiceItemText"] = Cut(Or(text, itemText), 50),
                 ["_deliveryCost"] = true,
+                // What the goods receipt accrued for this item + condition, in document currency.
+                ["_accrued"] = AccrualIsExact(r.Key.PoItem, r.Key.Cond) ? F2(AccrualNear(r.Key.PoItem, r.Key.Cond, amount)) : "0",
+                // A condition the PO holds in a foreign currency whose THB accrual could not be read:
+                // AP has to set the line to the PO history's BzWE before posting.
+
             });
         }
 
@@ -758,3 +1480,8 @@ public static class SupplierInvoicePayload
         v is null ? 0 : double.TryParse(v.ToString(), System.Globalization.NumberStyles.Any,
             System.Globalization.CultureInfo.InvariantCulture, out var d) ? d : 0;
 }
+
+/// <summary>A supplier's invoice SAP cannot take as it stands: a tax amount larger than the base its
+/// lines carry (the Customs Department's receipt — a 200.00 fee next to 26,228.00 of import VAT).
+/// In a bundle it holds back that supplier's invoice only; the other suppliers' invoices still go.</summary>
+public sealed class TaxOverBaseException(string detail) : MgtOcr.Core.HttpApiException(400, detail);

@@ -19,6 +19,7 @@ public static partial class ExtConversion
         ["confidenceNote"] = pd.ConfidenceNote,
         ["tokensIn"] = pd.TokensIn,
         ["tokensOut"] = pd.TokensOut,
+        ["pages"] = pd.Pages,
         ["cost"] = pd.Cost,
         ["costIn"] = pd.CostIn,
         ["costOut"] = pd.CostOut,
@@ -66,6 +67,17 @@ public static partial class ExtConversion
         if (!string.IsNullOrWhiteSpace(l.IssuerTaxId)) extra["issuerTaxId"] = l.IssuerTaxId.Trim();
         if (!string.IsNullOrWhiteSpace(l.IssuerBranch)) extra["issuerBranch"] = l.IssuerBranch.Trim();
         if (l.BaseAmount != 0) extra["baseAmount"] = l.BaseAmount;
+        // Non VAT / Before VAT / VAT of a form cost row — the DETAIL table's three columns. Written
+        // together, or not at all, so the screen can tell "not split" from "split, VAT 0".
+        if (l.NonVatAmount != 0 || l.BeforeVatAmount != 0 || l.VatAmount != 0)
+        {
+            extra["nonVat"] = Math.Round(l.NonVatAmount, 2).ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
+            // Before VAT is the WHOLE figure before VAT — non-VAT part + VAT-able part — the way
+            // Finance reads an invoice summary (PROMPT: 3,590.64 + 1,500.00); Non VAT is shown as
+            // the part of it that carries no tax. Amount (AP) = Before VAT + VAT.
+            extra["beforeVat"] = Math.Round(l.NonVatAmount + l.BeforeVatAmount, 2).ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
+            extra["vat"] = Math.Round(l.VatAmount, 2).ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
+        }
         if (extra.Count > 0) d["extra"] = extra;
         return d;
     }

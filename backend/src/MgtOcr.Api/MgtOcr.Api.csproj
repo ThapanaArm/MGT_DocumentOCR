@@ -13,6 +13,8 @@
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.10" />
     <!-- Writes the Input VAT / Journal Voucher / SAP Import workbooks Finance uploads into SAP. -->
     <PackageReference Include="ClosedXML" Version="0.104.2" />
+    <PackageReference Include="Microsoft.OpenApi" Version="2.0.0" />
+    <PackageReference Include="System.Security.Cryptography.Pkcs" Version="9.0.13" />
   </ItemGroup>
 
   <ItemGroup>
@@ -21,6 +23,7 @@
          technical-name row, the hidden columns and the section bands can never drift. -->
     <None Update="Export\Templates\SupplierInvoice_EN.xlsx" CopyToOutputDirectory="PreserveNewest" />
     <None Update="Export\Templates\JournalEntry_Accrued.xlsx" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="Export\Templates\JournalEntry_Upload.xlsx" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

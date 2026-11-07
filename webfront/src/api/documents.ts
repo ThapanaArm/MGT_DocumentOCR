@@ -159,6 +159,88 @@ export const postToSap = (id: number, user: string) =>
     message?: string;
   }>('/api/documents/' + id + '/post', { user });
 
+/* Step 3 send queue (sql/32_sap_post_queue.sql). SAP gets one document at a time, first come first
+   served. status: 1 Pending, 0 In process, 2 Completed, 9 Error. position = rows ahead of it. */
+export interface SapPostQueueStatus {
+  queueId: number;
+  docId: number;
+  module: string;
+  status: 0 | 1 | 2 | 9;
+  requestedBy: string;
+  requestedAt: string;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  attempts: number;
+  sapDocNos?: string | null;
+  resultMessage?: string | null;
+  resultJson?: string | null;
+  position: number;
+}
+
+export const enqueueSapPost = (id: number) =>
+  api.post<SapPostQueueStatus>('/api/documents/' + id + '/post-queue', {});
+export const getSapPostQueue = (id: number) =>
+  api.get<SapPostQueueStatus | null>('/api/documents/' + id + '/post-queue');
+export const listSapPostQueue = (top = 50) =>
+  api.get<SapPostQueueStatus[]>('/api/sap-post-queue?top=' + top);
+
+/* Same answer as postToSap, but through the queue: waits its turn, then reads what the worker got
+   back from SAP. onWait is told the position while the document is still waiting. */
+export async function postToSapQueued(id: number, onWait?: (s: SapPostQueueStatus) => void) {
+  let s = await enqueueSapPost(id);
+  while (s.status === 1 || s.status === 0) {
+    onWait?.(s);
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    const next = await getSapPostQueue(id);
+    if (!next) break;
+    s = next;
+  }
+  let result: { success?: boolean; simulated?: boolean; sapDocNo?: string; endpoint?: string; message?: string } = {};
+  try { result = s.resultJson ? JSON.parse(s.resultJson) : {}; } catch { result = {}; }
+  const document = await getDocument(id);
+  return {
+    document,
+    success: s.status === 2 && result.success !== false,
+    simulated: !!result.simulated,
+    sapDocNo: result.sapDocNo || s.sapDocNos || '',
+    endpoint: result.endpoint,
+    message: result.message || s.resultMessage || undefined,
+  };
+}
+
+export interface PurchaseOrderReconciliationResult {
+  purchaseOrder: string;
+  goodsRows: number;
+  shippingRows: number;
+  goodsNotMatching: number;
+  shippingNotMatching: number;
+  warnings: string[];
+}
+
+/** Read the current SAP PO/GR/invoice state and append an AP reconciliation snapshot. */
+export const reconcilePurchaseOrder = (po: string, docId: number) =>
+  api.post<PurchaseOrderReconciliationResult>(
+    `/api/reconcile/purchase-order/${encodeURIComponent(po)}?docId=${docId}`,
+  );
+
+export interface PurchaseOrderReconciliationBatchResult {
+  purchaseOrders: number;
+  results: Array<{
+    purchaseOrder: string;
+    docIds: number[];
+    goodsRows?: number;
+    shippingRows?: number;
+    goodsNotMatching?: number;
+    shippingNotMatching?: number;
+    warnings?: string[];
+    error?: string;
+  }>;
+}
+
+/** Capture reconciliation snapshots for every PO referenced by AP/II documents. */
+export const reconcileAllPurchaseOrders = () =>
+  api.post<PurchaseOrderReconciliationBatchResult>('/api/reconcile/run');
+
 export const reopenDeletedApInvoice = (id: number, sapDocNo: string) =>
   api.post<DocModel>('/api/documents/' + id + '/reopen-deleted-ap-invoice', { sapDocNo });
 

@@ -23,7 +23,8 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     SapClient sap, SapBusinessPartnerClient sapBp, AppConfig config, ICurrentUserAccessor currentUser,
     OcrJobRepository jobs, MgtOcr.Api.Services.DocumentIngestService ingest,
     SapProductClient sapProduct, SapPurchaseOrderClient sapPo, FileArchiveRepository archive, MgtOcr.Api.Services.GraphArchiveClient graph,
-    SalesOrderPostRepository soPosts, JobLogRepository jobLog, ILogger<DocumentsController> logger) : ControllerBase
+    SalesOrderPostRepository soPosts, JobLogRepository jobLog, ILogger<DocumentsController> logger,
+    SapPostQueueRepository postQueue) : ControllerBase
 {
     // Who to stamp on CreatedBy / PerformedBy / PostedBy.
     //
@@ -238,9 +239,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         if (files is null || files.Count == 0) throw new HttpApiException(400, "No files were uploaded");
         if (files.Count > 10) throw new HttpApiException(400, "Please import at most 10 files at a time");
         var apCat = ValidateApDocCategory(mod == "AP" ? "AP" : mod, apDocCategory);
-        // Gemini only (Megachem, 7 Oct 2026): every AI call in the system uses Gemini, whatever the
-        // client sends. The other providers stay in the code but are never selected.
-        var engine = "gemini";
+        var engine = Services.DocumentIngestService.UploadEngineFor(mod, ocr_);
 
         var batchId = Guid.NewGuid();
         var result = new List<object>();
@@ -370,17 +369,32 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             // Its original PostLog row remains for history but is deactivated for duplicate
             // protection. The audit log below records the user's confirmation. Other supplier
             // invoices stay successful and will be skipped by the existing duplicate protection.
-            var changed = await conn.ExecuteAsync("""
-                ;WITH target AS (
-                    SELECT TOP (1) * FROM ocr.PostLog
-                     WHERE DocId=@docId AND Module=@module AND SapDocNo=@sapDocNo AND Success=1
-                     ORDER BY LogId DESC
-                )
-                UPDATE target SET Success=0
-                """, new { docId, module, sapDocNo }, tx);
-            if (changed == 0)
+            // Several numbers may be given at once ("5105600246, 5105600247") — a bundle whose
+            // invoices were all deleted is reopened in one go. Each one must be this document's own.
+            var numbers = System.Text.RegularExpressions.Regex.Split(sapDocNo, @"[\s,;/]+")
+                .Select(n => n.Trim()).Where(n => n.Length > 0).Distinct().ToList();
+            var notFound = new List<string>();
+            foreach (var no in numbers)
+            {
+                var changed = await conn.ExecuteAsync("""
+                    ;WITH target AS (
+                        SELECT TOP (1) * FROM ocr.PostLog
+                         WHERE DocId=@docId AND Module=@module AND SapDocNo=@no AND Success=1
+                         ORDER BY LogId DESC
+                    )
+                    UPDATE target SET Success=0
+                    """, new { docId, module, no }, tx);
+                if (changed == 0) notFound.Add(no);
+            }
+            if (notFound.Count == numbers.Count)
+            {
+                var known = await conn.QueryAsync<string>(
+                    "SELECT SapDocNo FROM ocr.PostLog WHERE DocId=@docId AND Module IN ('AP','II') AND Success=1 AND ISNULL(SapDocNo,'')<>'' ORDER BY LogId",
+                    new { docId }, tx);
                 throw new HttpApiException(404,
-                    $"Successful SAP invoice {sapDocNo} was not found in this document's submission history");
+                    $"SAP invoice {string.Join(", ", notFound)} was not found in this document's submission history"
+                    + (known.Any() ? $" — this document's invoices are: {string.Join(", ", known.Distinct())}" : ""));
+            }
 
             var remainingSapDocNo = await conn.ExecuteScalarAsync<string?>("""
                 SELECT TOP (1) SapDocNo FROM ocr.PostLog
@@ -397,7 +411,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         }
 
         await repo.LogAuditAsync(docId, module, "REOPEN_AP_INVOICE", user,
-            detail: $"User confirmed SAP invoice {sapDocNo} was deleted; enabled retry for that supplier invoice only");
+            detail: $"User confirmed SAP invoice(s) {sapDocNo} were deleted; enabled retry for those supplier invoices only");
         var reopened = await repo.GetDocumentAsync(docId);
         await using (var conn = await GetDbAsync())
         {
@@ -520,8 +534,12 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             if (pdfStatus != PdfExtraction.PdfOpenStatus.Ok)
                 throw new HttpApiException(400, pdfStatus == PdfExtraction.PdfOpenStatus.PasswordRequired ? "PDF_PASSWORD_REQUIRED" : "PDF_PASSWORD_WRONG");
         }
-        // Locked to Gemini (per Megachem): empty / "auto" re-OCR uses Gemini (the UI sends "gemini").
-        var reocrEngine = "gemini"; // Gemini only (Megachem, 7 Oct 2026)
+        // AP invoices may be re-read with ChatGPT Vision. Keep the existing Gemini-only behavior
+        // for Sales Orders and other modules, regardless of a client-supplied engine.
+        var requestedEngine = body.GetStr("ocr");
+        var reocrEngine = module is "AP" or "II"
+            ? Services.DocumentIngestService.UploadEngineFor(module, requestedEngine)
+            : "gemini";
         // Re-reading follows the company the document is already filed under, so a second read
         // never silently swaps MGT's rules for GLC's (CompanyRules treats an empty value as GLC).
         // ocr.JobLog: a re-read is a NEW run of this document, so it opens its own JobNumber —
@@ -563,7 +581,8 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             await conn.ExecuteAsync($"""
                 UPDATE {docT} SET OcrProvider=@provider, OcrConfidence=@confidence, OcrConfidenceNote=@confidenceNote,
                     OcrTokensIn=@tokensIn, OcrTokensOut=@tokensOut, OcrCost=@cost, OcrInputCost=@costIn, OcrOutputCost=@costOut,
-                    OcrCostCurrency=@costCurrency, OcrDurationMs=@durationMs, HeaderJson=@headerJson, RawText=@rawText,
+                    OcrCostCurrency=@costCurrency, OcrDurationMs=@durationMs, OcrPageCount=@pages,
+                    HeaderJson=@headerJson, RawText=@rawText,
                     DocNo=@docNo, DocDate=@docDate, PostingDate=@postingDate, PartnerName=@partnerName, PartnerTaxId=@partnerTaxId,
                     Currency=@currency, SubTotal=@subTotal, VatRate=@vatRate, VatAmount=@vatAmount, WhtAmount=@whtAmount,
                     TotalAmount=@totalAmount, Status='NEW', MapStatus=NULL, MapMessage=NULL, PartnerCode=NULL, ShipToCode=NULL,
@@ -573,7 +592,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             {
                 provider = pd.Provider, confidence = pd.Confidence, confidenceNote = pd.ConfidenceNote,
                 tokensIn = pd.TokensIn, tokensOut = pd.TokensOut, cost = pd.Cost, costIn = pd.CostIn, costOut = pd.CostOut,
-                costCurrency = pd.CostCurrency, durationMs,
+                costCurrency = pd.CostCurrency, durationMs, pages = pd.Pages,
                 headerJson = JsonSerializer.Serialize(pd.Header, PyJson.Options), rawText,
                 docNo = dn.Get("DocNo"), docDate = dn.Get("DocDate"), postingDate = dn.Get("PostingDate"),
                 partnerName = dn.Get("PartnerName"), partnerTaxId = dn.Get("PartnerTaxId"), currency = dn.Get("Currency"),
@@ -1540,6 +1559,15 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             // missing API authorization can never send costs to unreceived PO items.
             if (poRef.Length > 0 && isDeliveryCostDoc)
             {
+                // GoodsReceiptItemsAsync deliberately returns an empty list when its endpoint is
+                // not configured. Do not let that look like proof that the PO has no GR: SAP's PO
+                // History can show receipts while this optional API is simply absent.
+                if (string.IsNullOrWhiteSpace(config.SapMaterialDocumentBaseUrl))
+                    throw new HttpApiException(502,
+                        $"ตรวจสอบ Goods Receipt ของ PO {poRef} จาก SAP ไม่ได้ — ยังไม่ได้ตั้งค่า "
+                        + "Sap:MaterialDocument:BaseUrl_{Dev|Prod} "
+                        + "สำหรับ API_MATERIAL_DOCUMENT_SRV (SAP_COM_0108). "
+                        + "ระบบจึงยังยืนยันรายการ GR สุทธิไม่ได้; กรุณาตั้งค่า endpoint/สิทธิ์ API ก่อนส่งเอกสารอีกครั้ง");
                 try
                 {
                     if (!sapPo.Configured)
@@ -1571,22 +1599,77 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             // agent's, the port authority's and the broker's invoices at once, and SAP takes one
             // invoicing party per document — so the bundle is split here rather than posting
             // everybody's costs against whichever supplier happened to be on the header.
-            var vendors = Export.SupplierInvoicePayload.VendorsOf(doc);
+            // Codes the vendor map sends to the same SAP supplier count as one supplier.
+            string SameParty(string code) =>
+                config.SapSupplierInvoiceVendorMap.TryGetValue(code.Trim(), out var to) ? to : code.Trim();
+            var vendors = Export.SupplierInvoicePayload.VendorsOf(doc, SameParty);
             if (vendors.Count <= 1)
             {
                 var only = Export.SupplierInvoicePayload.Build(
-                    doc, apCompany, party, poItems, source, apTerms, goodsReceiptItems: goodsReceiptItems);
-                return ([MapVendors(only)], res);
+                    doc, apCompany, party, poItems, source, apTerms, goodsReceiptItems: goodsReceiptItems,
+                    taxBaseClearingAccount: config.SapSupplierInvoiceTaxBaseClearingAccount, sameParty: SameParty);
+                // One condition billed under two tax codes on a PO with one item for it cannot be one
+                // SAP document (M8/321 / FF812) — it goes as one document per tax code.
+                return (TestReference(Export.SupplierInvoicePayload.SplitByTaxCode(only).Select(MapVendors).ToList(), doc), res);
             }
-            var split = vendors
-                .Select(v => MapVendors(Export.SupplierInvoicePayload.Build(
-                    doc, apCompany, v, poItems, source, apTerms, v, goodsReceiptItems)))
-                .ToList();
-            return (split, res);
+            // A supplier whose invoice SAP cannot take yet (customs import VAT larger than the fee it
+            // sits on) is held back, and the rest of the bundle — the agent's Local costs — goes now.
+            // The document stays open, so once accounting has settled the customs part (clearing
+            // account or JV) Step 3 again sends only what is still missing.
+            var split = new List<Dictionary<string, object?>>();
+            var heldBack = new List<Dictionary<string, object?>>();
+            foreach (var v in vendors)
+            {
+                try
+                {
+                    split.AddRange(Export.SupplierInvoicePayload.SplitByTaxCode(Export.SupplierInvoicePayload.Build(
+                        doc, apCompany, v, poItems, source, apTerms, v, goodsReceiptItems,
+                        config.SapSupplierInvoiceTaxBaseClearingAccount, SameParty)).Select(MapVendors));
+                }
+                catch (Export.TaxOverBaseException ex)
+                {
+                    heldBack.Add(new Dictionary<string, object?> { ["vendor"] = v, ["message"] = ex.Detail });
+                }
+            }
+            if (split.Count == 0 && heldBack.Count > 0)
+                throw new HttpApiException(400, string.Join(" | ", heldBack.Select(h => h.GetStr("message"))));
+            if (heldBack.Count > 0) res["heldBack"] = heldBack;
+            return (TestReference(split, doc), res);
         }
 
         var payload = SapPayloadBuilder.BuildPayload(config, module, header, lines, res, pm, source);
         return ([payload], res);
+    }
+
+    /// <summary>TEST tenant only (Sap:SupplierInvoice:Environment = dev): the Reference gets
+    /// "-T{docId}" on the end. The same real bundle is uploaded and sent to TEST again and again, and
+    /// SAP's duplicate check (M8/804: company + invoicing party + reference + invoice date — not the
+    /// PO) refuses every send after the first. Tagged with the OCR document's id, a new upload is a
+    /// new reference while re-sending the same document keeps its own, so the already-created check
+    /// still holds. PRD sends the reference exactly as printed on the invoice.</summary>
+    private List<Dictionary<string, object?>> TestReference(List<Dictionary<string, object?>> payloads, Dictionary<string, object?> doc)
+    {
+        if (!string.Equals(config.SapSupplierInvoiceEnvironment, "dev", StringComparison.OrdinalIgnoreCase)) return payloads;
+        var tag = $"-T{Convert.ToInt32(doc.Get("docId") ?? 0)}";
+        foreach (var p in payloads)
+        {
+            var reference = p.GetStr("SupplierInvoiceIDByInvcgParty");
+            if (reference.Length == 0 || reference.Contains(tag, StringComparison.OrdinalIgnoreCase)) continue;
+            // A bundle split by tax code sends "PI-2608011", "PI-2608011-2", … Cutting "-2" off to
+            // make room for the tag gave part 2 the same reference as part 1 once SAP's duplicate
+            // check had dropped the special characters (M8/804 against the part just created).
+            // So the part number goes after the tag as a letter: -T878, -T878B, -T878C.
+            var part = "";
+            var m = System.Text.RegularExpressions.Regex.Match(reference, @"^(.*)-(\d{1,2})$");
+            if (m.Success && int.TryParse(m.Groups[2].Value, out var n) && n >= 2 && n <= 26)
+            {
+                reference = m.Groups[1].Value;
+                part = ((char)('A' + n - 1)).ToString();
+            }
+            var room = 16 - tag.Length - part.Length;
+            p["SupplierInvoiceIDByInvcgParty"] = (reference.Length > room ? reference[..room] : reference) + tag + part;
+        }
+        return payloads;
     }
 
     /// <summary>Swaps vendor codes and goods-receipt material documents for the ones the target
@@ -1626,6 +1709,35 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     {
         public string? PayloadJson { get; set; }
         public string? SapDocNo { get; set; }
+    }
+
+    /// <summary>Whether a supplier invoice we logged as created is still there in SAP. AP deletes a
+    /// parked draft that came out wrong and the document is sent again — the log still named it, so
+    /// Step 3 skipped it as "already created" and nothing was sent. A deleted draft (status 2) or one
+    /// SAP no longer finds is not a reason to skip; anything else, including SAP not answering, is
+    /// treated as still there so a real duplicate is never sent.</summary>
+    private async Task<bool> StillInSapAsync(string sapDocNo, string fiscalYear)
+    {
+        if (string.IsNullOrWhiteSpace(sapDocNo)) return true;
+        var (ok, body) = await sap.GetSupplierInvoiceAsync(sapDocNo.Split('/')[0].Trim(), fiscalYear);
+        if (!ok)
+            return !(body.Contains("not found", StringComparison.OrdinalIgnoreCase)
+                     || body.Contains("does not exist", StringComparison.OrdinalIgnoreCase)
+                     || body.Contains("\"code\":\"/IWBEP/CM_MGW_RT/020\"", StringComparison.OrdinalIgnoreCase));
+        try
+        {
+            using var j = JsonDocument.Parse(body);
+            var d = j.RootElement.TryGetProperty("d", out var dd) ? dd : j.RootElement;
+            var status = d.TryGetProperty("SupplierInvoiceStatus", out var st) ? st.ToString().Trim() : "";
+            if (status == "2") return false;
+            // A posted invoice that was cancelled in SAP (Manage Supplier Invoices → Cancel) is still
+            // there, but reversed — it no longer stands for the costs, so it is sent again.
+            if (d.TryGetProperty("ReverseDocument", out var rev) && rev.ValueKind == JsonValueKind.String
+                && !string.IsNullOrWhiteSpace(rev.GetString())) return false;
+            if (d.TryGetProperty("SupplierInvoiceIsReversed", out var isRev) && isRev.ValueKind == JsonValueKind.True) return false;
+            return true;
+        }
+        catch (JsonException) { return true; }
     }
 
     private static string PostedKey(string party, string reference) =>
@@ -1874,6 +1986,34 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         });
     }
 
+    // ---- Step 3 send queue (sql/32_sap_post_queue.sql) ------------------------------------------
+    // Status: 1 Pending → 0 In process → 2 Completed | 9 Error. SapPostQueueWorker sends one document
+    // at a time, oldest first, through PostDocument below — same rules, same logs.
+
+    // POST /api/documents/{id}/post-queue — put the document in the queue (or return the row it is
+    // already waiting in). The same checks as the direct send run first, so a document that cannot
+    // be sent is refused here instead of waiting in line to fail.
+    [HttpPost("api/documents/{docId:int}/post-queue")]
+    public async Task<IActionResult> EnqueuePost(int docId)
+    {
+        var doc = await repo.GetDocumentAsync(docId);
+        if (doc.GetStr("status") == "POSTED") throw new HttpApiException(400, $"This document has already been posted to SAP ({doc.GetStr("sapDocNo")})");
+        if (doc.GetStr("status") != "MAPPED" || doc.GetStr("mapStatus") != "PASS") throw new HttpApiException(400, "Mapping must pass before posting to SAP");
+        var user = await currentUser.RequireAsync();
+        var queueId = await postQueue.EnqueueAsync(docId, doc.GetStr("module"), user.AuditName,
+            JsonSerializer.Serialize(user, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        return Ok(await postQueue.GetAsync(queueId));
+    }
+
+    // GET /api/documents/{id}/post-queue — the latest queue row of this document (null when never queued).
+    [HttpGet("api/documents/{docId:int}/post-queue")]
+    public async Task<IActionResult> PostQueueStatus(int docId) => Ok(await postQueue.LatestForDocAsync(docId));
+
+    // GET /api/sap-post-queue — the whole queue: in process, pending in order, then the latest finished.
+    [HttpGet("api/sap-post-queue")]
+    public async Task<IActionResult> PostQueueList([FromQuery] int top = 50) =>
+        Ok(await postQueue.ListAsync(Math.Clamp(top, 1, 500)));
+
     [HttpPost("api/documents/{docId:int}/post")]
     public async Task<IActionResult> PostDocument(int docId, [FromBody] Dictionary<string, object?>? rawBody)
     {
@@ -1916,6 +2056,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         // reached. So every supplier invoice already logged as created for this document (same
         // invoicing party + same reference) is skipped and reported with its SAP number.
         var alreadyCreated = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var createdYear = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         if (module is "AP" or "II")
         {
             await using var prevConn = await GetDbAsync();
@@ -1931,7 +2072,15 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
                     var key = PostedKey(
                         root.TryGetProperty("InvoicingParty", out var ip) ? ip.ToString() : "",
                         root.TryGetProperty("SupplierInvoiceIDByInvcgParty", out var rf) ? rf.ToString() : "");
-                    if (key.Length > 1) alreadyCreated[key] = row.SapDocNo ?? "";
+                    if (key.Length > 1)
+                    {
+                        alreadyCreated[key] = row.SapDocNo ?? "";
+                        if (root.TryGetProperty("PostingDate", out var pdt) && pdt.ValueKind == JsonValueKind.String
+                            && System.Text.RegularExpressions.Regex.Match(pdt.GetString() ?? "", @"\d+") is { Success: true } pm
+                            && long.TryParse(pm.Value, out var pms))
+                            createdYear[key] = DateTimeOffset.FromUnixTimeMilliseconds(pms).UtcDateTime.Year
+                                .ToString(System.Globalization.CultureInfo.InvariantCulture);
+                    }
                 }
                 catch (JsonException) { /* an unreadable old log row is not a reason to block posting */ }
             }
@@ -1939,7 +2088,9 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         var skipped = new HashSet<Dictionary<string, object?>>();
         foreach (var p in payloads)
         {
-            if (alreadyCreated.TryGetValue(PostedKey(p.GetStr("InvoicingParty"), p.GetStr("SupplierInvoiceIDByInvcgParty")), out var done))
+            var doneKey = PostedKey(p.GetStr("InvoicingParty"), p.GetStr("SupplierInvoiceIDByInvcgParty"));
+            if (alreadyCreated.TryGetValue(doneKey, out var done)
+                && await StillInSapAsync(done, createdYear.GetValueOrDefault(doneKey) ?? DateTime.Today.Year.ToString(System.Globalization.CultureInfo.InvariantCulture)))
             {
                 skipped.Add(p);
                 results.Add((p, new MgtOcr.Sap.SapPostResult(true, false, done, "",
@@ -1953,7 +2104,10 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             if (!one.Success) break;
         }
         var r = results[^1].Result;
-        var allOk = results.Count == payloads.Count && results.All(x => x.Result.Success);
+        var heldBack = res.GetValueOrDefault("heldBack") as List<Dictionary<string, object?>> ?? [];
+        // Held-back suppliers keep the document open (not POSTED) even when everything sent went in.
+        var sentOk = results.Count == payloads.Count && results.All(x => x.Result.Success);
+        var allOk = sentOk && heldBack.Count == 0;
         var sapDocNos = string.Join(", ", results.Where(x => x.Result.Success)
             .Select(x => x.Result.SapDocNo).Where(n => !string.IsNullOrWhiteSpace(n)));
         var ownCompany = await OwnCompanyAsync() is { Length: > 0 } own ? own : null;
@@ -2037,12 +2191,31 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             success = x.Result.Success,
             sapDocNo = x.Result.SapDocNo,
             message = x.Result.Message,
-        }).ToList();
+            heldBack = false,
+        }).Concat(heldBack.Select(h => new
+        {
+            vendor = h.GetStr("vendor"), invoiceNo = "", amount = "", success = false,
+            sapDocNo = "", message = h.GetStr("message"), heldBack = true,
+        })).ToList();
         var summary = payloads.Count > 1
             ? $"{results.Count(x => x.Result.Success)} of {payloads.Count} supplier invoice(s) created"
                 + (sapDocNos.Length > 0 ? $": {sapDocNos}" : "")
-                + (allOk ? "" : $" — {r.Message}")
+                + (sentOk ? "" : $" — {r.Message}")
             : r.Message;
+        // Lines whose accrual could not be read (a delivery cost the PO holds in USD): say so, so AP
+        // sets them to the PO history's figure before posting instead of finding Stock in Trade later.
+        var accrualNotes = payloads
+            .SelectMany(p => p.GetValueOrDefault("to_SuplrInvcItemPurOrdRef") as System.Collections.IEnumerable is { } list
+                ? list.OfType<Dictionary<string, object?>>() : [])
+            .Select(l => l.GetValueOrDefault("_accrualUnknown") as string)
+            .Where(n => !string.IsNullOrWhiteSpace(n))
+            .Distinct()
+            .ToList();
+        if (accrualNotes.Count > 0) summary += " · ⚠ " + string.Join(" · ", accrualNotes);
+        if (heldBack.Count > 0)
+            summary = (sentOk && sapDocNos.Length > 0 ? $"ส่งเข้า SAP แล้ว: {sapDocNos}" : summary)
+                + " · ยังไม่ส่ง (ข้ามไว้ก่อน): "
+                + string.Join(" | ", heldBack.Select(h => $"ผู้ขาย {h.GetStr("vendor")} — {h.GetStr("message")}"));
         // Shipping documents go in PARKED (SupplierInvoicePayload sets SupplierInvoiceStatus "A"):
         // say so, so nobody reads "created" as "posted".
         if (allOk && payloads.Any(p => p.GetStr("SupplierInvoiceStatus") == "A"))

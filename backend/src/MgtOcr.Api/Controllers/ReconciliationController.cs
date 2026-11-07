@@ -24,8 +24,64 @@ namespace MgtOcr.Api.Controllers;
 [ApiController]
 [Route("api/reconcile")]
 public class ReconciliationController(Db db, SapPurchaseOrderClient sapPo, SapClient sap, AppConfig config,
-    ICurrentUserAccessor currentUser, ILogger<ReconciliationController> logger) : ControllerBase
+    ICurrentUserAccessor currentUser, ILogger<ReconciliationController> logger, DocumentRepository repo) : ControllerBase
 {
+    // The condition types configured for GLC (KUT-MM-PU-203 p.34), as the PO Reference tab names them.
+    private static readonly Dictionary<string, string> ConditionNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["ZFRE"] = "Freight", ["ZLH1"] = "Local Handling", ["ZED1"] = "Excise Duty", ["ZFE2"] = "Fee",
+        ["ZINS"] = "Insurance", ["ZIM1"] = "Import Tax", ["ZOVS"] = "Oversea Charge", ["ZOTH"] = "Other Charges",
+    };
+
+    /// <summary>What the OCR document itself says about the shipment: the MatDoc number on the
+    /// bundle, the shipping agent (PROMPT / PILOT / CHEETAH), and which form lines settle each
+    /// condition. These were left NULL — the SAP side has none of them.</summary>
+    private sealed record DocSide(string? MatDocNo, string? Agent, Dictionary<string, string> CostLinesByCond);
+
+    private async Task<DocSide> DocSideAsync(int? docId)
+    {
+        var empty = new DocSide(null, null, new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase));
+        if (docId is not int id) return empty;
+        try
+        {
+            var doc = await repo.GetDocumentAsync(id);
+            var header = doc.GetValueOrDefault("header") as Dictionary<string, object?> ?? new();
+            string H(string k) => header.GetValueOrDefault(k)?.ToString()?.Trim() ?? "";
+            var fileName = doc.GetValueOrDefault("fileName")?.ToString() ?? "";
+            var matDoc = H("refMatDoc");
+            if (matDoc.Length == 0)
+            {
+                var m = System.Text.RegularExpressions.Regex.Match(fileName, @"MatDoc_(\d+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                if (m.Success) matDoc = m.Groups[1].Value;
+            }
+            // "PROMPT LOGISTICS CO.,LTD." → PROMPT: the agent as the team names it.
+            var vendorName = H("vendorName");
+            var agent = vendorName.Split([' ', ',', '.'], StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.ToUpperInvariant();
+
+            var byCond = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+            if (doc.GetValueOrDefault("lines") is System.Collections.IEnumerable lines)
+                foreach (var raw in lines)
+                {
+                    if (raw is not Dictionary<string, object?> l) continue;
+                    var extra = l.GetValueOrDefault("extra") as Dictionary<string, object?>;
+                    var cond = (extra?.GetValueOrDefault("deliveryCondType") ?? extra?.GetValueOrDefault("condType"))?.ToString()?.Trim() ?? "";
+                    var desc = l.GetValueOrDefault("desc")?.ToString()?.Trim() ?? "";
+                    if (cond.Length == 0 || desc.Length == 0) continue;
+                    if (!byCond.TryGetValue(cond, out var list)) byCond[cond] = list = [];
+                    if (!list.Contains(desc)) list.Add(desc);
+                }
+            return new DocSide(matDoc.Length == 0 ? null : Cut(matDoc, 20), agent is null ? null : Cut(agent, 20),
+                byCond.ToDictionary(kv => kv.Key, kv => Cut(string.Join(", ", kv.Value), 400), StringComparer.OrdinalIgnoreCase));
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "[RECON] could not read OCR document {DocId}", id);
+            return empty;
+        }
+    }
+
+    private static string Cut(string v, int max) => v.Length <= max ? v : v[..max];
+
     private static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
     // Conditions that are taxes or the overseas supplier's own charge: kept in the shipping table,
     // left out of landed cost, the same rule as TOTAL on FORM SHIPPING EXPENSE.
@@ -38,7 +94,7 @@ public class ReconciliationController(Db db, SapPurchaseOrderClient sapPo, SapCl
 
         // Every AP document that names a purchase order — the PO lives in HeaderJson
         // (PurchasingOrder on the PO Reference tab, else the poRef the read found).
-        var sql = "SELECT DocId, HeaderJson FROM ocr.Document WHERE Module IN ('AP','II')"
+        var sql = "SELECT DocId, HeaderJson FROM ocr.Document WHERE Module IN ('AP','II') AND Status IN ('POSTED','PARTIAL')"
                   + (days is > 0 ? " AND CreatedAt >= DATEADD(day, -@days, SYSDATETIME())" : "");
         var docs = await db.QueryAsync(sql, new { days });
         var byPo = new Dictionary<string, List<int>>();
@@ -137,6 +193,7 @@ public class ReconciliationController(Db db, SapPurchaseOrderClient sapPo, SapCl
         var splitMaterials = grItems.Where(g => !string.IsNullOrWhiteSpace(Str(g, "InventoryValuationType")))
             .Select(g => Str(g, "Material") ?? "").ToHashSet(StringComparer.OrdinalIgnoreCase);
 
+        var docSide = await DocSideAsync(docId);
         var goodsRows = new List<object>();
         var shippingRows = new List<object>();
         var landedByItem = new Dictionary<int, double>();
@@ -172,25 +229,34 @@ public class ReconciliationController(Db db, SapPurchaseOrderClient sapPo, SapCl
                 double? invoiced = cLines.Count == 0 ? null : Math.Round(cLines.Sum(l => Num(l, "SupplierInvoiceItemAmount")), 2);
                 var first = cLines.FirstOrDefault();
                 var h = cLines.Count > 0 ? HeadOf(first) : (null, null, null);
+                // A condition settled by more than one invoice (split by tax code: PI-2608011 and
+                // PI-2608011-2) — every reference and every SAP number, not only the first.
+                var refs = cLines.Select(l => HeadOf(l).Reference).Where(r => !string.IsNullOrWhiteSpace(r)).Distinct().ToList();
+                var invNos = cLines.Select(l => Str(l, "SupplierInvoice")).Where(n => !string.IsNullOrWhiteSpace(n)).Distinct().ToList();
                 if (!NotLandedCost.Contains(c.ConditionType))
                     landedByItem[ItemNo(it.Item)] = landedByItem.GetValueOrDefault(ItemNo(it.Item)) + (invoiced ?? plannedThb ?? 0);
 
                 shippingRows.Add(new
                 {
                     CheckedBy = user, SapEnvironment = env, CompanyCode = companyCode, DocId = docId,
-                    MatDocNo = (string?)null, Agent = (string?)null, AgentInvoiceNo = h.Reference,
+                    MatDocNo = docSide.MatDocNo, Agent = docSide.Agent,
+                    AgentInvoiceNo = refs.Count == 0 ? null : Cut(string.Join(", ", refs), 50),
                     PONumber = po, POItem = it.Item, MaterialCodeS4 = it.Material, MaterialName = it.Text,
                     POCurrency = it.Currency, POExchangeRate = rate > 0 ? (decimal?)rate : null,
-                    ConditionType = c.ConditionType, ConditionName = (string?)null, ConditionVendor = (string?)null,
+                    ConditionType = c.ConditionType,
+                    ConditionName = ConditionNames.TryGetValue(c.ConditionType, out var cn) ? cn : null,
+                    ConditionVendor = (string?)null,
                     PlannedAmountPO = (decimal?)c.Amount, PlannedAmountTHB = (decimal?)plannedThb,
                     GRMaterialDocument = grDoc, GRYear = grYear, GRPostingDate = grPosting,
                     IsSplitValuation = split, ValuationType = valuation,
                     AccruedAmountTHB = (decimal?)null, AccrualGLAccount = (string?)null,
-                    InvoicingParty = h.Party, InvoicedAmountTHB = (decimal?)invoiced, CostLines = (string?)null,
+                    InvoicingParty = h.Party, InvoicedAmountTHB = (decimal?)invoiced,
+                    CostLines = docSide.CostLinesByCond.TryGetValue(c.ConditionType, out var cl) ? cl : null,
                     SupplierInvoice = cLines.Count > 0 ? Str(first, "SupplierInvoice") : null,
                     SupplierInvoiceYear = cLines.Count > 0 ? Str(first, "FiscalYear") : null,
                     SupplierInvoiceStatus = h.Status, SapInvoiceLineAmount = (decimal?)invoiced,
-                    Remark = cLines.Count > 1 ? $"{cLines.Count} invoice lines" : null,
+                    Remark = invNos.Count > 1 ? Cut($"{cLines.Count} invoice lines: {string.Join(", ", invNos)}", 500)
+                        : cLines.Count > 1 ? $"{cLines.Count} invoice lines" : null,
                 });
             }
 

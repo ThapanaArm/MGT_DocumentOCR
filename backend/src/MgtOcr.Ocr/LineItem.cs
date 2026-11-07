@@ -35,6 +35,13 @@ public class LineItem
     // to, so it travels with the line. Empty on anything that is not a form cost row.
     public string CostType { get; set; } = "";
 
+    // How a form cost row splits on the document behind it — Cargoport's D/O receipt under the
+    // 12,386.00 "DO" row: 1,752.50 NON VAT + 10,633.50 SALES 7% + VAT 744.35. NonVat + BeforeVat is
+    // the cost (what Amount holds); + Vat is what the supplier is paid. All 0 when not known.
+    public double NonVatAmount { get; set; }
+    public double BeforeVatAmount { get; set; }
+    public double VatAmount { get; set; }
+
     // The item number printed in the PURCHASE ORDER's own "Item" column (1, 2, 3 … or 10, 20, 30).
     // MIRO's Purchasing Document References grid shows "<PO number> / <item>", so the number has to
     // come off the PO rather than from the position in our list. Blank on anything but a PO read.

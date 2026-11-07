@@ -135,6 +135,13 @@ public class AppConfig
     // (A-MatDoc_5000002095_...) while the test tenant's GR for the same PO is another one.
     public IReadOnlyDictionary<string, string> SapSupplierInvoiceMatDocMap { get; init; } =
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    // G/L account that carries the BASE of a tax row no line on the invoice stands for — the import
+    // VAT on a Customs Department receipt (26,228.00 on a declared value of 374,685.71, while the
+    // invoice itself bills a 200.00 fee). Sap:SupplierInvoice:TaxBaseClearingAccount. The base goes
+    // in as a debit with the tax code and straight back out as a credit without it, so the account
+    // nets to zero and SAP books the input VAT on the right base. Empty = such a row is refused
+    // before sending, with the reason, instead of SAP's FF812.
+    public string SapSupplierInvoiceTaxBaseClearingAccount { get; init; } = "";
 
     // Purchase Order lookup — API_PURCHASEORDER_PROCESS_SRV, read-only. A supplier invoice has to
     // name the PO ITEM it is billing (PurchaseOrderItem 10, 20, …), and that number exists only in

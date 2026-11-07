@@ -46,9 +46,6 @@ public class OcrEngine(AppConfig config)
             "PaddleOCR reads the characters on this server and the built-in rules pick out the fields — no AI cost, " +
             "but fields/lines are found by pattern matching, so expect more manual correction",
             PaddleOcr.IsReady(config)),
-        new("openai", "ChatGPT Vision (AI)",
-            "OpenAI's GPT-4o/GPT-5 reads the document image directly and understands context — requires OPENAI_API_KEY in .env (billed per call)",
-            !string.IsNullOrEmpty(config.OpenAiApiKey)),
         new("demo", "Sample data (test)", "Does not read a real file; for testing the Mapping / SAP submission steps only.", true),
     ];
 
@@ -171,18 +168,15 @@ public class OcrEngine(AppConfig config)
             if (outDoc != null) return outDoc;
             return FailedResult(module, "Could not connect to Claude Vision, or ANTHROPIC_API_KEY is not set in .env");
         }
+        if (provider == "openai") provider = "gemini";
         if (provider == "gemini")
         {
             var (outDoc, gErr) = await GeminiOcr.VisionExtractAsync(path, module, config, salesOrg, apDocCategory);
             if (outDoc != null) return outDoc;
             return FailedResult(module, gErr ?? "Could not connect to Google Gemini Vision");
         }
-        if (provider == "openai")
-        {
-            var (outDoc, oErr) = await OpenAiOcr.VisionExtractAsync(path, module, config, salesOrg, apDocCategory);
-            if (outDoc != null) return outDoc;
-            return FailedResult(module, oErr ?? "Could not connect to OpenAI Vision");
-        }
+        // ChatGPT Vision was removed (4 Nov 2026). A request that still names it — an old screen,
+        // a queued job — is read with Gemini rather than failing.
         if (provider == "claude_text")
         {
             var preText = ext == ".pdf" ? PdfExtraction.PdfText(path) : "";

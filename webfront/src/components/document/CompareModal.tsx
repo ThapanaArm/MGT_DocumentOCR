@@ -6,7 +6,7 @@ import { compareCandidates, type CompareField, type CompareVerdict } from '../..
 
 // Same three "AI" engines Chat to Fix Data offers — reuse the same providers list/ready flags
 // so picking a model here doesn't need any separate configuration.
-const AI_PROVIDER_IDS = ['claude', 'gemini', 'openai'];
+const AI_PROVIDER_IDS = ['claude', 'gemini'];
 
 /* Generic "compare N candidates side by side, optionally ask AI" popup. Used by any Mapping
    card's live search (SapCustomerPanel, ZohoCustomerPanel today; Vendor/Ship-to/Material later

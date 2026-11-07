@@ -162,7 +162,12 @@ public static partial class GeminiOcr
             // customs vendor: the model fills vendorCode from the form when it can, but it leaves it
             // blank often enough that the tax would otherwise land on the shipping agent.
             var oneShot = await OneShotAsync(imgs, mime, prompt, module, config, dpi, TimeoutFor(imgs.Count));
-            if (oneShot.Doc != null && module is "AP" or "II") AssignTaxRowVendors(oneShot.Doc);
+            if (oneShot.Doc != null && module is "AP" or "II")
+            {
+                AssignTaxRowVendors(oneShot.Doc);
+                VisionPrompt.FillLineVatFromSourceDocs(oneShot.Doc);
+                VisionPrompt.FillLineVatFromTaxRows(oneShot.Doc);
+            }
             return oneShot;
         }
         catch (Exception ex)
@@ -214,6 +219,8 @@ public static partial class GeminiOcr
         try
         {
             var pageCount = imgs.Count;
+            const string engineName = "Gemini";
+            var model = config.GeminiModel;
             var parts = new List<object> { new { text = prompt } };
             parts.AddRange(imgs.Select(b => (object)new { inline_data = new { mime_type = mime, data = Convert.ToBase64String(b) } }));
 
@@ -277,6 +284,9 @@ public static partial class GeminiOcr
                             var (tin, tout) = Usage(respText);
                             parsedDoc.TokensIn = tin;
                             parsedDoc.TokensOut = tout;
+                            // Pages actually sent in THIS request. Needed to report cost and
+                            // time per page; nothing else in the pipeline knows the figure.
+                            parsedDoc.Pages = pageCount;
                             return (parsedDoc, null);
                         }
                         // 200 OK but the body held no parseable JSON. This is NOT a connection problem —
@@ -285,7 +295,7 @@ public static partial class GeminiOcr
                         // response was empty/safety-blocked. Report THAT precisely instead of falling
                         // through to the misleading "Could not connect to Google Gemini Vision" default.
                         var finish = FinishReason(respText);
-                        lastErr = "Gemini returned HTTP 200 but no usable JSON"
+                        lastErr = $"{engineName} returned HTTP 200 but no usable JSON"
                             + (finish != null
                                 ? $" (finishReason={finish}{(finish == "MAX_TOKENS" ? " — response was cut off; raise maxOutputTokens" : "")})"
                                 : " (empty or safety-blocked response)")
@@ -295,7 +305,7 @@ public static partial class GeminiOcr
                     }
                     var status = (int)resp.StatusCode;
                     var transient = status is 429 or 500 or 502 or 503 or 504;
-                    lastErr = $"Gemini HTTP {status} (model={config.GeminiModel}"
+                    lastErr = $"{engineName} HTTP {status} (model={model}"
                         + (transient ? $", attempt {attempt}/{maxAttempts}" : "")
                         + $"): {Trunc(respText, 400)}";
                     Log(lastErr);
@@ -311,8 +321,8 @@ public static partial class GeminiOcr
                     // the chunked reader is that no request is ever large. A request that never answers
                     // is a connection problem, and saying otherwise sends the next person to split
                     // files that were never too big.
-                    lastErr = $"Gemini did not answer within {timeout.TotalSeconds:0}s "
-                        + $"(model={config.GeminiModel}, {pageCount} page(s) at {dpi} dpi, attempt {attempt}/{maxAttempts}). "
+                    lastErr = $"{engineName} did not answer within {timeout.TotalSeconds:0}s "
+                        + $"(model={model}, {pageCount} page(s) at {dpi} dpi, attempt {attempt}/{maxAttempts}). "
                         + (pageCount <= 8
                             ? "This request was small, so the file size is not the problem — check the connection "
                               + "to generativelanguage.googleapis.com (a web proxy that accepts the connection and "
@@ -324,7 +334,7 @@ public static partial class GeminiOcr
                 catch (HttpRequestException ex)
                 {
                     // Connection-level failure (DNS/TLS/network) — treat as transient and retry.
-                    lastErr = $"Gemini connection error (attempt {attempt}/{maxAttempts}): {ex.Message}";
+                    lastErr = $"{engineName} connection error (attempt {attempt}/{maxAttempts}): {ex.Message}";
                     Log(lastErr);
                     if (attempt == maxAttempts) return (null, lastErr);
                 }
@@ -402,10 +412,14 @@ public static partial class GeminiOcr
             // under-state what it actually cost by most of the file.
             doc.TokensIn = (doc.TokensIn ?? 0) + (part.TokensIn ?? 0);
             doc.TokensOut = (doc.TokensOut ?? 0) + (part.TokensOut ?? 0);
+            doc.Pages = (doc.Pages ?? 0) + (part.Pages ?? 0);
             MergeTaxRows(doc, part, mainVendorName);
+            MergeSourceDocs(doc, part);
         }
 
         AssignTaxRowVendors(doc);
+        VisionPrompt.FillLineVatFromSourceDocs(doc);
+        VisionPrompt.FillLineVatFromTaxRows(doc);
         RecountTaxTotals(doc);
         if (skipped > 0)
         {
@@ -415,6 +429,22 @@ public static partial class GeminiOcr
             doc.Confidence = Math.Min(doc.Confidence, 0.6);
         }
         return (doc, null);
+    }
+
+    /// <summary>Appends the supporting documents a later group of pages found (header.sourceDocs)
+    /// to the document's list, once each: the same issuer, document number and COSTS heading read
+    /// twice — a billing note and its tax invoice on two pages — is one document.</summary>
+    private static void MergeSourceDocs(ParsedDocument doc, ParsedDocument part)
+    {
+        if (!part.Header.TryGetValue("sourceDocs", out var add) || add is not List<object?> incoming || incoming.Count == 0) return;
+        if (!doc.Header.TryGetValue("sourceDocs", out var cur) || cur is not List<object?> list)
+            doc.Header["sourceDocs"] = list = [];
+        static string Key(object? o) => o is Dictionary<string, object?> d
+            ? $"{d.GetValueOrDefault("issuerName")}|{d.GetValueOrDefault("docNo")}|{d.GetValueOrDefault("costType")}".ToUpperInvariant()
+            : "";
+        var seen = list.Select(Key).ToHashSet();
+        foreach (var o in incoming)
+            if (o is Dictionary<string, object?> && seen.Add(Key(o))) list.Add(o);
     }
 
     private static readonly string[] TaxRowCodes = ["VAT", "WHT", "DUTY"];
@@ -493,7 +523,7 @@ public static partial class GeminiOcr
     ///
     /// This runs once, after every supporting group has been merged, because the row that carries
     /// the code and the row that needs it routinely arrive in different requests.</summary>
-    private static void AssignTaxRowVendors(ParsedDocument doc)
+    internal static void AssignTaxRowVendors(ParsedDocument doc)
     {
         static string Vendor(LineItem l) => (l.VendorCode ?? "").Trim();
         static bool Is(LineItem l, string code) =>

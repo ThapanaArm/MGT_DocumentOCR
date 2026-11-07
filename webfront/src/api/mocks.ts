@@ -19,7 +19,6 @@ const providers = [
   { id: 'azure', label: 'Azure Document Intelligence', desc: 'Much more accurate for forms/tables', ready: false },
   { id: 'claude', label: 'Claude Vision (AI)', desc: 'Most accurate for messy documents', ready: false },
   { id: 'gemini', label: 'Gemini Vision (AI)', desc: "Google's Vision model", ready: false },
-  { id: 'openai', label: 'ChatGPT Vision (AI)', desc: "OpenAI's GPT-4o model", ready: false },
   { id: 'demo', label: 'Sample Data (Test)', desc: 'Does not read a real file; used to test the Mapping / SAP submission steps', ready: true },
 ];
 

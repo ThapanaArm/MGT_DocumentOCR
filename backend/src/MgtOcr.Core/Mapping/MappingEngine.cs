@@ -127,9 +127,17 @@ public static class MappingEngine
         if (desc.StartsWith("OTHER", StringComparison.OrdinalIgnoreCase)
             && desc.Contains(':', StringComparison.Ordinal)) return true;
 
+        // 2b. Filed under a COSTS heading of the form (Local / Insurance / Fee / Overseas).
+        if ((line.Get("extra") as Dictionary<string, object?>)?.GetStr("costType") is { } ct
+            && ct.Trim().Length > 0) return true;
+
         // 3. Wording, but only for a line with no item code of its own — a line that carries the
         //    vendor's item code is something ordered, not a charge.
         if (extCode.Length > 0) return false;
+        // The form's DO row is just "DO" — too short for the word list, and "do" inside a
+        // product name must not count, so it is matched as the whole description.
+        if (System.Text.RegularExpressions.Regex.IsMatch(desc, @"^\s*(D\s*/?\s*O|DO\s+FEE)\s*$",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase)) return true;
         var d = desc.ToLowerInvariant();
         return d.Length > 0 && DeliveryCostWords.Any(w => d.Contains(w, StringComparison.OrdinalIgnoreCase));
     }

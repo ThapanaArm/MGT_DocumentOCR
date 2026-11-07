@@ -8,7 +8,7 @@ import { moduleLabel } from '../utils/format';
 import { sampleDocument, uploadDocument, uploadDocumentBatch } from '../api/documents';
 import type { ModuleCode } from '../api/types';
 import Steps from '../components/Steps';
-import OcrProviderSelect, { READ_ENGINE_IDS } from '../components/OcrProviderSelect';
+import OcrProviderSelect, { AP_READ_ENGINE_IDS, READ_ENGINE_IDS } from '../components/OcrProviderSelect';
 
 /* Ports renderWork()'s upload screen (uploadHtml + bindDrop + uploadFile). */
 
@@ -52,6 +52,12 @@ export default function ImportPage() {
     if (isInvoice) loadApDocCategories();
     setCategory('');
   }, [mod, loadOcrProviders, loadApDocCategories, loadMe]);
+
+  // Gemini only, for every module (ChatGPT Vision removed 4 Nov 2026).
+  useEffect(() => {
+    if (!ocrProviders) return;
+    setProvider('gemini');
+  }, [isInvoice, ocrProviders]);
 
   // An Admin works both post rooms, so they choose; the switch starts on their own company so a
   // distracted click never files an invoice for the other side by accident.
@@ -186,7 +192,12 @@ export default function ImportPage() {
             <label className="hint" style={{ fontWeight: 600 }}>
               <i className="fa-solid fa-brain" /> Reading Method (OCR Engine)
             </label>
-            <OcrProviderSelect providers={providers} value={provider} onChange={setProvider} choices={READ_ENGINE_IDS} />
+            <OcrProviderSelect
+              providers={providers}
+              value={provider}
+              onChange={setProvider}
+              choices={isInvoice ? AP_READ_ENGINE_IDS : READ_ENGINE_IDS}
+            />
           </div>
           <p className="hint" style={{ margin: '-8px 0 16px' }}>
             {active ? active.desc : ''}

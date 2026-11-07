@@ -183,12 +183,12 @@ public partial class DocumentRepository(Db db)
         var docId = await db.InsertReturningIdAsync($"""
             INSERT {docT}(Module,FileName,StoredPath,FileSize,OcrProvider,OcrConfidence,OcrConfidenceNote,
                   OcrTokensIn,OcrTokensOut,OcrCost,OcrInputCost,OcrOutputCost,OcrCostCurrency,OcrDurationMs,
-                  ApDocCategory,Status,
+                  OcrPageCount,ApDocCategory,Status,
                   DocNo,DocDate,PostingDate,PartnerName,PartnerTaxId,Currency,SubTotal,VatRate,VatAmount,
                   WhtAmount,TotalAmount,HeaderJson,RawText,CreatedBy,SalesOrg)
             VALUES(@module,@fileName,@stored,@size,@provider,@confidence,@confidenceNote,
                   @tokensIn,@tokensOut,@cost,@costIn,@costOut,@costCurrency,@durationMs,
-                  @apDocCategory,'NEW', @docNo,@docDate,@postingDate,@partnerName,@partnerTaxId,@currency,
+                  @pages,@apDocCategory,'NEW', @docNo,@docDate,@postingDate,@partnerName,@partnerTaxId,@currency,
                   @subTotal,@vatRate,@vatAmount,@whtAmount,@totalAmount,@headerJson,@rawText,@user,@salesOrg);
             SELECT SCOPE_IDENTITY();
             """, new
@@ -196,6 +196,7 @@ public partial class DocumentRepository(Db db)
             module, fileName, stored, size,
             provider = ext.Get("provider"), confidence = ext.Get("confidence"), confidenceNote = ext.Get("confidenceNote"),
             tokensIn = ext.Get("tokensIn"), tokensOut = ext.Get("tokensOut"), cost = ext.Get("cost"),
+            pages = ext.Get("pages"),
             costIn = ext.Get("costIn"), costOut = ext.Get("costOut"), costCurrency = ext.Get("costCurrency"),
             durationMs,
             apDocCategory = apDocCategory.Length > 0 ? apDocCategory : null,

@@ -60,11 +60,13 @@ public static partial class VisionPrompt
             "poCurrency": "",
             "poLines": [{"extCode": "รหัส/ล็อตสินค้าตามใบสั่งซื้อ", "desc": "ชื่อสินค้า",
                          "qty": 0, "uom": "หน่วยนับ", "price": 0, "amount": 0}],
-            "subTotal": 0, "vatRate": 7, "vatAmount": 0, "whtAmount": 0, "totalAmount": 0
+            "subTotal": 0, "vatRate": 7, "vatAmount": 0, "whtAmount": 0, "totalAmount": 0,
+            "sourceDocs": [{"docType": "Invoice / Tax Invoice / Receipt / Debit Note", "issuerName": "ชื่อผู้ออกเอกสาร", "docNo": "เลขที่เอกสาร", "docDate": "YYYY-MM-DD", "costType": "Local หรือ Insurance หรือ Fee หรือ Overseas", "currency": "THB", "nonVatAmount": 0, "amountBeforeVat": 0, "vatAmount": 0, "totalAmount": 0, "includedIn": "", "shipper": "", "blNo": "", "shipperInvoiceNo": ""}]
           },
           "lines": [{"extCode": "รหัสสินค้า/บริการถ้ามี", "desc": "ชื่อ/รายละเอียดสินค้าหรือบริการ",
                      "qty": 0, "uom": "หน่วยนับ", "price": 0, "amount": 0,
                      "poItem": "เลขที่รายการในคอลัมน์ Item ของหน้า PURCHASE ORDER (เช่น 1, 2, 3) ถ้าไม่ได้อ่านจากใบสั่งซื้อให้ใส่สตริงว่าง",
+                     "nonVatAmount": 0, "beforeVatAmount": 0, "vatAmount": 0,
                      "costType": "ค่าในคอลัมน์ COSTS ของหน้า FORM SHIPPING EXPENSE ตอบได้เฉพาะ \"Local\" \"Insurance\" \"Fee\" \"Overseas\" ถ้าไม่ใช่แถวจากฟอร์มให้ใส่สตริงว่าง",
                      "vendorCode": "รหัสผู้ขายของรายการนี้ ถ้าเอกสารมีคอลัมน์ VENDOR ระบุไว้ ไม่มีให้ใส่สตริงว่าง",
                      "taxKind": "เฉพาะแถว VAT: \"INPUT\" ถ้ามาจากใบกำกับภาษี/ใบเสร็จรับเงิน หรือ \"DEFERRED\" ถ้ามาจากใบแจ้งหนี้/ใบวางบิล แถวอื่นใส่สตริงว่าง",
@@ -135,9 +137,178 @@ public static partial class VisionPrompt
             + SupportingRowRules(mainVendorName);
     }
 
+    /// <summary>What is wanted about each supporting document of a shipping bundle: its own
+    /// totals and which COSTS heading of the form it belongs to. The screen sums them per heading
+    /// and compares the sum with the form, so a cost missing from the form, or a form figure no
+    /// document stands behind, shows up as a red DIFF before anything is sent to SAP.</summary>
+    internal const string SourceDocsRule =
+        "- sourceDocs: 1 รายการต่อเอกสารประกอบ 1 ใบ (ใบแจ้งหนี้ ใบกำกับภาษี ใบเสร็จรับเงิน ใบเพิ่มหนี้) " +
+        "ห้ามใส่หน้า FORM SHIPPING EXPENSE / ฟอร์มสรุปค่าใช้จ่าย, ใบสั่งซื้อ (PURCHASE ORDER), ใบขนสินค้า, B/L, Packing List, ตารางอัตราแลกเปลี่ยน\n" +
+        "  · costType = หมวดในคอลัมน์ COSTS ของฟอร์มที่ค่าใช้จ่ายของใบนี้อยู่: \"Local\" (ค่าขนส่ง/ค่าบริการชิปปิ้ง/DO/ค่าคลัง/ค่าท่าเรือ), " +
+        "\"Fee\" (ค่าธรรมเนียม/อากร/ภาษีของกรมศุลกากรหรือสรรพสามิต), \"Insurance\" (ค่าประกันภัย), \"Overseas\" (ค่าใช้จ่ายของผู้ขายต่างประเทศ) " +
+        "ถ้าใบเดียวมีหลายหมวด ให้แยกเป็นหลายรายการ ใช้ docNo เดียวกัน แต่ละรายการใส่เฉพาะยอดของหมวดนั้น\n" +
+        "  · amountBeforeVat = ยอดก่อน VAT ทั้งหมดของใบ = ส่วนที่ไม่มี/ยกเว้นภาษี + ส่วนที่คำนวณภาษี 7% (เช่น 3,590.64 + 1,500.00 = 5,090.64), " +
+        "nonVatAmount = เฉพาะส่วนที่ไม่มี/ยกเว้นภาษี (เป็นส่วนหนึ่งของ amountBeforeVat), vatAmount = ภาษีมูลค่าเพิ่ม, " +
+        "totalAmount = จำนวนเงินทั้งสิ้น (ก่อนหัก ณ ที่จ่าย) = amountBeforeVat + vatAmount ตามที่พิมพ์ในใบ ห้ามคำนวณใหม่ถ้าในใบมีตัวเลข\n" +
+        "  · includedIn = เลขที่ใบแจ้งหนี้ของตัวแทนชิปปิ้ง ถ้าใบนี้เป็นใบเสร็จที่ตัวแทนจ่ายแทนแล้วเรียกเก็บรวมอยู่ในใบแจ้งหนี้ของตัวแทนอีกที " +
+        "(เช่น ใบเสร็จค่า DO / ค่าท่าเรือที่อยู่ในใบแจ้งหนี้ของ PROMPT แล้ว) ใบที่เราจ่ายเองโดยตรงให้ใส่สตริงว่าง\n" +
+        "  · ใบวางบิล/ใบแจ้งหนี้ กับใบกำกับภาษี/ใบเสร็จ ของรายการเดียวกัน (ผู้ออกเดียวกัน ยอดเท่ากัน) ให้ใส่รายการเดียว\n" +
+        "  · ใบแจ้งหนี้ของตัวแทนชิปปิ้งเอง (ผู้ขายหลักของชุด มักเป็นหน้าแรก เช่น PROMPT PI-2608011) ต้องอยู่ใน sourceDocs เสมอ " +
+        "ใช้ตัวเลขในส่วนสรุปของใบ: amountBeforeVat = มูลค่าไม่มีหรือยกเว้นภาษี + มูลค่าที่คำนวณภาษี 7%, nonVatAmount = มูลค่าไม่มีหรือยกเว้นภาษี, " +
+        "vatAmount = ภาษีมูลค่าเพิ่ม 7%, totalAmount = จำนวนเงินทั้งสิ้น\n" +
+        "  · shipper = ชื่อ SHIPPER ที่พิมพ์ในใบ (มักอยู่ในหมายเหตุ/Remark เช่น \"SHIPPER : KCC SILICONE CORPORATION\" หรือช่อง Shipper/Consignor), " +
+        "blNo = เลข B/L (B/L NO., B/L CHANGE), shipperInvoiceNo = เลข Invoice ของผู้ขายสินค้า (INV.NO., REF DOC) ถ้าในใบไม่มีให้ใส่สตริงว่าง " +
+        "ทั้งสามช่องใช้บอกว่าใบนี้เป็นของ shipment เดียวกับหน้าฟอร์ม — อ่านทุกใบที่ shipper / B/L ตรงกับชุดนี้ ห้ามข้ามใบใดเพราะผู้ออกเป็นคนละรายกับตัวแทน\n" +
+        "- ทุกแถวค่าใช้จ่ายจากฟอร์ม (lines ที่มี costType) ให้แยกยอดตามเอกสารที่อยู่เบื้องหลังแถวนั้น: " +
+        "nonVatAmount = ส่วนที่ไม่มี VAT, beforeVatAmount = ส่วนที่คิด VAT ก่อน VAT, vatAmount = VAT ของส่วนนั้น " +
+        "โดย nonVatAmount + beforeVatAmount ต้องเท่ากับ amount ของแถว (ตัวอย่าง DO 12,386 จากใบเสร็จที่มี NON VAT 1,752.50 / SALES 7% 10,633.50 / VAT 744.35 " +
+        "→ nonVatAmount 1752.5, beforeVatAmount 10633.5, vatAmount 744.35) " +
+        "ถ้าหลายแถวมาจากใบเดียวกันและใบมี VAT รวมทั้งใบ ให้แบ่ง VAT ตามสัดส่วน beforeVatAmount ของแต่ละแถว ผลรวมต้องเท่ากับ VAT ในใบ " +
+        "ค่าใช้จ่ายของกรมศุลกากร (Fee) ให้ใส่ VAT นำเข้าของใบเสร็จกรมศุลกากรใน vatAmount ของแถวนั้น " +
+        "แถว DO (D/O, Delivery Order) คือยอดรวมของใบเสร็จ\"ทุกใบ\"ที่ออกโดยสายเรือ/ผู้ปล่อยสินค้าฝั่ง shipper รายเดียวกัน (เช่น CP WORLD / Cargoport: D/O FEE, THC, CFS, LSS …) " +
+        "ให้อ่านทุกใบของผู้ออกรายนั้นแล้วรวม NON VAT, SALES 7% และ VAT เข้าแถว DO แถวเดียว " +
+        "ถ้าค่าใช้จ่ายไม่มี VAT ให้ nonVatAmount = amount ถ้าหาเอกสารของแถวนั้นไม่เจอ ให้ใส่ 0 ทั้งสามช่อง ห้ามเดา\n";
+
+    /// <summary>Fills Non VAT / Before VAT / VAT on form cost rows the read left unsplit, from the
+    /// supporting document that stands behind the row: same COSTS heading, and NON VAT + SALES 7%
+    /// equal to the row's amount to the satang (DO 12,386.00 ← Cargoport's receipt 1,752.50 +
+    /// 10,633.50, VAT 744.35). A long bundle is read in several requests and the form row and its
+    /// receipt usually arrive in different ones, so the model cannot split the row itself there.
+    /// A row that matches no document, or more than one, is left as it is.</summary>
+    public static void FillLineVatFromSourceDocs(ParsedDocument doc)
+    {
+        if (!doc.Header.TryGetValue("sourceDocs", out var v) || v is not List<object?> docs || docs.Count == 0) return;
+        static double N(Dictionary<string, object?> d, string k) =>
+            d.TryGetValue(k, out var o) && o != null && double.TryParse(o.ToString(), System.Globalization.NumberStyles.Any,
+                System.Globalization.CultureInfo.InvariantCulture, out var n) ? n : 0;
+        var src = docs.OfType<Dictionary<string, object?>>().ToList();
+        foreach (var l in doc.Lines)
+        {
+            if (l.NonVatAmount != 0 || l.BeforeVatAmount != 0 || l.VatAmount != 0) continue;
+            if (l.Amount == 0 || string.IsNullOrWhiteSpace(l.CostType)) continue;
+            var hits = src.Where(d =>
+                    string.Equals((d.GetValueOrDefault("costType")?.ToString() ?? "").Trim(), l.CostType.Trim(), StringComparison.OrdinalIgnoreCase)
+                    && Math.Abs(N(d, "amountBeforeVat") - l.Amount) < 0.01)
+                .ToList();
+            if (hits.Count != 1) continue;
+            // amountBeforeVat is the whole before-VAT figure (non-VAT part included); the line keeps
+            // the two parts apart.
+            l.NonVatAmount = N(hits[0], "nonVatAmount");
+            l.BeforeVatAmount = Math.Round(N(hits[0], "amountBeforeVat") - l.NonVatAmount, 2);
+            l.VatAmount = N(hits[0], "vatAmount");
+        }
+    }
+
+    /// <summary>Splits the form cost rows by the VAT rows of the same bundle — the deterministic
+    /// pass after the read, because the model splits a row only when it saw the receipt behind it
+    /// in the same request, and on a long bundle it usually did not: it then answered "all Non VAT"
+    /// (DO 12,386 → Non VAT 12,386, VAT 0) although Cargoport's receipt says 1,752.50 + 10,633.50 +
+    /// VAT 744.35.
+    ///
+    /// Each VAT row carries its base (SALES 7%) and its tax. It is matched to ONE cost row:
+    ///   1. a row whose amount equals the base exactly (STORAGE 552 ← Port Authority base 552,
+    ///      SHIPPING SERVICE 1,500 ← PROMPT base 1,500): Before VAT = base, Non VAT = 0;
+    ///   2. otherwise the row the base fits into with the smallest remainder (DO 12,386 ← Cargoport
+    ///      base 10,633.50): Before VAT = base, Non VAT = the rest;
+    ///   3. a base larger than every row — import VAT on the declared value of the goods — goes to
+    ///      the largest cost row of the same vendor (the Customs Department's fee): Non VAT = the
+    ///      fee, VAT = the import VAT, so the row's Amount (AP) is what the receipt asks to be paid.
+    /// A row the model split itself (Before VAT or VAT already set) is kept; a row left without any
+    /// VAT row is "Non VAT = amount" — an advance with no tax invoice.</summary>
+    /// <summary>The form's D/O row ("DO", "D/O", "D/O FEE", "DELIVERY ORDER").</summary>
+    private static bool IsDoRow(LineItem l) =>
+        Regex.IsMatch(l.Desc ?? "", @"^\s*(D\s*/?\s*O\b|DELIVERY\s+ORDER)", RegexOptions.IgnoreCase);
+
+    /// <summary>Who issued a tax row: the 13-digit tax id when it was read, else the name's first
+    /// distinctive word ("CARGOPORT (THAILAND) LTD." → CARGOPORT).</summary>
+    private static string IssuerKey(LineItem v)
+    {
+        var id = (v.IssuerTaxId ?? "").Trim();
+        if (id.Length == 13) return id;
+        var name = (v.IssuerName ?? "").Trim();
+        if (name.Length == 0)
+        {
+            // "VAT 7% Cargoport (Thailand) Ltd. RC26070748" — the issuer is in the description.
+            var m = Regex.Match(v.Desc ?? "", @"VAT\s*\d+\s*%\s*(.+)$", RegexOptions.IgnoreCase);
+            name = m.Success ? m.Groups[1].Value : "";
+        }
+        return Regex.Match(name.ToUpperInvariant(), @"[A-Z]{3,}|[\u0E00-\u0E7F]{3,}").Value;
+    }
+
+    public static void FillLineVatFromTaxRows(ParsedDocument doc)
+    {
+        static bool IsTax(LineItem l) => (l.ExtCode ?? "").Trim().ToUpperInvariant() is "VAT" or "WHT" or "DUTY";
+        static bool Split(LineItem l) => l.BeforeVatAmount != 0 || l.VatAmount != 0;
+        var costs = doc.Lines.Where(l => !IsTax(l) && l.Amount > 0 && !string.IsNullOrWhiteSpace(l.CostType)).ToList();
+        if (costs.Count == 0) return;
+        var free = costs.Where(l => !Split(l)).ToList();
+        var vats = doc.Lines.Where(l => (l.ExtCode ?? "").Trim().Equals("VAT", StringComparison.OrdinalIgnoreCase) && l.Amount > 0)
+            .Select(l => (Row: l, Base: Math.Round(l.BaseAmount > 0 ? l.BaseAmount : l.Amount / 0.07, 2)))
+            .OrderByDescending(v => v.Base)
+            .ToList();
+        // Taxes the model already placed on a row it split itself are not placed again.
+        vats = vats.Where(v => !costs.Any(c => Split(c) && Math.Abs(c.VatAmount - v.Row.Amount) < 0.01)).ToList();
+
+        void Put(LineItem c, double before, double vat)
+        {
+            c.BeforeVatAmount = Math.Round(before, 2);
+            c.NonVatAmount = Math.Round(c.Amount - before, 2);
+            c.VatAmount = Math.Round(vat, 2);
+            free.Remove(c);
+        }
+
+        var left = new List<(LineItem Row, double Base)>();
+        foreach (var v in vats)                                   // 1. exact base
+        {
+            var hit = free.Where(c => !IsDoRow(c) && Math.Abs(c.Amount - v.Base) < 0.01).ToList();
+            if (hit.Count >= 1) Put(hit[0], v.Base, v.Row.Amount); else left.Add(v);
+        }
+
+        // 1b. DO: the form's "DO" row is everything the shipping line / terminal (the shipper's
+        // side — CP WORLD / Cargoport) charged to release the goods, across ALL its receipts: D/O
+        // fee, THC, CFS, LSS … So the VAT rows are grouped by issuer and the issuer whose bases add
+        // up closest under the DO amount is taken whole — every receipt of it, summed.
+        foreach (var dRow in free.Where(IsDoRow).ToList())
+        {
+            var best = left
+                .GroupBy(v => IssuerKey(v.Row))
+                .Where(g => g.Key.Length > 0)
+                .Select(g => (Items: g.ToList(), Base: Math.Round(g.Sum(x => x.Base), 2), Vat: Math.Round(g.Sum(x => x.Row.Amount), 2)))
+                .Where(g => g.Base <= dRow.Amount + 0.01 && g.Base >= dRow.Amount * 0.5)
+                .OrderBy(g => dRow.Amount - g.Base)
+                .FirstOrDefault();
+            if (best.Items == null) continue;
+            Put(dRow, best.Base, best.Vat);
+            foreach (var it in best.Items) left.Remove(it);
+        }
+        var stillLeft = new List<(LineItem Row, double Base)>();
+        foreach (var v in left)                                   // 2. smallest remainder
+        {
+            var hit = free.Where(c => c.Amount - v.Base > -0.01).OrderBy(c => c.Amount - v.Base).FirstOrDefault();
+            if (hit != null && v.Base >= hit.Amount * 0.5) Put(hit, v.Base, v.Row.Amount); else stillLeft.Add(v);
+        }
+        foreach (var v in stillLeft)                              // 3. import VAT → same vendor's fee
+        {
+            var vendor = (v.Row.VendorCode ?? "").Trim();
+            if (vendor.Length == 0) continue;
+            var hit = costs.Where(c => string.Equals((c.VendorCode ?? "").Trim(), vendor, StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(c => c.Amount).FirstOrDefault();
+            if (hit == null) continue;
+            hit.NonVatAmount = hit.NonVatAmount == 0 && hit.BeforeVatAmount == 0 ? hit.Amount : hit.NonVatAmount;
+            hit.VatAmount = Math.Round(hit.VatAmount + v.Row.Amount, 2);
+            free.Remove(hit);
+        }
+        foreach (var c in free)                                   // no tax invoice behind it
+        {
+            c.NonVatAmount = c.Amount;
+            c.BeforeVatAmount = 0;
+            c.VatAmount = 0;
+        }
+    }
+
     private const string SupportingSchema = """
         {
-          "header": {},
+          "header": {"sourceDocs": [{"docType": "Invoice / Tax Invoice / Receipt / Debit Note", "issuerName": "ชื่อผู้ออกเอกสาร", "docNo": "เลขที่เอกสาร", "docDate": "YYYY-MM-DD", "costType": "Local หรือ Insurance หรือ Fee หรือ Overseas", "currency": "THB", "nonVatAmount": 0, "amountBeforeVat": 0, "vatAmount": 0, "totalAmount": 0, "includedIn": "", "shipper": "", "blNo": "", "shipperInvoiceNo": ""}]},
           "lines": [{"extCode": "VAT หรือ WHT หรือ DUTY เท่านั้น", "desc": "",
                      "qty": 1, "uom": "EA", "price": 0, "amount": 0, "vendorCode": "",
                      "taxKind": "", "taxDocNo": "", "taxDocDate": "",
@@ -149,7 +320,8 @@ public static partial class VisionPrompt
     // same substance as the matching clauses in IiBundleRules, minus everything about the form.
     private static string SupportingRowRules(string mainVendorName) =>
         "- ห้ามใส่รายการสินค้า/บริการของใบแจ้งหนี้เป็น lines เด็ดขาด lines ต้องมีแต่แถว VAT, WHT และ DUTY\n" +
-        "- header ให้ส่งเป็นอ็อบเจกต์ว่าง {} ถ้าไม่มีภาษีเลย ให้ตอบ lines เป็นอาร์เรย์ว่าง []\n" +
+        "- header ให้มีแค่ sourceDocs (ดูกติกา sourceDocs) ถ้าไม่มีภาษีเลย ให้ตอบ lines เป็นอาร์เรย์ว่าง []\n" +
+        SourceDocsRule +
         "- ตัวเลขทุกช่องเป็นตัวเลขล้วน วันที่รูปแบบ YYYY-MM-DD (พ.ศ. ลบ 543) "
             + "ค่าข้อความตอบเป็นภาษาอังกฤษ ยกเว้นชื่อบริษัท/บุคคล และเลขที่เอกสาร\n" +
         "- VAT: 1 แถวต่อ 1 ใบกำกับภาษี/ใบเสร็จที่มี VAT, extCode = \"VAT\", "
@@ -250,8 +422,8 @@ public static partial class VisionPrompt
         "\"อัตราขายถ่วงเฉลี่ย\" (คอลัมน์ขวาสุด) ของแถวสกุลเงินที่ตรงกับ header.currency เท่านั้น " +
         "ห้ามใช้คอลัมน์ \"ซื้อตั๋วเงิน\" หรือ \"ซื้อเงินโอน\" และห้ามใช้ตัวเลขใหญ่ที่พาดหัวหน้าว่า \"อัตราแลกเปลี่ยนถัวเฉลี่ยถ่วงน้ำหนักระหว่างธนาคาร\" " +
         "พร้อมอ่าน header.exchangeRateDate = วันที่ประจำของตารางนั้น (แปลง พ.ศ. เป็น ค.ศ. ด้วย)" +
-        "\n- (เฉพาะกรณีที่มีหน้า FORM SHIPPING EXPENSE) แถว DO ในตารางให้ใส่เป็น line เฉพาะเมื่อผู้ให้บริการชิปปิ้ง (ช่อง SHIPPING ของฟอร์ม) " +
-        "เป็น PROMPT หรือ CHEETAH เท่านั้น ถ้าเป็นรายอื่นห้ามใส่แถว DO แม้ในฟอร์มจะมียอดอยู่" +
+        "\n- (เฉพาะกรณีที่มีหน้า FORM SHIPPING EXPENSE) แถว DO ในตารางที่มียอด ให้ใส่เป็น line เสมอพร้อม vendorCode ตามคอลัมน์ VENDOR ของแถวนั้น " +
+        "(เช่น DO 4000358 19,045.00 Local ของ PILOT) ห้ามข้ามแถวนี้" +
         "\n- (เฉพาะกรณีที่มีหน้า FORM SHIPPING EXPENSE) แถวที่เป็นสกุลเงินต่างประเทศ เช่น \"OTHER : Oversea Charge (USD)\" " +
         "ให้แปลงเป็นเงินบาทก่อนใส่ใน amount/price โดยใช้อัตราแลกเปลี่ยนของวันที่ของเข้า (ETA) ตามที่ปรากฏในไฟล์ " +
         "ต้องใช้คอลัมน์ \"อัตราขายถัวเฉลี่ย\" (Selling rate / averaged selling rate) เท่านั้น ห้ามใช้อัตราซื้อ (Buying) หรืออัตรากลาง " +
@@ -301,7 +473,7 @@ public static partial class VisionPrompt
 
     // GLC is the default: everything written before MGT came into scope was GLC's rules, and a
     // document with no company stamped on it keeps reading exactly as it did before.
-    private const string IiBundleRules = BundleHeaderRules + GlcFormRules + BundleTaxRules;
+    private const string IiBundleRules = BundleHeaderRules + GlcFormRules + BundleTaxRules + "\n" + SourceDocsRule;
 
     // The MGT import-cost form is NOT the GLC "FORM SHIPPING EXPENSE". It carries four amount
     // columns (two estimates, the broker's figure and the invoice actually received) and has no
@@ -364,7 +536,7 @@ public static partial class VisionPrompt
         "ยกเว้นแถว DUTY และภาษีจากใบเสร็จกรมศุลกากร ถ้าตารางท้ายฟอร์มมีรหัสที่บรรทัด IMPORT TAX เขียนไว้ต่างหาก ให้ใช้รหัสนั้น " +
         "ถ้าไม่มีเขียนไว้ ให้ใช้รหัสเดียวกับแถวค่าใช้จ่ายเช่นกัน ห้ามเว้นว่างและห้ามแต่งรหัสขึ้นเอง";
 
-    private const string MgtBundleRules = BundleHeaderRules + MgtFormRules + BundleTaxRules + MgtTaxVendorRules;
+    private const string MgtBundleRules = BundleHeaderRules + MgtFormRules + BundleTaxRules + MgtTaxVendorRules + "\n" + SourceDocsRule;
 
     public const string InventoryPoCategory = "INVENTORY_PO";
 
@@ -427,6 +599,9 @@ public static partial class VisionPrompt
                     ExtCode = GetStr(ln, "extCode"), Desc = GetStr(ln, "desc"),
                     PoItem = GetStr(ln, "poItem").Trim(),
                     CostType = GetStr(ln, "costType").Trim(),
+                    NonVatAmount = GetNum(ln, "nonVatAmount"),
+                    BeforeVatAmount = GetNum(ln, "beforeVatAmount"),
+                    VatAmount = GetNum(ln, "vatAmount"),
                     Qty = GetNum(ln, "qty"), Uom = GetStr(ln, "uom") is { Length: > 0 } u ? u : "EA",
                     VendorCode = GetStr(ln, "vendorCode") is var vc && vc != "#N/A" ? vc.Trim() : "",
                     TaxKind = NormTaxKind(GetStr(ln, "taxKind")),
@@ -451,9 +626,15 @@ public static partial class VisionPrompt
         // DO (delivery order) fee is only charged to us by PROMPT and CHEETAH; with any other
         // shipping agent the row on the form is not ours to record, so it is dropped even when it
         // carries an amount.
+        // …unless the form itself files the DO under the shipping agent we pay: PILOT bills the
+        // agent line's DO on its own invoice (FORM 5000002085: DO 4000358 19,045.00 Local; PRD
+        // 5105604002 settles ZLH1 45,085 = 26,040 + that 19,045). Dropping it left the invoice
+        // 19,045 short of what Accounting posts.
         var shipper = h.TryGetValue("vendorName", out var vName) ? vName?.ToString() ?? "" : "";
+        var shipperCode = h.TryGetValue("vendorCode", out var vCode) ? (vCode?.ToString() ?? "").Trim() : "";
         if (!DoChargingShipper().IsMatch(shipper))
-            lines.RemoveAll(l => DoFeeDesc().IsMatch(l.Desc ?? ""));
+            lines.RemoveAll(l => DoFeeDesc().IsMatch(l.Desc ?? "")
+                && !(shipperCode.Length > 0 && string.Equals((l.VendorCode ?? "").Trim(), shipperCode, StringComparison.OrdinalIgnoreCase)));
 
         // The FORM's EXCISE FEE is one figure but two taxes: excise plus the interior ("มหาดไทย")
         // tax, which Thai law sets at 10% of the excise. When the read returns it as a single row,

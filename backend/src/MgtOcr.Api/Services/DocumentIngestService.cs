@@ -10,14 +10,21 @@ namespace MgtOcr.Api.Services;
 // path rejects encrypted PDFs before enqueuing, so `password` is normally null here.
 public class DocumentIngestService(OcrEngine ocr, DocumentRepository repo, JobLogRepository jobs)
 {
+    public static string UploadEngineFor(string module, string? requested)
+    {
+        // Gemini only, whatever the client asks for: ChatGPT Vision was removed (4 Nov 2026) so the
+        // reading cost is billed on one provider.
+        _ = module; _ = requested;
+        return "gemini";
+    }
+
     public async Task<(int DocId, string Module, string? Note)> IngestAsync(
         string module, string storedPath, string fileName, int size, string engine,
         string apDocCategory, string user, string? password = null, string? salesOrg = null)
     {
         var mod = module.ToUpperInvariant();
         var detect = mod == "AP";
-        // Locked to Gemini for the auto/empty path (per Megachem), same as the sync upload.
-        var uploadEngine = "gemini"; // Gemini only (Megachem, 7 Oct 2026), whatever engine was requested
+        var uploadEngine = UploadEngineFor(mod, engine);
         var t0 = DateTime.UtcNow;
         // ocr.JobLog: the clock starts BEFORE the call, so a read that fails or times out still
         // leaves a row saying when it began and how long it ran. OcrDurationMs on the document

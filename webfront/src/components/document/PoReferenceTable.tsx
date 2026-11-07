@@ -148,6 +148,14 @@ export default function PoReferenceTable({
     ['ZOVS', 'Oversea Charge'],
     ['ZOTH', 'Other Charges'],
   ];
+  // Once the PO has been read, only offer condition types SAP actually returned for it. Before
+  // the lookup, keep the standard list available; the backend still validates against the PO.
+  const poConditionTypes = new Set(
+    (sapItems ?? []).flatMap((item) => item.conditions ?? []).map((condition) => condition.conditionType.trim().toUpperCase()),
+  );
+  const conditionOptions = (sapItems?.length ?? 0) > 0
+    ? CONDITIONS.filter(([code]) => poConditionTypes.has(code))
+    : CONDITIONS;
   const condOf = (l: DocLine) =>
     String((l.extra as Record<string, unknown> | undefined)?.deliveryCondType ?? '').trim();
   const showCond = !!showCondition && !!onCondType;
@@ -318,7 +326,12 @@ export default function PoReferenceTable({
                           style={{ minWidth: 160 }}
                         >
                           <option value="">— Select —</option>
-                          {CONDITIONS.map(([c, label]) => (
+                          {condOf(l) && !conditionOptions.some(([c]) => c === condOf(l)) && (
+                            <option value={condOf(l)} disabled>
+                              {condOf(l)} · not found on this PO
+                            </option>
+                          )}
+                          {conditionOptions.map(([c, label]) => (
                             <option key={c} value={c}>
                               {c} · {label}
                             </option>
@@ -393,7 +406,10 @@ export default function PoReferenceTable({
         {lines.length > 0 && (
           <tfoot>
             <tr>
-              <td colSpan={4} style={{ textAlign: 'right' }}><b>Total</b></td>
+              {/* As many cells as there are columns before Amount: Assigned and Purchasing
+                  Document/Item only on goods, Condition only when shown — a fixed 4 put the total
+                  under Quantity on a delivery-cost document. */}
+              <td colSpan={(deliveryCostsOnly ? 2 : 4) + (showCond ? 1 : 0)} style={{ textAlign: 'right' }}><b>Total</b></td>
               <td style={{ textAlign: 'right' }}><b>{fmtAmt(total)}</b></td>
               <td colSpan={(onDelLine ? 5 : 4) + (showGr ? 1 : 0)} />
             </tr>
