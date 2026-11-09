@@ -143,6 +143,7 @@ var appConfig = new AppConfig
         .Where(c => !string.IsNullOrWhiteSpace(c.Value))
         .ToDictionary(c => c.Key.Trim(), c => c.Value!.Trim(), StringComparer.OrdinalIgnoreCase),
     SapSupplierInvoiceTaxBaseClearingAccount = Get("Sap:SupplierInvoice:TaxBaseClearingAccount"),
+    SapSupplierInvoiceTestReferenceSuffix = string.Equals(Get("Sap:SupplierInvoice:TestReferenceSuffix"), "true", StringComparison.OrdinalIgnoreCase),
     SapSupplierInvoiceMatDocMap = cfg.GetSection($"Sap:SupplierInvoice:MatDocMap_{Cap(sapSupplierInvoiceEnv)}")
         .GetChildren()
         .Where(c => !string.IsNullOrWhiteSpace(c.Value))

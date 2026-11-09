@@ -142,6 +142,10 @@ public class AppConfig
     // nets to zero and SAP books the input VAT on the right base. Empty = such a row is refused
     // before sending, with the reason, instead of SAP's FF812.
     public string SapSupplierInvoiceTaxBaseClearingAccount { get; init; } = "";
+    // Sap:SupplierInvoice:TestReferenceSuffix — true puts "-T{docId}" after the Reference so the
+    // same real bundle can be sent to TEST again without SAP's duplicate check (M8/804). Off by
+    // default: the Reference is the invoice number exactly as printed, as Accounting keys it.
+    public bool SapSupplierInvoiceTestReferenceSuffix { get; init; }
 
     // Purchase Order lookup — API_PURCHASEORDER_PROCESS_SRV, read-only. A supplier invoice has to
     // name the PO ITEM it is billing (PurchaseOrderItem 10, 20, …), and that number exists only in

@@ -1649,7 +1649,8 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     /// still holds. PRD sends the reference exactly as printed on the invoice.</summary>
     private List<Dictionary<string, object?>> TestReference(List<Dictionary<string, object?>> payloads, Dictionary<string, object?> doc)
     {
-        if (!string.Equals(config.SapSupplierInvoiceEnvironment, "dev", StringComparison.OrdinalIgnoreCase)) return payloads;
+        if (!config.SapSupplierInvoiceTestReferenceSuffix
+            || !string.Equals(config.SapSupplierInvoiceEnvironment, "dev", StringComparison.OrdinalIgnoreCase)) return payloads;
         var tag = $"-T{Convert.ToInt32(doc.Get("docId") ?? 0)}";
         foreach (var p in payloads)
         {

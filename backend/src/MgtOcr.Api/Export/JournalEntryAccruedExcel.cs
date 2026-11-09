@@ -65,6 +65,8 @@ public static class JournalEntryAccruedExcel
     private const int L_TaxBase = 25;       // Y  FWBAS
     private const int L_TaxDate = 26;       // Z  TXDAT
     private const int TechRow = 15, LabelRow = 16, HeaderTechRow = 9, HeaderLabelRow = 10;
+    // SAP's batch block: "1 | Header" (row 8) down to the line-item labels (row 16).
+    private const int BlockFirstRow = 8, LastTemplateColumn = L_TaxDate;
 
     // Journal entry type for a plain G/L posting, as the sample uses.
     private const string EntryType = "SA";
@@ -79,6 +81,20 @@ public static class JournalEntryAccruedExcel
     {
         var header = (Dictionary<string, object?>)doc["header"]!;
         var rows = DeferredRows(doc);
+        // Assignment and Item Text as the invoice's own D1 lines carry them (Accounting,
+        // 2026-11-08: "same as the AP"), so the JV clears against them on sight: the PO, and
+        // "PROMPT,INV.PI-2608011" — the invoicing party and ITS invoice — on every tax invoice of
+        // the bundle, the pass-through receipts included. Reference stays per tax invoice.
+        var poAssignment = header.GetStr("poRef").Trim();
+        var ownInvoice = header.GetStr("invoiceNo").Trim();
+        var party = ShortName(Or(rows.FirstOrDefault(r => string.Equals(r.DocNo, ownInvoice, StringComparison.OrdinalIgnoreCase))?.Text ?? "",
+            Or(header.GetStr("vendorName").Trim(), rows.FirstOrDefault()?.Text ?? "")));
+        var apText = party.Length > 0 && ownInvoice.Length > 0 ? $"{party},INV.{ownInvoice}" : "";
+        rows = rows.Select(r => r with
+        {
+            Text = Or(apText, r.Text),
+            Assignment = Or(poAssignment, r.Assignment),
+        }).ToList();
         if (rows.Count == 0) return null;
 
         var templatePath = FindTemplate()
@@ -101,17 +117,10 @@ public static class JournalEntryAccruedExcel
         // file uses it as Reference; the PO number stands in when the read found no invoice number.
         var reference = Or(header.GetStr("invoiceNo").Trim(), header.GetStr("poRef").Trim());
 
-        Text(ws.Cell(HeaderRow, H_CompanyCode), Cut(companyCode, 4));
-        Text(ws.Cell(HeaderRow, H_EntryType), EntryType);
-        Date(ws.Cell(HeaderRow, H_EntryDate), postingDate);
-        Date(ws.Cell(HeaderRow, H_PostingDate), postingDate);
-        Text(ws.Cell(HeaderRow, H_Period), postingDate.Month.ToString());
-        Text(ws.Cell(HeaderRow, H_HeaderText), DeferredVatReversal.Reference(header));
-        Text(ws.Cell(HeaderRow, H_Currency), Cut(currency, 5));
-        Text(ws.Cell(HeaderRow, H_Reference), Cut(reference, 16));
+        // Extra columns the template does not carry, named in the FIRST block before it is copied
+        // for the next batches.
         Text(ws.Cell(HeaderTechRow, H_Branch), "BRNCH");
         Text(ws.Cell(HeaderLabelRow, H_Branch), "Branch Number (4)");
-        Text(ws.Cell(HeaderRow, H_Branch), HeadOfficeBusinessPlace);
         foreach (var (col, tech, label) in new[]
                  {
                      (L_BusinessPlace, "BUPLA", "Business Place (4)"),
@@ -123,17 +132,45 @@ public static class JournalEntryAccruedExcel
             Text(ws.Cell(LabelRow, col), label);
         }
 
-        // One pair per tax invoice, as the RPA "Input VAT" voucher posts it (SRS Record Automatic
-        // Journal Voucher, topic 3): Dr 11720000 V1 / Cr 11730000 D1, Item Text = the issuer,
-        // Assignment = the issuer's tax ID, base and tax date of that tax invoice.
-        var row = FirstLineRow;
+        // ONE JOURNAL ENTRY PER TAX INVOICE (SRS topic 3: Reference = the template's Invoice No of
+        // that row). The Input Tax Report takes "Tax invoice no.", the vendor and the assignment
+        // from the document, so three tax invoices in one entry all came out as PI-2608012 /
+        // PROMPT. Each batch is SAP's own block (rows 8-16: "n Header", names, labels, values,
+        // "Line Items", names, labels) copied below the previous one, then its two lines:
+        // Dr 11720000 V1 / Cr 11730000 D1, Item Text = issuer, Assignment = issuer's tax ID.
+        var block = ws.Range(BlockFirstRow, 1, LabelRow, LastTemplateColumn);
+        var start = BlockFirstRow;
+        var batchNo = 0;
         foreach (var r in rows)
         {
+            batchNo++;
+            if (batchNo > 1)
+            {
+                block.CopyTo(ws.Cell(start, 1));
+                // Copied headers keep only the values the block had; clear the first batch's header
+                // values and line data that came along.
+                ws.Range(start + (HeaderRow - BlockFirstRow), 1, start + (HeaderRow - BlockFirstRow), LastTemplateColumn).Clear(XLClearOptions.Contents);
+            }
+            ws.Cell(start, 1).Value = batchNo.ToString();
+            var h = start + (HeaderRow - BlockFirstRow);
+            Text(ws.Cell(h, H_CompanyCode), Cut(companyCode, 4));
+            Text(ws.Cell(h, H_EntryType), EntryType);
+            Date(ws.Cell(h, H_EntryDate), postingDate);
+            Date(ws.Cell(h, H_PostingDate), postingDate);
+            Text(ws.Cell(h, H_Period), postingDate.Month.ToString());
+            Text(ws.Cell(h, H_HeaderText), DeferredVatReversal.Reference(header));
+            Text(ws.Cell(h, H_Currency), Cut(currency, 5));
+            // The tax invoice's own number; the bundle's invoice/PO only when the read has none.
+            Text(ws.Cell(h, H_Reference), Cut(Or(r.DocNo, reference), 16));
+            Text(ws.Cell(h, H_Branch), HeadOfficeBusinessPlace);
+
+            var line = start + (FirstLineRow - BlockFirstRow);
             var taxDate = r.TaxDate ?? postingDate;
-            Line(ws, row++, companyCode, DeferredVatReversal.GlInputTax, r.Text, r.Assignment, r.Amount,
+            Line(ws, line++, companyCode, DeferredVatReversal.GlInputTax, r.Text, r.Assignment, r.Amount,
                 debit: true, DeferredVatReversal.InputTaxCode, postingDate, r.Base, taxDate);
-            Line(ws, row++, companyCode, DeferredVatReversal.GlDeferredInputTax, r.Text, r.Assignment, r.Amount,
+            Line(ws, line++, companyCode, DeferredVatReversal.GlDeferredInputTax, r.Text, r.Assignment, r.Amount,
                 debit: false, DeferredVatReversal.DeferredTaxCode, postingDate, r.Base, taxDate);
+            start = line + 1;   // one empty row between batches
         }
 
         using var ms = new MemoryStream();
@@ -161,7 +198,7 @@ public static class JournalEntryAccruedExcel
         }
     }
 
-    private sealed record DeferredRow(string Text, string Assignment, double Amount, double Base, DateTime? TaxDate);
+    private sealed record DeferredRow(string Text, string Assignment, double Amount, double Base, DateTime? TaxDate, string DocNo);
 
     /// <summary>The deferred (D-code) tax rows of the document, one per tax invoice.</summary>
     private static List<DeferredRow> DeferredRows(Dictionary<string, object?> doc)
@@ -187,7 +224,7 @@ public static class JournalEntryAccruedExcel
             list.Add(new DeferredRow(
                 Text: Or(issuer, docNo),
                 Assignment: Or(taxId, docNo),
-                Amount: amount, Base: baseAmt, TaxDate: taxDate));
+                Amount: amount, Base: baseAmt, TaxDate: taxDate, DocNo: docNo));
         }
         return list;
     }
@@ -219,6 +256,14 @@ public static class JournalEntryAccruedExcel
     }
 
     private static string Or(string a, string b) => string.IsNullOrWhiteSpace(a) ? b : a;
+
+    // "PROMPT LOGISTICS CO.,LTD" -> "PROMPT", the way the invoice's D1 lines write it.
+    private static string ShortName(string name)
+    {
+        var n = (name ?? "").Trim();
+        var cut = n.IndexOfAny([' ', ',']);
+        return (cut > 0 ? n[..cut] : n).Trim().ToUpperInvariant();
+    }
 
     private static double Num(object? v) =>
         v is null ? 0 : double.TryParse(v.ToString(), out var d) ? d : 0;

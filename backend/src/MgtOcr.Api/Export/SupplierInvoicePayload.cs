@@ -87,6 +87,11 @@ public static class SupplierInvoicePayload
             Or(header.GetStr("invoiceNo").Trim(),
                Or(header.GetStr("goodsInvoiceNo").Trim(), poRef)));
         var itemText = Or(firstGl?.GetStr("itemText").Trim() ?? "", assignment);
+        // Shipping documents: Assignment is the PURCHASE ORDER on every line Accounting keys —
+        // payables, cost, deferred VAT and Purchase Variance (PRD 5100001132: 2230000565 on all of
+        // them; 5100001131 PROMPT the same). Only the customs import VAT line carries the receipt
+        // number instead (0152-091171), set where that line is built.
+        if (!isPoKeyed && poRef.Length > 0) assignment = poRef;
 
         // The Text box on Basic Data (BKTXT). The screen keeps it in header.headerText and it
         // wins: somebody who typed there meant that text. Nothing read it before and the box was
@@ -339,7 +344,7 @@ public static class SupplierInvoicePayload
             // Accounting posts them (5100001131: PROMPT 105.00 D1, then 782.99 D1 = Cargoport 744.35
             // + Port Authority 38.64).
             var ownInvoice = Or(vendor.Length > 0 ? InvoiceNoOf(taxRows) : "", header.GetStr("invoiceNo").Trim());
-            var vatLines = new List<(string Code, bool Own, bool Deferred, double Amount, double Base, string DocNo, string Issuer)>();
+            var vatLines = new List<(string Code, bool Own, bool Deferred, double Amount, double Base, string DocNo, string Issuer, bool Customs)>();
             foreach (var t in taxRows)
             {
                 var code = t.GetStr("taxCode").Trim().ToUpperInvariant();
@@ -355,9 +360,23 @@ public static class SupplierInvoicePayload
                 var docNo = t.GetStr("taxDocNo").Trim();
                 vatLines.Add((code, ownInvoice.Length > 0 && string.Equals(docNo, ownInvoice, StringComparison.OrdinalIgnoreCase),
                     deferred, amt, Num(t.Get("baseAmount")) > 0 ? Num(t.Get("baseAmount")) : Math.Round(amt / 0.07, 2),
-                    docNo, t.GetStr("issuerName").Trim().ToUpperInvariant()));
+                    docNo, t.GetStr("issuerName").Trim().ToUpperInvariant(), DeferredVatReversal.IsImportVat(t)));
             }
-            foreach (var g in vatLines.GroupBy(v => (v.Code, v.Deferred, Key: v.Own ? "OWN|" + v.DocNo : "PAID-ON-BEHALF")))
+            // Every VAT line carries the invoicing party and ITS invoice, the way Accounting writes
+            // it (PRD 5100001131: both D1 lines "PROMPT,INV.PI-2608011", the pass-through receipts
+            // included), with the PO as Assignment (PRD 5105604002). The per-receipt detail the
+            // tax report needs travels on the Input VAT journal entry, not here.
+            static string Short(string name)
+            {
+                var n = (name ?? "").Trim();
+                var cut = n.IndexOfAny([' ', ',']);
+                return (cut > 0 ? n[..cut] : n).Trim().ToUpperInvariant();
+            }
+            var partyName = Short(Or(vatLines.FirstOrDefault(v => v.Own).Issuer ?? "",
+                Or(header.GetStr("vendorName").Trim(), vatLines.FirstOrDefault().Issuer ?? "")));
+            var vatText = partyName.Length > 0 && ownInvoice.Length > 0 ? $"{partyName},INV.{ownInvoice}" : itemText;
+            foreach (var g in vatLines.GroupBy(v => (v.Code, v.Deferred,
+                         Key: v.Customs ? "CUSTOMS|" + v.DocNo : v.Own ? "OWN|" + v.DocNo : "PAID-ON-BEHALF")))
             {
                 var items = g.ToList();
                 var amt = Math.Round(items.Sum(v => v.Amount), 2);
@@ -374,10 +393,18 @@ public static class SupplierInvoicePayload
                     ["DebitCreditCode"] = "S",
                     ["TaxCode"] = g.Key.Code,
                     ["TaxBaseAmountInTransCrcy"] = F2(Math.Round(items.Sum(v => v.Base), 2)),
-                    ["AssignmentReference"] = Cut(Or(docs.FirstOrDefault() ?? "", assignment), 18),
-                    ["SupplierInvoiceItemText"] = Cut(Or(text, itemText), 50),
+                    // Customs import VAT (Accounting, 2026-11-08): Assignment = the customs receipt
+                    // number, Text = the department's full name. Every other VAT line: the PO and
+                    // the invoicing party's text.
+                    ["AssignmentReference"] = g.Key.Key.StartsWith("CUSTOMS|")
+                        ? Cut(Or(docs.FirstOrDefault() ?? "", Or(poRef, assignment)), 18)
+                        : Cut(Or(poRef, Or(docs.FirstOrDefault() ?? "", assignment)), 18),
+                    ["SupplierInvoiceItemText"] = g.Key.Key.StartsWith("CUSTOMS|")
+                        ? Cut(Or(items.First().Issuer, vatText), 50)
+                        : Cut(vatText, 50),
                     ["_vatAsGlLine"] = g.Key.Code,
                     ["_vatDocs"] = string.Join(", ", docs),
+                    ["_vatDetail"] = text,
                 });
             }
             // Lines: VX, and one line per PO item + condition again.
@@ -396,8 +423,6 @@ public static class SupplierInvoicePayload
                         first["SupplierInvoiceItemAmount"] = F2(Math.Round(grp.Sum(r => Num(r.Get("SupplierInvoiceItemAmount"))), 2));
                         if (grp.All(r => r.Get("QuantityInPurchaseOrderUnit") != null))
                             first["QuantityInPurchaseOrderUnit"] = F3(Math.Round(grp.Sum(r => Num(r.Get("QuantityInPurchaseOrderUnit"))), 3));
-                        first["SupplierInvoiceItemText"] = Cut(string.Join(", ",
-                            grp.Select(r => r.GetStr("SupplierInvoiceItemText")).Where(x => x.Length > 0).Distinct()), 50);
                         first["SuplrInvcDeliveryCostCndnStep"] = null;
                         first["SuplrInvcDeliveryCostCndnCount"] = null;
                     }
@@ -442,7 +467,9 @@ public static class SupplierInvoicePayload
                     // Lines raised to the accrual → credit the variance; lowered → debit it.
                     ["DebitCreditCode"] = accrualDelta > 0 ? "H" : "S",
                     ["TaxCode"] = "VX",
-                    ["AssignmentReference"] = Cut(poRef, 18),
+                    // Same Assignment and Text as the payables line, as Accounting keys them.
+                    ["AssignmentReference"] = Cut(assignment, 18),
+                    ["SupplierInvoiceItemText"] = Cut(DistinctText(itemText, "PURCHASE VARIANCE", "PURCHASE VARIANCE"), 50),
                     ["_purchaseVariance"] = true,
                 });
             purOrdRef.Clear();
@@ -1303,7 +1330,14 @@ public static class SupplierInvoicePayload
                     && !string.Equals(r.Key.Vendor, invoicingParty.Trim(), StringComparison.OrdinalIgnoreCase)
                         ? r.Key.Vendor : null,
                 ["TaxCode"] = r.Key.TaxCode,
-                ["SupplierInvoiceItemText"] = Cut(Or(text, itemText), 50),
+                // The payables line's text, not the form's cost descriptions — Accounting's lines
+                // carry one text for the whole invoice.
+                // SAP blanks an item text that is the SAME string as the payables line's text
+                // (5100000125: "KCC,INV.KCCCI260715-012" sent on Local Hand&Fr and Purchase
+                // Variance, both came back empty; the D1 lines, worded differently, kept theirs;
+                // before, when this line carried the cost description, it showed). So the line
+                // carries the payables text followed by what the cost is.
+                ["SupplierInvoiceItemText"] = Cut(DistinctText(itemText, text, "DELIVERY COST"), 50),
                 ["_deliveryCost"] = true,
                 // What the goods receipt accrued for this item + condition, in document currency.
                 ["_accrued"] = AccrualIsExact(r.Key.PoItem, r.Key.Cond) ? F2(AccrualNear(r.Key.PoItem, r.Key.Cond, amount)) : "0",
@@ -1471,6 +1505,19 @@ public static class SupplierInvoicePayload
     private static string F2(double v) => v.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
     private static string F3(double v) => v.ToString("0.000", System.Globalization.CultureInfo.InvariantCulture);
     private static string Or(string a, string b) => string.IsNullOrWhiteSpace(a) ? b : a;
+
+    /// <summary>An item text that is never the bare payables text (SAP empties those): the
+    /// payables text followed by what the line is.</summary>
+    private static string DistinctText(string payablesText, string what, string fallback)
+    {
+        var p = (payablesText ?? "").Trim();
+        var w = Or((what ?? "").Trim(), fallback).ToUpperInvariant();
+        if (p.Length == 0) return w;
+        if (string.Equals(w, p, StringComparison.OrdinalIgnoreCase)) w = fallback;
+        var joined = $"{p} {w}";
+        // Cut to 50 from the END of the cost words, so the invoice reference always survives.
+        return joined.Length <= 50 ? joined : joined[..50];
+    }
     private static string Cut(string? v, int n)
     {
         var s = System.Text.RegularExpressions.Regex.Replace(v ?? "", @"\s+", " ").Trim();

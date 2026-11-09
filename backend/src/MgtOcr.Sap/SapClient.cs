@@ -223,6 +223,127 @@ public class SapClient(AppConfig config, HttpClient httpClient)
         }
     }
 
+    /// <summary>
+    /// After a supplier invoice is posted: fills the Assignment and Text its accounting document
+    /// left EMPTY, the way Accounting keys them (PRD 5100001119: every line "DSM,INV.2831356514",
+    /// Assignment = the PO). API_SUPPLIERINVOICE_PROCESS_SRV cannot do it at creation: the PO-ref
+    /// item has no AssignmentReference, and an item text equal to the payables line's text comes
+    /// back blank (5100000125). So the lines are read back from the journal (Operational Journal
+    /// Entry Item cube) and changed with Journal Entry - Change (Asynchronous, SAP_COM_0002).
+    /// Best effort and never throws: the invoice is already posted; the message says what happened.
+    /// </summary>
+    public async Task<(bool Ok, string Message)> FillJournalEntryTextsAsync(
+        string supplierInvoice, string fiscalYear, string companyCode, string text, string assignment)
+    {
+        var baseUrl = config.SapSupplierInvoiceBaseUrl;
+        if (string.IsNullOrWhiteSpace(baseUrl)) return (false, "Sap:SupplierInvoice base URL is not configured");
+        text = (text ?? "").Trim();
+        assignment = (assignment ?? "").Trim();
+        if (text.Length == 0 && assignment.Length == 0) return (true, "nothing to fill");
+        if (text.Length > 50) text = text[..50];
+        if (assignment.Length > 18) assignment = assignment[..18];
+        static string Q(string v) => (v ?? "").Trim().Replace("'", "''");
+        void Auth(HttpRequestMessage r)
+        {
+            if (!string.IsNullOrWhiteSpace(config.SapSupplierInvoiceAuthHeader))
+                r.Headers.TryAddWithoutValidation("Authorization", config.SapSupplierInvoiceAuthHeader);
+        }
+
+        // 1. The accounting document's lines. An MM invoice's journal entry carries the invoice as
+        //    its original reference: supplier invoice number + fiscal year (5105600246 + 2026).
+        var cube = baseUrl.Replace("API_SUPPLIERINVOICE_PROCESS_SRV", "API_OPLACCTGDOCITEMCUBE_SRV", StringComparison.OrdinalIgnoreCase);
+        var filter = Uri.EscapeDataString(
+            $"CompanyCode eq '{Q(companyCode)}' and OriginalReferenceDocument eq '{Q(supplierInvoice)}{Q(fiscalYear)}'");
+        var readUrl = $"{cube.TrimEnd('/')}/A_OperationalAcctgDocItemCube?$filter={filter}"
+            + "&$select=AccountingDocument,AccountingDocumentItem,FiscalYear,FinancialAccountType,GLAccount,DocumentItemText,AssignmentReference"
+            + $"&$top=999&$format=json&sap-client={config.SapClient}";
+        var lines = new List<(string Doc, string Year, int Item, bool Change, string NewText, string NewAssignment)>();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+            using var req = new HttpRequestMessage(HttpMethod.Get, readUrl);
+            Auth(req);
+            req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+            using var resp = await httpClient.SendAsync(req, cts.Token);
+            var body = await resp.Content.ReadAsStringAsync(cts.Token);
+            if (!resp.IsSuccessStatusCode)
+                return (false, $"reading the journal entry failed: {(int)resp.StatusCode} {body[..Math.Min(300, body.Length)]}");
+            using var json = JsonDocument.Parse(body);
+            var d = json.RootElement.TryGetProperty("d", out var dd) ? dd : json.RootElement;
+            var results = d.TryGetProperty("results", out var rr) ? rr : d;
+            if (results.ValueKind != JsonValueKind.Array) return (false, "journal entry read returned no lines");
+            foreach (var it in results.EnumerateArray())
+            {
+                // The payables line itself took both from the invoice header; leave it alone.
+                var type = TryGetString(it, "FinancialAccountType") ?? "";
+                if (type is "K" or "D") continue;
+                var curText = (TryGetString(it, "DocumentItemText") ?? "").Trim();
+                var curAssign = (TryGetString(it, "AssignmentReference") ?? "").Trim();
+                // Empty, or the "<payables text> <what it is>" stand-in the invoice was created with.
+                var fixText = text.Length > 0 && (curText.Length == 0
+                    || curText.StartsWith(text + " ", StringComparison.OrdinalIgnoreCase));
+                var fixAssign = assignment.Length > 0 && curAssign.Length == 0;
+                if (!int.TryParse(TryGetString(it, "AccountingDocumentItem"), out var itemNo)) continue;
+                lines.Add((TryGetString(it, "AccountingDocument") ?? "", TryGetString(it, "FiscalYear") ?? fiscalYear,
+                    itemNo, fixText || fixAssign, fixText ? text : "", fixAssign ? assignment : ""));
+            }
+        }
+        catch (Exception e)
+        {
+            return (false, $"reading the journal entry failed: {e.Message}");
+        }
+        var todo = lines.Where(l => l.Change && l.Doc.Length > 0).ToList();
+        if (lines.Count == 0) return (false, $"no journal entry found for supplier invoice {supplierInvoice}/{fiscalYear}");
+        if (todo.Count == 0) return (true, $"{lines[0].Doc}: every line already has Assignment and Text");
+
+        // 2. One change request for all of them. Children are unqualified (the WSDL schema has no
+        //    elementFormDefault), only the message element carries the namespace.
+        static string X(string v) => System.Security.SecurityElement.Escape(v) ?? "";
+        var now = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture);
+        var sb = new StringBuilder();
+        sb.Append("<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\" xmlns:sfin=\"http://sap.com/xi/SAPSCORE/SFIN\">");
+        sb.Append("<soapenv:Header/><soapenv:Body><sfin:JournalEntryBulkChangeRequestMessage>");
+        sb.Append($"<MessageHeader><ID>OCR-{X(supplierInvoice)}-{DateTime.UtcNow:HHmmssfff}</ID><CreationDateTime>{now}</CreationDateTime></MessageHeader>");
+        foreach (var l in todo)
+        {
+            sb.Append("<JournalEntryGLItem>");
+            sb.Append($"<MessageHeader><ID>OCR-{X(l.Doc)}-{l.Item}</ID><CreationDateTime>{now}</CreationDateTime></MessageHeader>");
+            sb.Append($"<ItemKey><AccountingDocument>{X(l.Doc)}</AccountingDocument><CompanyCode>{X(companyCode)}</CompanyCode>"
+                + $"<FiscalYear>{X(l.Year)}</FiscalYear><AccountingDocumentItemID>{l.Item}</AccountingDocumentItemID></ItemKey>");
+            if (l.NewText.Length > 0)
+                sb.Append($"<DocumentItemTextChange><DocumentItemText>{X(l.NewText)}</DocumentItemText>"
+                    + "<FieldValueChangeIsRequested>true</FieldValueChangeIsRequested></DocumentItemTextChange>");
+            if (l.NewAssignment.Length > 0)
+                sb.Append($"<AssignmentReferenceChange><AssignmentReference>{X(l.NewAssignment)}</AssignmentReference>"
+                    + "<FieldValueChangeIsRequested>true</FieldValueChangeIsRequested></AssignmentReferenceChange>");
+            sb.Append("</JournalEntryGLItem>");
+        }
+        sb.Append("</sfin:JournalEntryBulkChangeRequestMessage></soapenv:Body></soapenv:Envelope>");
+
+        var host = new Uri(baseUrl).GetLeftPart(UriPartial.Authority);
+        var changeUrl = $"{host}/sap/bc/srt/scs_ext/sap/journalentrybulkchangerequest_";
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+            using var req = new HttpRequestMessage(HttpMethod.Post, changeUrl);
+            Auth(req);
+            req.Headers.TryAddWithoutValidation("SOAPAction",
+                "http://sap.com/xi/SAPSCORE/SFIN/JournalEntryBulkChangeRequest_In/JournalEntryBulkChangeRequest_InRequest");
+            req.Content = new StringContent(sb.ToString(), Encoding.UTF8, "text/xml");
+            using var resp = await httpClient.SendAsync(req, cts.Token);
+            var body = await resp.Content.ReadAsStringAsync(cts.Token);
+            // Asynchronous: 202 means SAP queued it. A refusal while processing shows in the
+            // message monitor, not here.
+            return resp.IsSuccessStatusCode
+                ? (true, $"{todo[0].Doc}: Assignment/Text sent for line(s) {string.Join(", ", todo.Select(t => t.Item))}")
+                : (false, $"Journal Entry - Change refused: {(int)resp.StatusCode} {body[..Math.Min(300, body.Length)]}");
+        }
+        catch (Exception e)
+        {
+            return (false, $"Journal Entry - Change failed: {e.Message}");
+        }
+    }
+
     private static string? TryGetString(JsonElement el, string prop) =>
         el.ValueKind == JsonValueKind.Object && el.TryGetProperty(prop, out var v) && v.ValueKind == JsonValueKind.String
             ? v.GetString() : null;
