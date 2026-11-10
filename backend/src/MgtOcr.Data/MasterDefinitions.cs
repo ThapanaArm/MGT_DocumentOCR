@@ -60,6 +60,13 @@ public static class MasterDefinitions
             ["SalesOrg", "IncomeType", "Keywords", "Rate", "WhtType", "WhtCode", "FormType", "GlAccount", "Note", "IsActive"],
             "CASE WHEN SalesOrg IS NULL THEN 0 ELSE 1 END, SalesOrg, IncomeType, Id"),
 
+        // Tax ID -> the standard name of a tax-invoice issuer (sql/35_supplier_tax_map.sql). Filled
+        // by the read itself the first time a Tax ID is seen (IsVerified 0); AP checks the name
+        // here and sets IsVerified 1. Not per company: a Tax ID names one legal entity.
+        ["suppliertaxmaps"] = new("ocr.SupplierTaxMap", "TaxId", false,
+            ["TaxId", "SupplierName", "IsVerified", "FirstDocId", "Note"],
+            "IsVerified, TaxId"),
+
         // NOTE: Payment-terms code->text mapping is intentionally NOT an editable master here. It
         // lives in the shared dbo.SysDataMapping table (Subject='Payment_Terms'), which is
         // maintained centrally (also used by the Zoho account sync), so the OCR app only READS it

@@ -1,4 +1,4 @@
-/* =====================================================================
+﻿/* =====================================================================
    Header/detail field definitions & master-data schema — ported verbatim
    from app.js so the ported screens render the exact same fields.
    ===================================================================== */
@@ -573,6 +573,16 @@ export const MASTER_DEF: Record<string, MasterDef> = {
       { k: 'Note', l: 'Note' },
       { k: 'IsActive', l: 'Status', source: 'system' }],
   },
+  // Tax ID -> standard name of a tax-invoice issuer (ocr.SupplierTaxMap). The read adds a row the
+  // first time it meets a Tax ID (IsVerified 0); AP checks the name and sets IsVerified to 1.
+  suppliertaxmaps: {
+    label: 'Tax Invoice Issuer', mod: 'AP', key: 'TaxId', cols: [
+      { k: 'TaxId', l: 'Tax ID', required: true, maxLen: 13, help: '13-digit tax ID of whoever issued the tax invoice' },
+      { k: 'SupplierName', l: 'Supplier Name', required: true, help: 'The name every document will use for this Tax ID' },
+      { k: 'IsVerified', l: 'Verified', help: '0 = added by the read, waiting for AP to check · 1 = checked' },
+      { k: 'FirstDocId', l: 'First seen in document' },
+      { k: 'Note', l: 'Note' }],
+  },
   materials: {
     label: 'Material / Service', mod: 'ALL', key: 'MaterialCode', cols: [
       { k: 'MaterialCode', l: 'Material Code (Internal)' }, { k: 'SapMaterialCode', l: 'SAP Code (Material)', sap: true },
@@ -590,6 +600,7 @@ export const MASTER_NOTE: Record<string, string> = {
   materials: 'SAP Material data (should be replicated from S/4HANA)',
   vatmaps: 'Decides the Tax Code and G/L account for a VAT row — looked up by Company + kind of document + rate, falling back to a rule with no company and then to a rule with no rate',
   whtmaps: 'Decides the withholding rate, the SAP withholding type/code and the return (PND3/PND53) for a cost line — looked up by Company + kind of income, falling back to a rule with no company',
+  suppliertaxmaps: 'Tax ID → the standard issuer name. A Tax ID read for the first time is added automatically with Verified = 0; later documents use the name stored here',
   uoms: 'Turns the unit written on the document into a valid order-unit code — looked up by Company + Material + document unit, falling back to a rule with no Material, then to a rule with no Company. Factor changes the quantity only when it is not 1',
 };
 
@@ -611,6 +622,7 @@ export const MASTER_GROUPS: MasterGroup[] = [
   { key: 'apmaterial', label: '5. Purchasing materials', mod: 'AP', tabs: ['venmaterials'], note: 'Material and service data for purchasing documents' },
   { key: 'vat', label: '6. VAT', mod: 'AP', tabs: ['vatmaps'], note: 'Kind of document + rate → Tax Code + G/L account. A rule for the company is preferred; a rule with no company serves both' },
   { key: 'wht', label: '7. Withholding Tax', mod: 'AP', tabs: ['whtmaps'], note: 'Kind of income → rate + SAP withholding type/code + PND3/PND53. A rule for the company is preferred; a rule with no company serves both' },
+  { key: 'taxissuer', label: '8. Tax Invoice Issuer', mod: 'AP', tabs: ['suppliertaxmaps'], note: 'Tax ID → issuer name. New Tax IDs are added by the read itself and wait for AP to check them (Verified = 0)' },
 ];
 
 export const M_LABEL: Record<string, string> = {

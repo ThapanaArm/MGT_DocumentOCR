@@ -77,6 +77,9 @@ public class MasterRepository(Db db)
             ? await db.QueryAsync("SELECT * FROM ocr.WhtMap" + scopedMap
                 + " ORDER BY CASE WHEN SalesOrg IS NULL THEN 0 ELSE 1 END, SalesOrg, IncomeType, Id", scopeParam)
             : [];
+        result["suppliertaxmaps"] = await TableExistsAsync("ocr.SupplierTaxMap")
+            ? await db.QueryAsync("SELECT * FROM ocr.SupplierTaxMap ORDER BY IsVerified, TaxId")
+            : [];
         result["uoms"] = await db.QueryAsync(
             "SELECT * FROM ocr.UomConversion ORDER BY CASE WHEN SalesOrg IS NULL THEN 0 ELSE 1 END, SalesOrg, CASE WHEN MaterialCode IS NULL THEN 0 ELSE 1 END, MaterialCode, ExtUom");
         // Payment-terms code -> display-text mapping. SAP returns only the code (e.g. "5009") on the

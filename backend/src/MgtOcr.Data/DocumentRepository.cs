@@ -216,6 +216,56 @@ public partial class DocumentRepository(Db db)
         return docId;
     }
 
+    /// <summary>
+    /// Tax-invoice issuers by Tax ID (ocr.SupplierTaxMap, sql/35). For every tax row the read gave a
+    /// 13-digit issuerTaxId: a Tax ID seen for the first time is stored with the name the read
+    /// gave, waiting for AP to check it (IsVerified 0); a known one replaces the read name with the
+    /// table's, so the same issuer is always written the same way. extra.issuerMap says which
+    /// ("NEW" / "PENDING" / "VERIFIED"); extra.issuerNameOcr keeps what the read actually said.
+    /// A database without the table yet simply skips this — saving never fails over it.
+    /// </summary>
+    private static async Task ApplySupplierTaxMapAsync(
+        System.Data.Common.DbConnection conn, System.Data.Common.DbTransaction tx, int docId,
+        List<Dictionary<string, object?>> lines)
+    {
+        try
+        {
+            var exists = await conn.ExecuteScalarAsync<int>(
+                "SELECT CASE WHEN OBJECT_ID('ocr.SupplierTaxMap') IS NULL THEN 0 ELSE 1 END", transaction: tx);
+            if (exists == 0) return;
+            foreach (var l in lines)
+            {
+                if (l.Get("extra") is not Dictionary<string, object?> extra) continue;
+                var taxId = Regex.Replace(extra.GetStr("issuerTaxId"), @"\D", "");
+                if (taxId.Length != 13) continue;
+                var name = extra.GetStr("issuerName").Trim();
+                var row = await conn.QueryFirstOrDefaultAsync(
+                    "SELECT SupplierName, IsVerified FROM ocr.SupplierTaxMap WHERE TaxId=@taxId", new { taxId }, tx);
+                if (row == null)
+                {
+                    if (name.Length == 0) continue;
+                    await conn.ExecuteAsync(
+                        "INSERT ocr.SupplierTaxMap(TaxId,SupplierName,IsVerified,FirstDocId) VALUES(@taxId,@name,0,@docId)",
+                        new { taxId, name = name.Length > 200 ? name[..200] : name, docId }, tx);
+                    extra["issuerMap"] = "NEW";
+                    continue;
+                }
+                var mapped = ((string?)row.SupplierName ?? "").Trim();
+                var verified = (bool)row.IsVerified;
+                if (mapped.Length > 0 && !string.Equals(mapped, name, StringComparison.Ordinal))
+                {
+                    if (!extra.ContainsKey("issuerNameOcr") && name.Length > 0) extra["issuerNameOcr"] = name;
+                    extra["issuerName"] = mapped;
+                }
+                extra["issuerMap"] = verified ? "VERIFIED" : "PENDING";
+            }
+        }
+        catch (Exception)
+        {
+            // Best effort: the lines are saved either way.
+        }
+    }
+
     // Always full delete+reinsert (matches Python) — ItemNo is always recomputed as (i+1)*10.
     public async Task SaveLinesAsync(string module, int docId, List<Dictionary<string, object?>> lines)
     {
@@ -223,6 +273,7 @@ public partial class DocumentRepository(Db db)
         await using var conn = await db.OpenAsync();
         await using var tx = await conn.BeginTransactionAsync();
         await conn.ExecuteAsync($"DELETE FROM {lineT} WHERE DocId=@docId", new { docId }, tx);
+        if (module is "AP" or "II") await ApplySupplierTaxMapAsync(conn, tx, docId, lines);
         for (var i = 0; i < lines.Count; i++)
         {
             var l = lines[i];
