@@ -1,4 +1,5 @@
-import { Fragment, useState } from 'react';
+import { Fragment, useEffect, useState } from 'react';
+import { getZohoAccountFullByCode } from '../../api/zoho';
 import type { DocLine } from '../../api/documents';
 import type { OcrProvider } from '../../api/masters';
 import type {
@@ -15,6 +16,38 @@ import DateInput, { formatDate } from '../common/DateInput';
 import type { DeliveryDateGroup } from './SapSalesOrderEditor';
 import type { SoGroupState } from '../../api/documents';
 import SoGroupPanel, { groupStatus, type GroupShipToControl } from './SoGroupPanel';
+
+function DealOwnerPreview({ preview }: { preview: ZohoSalesOrderPreview }) {
+  const [accountOwner, setAccountOwner] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    setAccountOwner('');
+    setError('');
+    setLoading(false);
+    if (preview.dealOwnerName || !preview.flow?.newDeal || !preview.accountCode) return;
+    let cancelled = false;
+    setLoading(true);
+    getZohoAccountFullByCode(preview.accountCode)
+      .then((account) => {
+        if (cancelled) return;
+        const owner = account.fields.find((f) => f.label.toLowerCase() === 'owner')?.value;
+        if (owner) setAccountOwner(owner);
+        else setError('No responsible salesperson found on the Customer Account.');
+      })
+      .catch(() => { if (!cancelled) setError('Could not read the responsible salesperson. Please reload the preview.'); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [preview.dealOwnerName, preview.flow?.newDeal, preview.accountCode]);
+  const name = preview.dealOwnerName || accountOwner;
+  return (
+    <div className="notice" style={{ margin: '10px 0', padding: 12 }}>
+      <b>Responsible Sales / Deal Owner: </b>
+      {name ? <strong>{name}</strong> : <span>{loading ? 'Reading Customer Account…' : error || preview.dealOwnerError || 'Could not determine the Deal owner. Please reload the preview.'}</span>}
+      {preview.flow?.newDeal && name && <div className="hint">Sales Employee from Customer Account — assigned as owner of the new Deal</div>}
+    </div>
+  );
+}
 
 /* The Zoho Sales Order, lifted whole onto the document page as one editable table -- what
    replaced the old per-line "Material - Row N" comparison cards + the "Confirm Submission to
@@ -191,10 +224,11 @@ export default function ZohoSalesOrderEditor({
     return (
       <>
         <p className="hint">
-          This is exactly what will be created in Zoho CRM as a <b>Sales Order</b>, linked to Deal <b>{preview.dealName}</b>
-          {preview.flow?.newDeal ? ' (new)' : ''}. Every field is editable — change anything before you send.
+          This will be created in Zoho CRM as a <b>Sales Order</b>, linked to{' '}
+          {preview.flow?.newDeal ? <>a new Deal <b>{preview.dealName || 'Name will be calculated from the matched Materials'}</b></> : <>Deal <b>{preview.dealName}</b></>}.
         </p>
 
+        <DealOwnerPreview preview={preview} />
         {preview.flow && (
           // Zoho chain Deal -> Quote -> Sales Order (27 Oct 2026): what Send does, one step per card.
           <ZohoFlowSteps flow={preview.flow} dealName={preview.dealName} salesOrders={Math.max(1, dateGroups.length)} />
@@ -259,9 +293,9 @@ export default function ZohoSalesOrderEditor({
             <input type="text" value={header.taxId} placeholder={preview.taxId || ''} disabled={posted} onChange={(e) => onHeaderChange({ taxId: e.target.value })} />
           </div>
           <div className="f" style={{ gridColumn: '1 / -1' }}>
-            {/* Zoho "Remarks" (Terms and Conditions block). Pre-filled from the document's Remark. */}
-            <label>Remarks</label>
-            <textarea rows={2} value={header.remarks} placeholder={preview.remarks || ''} disabled={posted} onChange={(e) => onHeaderChange({ remarks: e.target.value })} />
+            {/* Document Remark is sent to Zoho's Sales Order header Description. */}
+            <label>Description</label>
+            <textarea rows={2} value={header.remarks} disabled={posted} onChange={(e) => onHeaderChange({ remarks: e.target.value })} />
           </div>
           {preview.accountCode && (
             <div className="f">
@@ -475,7 +509,7 @@ function ZohoFlowSteps({ flow, dealName, salesOrders }: { flow: ZohoSalesOrderFl
       title: 'Deal',
       action: flow.newDeal ? 'Create new' : 'Use existing',
       kind: flow.newDeal ? 'create' : 'use',
-      main: flow.newDeal ? 'New Deal for this customer' : dealName,
+      main: dealName || 'New Deal for this customer',
       sub: flow.newDeal
         ? 'No forecast · Forecast Status No · Stage “Sales Order Created”'
         : flow.wcd ? 'Forecast (WCD) · Forecast Status Yes' : `No forecast · Forecast Status ${flow.forecastStatus || 'blank'}`,

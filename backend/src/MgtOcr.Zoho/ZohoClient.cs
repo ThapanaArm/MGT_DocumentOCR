@@ -1,4 +1,5 @@
 using System.Net;
+using System.Collections.Concurrent;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json.Nodes;
@@ -34,6 +35,8 @@ public class ZohoClient(AppConfig config, ILogger<ZohoClient> logger)
     private static readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(120) };
     private string? _accessToken;
     private DateTime _expireAt = DateTime.MinValue;
+    private readonly ConcurrentDictionary<string, (JsonArray Fields, DateTime Expires)> _fieldsCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _fieldsLocks = new(StringComparer.OrdinalIgnoreCase);
 
     private string ApiDomain =>
         string.IsNullOrWhiteSpace(config.ZohoApiDomain) ? "https://www.zohoapis.com" : config.ZohoApiDomain.TrimEnd('/');
@@ -120,11 +123,11 @@ public class ZohoClient(AppConfig config, ILogger<ZohoClient> logger)
         return res;
     }
 
-    public async Task<ZohoUpsertResult> InsertAsync(string module, JsonObject record, string? sapKey = null)
+    public async Task<ZohoUpsertResult> InsertAsync(string module, JsonObject record, string? sapKey = null, bool useDefaultAutomation = false)
     {
         string token = await GetAccessTokenAsync();
         string url = $"{ApiDomain}/crm/v8/{module}";
-        return await SendWriteAsync(HttpMethod.Post, url, record, token, sapKey);
+        return await SendWriteAsync(HttpMethod.Post, url, record, token, sapKey, useDefaultAutomation);
     }
 
     public async Task<ZohoUpsertResult> UpdateAsync(string module, string recordId, JsonObject record, string? sapKey = null)
@@ -169,13 +172,14 @@ public class ZohoClient(AppConfig config, ILogger<ZohoClient> logger)
     }
 
     private async Task<ZohoUpsertResult> SendWriteAsync(
-        HttpMethod method, string url, JsonObject record, string token, string? sapKey)
+        HttpMethod method, string url, JsonObject record, string token, string? sapKey, bool useDefaultAutomation = false)
     {
         var payload = new JsonObject
         {
             ["data"] = new JsonArray(record.DeepClone()),
             ["trigger"] = new JsonArray() // skip workflow/approval; drop this line to let it run
         };
+        if (useDefaultAutomation) payload.Remove("trigger");
         using var req = new HttpRequestMessage(method, url);
         req.Headers.Authorization = new AuthenticationHeaderValue("Zoho-oauthtoken", token);
         req.Content = new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json");
@@ -326,17 +330,62 @@ public class ZohoClient(AppConfig config, ILogger<ZohoClient> logger)
     // GetRelatedListsAsync above).
     public async Task<JsonArray> GetFieldsAsync(string module)
     {
+        if (_fieldsCache.TryGetValue(module, out var cached) && cached.Expires > DateTime.UtcNow)
+            return (JsonArray)cached.Fields.DeepClone();
+        var gate = _fieldsLocks.GetOrAdd(module, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync();
+        try
+        {
+            if (_fieldsCache.TryGetValue(module, out cached) && cached.Expires > DateTime.UtcNow)
+                return (JsonArray)cached.Fields.DeepClone();
+            try
+            {
+                var fields = await FetchFieldsAsync(module);
+                if (fields.Count > 0)
+                    _fieldsCache[module] = ((JsonArray)fields.DeepClone(), DateTime.UtcNow.AddHours(1));
+                return fields;
+            }
+            catch (Exception e) when ((e is TimeoutException || e is HttpRequestException)
+                && _fieldsCache.TryGetValue(module, out cached))
+            {
+                logger.LogWarning(e, "[ZOHO] Using previously verified field metadata for {Module}", module);
+                return (JsonArray)cached.Fields.DeepClone();
+            }
+        }
+        finally { gate.Release(); }
+    }
+
+    private async Task<JsonArray> FetchFieldsAsync(string module)
+    {
         string token = await GetAccessTokenAsync();
         string url = $"{ApiDomain}/crm/v8/settings/fields?module={Uri.EscapeDataString(module)}";
-        using var req = new HttpRequestMessage(HttpMethod.Get, url);
-        req.Headers.Authorization = new AuthenticationHeaderValue("Zoho-oauthtoken", token);
-        using var resp = await _http.SendAsync(req);
-        if (resp.StatusCode == HttpStatusCode.NoContent) return new JsonArray();
-        string body = await resp.Content.ReadAsStringAsync();
-        if ((int)resp.StatusCode == 429) throw new Exception("Zoho 429 Too Many Requests: " + body);
-        if (!resp.IsSuccessStatusCode)
-            throw new Exception($"Zoho fields {(int)resp.StatusCode}: {body[..Math.Min(400, body.Length)]}");
-        return JsonNode.Parse(body)?["fields"] as JsonArray ?? new JsonArray();
+        // Retry only this read-only metadata request, never a record creation.
+        for (var attempt = 0; ; attempt++)
+        {
+            try { return await FetchOnceAsync(); }
+            catch (Exception e) when (attempt == 0 && (e is OperationCanceledException || e is HttpRequestException))
+            {
+                logger.LogWarning(e, "[ZOHO] Retrying field metadata read for {Module}", module);
+            }
+            catch (OperationCanceledException e)
+            {
+                throw new TimeoutException($"Zoho field metadata for {module} did not respond after two 20-second attempts. No record was created by this metadata request. Please retry.", e);
+            }
+        }
+
+        async Task<JsonArray> FetchOnceAsync()
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            using var req = new HttpRequestMessage(HttpMethod.Get, url);
+            req.Headers.Authorization = new AuthenticationHeaderValue("Zoho-oauthtoken", token);
+            using var resp = await _http.SendAsync(req, timeout.Token);
+            if (resp.StatusCode == HttpStatusCode.NoContent) return new JsonArray();
+            string body = await resp.Content.ReadAsStringAsync(timeout.Token);
+            if ((int)resp.StatusCode == 429) throw new Exception("Zoho 429 Too Many Requests: " + body);
+            if (!resp.IsSuccessStatusCode)
+                throw new Exception($"Zoho fields {(int)resp.StatusCode}: {body[..Math.Min(400, body.Length)]}");
+            return JsonNode.Parse(body)?["fields"] as JsonArray ?? new JsonArray();
+        }
     }
 
     // GET /crm/v8/settings/related_lists?module={module} — every related list configured on a

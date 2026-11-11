@@ -1,4 +1,6 @@
 using Dapper;
+using System.Text.Json.Nodes;
+using MgtOcr.Core;
 
 namespace MgtOcr.Data;
 
@@ -27,18 +29,27 @@ public class FileArchiveRepository(DbConnectionFactory factory)
 
     /// <summary>Queues the document's source file for SharePoint (Status=PENDING). A file already
     /// queued or archived (split documents share one file) is left as it is.</summary>
-    public async Task EnqueueAsync(int docId, string docTable, string companyCode, string module, string? subPath)
+    public async Task EnqueueAsync(int docId, string docTable, string companyCode, string module, string? subPath,
+        string? deliveryDate = null)
     {
         await using var conn = await factory.OpenAsync();
-        var d = await conn.QueryFirstOrDefaultAsync<(string? StoredPath, string? FileName, DateTime? PostedAt)>(
-            $"SELECT StoredPath, FileName, PostedAt FROM {docTable} WHERE DocId=@docId", new { docId });
+        var d = await conn.QueryFirstOrDefaultAsync<(string? StoredPath, string? FileName, DateTime? PostedAt, string? HeaderJson)>(
+            $"SELECT StoredPath, FileName, PostedAt, HeaderJson FROM {docTable} WHERE DocId=@docId", new { docId });
         if (string.IsNullOrWhiteSpace(d.StoredPath)) return;
+        var archiveFileName = d.FileName;
+        if (string.Equals(companyCode, "MGT", StringComparison.OrdinalIgnoreCase)
+            && string.Equals(module, "SO", StringComparison.OrdinalIgnoreCase))
+        {
+            var header = JsonNode.Parse(d.HeaderJson ?? "{}");
+            archiveFileName = SalesOrderFileName.Build(header?["poNo"]?.ToString(),
+                deliveryDate ?? header?["deliveryDate"]?.ToString(), d.FileName ?? d.StoredPath) ?? d.FileName;
+        }
         await conn.ExecuteAsync("""
             MERGE ocr.FileArchive AS t
             USING (SELECT @StoredPath AS StoredPath) s ON t.StoredPath=s.StoredPath
             WHEN NOT MATCHED THEN INSERT(StoredPath,FileName,CompanyCode,Status,Attempts,DocId,Module,SubPath,PostedAt,MachineName)
                  VALUES(@StoredPath,@FileName,@companyCode,'PENDING',0,@docId,@module,@subPath,COALESCE(@PostedAt,SYSDATETIME()),@machine);
-            """, new { d.StoredPath, d.FileName, d.PostedAt, companyCode, docId, module, subPath, machine = Environment.MachineName });
+            """, new { d.StoredPath, FileName = archiveFileName, d.PostedAt, companyCode, docId, module, subPath, machine = Environment.MachineName });
     }
 
     // Queued files to send now: PENDING, or FAILED with attempts left once its back-off has passed

@@ -16,6 +16,9 @@ export interface MasterEditState {
   tab: string;
   rowKey: string | number | null;
   prefill?: MasterRow;
+  /** Opened from a document's Material card for a material already chosen there (5 Nov 2026): the
+   *  Material code is shown read-only (code — name) instead of a list of every material to pick. */
+  lockMaterial?: { code: string; name?: string; docQty?: number; row?: number };
   dupes?: Dupe[];
   /** called with the saved row's key after a successful save */
   onSaved?: (savedKey: string) => void | Promise<void>;
@@ -34,6 +37,12 @@ const METRIC_FACTOR: Record<string, number> = {
   'G>KG': 0.001, 'KG>G': 1000, 'MG>G': 0.001, 'G>MG': 1000, 'MG>KG': 0.000001, 'KG>MG': 1000000,
   'KG>TON': 0.001, 'TON>KG': 1000, 'G>TON': 0.000001, 'TON>G': 1000000,
   'ML>L': 0.001, 'L>ML': 1000,
+};
+
+/* Long master names (e.g. a whole PO line kept as a CustomerMaterial name) cut for a one-line option. */
+const shortLabel = (v: unknown, max = 60) => {
+  const t = String(v ?? '').replace(/\s+/g, ' ').trim();
+  return t.length > max ? t.slice(0, max - 1).trimEnd() + '…' : t;
 };
 
 export default function MasterEditModal({
@@ -70,16 +79,20 @@ export default function MasterEditModal({
     const existing = state.rowKey != null
       ? { ...(masters[state.tab]?.find((x) => String(x[def.key]) === String(state.rowKey)) || {}), ...(state.prefill || {}) }
       : state.prefill || {};
-    setForm({ SalesOrg: isMgt ? '1000' : '2000', IsActive: 1, Isactive: 1, ...existing });
+    const rule = state.tab === 'custmaterials' ? (masters.uoms || []).find((u) =>
+      String(u.MaterialCode || '') === String(existing.MaterialCodeSAP || '')
+        && String(u.SalesOrg || '') === String(existing.SalesOrg || (isMgt ? '1000' : '2000'))) : undefined;
+    setForm({ SalesOrg: isMgt ? '1000' : '2000', IsActive: 1, Isactive: 1,
+      ...(state.tab === 'custmaterials' ? { ExtUom: rule?.ExtUom || '', SapUom: rule?.SapUom || '', Factor: rule?.Factor || 1, SapUomIso: rule?.SapUomIso || '' } : {}), ...existing });
   }, [state, masters, isMgt]);
 
   // Unit Conversion (GLC/SAP): the Order Unit field becomes a dropdown of the units SAP has for
   // the chosen material (base + alternative units). A rule for "all materials" has no material to
   // ask SAP about, so it offers the order units already used in this master plus common codes.
   // MGT (Zoho) keeps the plain text box — its unit comes from the Zoho Deal, not SAP.
-  const uomSapEnabled = state?.tab === 'uoms' && !isMgt && String(form.SalesOrg ?? '') !== '1000';
+  const uomSapEnabled = (state?.tab === 'uoms' || state?.tab === 'custmaterials') && !isMgt && String(form.SalesOrg ?? '') !== '1000';
   const uomMaterial = (() => {
-    const code = (form.MaterialCode ?? '').toString().trim();
+    const code = (state?.tab === 'custmaterials' ? form.MaterialCodeSAP ?? '' : form.MaterialCode ?? '').toString().trim();
     if (!code) return '';
     const m = (masters.materials || []).find((x) => String(x.MaterialCode) === code);
     return ((m?.SapMaterialCode as string) || code).toString().trim();
@@ -108,7 +121,7 @@ export default function MasterEditModal({
   const sapUomTouched = useRef(false);
   useEffect(() => { sapUomTouched.current = false; }, [state]);
   useEffect(() => {
-    if (!uomSapEnabled || !uomMaterial || sapUnits.length === 0 || sapUomTouched.current) return;
+    if (!uomSapEnabled || !uomMaterial || sapUnits.length === 0 || sapUomTouched.current || state?.tab === 'custmaterials') return;
     if (state?.rowKey != null && state.prefill?.SapUom == null) return;
     const cur = (form.SapUom ?? '').toString().trim().toUpperCase();
     if (cur && sapUnits.some((u) => u.unit.toUpperCase() === cur)) return;
@@ -280,21 +293,44 @@ export default function MasterEditModal({
           </select>
         ) : c.source === 'system' ? (
           <select id={'master-' + c.k} value={Number(form[c.k] ?? 1)} onChange={(e) => setField(c.k, e.target.value)}><option value="1">1 — Active</option><option value="0">0 — Inactive</option></select>
+        ) : c.ref && state!.tab === 'uoms' && c.k === 'MaterialCode' && state!.lockMaterial ? (
+          <input
+            id={'master-' + c.k}
+            type="text"
+            readOnly
+            disabled
+            value={[state!.lockMaterial.code, state!.lockMaterial.name].filter(Boolean).join(' — ')}
+            title={[state!.lockMaterial.code, state!.lockMaterial.name].filter(Boolean).join(' — ')}
+            style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+          />
         ) : c.ref ? (
-          <select id={'master-' + c.k} value={form[c.k] ?? ''} onChange={(e) => setField(c.k, e.target.value)}>
+          // One line only: a Material's name can be a whole PO description (CustomerMaterial keeps the
+          // document's wording, 6 Oct 2026), which made this box grow to ten lines. Options are cut to
+          // 60 characters; the full text of the chosen one is in the tooltip.
+          <select
+            id={'master-' + c.k}
+            value={form[c.k] ?? ''}
+            onChange={(e) => setField(c.k, e.target.value)}
+            title={(() => {
+              const vk = MASTER_DEF[c.ref!].matchKey || MASTER_DEF[c.ref!].key;
+              const row = (masters[c.ref!] || []).find((o) => String(o[vk]) === String(form[c.k] ?? ''));
+              return row ? `${row[vk]} — ${row[M_LABEL[c.ref!]] ?? ''}` : undefined;
+            })()}
+            style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', height: 'auto' }}
+          >
             {!c.blank && <option value="">— Select —</option>}
             {c.blank && <option value="">— All materials (global rule) —</option>}
             {(masters[c.ref] || []).filter((o) => (o.IsActive == null || !!Number(o.IsActive)) && (c.ref !== 'customers' || !form.SalesOrg || (state!.tab !== 'custmaterials' && state!.tab !== 'shiptos') || String(o.SalesOrg) === String(form.SalesOrg))).map((o, index) => {
               const vk = MASTER_DEF[c.ref!].matchKey || MASTER_DEF[c.ref!].key;
               const lk = M_LABEL[c.ref!];
               return (
-                <option key={index} value={o[vk]}>
-                  {o[vk]} — {o[lk]}
+                <option key={index} value={o[vk]} title={`${o[vk]} — ${o[lk] ?? ''}`}>
+                  {o[vk]} — {shortLabel(o[lk])}
                 </option>
               );
             })}
           </select>
-        ) : state!.tab === 'uoms' && c.k === 'SapUom' && uomSapEnabled ? (
+        ) : ['uoms', 'custmaterials'].includes(state!.tab) && c.k === 'SapUom' && uomSapEnabled ? (
           <UomPicker
             id={'master-' + c.k}
             value={(form[c.k] ?? '').toString()}
@@ -304,7 +340,7 @@ export default function MasterEditModal({
             maxLength={c.maxLen}
             emptyLabel={uomMaterial ? '— Select a SAP unit —' : '— Select unit —'}
           />
-        ) : state!.tab === 'uoms' && c.k === 'Factor' ? (
+        ) : ['uoms', 'custmaterials'].includes(state!.tab) && c.k === 'Factor' ? (
           (() => {
             const ext = String(form.ExtUom ?? '').trim() || 'document unit';
             const ord = String(form.SapUom ?? '').trim().toUpperCase() || 'order unit';
@@ -414,10 +450,30 @@ export default function MasterEditModal({
       showToast('Please enter ' + def.cols.find((c) => c.k === def.key)?.l);
       return;
     }
+    let unitRow: MasterRow | null = null;
+    if (state!.tab === 'custmaterials') {
+      unitRow = { SalesOrg: o.SalesOrg, MaterialCode: o.MaterialCodeSAP,
+        ExtUom: String(form.ExtUom ?? '').trim(), SapUom: String(form.SapUom ?? '').trim().toUpperCase(),
+        Factor: String(form.Factor ?? 1), SapUomIso: String(form.SapUomIso ?? '').trim().toUpperCase(), Note: '' };
+      if (!String(o.MaterialCodeName || '').trim()) { showToast('Please specify Material name in document'); return; }
+      if (!unitRow.ExtUom || !unitRow.SapUom || !unitRow.MaterialCode) { showToast('Please specify Material code, Document Unit and Order Unit'); return; }
+      if (['SapUom', 'SapUomIso'].some((k) => unitRow![k] && (String(unitRow![k]).length > 3 || /[\s/\\]/.test(String(unitRow![k]))))) {
+        showToast('Unit codes must be at most 3 characters, with no spaces or slash'); return;
+      }
+      if (!Number.isFinite(Number(unitRow.Factor)) || Number(unitRow.Factor) <= 0) { showToast('Factor must be a number greater than 0'); return; }
+    }
     setSaving(true);
     const ok = await guard(async () => {
       if (state!.rowKey == null) await createMaster(state!.tab, o);
       else await updateMaster(state!.tab, String(state!.rowKey), o);
+      if (unitRow) {
+        const existingRule = (masters.uoms || []).find((u) =>
+          String(u.MaterialCode || '') === String(unitRow!.MaterialCode)
+            && String(u.SalesOrg || '') === String(unitRow!.SalesOrg)
+            && String(u.ExtUom || '').trim().toLowerCase() === String(unitRow!.ExtUom).toLowerCase());
+        if (existingRule) await updateMaster('uoms', String(existingRule.Id), { ...unitRow, Note: existingRule.Note || '' });
+        else await createMaster('uoms', unitRow);
+      }
       return true;
     });
     setSaving(false);
@@ -475,7 +531,7 @@ export default function MasterEditModal({
   return (
     <Modal open wide onClose={onClose}>
       <ModalHeader
-        title={`${state.rowKey == null ? 'Add' : 'Edit'} — ${def.label}`}
+        title={`${state.rowKey == null ? 'Add' : 'Edit'} — ${def.label}${state.tab === 'custmaterials' ? ' + UOM' : ''}`}
         onClose={onClose}
       />
       <div className="card-b">
@@ -642,6 +698,45 @@ export default function MasterEditModal({
               </section>
             </div>
           </>
+        ) : state.tab === 'uoms' && state.lockMaterial ? (
+          // Opened from a document's Material card (5 Nov 2026): the material and company are already
+          // decided, so this is a "confirm the unit" screen -- material on top, the three unit fields,
+          // and what THIS line becomes. Company / Material code / Note stay in the form, just not shown.
+          (() => {
+            const lm = state.lockMaterial!;
+            const ext = String(form.ExtUom ?? '').trim();
+            const ord = String(form.SapUom ?? '').trim().toUpperCase();
+            const f = Number(form.Factor);
+            const qty = Number(lm.docQty);
+            const fmt = (n: number) => n.toLocaleString('en-US', { maximumFractionDigits: 3 });
+            const ok = !!ext && !!ord && f > 0;
+            const sample = qty > 0 ? qty : 100;
+            return (
+              <div className="master-uom-confirm">
+                <div className="master-uom-material">
+                  <span className="hint">Material{lm.row ? ` · document row ${lm.row}` : ''}</span>
+                  <b className="code">{lm.code}</b>
+                  {lm.name && <span className="name">{lm.name}</span>}
+                </div>
+                <div className="grid master-uom-fields">
+                  {visibleCols.filter((c) => ['ExtUom', 'SapUom', 'Factor'].includes(c.k)).map(renderField)}
+                </div>
+                <div className="master-uom-result">
+                  {ok ? (
+                    <>
+                      <span className="hint">{qty > 0 ? 'This line is sent as' : 'A line is sent as'}</span>
+                      <div className="big">
+                        {fmt(sample)} {ext} <i className="fa-solid fa-arrow-right" /> <b>{fmt(sample * f)} {ord}</b>
+                      </div>
+                      <span className="hint">1 {ord} = {fmt(1 / f)} {ext}</span>
+                    </>
+                  ) : (
+                    <span className="hint">Fill in the units and the factor to see what this line becomes.</span>
+                  )}
+                </div>
+              </div>
+            );
+          })()
         ) : (
           <div className="master-field-groups single">
             <section>
@@ -655,6 +750,18 @@ export default function MasterEditModal({
               {editing && <div className="hint" style={{ marginTop: 10 }}>{def.key}: {existing[def.key]} · CreatedAt: {existing.CreatedAt || '—'} · UpdatedAt: {existing.UpdatedAt || '—'}</div>}
             </section>
           </div>
+        )}
+        {state.tab === 'custmaterials' && (
+          <section className="master-field-groups single" style={{ marginTop: 16 }}>
+            <div>
+              <h3>Unit Conversion (UOM)</h3>
+              <div className="grid">
+                {MASTER_DEF.uoms.cols.filter((c) => ['ExtUom', 'SapUom', 'Factor', ...(!isMgt ? ['SapUomIso'] : [])].includes(c.k)).map(renderField)}
+              </div>
+              {state.lastPrice !== undefined && <p className="hint">Last Price: {state.lastPrice ? state.lastPrice.pricePerUnit.toLocaleString() + ' / ' + state.lastPrice.unit : 'No prior SAP billing found'}</p>}
+              <div className="result" style={{ marginTop: 12 }}>{uomPreview}</div>
+            </div>
+          </section>
         )}
         <div className="row" style={{ marginTop: 18 }}>
           <button className="btn primary" disabled={saving} onClick={save}>

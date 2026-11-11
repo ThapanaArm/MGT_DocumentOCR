@@ -80,9 +80,10 @@ public class GraphArchiveClient(AppConfig config, IHttpClientFactory httpFactory
     /// <summary>Folder layout: {RootFolder}/{subPath}/{yyyy}/{MM}/{file} - or, for a DateFirst target
     /// (GLC), {RootFolder}/{yyyy}/{MM}/{subPath}/{file} - where subPath is what the post decided
     /// (MGT Sales Order: "{Sales}/{Code}_{Customer}", GLC Sales Order: "{Code}_{Customer}") or, when none was stored,
-    /// "{Company}/{Module}". The name keeps the on-disk (unique) name so two uploads with the same
-    /// original name never collide.</summary>
-    public static string BuildRemotePath(SharePointTarget t, string company, string module, DateTime? postedAt, string localPath, string? subPath = null)
+    /// "{Company}/{Module}". Uses the supplied archive filename when present, otherwise the
+    /// unique on-disk filename.</summary>
+    public static string BuildRemotePath(SharePointTarget t, string company, string module, DateTime? postedAt, string localPath, string? subPath = null,
+        string? remoteFileName = null)
     {
         var d = postedAt ?? DateTime.Now;
         var parts = new List<string>();
@@ -96,7 +97,7 @@ public class GraphArchiveClient(AppConfig config, IHttpClientFactory httpFactory
             if (!string.IsNullOrWhiteSpace(module)) parts.Add(SafeName(module.Trim().ToUpperInvariant()));
         }
         if (!t.DateFirst) { parts.Add(d.ToString("yyyy")); parts.Add(d.ToString("MM")); }
-        parts.Add(SafeName(Path.GetFileName(localPath)));
+        parts.Add(SafeName(Path.GetFileName(string.IsNullOrWhiteSpace(remoteFileName) ? localPath : remoteFileName)));
         return string.Join('/', parts);
     }
 

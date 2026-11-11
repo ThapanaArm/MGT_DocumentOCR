@@ -126,7 +126,7 @@ public class ZohoDealClient(ZohoClient zoho)
     /// lookup/link at all (unlike the Ship-to/Sold-to address panels, which do need a real Zoho
     /// Account id and can be broken by a Master Customer row whose linked id is stale/wrong).
     /// </summary>
-    public async Task<List<ZohoDeal>> FindOpenDealsByAccountCodeAsync(string accountCode)
+    public async Task<List<ZohoDeal>> FindOpenDealsByAccountCodeAsync(string accountCode, bool onlyOpenDraft = false)
     {
         var module = await ResolveModuleAsync();
         var rows = await zoho.QueryCoqlAsync(
@@ -140,6 +140,7 @@ public class ZohoDealClient(ZohoClient zoho)
         {
             var stage = Str(row, "Stage") ?? "";
             if (ClosedStages.Contains(stage)) continue;
+            if (onlyOpenDraft && !ZohoDealStage.IsOpenOrDraft(stage)) continue;
             var id = Str(row, "id");
             if (string.IsNullOrEmpty(id)) continue;
 
@@ -294,25 +295,46 @@ public class ZohoDealClient(ZohoClient zoho)
 
     private string? _itemsField;
 
+    public static string BuildDealName(string accountName, IEnumerable<string?> materialCodes, DateTimeOffset? createdAt = null)
+    {
+        var codes = materialCodes.ToList();
+        if (string.IsNullOrWhiteSpace(accountName) || codes.Count == 0)
+            throw new InvalidOperationException("Account Name and at least one Material are required to name a Deal.");
+        var material = codes.Count > 1 ? "APPLICATION" : codes[0]?.Trim();
+        if (string.IsNullOrWhiteSpace(material))
+            throw new InvalidOperationException("Material Code is required to name a single-material Deal.");
+        // Thai local time, with the Gregorian calendar enforced by InvariantCulture below.
+        var date = (createdAt ?? DateTimeOffset.UtcNow).ToOffset(TimeSpan.FromHours(7));
+        return $"{accountName.Trim()}_{material}_{date.ToString("MMyy", System.Globalization.CultureInfo.InvariantCulture)}";
+    }
+
     /// <summary>
     /// The Deal record the OCR flow creates when a document has no Deal at all (Megachem rule,
     /// 27 Oct 2026: no Deal = not WCD, so open one, then Quote, then Sales Order). Forecast_Status
     /// = "No" (the manual's own instruction for a normal, non-forecast Deal, 5.6.3 step 6), Stage =
     /// NewDealStage, Closing_Date = Delivery_Date = the document's delivery date (both mandatory).
-    /// Deal_Name is mandatory too; Zoho may rename it by its own naming format (manual 5.6.9).
+    /// Deal_Name follows AccountName_MaterialCode_MMYY, or AccountName_APPLICATION_MMYY for multiple lines.
     /// The Deal Items subform's Quantity is "Number - 9" (whole numbers), so it is rounded here --
     /// the Quote and Sales Order still carry the document's exact quantity.
     /// </summary>
-    public async Task<JsonObject> BuildCreateRecordAsync(string accountId, string? accountCode, string dealName,
+    public async Task<JsonObject> BuildCreateRecordAsync(string accountId, string? accountCode,
         string? deliveryDate, string? customerRef, string? paymentTerms, string? paymentCurrency, string? incoterms,
         List<ZohoNewDealLine> lines)
     {
+        // Assign the Deal to the customer's responsible salesperson, rather than the API user.
+        var account = await zoho.GetByIdAsync("Accounts", accountId);
+        var ownerId = LookupId(account?["Owner"]);
+        if (string.IsNullOrWhiteSpace(ownerId))
+            throw new InvalidOperationException("Cannot create a Deal: the customer's Account Owner could not be determined.");
         var module = await ResolveModuleAsync();
         _itemsField ??= await ZohoRecordFields.ResolveSubformFieldAsync(zoho, module, "Deal Item");
+        if (string.IsNullOrWhiteSpace(_itemsField))
+            throw new InvalidOperationException("Cannot create a Deal: the Deal Items subform could not be identified in Zoho. No Deal was created.");
         var record = new JsonObject
         {
-            ["Deal_Name"] = dealName.Length > 120 ? dealName[..120] : dealName,
+            ["Deal_Name"] = BuildDealName(ZohoRecordFields.Str(account!, "Account_Name") ?? "", lines.Select(l => l.MaterialCode)),
             ["Account_Name"] = new JsonObject { ["id"] = accountId },
+            ["Owner"] = new JsonObject { ["id"] = ownerId },
             ["Stage"] = NewDealStage,
             ["Forecast_Status"] = "No",
         };
@@ -346,7 +368,7 @@ public class ZohoDealClient(ZohoClient zoho)
     }
 
     public async Task<ZohoUpsertResult> CreateAsync(JsonObject record) =>
-        await zoho.InsertAsync(await ResolveModuleAsync(), record);
+        await zoho.InsertAsync(await ResolveModuleAsync(), record, useDefaultAutomation: true);
 
     /// <summary>
     /// Manual fallback for when the automatic Account_Code lookup above finds nothing --
@@ -363,14 +385,22 @@ public class ZohoDealClient(ZohoClient zoho)
         var query = nameContains?.Trim();
         if (string.IsNullOrEmpty(query)) return [];
         var module = await ResolveModuleAsync();
+        var term = Escape(query);
+        var fields = await zoho.GetFieldsAsync(module);
+        var hasDescription = fields.OfType<JsonObject>().Any(f => Str(f, "api_name") == "Description");
+        var where = $"(Deal_Name like '%{term}%' or Account_Code like '%{term}%')";
+        if (hasDescription) where = $"({where} or Description like '%{term}%')";
         var rows = await zoho.QueryCoqlAsync(
             module,
             "id, Deal_Name, Stage, Account_Code, Customer_Ref, Delivery_Date, Closing_Date",
-            $"Deal_Name like '%{Escape(query)}%'",
+            where,
             "Deal_Name");
 
         var result = new List<ZohoDeal>();
-        foreach (var row in rows.Take(top))
+        foreach (var row in rows
+            .OrderByDescending(r => string.Equals(Str(r, "Account_Code"), query, StringComparison.OrdinalIgnoreCase))
+            .ThenByDescending(r => string.Equals(Str(r, "Deal_Name"), query, StringComparison.OrdinalIgnoreCase))
+            .Take(Math.Clamp(top, 1, 100)))
         {
             var id = Str(row, "id");
             if (string.IsNullOrEmpty(id)) continue;

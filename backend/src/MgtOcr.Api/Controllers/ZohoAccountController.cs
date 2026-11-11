@@ -141,7 +141,7 @@ public class ZohoAccountController(ZohoAccountClient client, ZohoClient zoho, Zo
     [HttpGet("deals/by-account-code/{code}")]
     public async Task<IActionResult> GetDealsByAccountCode(string code)
     {
-        var found = await deals.FindOpenDealsByAccountCodeAsync(code);
+        var found = await deals.FindOpenDealsByAccountCodeAsync(code, onlyOpenDraft: true);
         return Ok(new { count = found.Count, deals = found });
     }
 

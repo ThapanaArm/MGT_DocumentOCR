@@ -59,7 +59,10 @@ public class FileArchiveWorker(AppConfig config, FileArchiveRepository repo, Gra
                 if (target == null) continue;   // e.g. GLC while only MGT is configured - not an error, just not archived yet
                 var local = Path.GetFullPath(c.StoredPath);
                 if (!File.Exists(local)) { await repo.MarkMissingAsync(c); continue; }   // permanent - not retried
-                var remote = GraphArchiveClient.BuildRemotePath(target, c.CompanyCode, c.Module, c.PostedAt, local, c.SubPath);
+                var namedSalesOrder = string.Equals(c.CompanyCode, "MGT", StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(c.Module, "SO", StringComparison.OrdinalIgnoreCase);
+                var remote = GraphArchiveClient.BuildRemotePath(target, c.CompanyCode, c.Module, c.PostedAt, local, c.SubPath,
+                    remoteFileName: namedSalesOrder ? c.FileName : null);
                 var r = await graph.UploadAsync(target, local, remote, ct);
                 await repo.MarkDoneAsync(c, r.ItemId, r.RemotePath, r.WebUrl);
             }

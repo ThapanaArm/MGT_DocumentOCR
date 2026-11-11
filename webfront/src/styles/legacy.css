@@ -1317,3 +1317,14 @@ input,select,textarea,.btn,.nav a{-webkit-tap-highlight-color:transparent}
 .jt-partner{max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .jt-warn{color:var(--orange)}
 @media (max-width:800px){.jt-split{grid-template-columns:1fr}}
+
+/* Unit conversion popup opened from a document's Material card (5 Nov 2026) */
+.master-uom-confirm { display: flex; flex-direction: column; gap: 18px; }
+.master-uom-material { display: flex; flex-direction: column; gap: 2px; padding: 12px 16px; border: 1px solid var(--line, #dbe3e9); border-radius: var(--r3, 12px); background: var(--line-soft, #f5f7f9); }
+.master-uom-material .code { font-size: 17px; }
+.master-uom-material .name { overflow-wrap: anywhere; }
+.master-uom-fields { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.master-uom-result { padding: 14px 16px; border: 1px solid var(--line, #dbe3e9); border-radius: var(--r3, 12px); }
+.master-uom-result .big { font-size: 20px; margin: 4px 0; }
+.master-uom-result .big i { font-size: 15px; color: var(--muted); margin: 0 6px; }
+@media (max-width: 760px) { .master-uom-fields { grid-template-columns: 1fr; } }

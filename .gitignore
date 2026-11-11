@@ -28,3 +28,5 @@ backend/src/MgtOcr.Api/appsettings.Development.json
 tools/
 /docs
 /reports
+# Local scratch / build output (incl. a copy of appsettings.json with real keys) -- never committed
+/outputs/

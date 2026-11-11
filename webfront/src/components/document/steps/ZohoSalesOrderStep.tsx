@@ -303,6 +303,8 @@ const ZohoSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function Zoho
     } : undefined);
     return {
       ...Object.fromEntries(Object.entries(header).map(([key, value]) => [key, value || undefined])),
+      // Preserve explicit clearing of Description instead of restoring the document's Remark.
+      remarks: dirtyHeader.current.has('remarks') ? header.remarks : header.remarks || undefined,
       shipTo,
       // Only what the person typed (plus an AI-confirmed material) goes as an override; untouched
       // quantities / prices come from the backend's own conversion. Numbers accept "1,250.50".

@@ -176,6 +176,7 @@ public class ZohoSalesOrderController(
         // is opened on the document's customer when the person sends (see EnsureDealAsync). Until
         // then it is a stand-in record with no id, no items and Forecast Status "No".
         var newDeal = dealId == NewDealId;
+        string? newDealAccountName = null;
         ZohoDeal? deal;
         if (newDeal)
         {
@@ -184,9 +185,9 @@ public class ZohoSalesOrderController(
                 throw new HttpApiException(400, "Match the customer first — a new Deal is opened on this document's customer");
             var acc = await accountClient.FindByAccountCodeAsync(custCode)
                 ?? throw new HttpApiException(400, $"Customer {custCode} was not found in Zoho CRM by Account Code — a new Deal cannot be opened");
-            var po = ((Dictionary<string, object?>)doc["header"]!).GetStr("poNo").Trim();
+            newDealAccountName = acc.AccountName;
             deal = new ZohoDeal(
-                Id: "", DealName: po.Length > 0 ? $"{acc.AccountName} / PO {po}" : acc.AccountName,
+                Id: "", DealName: "",
                 Stage: ZohoDealClient.NewDealStage, AccountId: acc.AccountId, AccountCode: acc.AccountCode ?? custCode,
                 CustomerRef: null, DeliveryDate: null, ClosingDate: null, Items: [], ForecastStatus: "No");
         }
@@ -233,49 +234,52 @@ public class ZohoSalesOrderController(
         foreach (var l in lines)
         {
             var itemNo = l.Get("itemNo")?.ToString() ?? "";
-            var lineCode = l.GetStr("materialCode");
             var desc = l.GetStr("desc");
             var extCode = l.GetStr("extCode");
-
-            // Same match order as the frontend's ZohoDealCard: matched local Material code first
-            // (exact, case-insensitive), else a fuzzy substring match on the description. This is
-            // deliberately a cheap/strict rule, not a fuzzy-similarity score — real OCR'd
-            // descriptions (CAS numbers, remarks, requestor codes tacked on) routinely don't
-            // literally contain the Deal Item's own material name or vice versa, so a line this
-            // misses is expected to fall to "skipped" and get resolved by the AI-assisted
-            // suggestion tool (see MappingCards' Ask AI button) rather than a looser string rule
-            // silently guessing which real-world material is meant.
+            var mappedCode = l.GetStr("materialCode");
+            // A line's Material Code (Deal search, Megachem 10 Nov 2026): the code on the PO (OCR/CS,
+            // extCode) or the code mapped by Master Mapping / CS (materialCode) -- either may be the
+            // Zoho Material Code. The PO code is tried first, then the mapped one, the same as the
+            // page's Deal search (MappingCards lineCodes). Names/descriptions never substitute a
+            // differently coded item. Several PO rows of one material (e.g. different delivery dates)
+            // all use the same Deal item.
+            var codes = new[] { extCode, mappedCode }
+                .Where(c => !string.IsNullOrWhiteSpace(c)).Select(c => c.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            var lineCode = codes.FirstOrDefault() ?? "";
             ZohoDealItem? item = null;
-            if (!string.IsNullOrEmpty(lineCode))
-                item = deal.Items.FirstOrDefault(it =>
-                    !string.IsNullOrEmpty(it.MaterialCode) && string.Equals(it.MaterialCode, lineCode, StringComparison.OrdinalIgnoreCase));
-            if (item is null && !string.IsNullOrEmpty(desc))
+            foreach (var code in codes)
             {
-                var d = desc.ToLowerInvariant();
                 item = deal.Items.FirstOrDefault(it =>
-                    (!string.IsNullOrEmpty(it.MaterialName) && (it.MaterialName.ToLowerInvariant().Contains(d) || d.Contains(it.MaterialName.ToLowerInvariant())))
-                    || (!string.IsNullOrEmpty(it.MaterialDescription) && (it.MaterialDescription.ToLowerInvariant().Contains(d) || d.Contains(it.MaterialDescription.ToLowerInvariant()))));
+                    !string.IsNullOrEmpty(it.MaterialCode) && string.Equals(it.MaterialCode, code, StringComparison.OrdinalIgnoreCase));
+                if (item is not null) { lineCode = code; break; }
             }
             // Not WCD (Forecast Status No / blank, or a new Deal): a line that is not one of the Deal's
-            // Items is looked up in Zoho Materials by its mapped material code (Megachem, 27 Oct 2026).
-            // A WCD Deal (Forecast Status Yes) still only takes its own forecast items.
+            // Items is looked up in Zoho Materials by its mapped material code, else the PO code
+            // (Megachem, 27 Oct 2026). A WCD Deal (Forecast Status Yes) still only takes its own items.
             string? notFound = null;
             if ((item is null || string.IsNullOrEmpty(item.MaterialId)) && !deal.IsWcd)
             {
-                if (string.IsNullOrWhiteSpace(lineCode))
+                if (codes.Count == 0)
                     notFound = "Not a Deal Item, and no material code is mapped on this line to look up in Zoho";
                 else
                 {
-                    try
+                    item = null;
+                    var tried = new List<string>();
+                    foreach (var code in codes.OrderByDescending(c => string.Equals(c, mappedCode.Trim(), StringComparison.OrdinalIgnoreCase)))
                     {
-                        var m = await materialClient.FindByCodeAsync(lineCode);
-                        if (m is null) notFound = $"Not a Deal Item, and material {lineCode} was not found in Zoho Materials";
-                        else item = MaterialAsItem(m);
-                    }
-                    catch (Exception e)
-                    {
-                        log.LogWarning(e, "Zoho Materials lookup failed for {Code} (doc {DocId})", lineCode, docId);
-                        notFound = $"Not a Deal Item, and the Zoho Materials lookup for {lineCode} failed";
+                        tried.Add(code);
+                        try
+                        {
+                            var m = await materialClient.FindByCodeAsync(code);
+                            if (m is not null) { item = MaterialAsItem(m); lineCode = code; notFound = null; break; }
+                            notFound = $"Not a Deal Item, and material {string.Join(" / ", tried)} was not found in Zoho Materials";
+                        }
+                        catch (Exception e)
+                        {
+                            log.LogWarning(e, "Zoho Materials lookup failed for {Code} (doc {DocId})", code, docId);
+                            notFound = $"Not a Deal Item, and the Zoho Materials lookup for {code} failed";
+                        }
                     }
                 }
             }
@@ -296,6 +300,9 @@ public class ZohoSalesOrderController(
             }
             matched.Add(built);
         }
+
+        if (newDeal && matched.Count > 0)
+            deal = deal with { DealName = ZohoDealClient.BuildDealName(newDealAccountName!, matched.Select(l => l.MaterialCode)) };
 
         // Subject = the Deal's name only (Megachem, 29 Oct 2026: nothing added -- no "Doc#", no "(1/2)").
         var subject = deal.DealName;
@@ -324,9 +331,8 @@ public class ZohoSalesOrderController(
             Skipped: skipped,
             UomRules: masterData.Uoms,
             SalesOrg: salesOrg,
-            // The document's Remark -> Zoho Sales Order "Remarks" (Multi Line, Megachem Zoho manual
-            // AO-CRM-UM-2026-003 p.302-303). MGT/Zoho only: GLC/SAP carries notes in Item Note 1.
-            Remarks: header.GetStr("remark") is { Length: > 0 } rm ? rm : null,
+            // Document Remark is reviewed as Description and sent to Zoho's header Description.
+            Remarks: header.GetStr("remark") is { Length: > 0 } remark ? remark : null,
             NewDeal: newDeal,
             QuoteRefs: DocQuoteRefs(header, lines));
     }
@@ -347,7 +353,7 @@ public class ZohoSalesOrderController(
     // (non-WCD only). Carries the Material's own Unit / Conversion Ratio / Sub Unit, so the line is
     // converted to and sent in the Unit (Megachem, 29 Oct 2026), the same as a Deal item.
     private static ZohoDealItem MaterialAsItem(ZohoMaterial m) => new(
-        MaterialName: m.Name, MaterialId: m.Id, MaterialCode: m.Code, MaterialDescription: null,
+        MaterialName: m.Name, MaterialId: m.Id, MaterialCode: m.Code, MaterialDescription: m.Description,
         MaterialGroup: m.MaterialGroup, Quantity: null, Unit: m.Unit, ConversionRatio: m.ConversionRatio, SubUnit: m.SubUnit,
         UnitPrice: null, PriceSubUnit: null, LastPrice: null, TotalAmount: null, ShipVia: null, Stock: null,
         LeadTimeDays: null, SoCompleted: null, SoCancelled: null);
@@ -434,7 +440,7 @@ public class ZohoSalesOrderController(
           ?? DateTime.Today.ToString("yyyy-MM-dd");
 
     private Task<JsonObject> BuildNewDealRecordAsync(Assembled a, IEnumerable<SoGroup> groups) =>
-        dealClient.BuildCreateRecordAsync(a.Deal.AccountId!, a.Deal.AccountCode, a.Deal.DealName,
+        dealClient.BuildCreateRecordAsync(a.Deal.AccountId!, a.Deal.AccountCode,
             HeaderDate(a.DeliveryDate, groups), a.CustomerRef is { Length: > 0 } cr && cr != "-" ? cr : null,
             a.PaymentTerms, a.PaymentCurrency, a.Incoterms,
             a.SoLines.Select(l => new ZohoNewDealLine(l.MaterialId, l.MaterialCode, l.Description, l.MaterialGroup,
@@ -470,7 +476,12 @@ public class ZohoSalesOrderController(
             }
         }
 
-        var record = await BuildNewDealRecordAsync(a, groups);
+        JsonObject record;
+        try { record = await BuildNewDealRecordAsync(a, groups); }
+        catch (TimeoutException)
+        {
+            throw new HttpApiException(504, "Zoho took too long to return the Deal field definitions. No new Deal, Quote or Sales Order was created. Please try sending again.");
+        }
         ZohoUpsertResult res;
         try { res = await dealClient.CreateAsync(record); }
         catch (Exception e) { res = new ZohoUpsertResult { SapKey = "", ZohoId = "", Status = "error", Message = e.Message }; }
@@ -481,6 +492,8 @@ public class ZohoSalesOrderController(
             throw new HttpApiException(400, $"Could not open a new Deal in Zoho CRM: {res.Message} — nothing was sent");
         }
         var created = await dealClient.GetByIdAsync(res.ZohoId);
+        if (string.IsNullOrWhiteSpace(created?.DealName))
+            throw new HttpApiException(400, $"Deal {res.ZohoId} was created, but its name could not be read back from Zoho. Please retry; no Quote or Sales Order was created.");
         var deal = created is null || string.IsNullOrEmpty(created.AccountId)
             ? a.Deal with { Id = res.ZohoId }
             : created;
@@ -604,9 +617,28 @@ public class ZohoSalesOrderController(
             log.LogWarning(e, "Preview: could not read the Payment Terms / Currency picklists from Zoho CRM");
         }
 
+        string? dealOwnerName = null, dealOwnerError = null;
+        try
+        {
+            var ownerRecord = d.NewDeal
+                ? await accountClient.GetRecordAsync(d.Deal.AccountId!)
+                : await dealClient.GetRecordAsync(d.Deal.Id);
+            if (ownerRecord?["Owner"] is JsonObject owner)
+                dealOwnerName = owner["name"]?.GetValue<string>();
+            if (string.IsNullOrWhiteSpace(dealOwnerName))
+                dealOwnerError = "Responsible salesperson could not be determined.";
+        }
+        catch (Exception e)
+        {
+            log.LogWarning(e, "Preview: could not read the Deal owner for account {AccountCode}", d.Deal.AccountCode);
+            dealOwnerError = "Responsible salesperson is temporarily unavailable. Please reload the preview.";
+        }
+
         return Ok(new
         {
             dealName = d.Deal.DealName,
+            dealOwnerName,
+            dealOwnerError,
             accountCode = d.Deal.AccountCode,
             flow = new
             {
@@ -724,7 +756,8 @@ public class ZohoSalesOrderController(
             PaymentCurrency: body.PaymentCurrency is { Length: > 0 } ? body.PaymentCurrency : d.PaymentCurrency,
             Incoterms: body.Incoterms is { Length: > 0 } ? body.Incoterms : d.Incoterms,
             ShipTo: body.ShipTo,
-            Remarks: body.Remarks is { Length: > 0 } ? body.Remarks : d.Remarks,
+            // Null means no override; an explicit empty string clears the document's Remark.
+            Remarks: body.Remarks ?? d.Remarks,
             SoLines: soLines,
             StillSkipped: stillSkipped,
             Doc: d.Doc,
@@ -925,7 +958,7 @@ public class ZohoSalesOrderController(
             if (newStatus == "POSTED" && !string.IsNullOrEmpty(firstZohoId))
             {
                 var folder = await ArchiveFolderAsync(docId, firstZohoId, deal.Id, deal.AccountCode);
-                try { await archive.EnqueueAsync(docId, DocumentTables.ForId(docId).Doc, "MGT", "SO", folder); }
+                try { await archive.EnqueueAsync(docId, DocumentTables.ForId(docId).Doc, "MGT", "SO", folder, deliveryDate: a.DeliveryDate); }
                 catch (Exception e) { log.LogWarning(e, "Could not queue doc {DocId} for SharePoint (run sql/27 + sql/29?)", docId); }
             }
 

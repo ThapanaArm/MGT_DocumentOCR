@@ -163,10 +163,11 @@ export interface ZohoDeal {
  *  Same value as ZohoSalesOrderController.NewDealId. */
 export const NEW_DEAL_ID = '__new__';
 
-/* Zoho Materials by code or name (GET /api/zoho/materials/search) -- for a line when the document has
+/* Zoho Materials by code, name or description (GET /api/zoho/materials/search) -- for a line when the document has
    no Deal or a non-WCD Deal. */
 export interface ZohoMaterialHit {
   id: string; name?: string | null; code?: string | null; materialGroup?: string | null;
+  description?: string | null;
   /** Selling unit, how many sub-units make one, and the sub-unit (e.g. DR, 160, KG). */
   unit?: string | null; conversionRatio?: number | null; subUnit?: string | null;
 }
@@ -279,6 +280,8 @@ export interface ZohoSalesOrderPreviewLine {
 }
 
 export interface ZohoSalesOrderPreview {
+  dealOwnerName?: string | null;
+  dealOwnerError?: string | null;
   dealName: string;
   accountCode?: string | null;
   subject: string;

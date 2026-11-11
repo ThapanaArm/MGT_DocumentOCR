@@ -93,6 +93,10 @@ public static partial class VisionPrompt
             "- customerAddress คือที่อยู่ของลูกค้าเอง (สำหรับออกเอกสาร/ใบกำกับภาษี) ส่วน shipToAddress คือที่อยู่ปลายทางจัดส่งสินค้าเท่านั้น " +
             "ถ้าเอกสารมีที่อยู่เดียวไม่ได้แยกที่อยู่จัดส่งไว้ต่างหาก ให้ใส่ในช่อง customerAddress อย่างเดียว อย่าเติมซ้ำใน shipToAddress\n" +
             "- ตรวจสอบผลรวม: subTotal + vatAmount ควรใกล้เคียง totalAmount\n" +
+            (module == "SO"
+                ? "- lines ต้องมี 1 รายการต่อ 1 แถวในตารางสินค้าของเอกสาร ตามลำดับเดิม ถ้าสินค้าชื่อ/รหัสเดียวกันปรากฏหลายแถว " +
+                  "(เช่น คนละวันส่ง คนละจำนวน หรือคนละราคา) ให้แยกเป็นคนละรายการ ห้ามรวมกันและห้ามตัดแถวที่ซ้ำทิ้ง\n"
+                : "") +
             "- ค่าที่เป็นข้อความทุกช่อง (docType, branch, paymentTerms, desc ของรายการ ฯลฯ) ให้ตอบเป็นภาษาอังกฤษเสมอ " +
             "ถ้าเอกสารเขียนเป็นภาษาไทยหรือภาษาอื่น ให้แปลเป็นอังกฤษ เช่น สำนักงานใหญ่ = Head Office, สาขา 1 = Branch 1, " +
             "30 วัน = 30 days, ใบแจ้งหนี้/ใบวางบิล = Invoice, ใบกำกับภาษี = Tax Invoice, ใบเสร็จรับเงิน = Receipt, " +
@@ -452,7 +456,10 @@ public static partial class VisionPrompt
         // Several FORMs (one per PO) list the same cost rows, and Finance wants one line per cost:
         // merge rows with the same description and vendor by adding the amounts. Tax rows stay per
         // invoice — they are reported individually.
-        for (var i = 0; i < lines.Count; i++)
+        // Liability documents only: on a Sales Order (customer PO) the same product can appear on
+        // several rows on purpose (different delivery dates, quantities or prices), and merging
+        // them collapsed those rows into one with Qty 1 (3 Nov 2026).
+        for (var i = 0; module != "SO" && i < lines.Count; i++)
         {
             var l = lines[i];
             if (l.ExtCode is "WHT" or "VAT" or "DUTY") continue;

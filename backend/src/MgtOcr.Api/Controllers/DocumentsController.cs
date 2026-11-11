@@ -727,7 +727,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
                 imageB64, imageMediaType, provider, config, materialOptions, shipToOptions, accountOptions,
                 enableThisRound, lookupLog.ToString(), actionsEnabled,
                 // GLC: Item Note 1 is the CS's own entry -- the AI keeps its hands off it.
-                protectItemNote1: module == "SO" && isGlc);
+                protectItemNote1: module == "SO");
             if (result == null)
             {
                 var (label, envVar) = ChatFixProviderLabel[provider];

@@ -673,12 +673,22 @@ public static class MappingEngine
             var mv = itemKey.Length > 0 ? mLineRaw.Get("item:" + itemKey)?.ToString() : null;
             if (string.IsNullOrEmpty(mv)) mv = mLineRaw.Get(i.ToString())?.ToString();
             var savedMat = itemKey.Length > 0 ? mLineRaw.Get("saved:" + itemKey)?.ToString() : null;
+            // MGT (Zoho) Sales Order: a Material picked from the Deal / Zoho Materials dropdown for THIS
+            // document only (Megachem, 5 Nov 2026: changing a line that Master Mapping already matched
+            // must not touch Master Mapping). Such a code has no CustomerMaterial row, which is fine --
+            // Zoho checks it against the Deal / Zoho Materials at send time. GLC keeps the rule that a
+            // pick must be a CustomerMaterial of this customer (its SAP checks rely on that row).
+            var docOnlyOk = module == "SO" && !shipToOptional;
+            var pickLabel = mLineRaw.Get("label:" + (itemKey.Length > 0 ? "item:" + itemKey : i.ToString()))?.ToString();
             Dictionary<string, object?> row;
             if (!string.IsNullOrEmpty(mv))
             {
-                row = module == "SO" && !mapRows.Any(x => x.GetStr("MaterialCode") == mv)
+                var inMaster = module != "SO" || mapRows.Any(x => x.GetStr("MaterialCode") == mv);
+                row = !inMaster && !docOnlyOk
                     ? R("fail")
-                    : R("manual", mv, matDesc.TryGetValue(mv, out var d) ? d?.ToString() ?? mv : mv, "manually selected");
+                    : !inMaster
+                        ? R("manual", mv, string.IsNullOrWhiteSpace(pickLabel) ? mv : pickLabel, "selected for this document only")
+                        : R("manual", mv, matDesc.TryGetValue(mv, out var d) ? d?.ToString() ?? mv : mv, "manually selected");
                 if (row.GetStr("status") == "fail")
                     errors.Add(new() { ["field"] = $"Item line {i + 1}", ["msg"] = "This item is not active for this customer and SalesOrg", ["fix"] = "Select or add CustomerMaterial for this customer" });
             }
@@ -700,6 +710,8 @@ public static class MappingEngine
                 if (module == "SO" && !string.IsNullOrEmpty(savedMat)
                     && mapRows.Any(x => x.GetStr(keyField) == partner && x.GetStr("MaterialCode") == savedMat))
                     row = R("manual", savedMat, matDesc.TryGetValue(savedMat, out var d3) ? d3?.ToString() ?? savedMat : savedMat, "previously selected");
+                else if (docOnlyOk && !string.IsNullOrEmpty(savedMat))
+                    row = R("manual", savedMat, savedMat, "previously selected for this document only");
                 else if (!string.IsNullOrEmpty(code))
                     row = R("ok", code, matDesc.TryGetValue(code, out var d2) ? d2?.ToString() ?? code : code, method);
                 else

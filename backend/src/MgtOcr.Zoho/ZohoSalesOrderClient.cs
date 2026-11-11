@@ -10,7 +10,7 @@ namespace MgtOcr.Zoho;
 /// caller reuses from the matched Deal Item (there is no separate Zoho Material search feature,
 /// so MaterialId -- required for the Product_Name lookup -- can only come from a matched Deal Item).
 /// StatusNote is the odd one out: it's the document's own per-line "Item Note 1"
-/// (line.extra.itemNote1 -- OCR-prefilled from the PO, editable in DetailTable), the exact same
+/// (line.extra.itemNote1 -- entered by the user in DetailTable), the exact same
 /// source SAP's Item Note 1 feature sends as item long text (to_Item -> to_Text) -- confirmed by
 /// Megachem that Zoho's Status_Note column on this subform is the right place for it, reversing
 /// this class's earlier assumption that Status_Note had no clear document-side source.
@@ -356,9 +356,8 @@ public class ZohoSalesOrderClient(ZohoClient zoho)
         if (!string.IsNullOrWhiteSpace(paymentTerms)) record["Payment_Terms"] = paymentTerms;
         if (!string.IsNullOrWhiteSpace(paymentCurrency)) record["Payment_Currency"] = paymentCurrency;
         if (!string.IsNullOrWhiteSpace(incoterms)) record["Incoterms"] = incoterms;
-        // "Remarks" (Multi Line, 32000 chars) in the Sales Order's Terms and Conditions block --
-        // field confirmed in Megachem's Zoho CRM manual AO-CRM-UM-2026-003, pages 302-303.
-        if (!string.IsNullOrWhiteSpace(remarks)) record["Remarks"] = remarks.Length > 32000 ? remarks[..32000] : remarks;
+        // The document's Remark maps to the Sales Order header Description (not line Description).
+        if (!string.IsNullOrWhiteSpace(remarks)) record["Description"] = remarks.Length > 32000 ? remarks[..32000] : remarks;
 
         // CORRECTED 2026-09-22 against Megachem's own Zoho CRM user manual (AO-CRM-UM-2026-003,
         // section 5.9.6 "ใบสั่งขาย" (Sales Order), pages 300-303, "Select Address"/"Address

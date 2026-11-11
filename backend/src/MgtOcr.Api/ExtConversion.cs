@@ -12,7 +12,7 @@ public static partial class ExtConversion
 {
     // ocrItemNote: false drops the OCR-read per-line note so extra.itemNote1 starts empty — see
     // OcrPrefillsItemNote for which documents that applies to.
-    public static Dictionary<string, object?> ToExtDict(ParsedDocument pd, bool ocrItemNote = true) => new()
+    public static Dictionary<string, object?> ToExtDict(ParsedDocument pd, bool ocrItemNote = false) => new()
     {
         ["header"] = pd.Header,
         ["lines"] = pd.Lines.Select(l => ToLineDict(l, HeaderDeliveryDate(pd.Header), ocrItemNote)).ToList(),
@@ -33,7 +33,7 @@ public static partial class ExtConversion
     // headerDeliveryDate: the document-level delivery date, used as the per-line default so the DETAIL
     // table's "Delivery Date" column is never blank when the PO only states one date for the whole
     // order. A per-line date the OCR actually read (LineItem.DueDate) always wins over it.
-    public static Dictionary<string, object?> ToLineDict(LineItem l, string? headerDeliveryDate = null, bool ocrItemNote = true)
+    public static Dictionary<string, object?> ToLineDict(LineItem l, string? headerDeliveryDate = null, bool ocrItemNote = false)
     {
         var d = new Dictionary<string, object?>
         {
@@ -67,13 +67,9 @@ public static partial class ExtConversion
         return d;
     }
 
-    // Item Note 1 (26 Oct 2026): a GLC Sales Order (SalesOrg 2000 -> SAP to_Text ZI01) starts with
-    // extra.itemNote1 empty and the CS types it in the DETAIL table — OCR never prefills it, even if
-    // the prompt still returned an itemNote. MGT (1000 -> Zoho Status_Note) keeps the OCR prefill.
-    // Only an explicit GLC stamp turns it off: a document with no company keeps the old behaviour.
+    // Sales Order Item Note 1 is entered by the user for both Zoho and SAP, never prefilled by OCR.
     public static bool OcrPrefillsItemNote(string module, MgtOcr.Core.Config.AppConfig config, string? salesOrg) =>
-        !(string.Equals(module, "SO", StringComparison.OrdinalIgnoreCase)
-          && string.Equals(config.CompanyForSalesOrg(salesOrg?.Trim())?.Name, "GLC", StringComparison.OrdinalIgnoreCase));
+        !string.Equals(module, "SO", StringComparison.OrdinalIgnoreCase);
 
     private static string? HeaderDeliveryDate(Dictionary<string, object?> header) =>
         header.TryGetValue("deliveryDate", out var v) ? v as string : null;

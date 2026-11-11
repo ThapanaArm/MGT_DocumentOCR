@@ -272,7 +272,8 @@ export default function DetailTable({
   const showVendor = doc.module === 'AP' || doc.module === 'II';
   const showPoExtra = doc.module === 'AP';
   const showSoExtra = doc.module === 'SO';
-  const extraCols = (showPoExtra ? 1 : 0) + (showSoExtra ? 4 : 0) + (showVendor ? 1 : 0);
+  const showSalesEmployee = showSoExtra && !isMgt;
+  const extraCols = (showPoExtra ? 1 : 0) + (showSoExtra ? 3 : 0) + (showSalesEmployee ? 1 : 0) + (showVendor ? 1 : 0);
   // Withholding tax is not part of what is billed — it is deducted at payment — so the footer
   // total leaves those rows out (they stay in the table as a record). The total also follows the
   // vendor lookup, so filtering by a vendor shows exactly what that vendor's MIRO run is worth.
@@ -368,7 +369,7 @@ export default function DetailTable({
                 {showPoExtra && <th style={{ width: 120 }}>PO Detail</th>}
                 {showSoExtra && (
                   <>
-                    <th style={{ minWidth: 160 }}>Sales Employee Name</th>
+                    {showSalesEmployee && <th style={{ minWidth: 160 }}>Sales Employee Name</th>}
                     <th style={{ minWidth: 140 }}>Delivery Date</th>
 
                     <th style={{ minWidth: 220 }}>Item Note 1</th>
@@ -522,7 +523,7 @@ export default function DetailTable({
                       )}
                       {showSoExtra && (
                         <>
-                          <td style={{ minWidth: 160 }}>
+                          {showSalesEmployee && <td style={{ minWidth: 160 }}>
                             {(() => {
                               // Show the Sales Employee chosen for THIS line. The person is picked
                               // per line in the "Sales Employee — this line" card above (stored as the
@@ -546,7 +547,7 @@ export default function DetailTable({
                                 <span className="hint">—</span>
                               );
                             })()}
-                          </td>
+                          </td>}
                           <td style={{ minWidth: 140 }}>
                             {/* Delivery Date: the app's one date field (English, dd/MM/yyyy shown) -- the value
                                 stays YYYY-MM-DD, as stored in extra.deliveryDate and used by SAP scheduling +

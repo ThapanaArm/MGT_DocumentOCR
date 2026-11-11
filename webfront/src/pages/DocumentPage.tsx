@@ -58,8 +58,8 @@ import { fetchBlobUrl,
   ApiError,
 } from '../api/client';
 import { createMaster, updateMaster } from '../api/masters';
-import type { SapBusinessPartner, SapLastPrice, SapMaterial, SapMaterialDetail, SapPartnerFunctionLink, SapSalesEmployee, SapSalesEmployeeSuggestion } from '../api/sap';
-import { getSapLastPrice, getSapMaterialDetail, getSapSalesEmployees, getSapLastSalesEmployee } from '../api/sap';
+import type { SapBusinessPartner, SapLastPrice, SapMaterial, SapPartnerFunctionLink, SapSalesEmployee, SapSalesEmployeeSuggestion } from '../api/sap';
+import { getSapLastPrice, getSapSalesEmployees, getSapLastSalesEmployee } from '../api/sap';
 import type {
   ZohoAccount,
   ZohoShipToInfo,
@@ -1405,7 +1405,7 @@ export default function DocumentPage() {
     setMasterEdit({
       tab: so ? 'custmaterials' : 'apmaterials',
       rowKey: null,
-      prefill: so ? { SalesOrg: companyCode, CustomerCode: customerCode, MaterialCodeCode: l.extCode || '', MaterialCodeName: l.desc || '' } : { Description: l.desc || '', Uom: l.uom || '', Plant: '1000' },
+      prefill: so ? { SalesOrg: companyCode, CustomerCode: customerCode, MaterialCodeCode: l.extCode || '', MaterialCodeName: l.desc || '', ExtUom: l.uom || '', SapUom: normUom(l.uom || ''), Factor: 1 } : { Description: l.desc || '', Uom: l.uom || '', Plant: '1000' },
       dupes: so ? findDupes(masters, 'custmaterials', l.desc, null, (x) => x.CustomerCode === customerCode && String(x.SalesOrg) === companyCode) : findDupes(masters, 'apmaterials', l.desc, null),
       onSaved: async (code) => {
         manual.current.lines[manualLineKey(i)] = code;
@@ -1444,196 +1444,74 @@ export default function DocumentPage() {
     return map[raw] || map[noDot] || map[t] || t.toUpperCase();
   };
 
-  // Picking a SAP search result saves the CustomerMaterial mapping, then (only when needed) pops an
-  // editable confirmation for the Unit Conversion rule, pre-filled from SAP. The old ocr.Material
-  // ("apmaterials") master step was removed — material data now lives entirely in CustomerMaterial,
-  // and unit handling in ocr.UomConversion. Because there is no material base unit anymore, a
-  // conversion rule is created whenever the document's unit isn't already a code SAP recognises.
+  // Review the document name and units together before writing either master mapping.
   const useSapMaterial = (i: number, material: SapMaterial) =>
     guard(async () => {
       const customerCode = map?.header.customer?.code || doc.partnerCode;
-      if (!customerCode) {
-        showToast('Please identify the customer first');
-        return;
-      }
+      if (!customerCode) { showToast('Please identify the customer first'); return; }
       const line = doc.lines[i];
-      const docUnit = (line.uom || '').trim();
-
-      let detail: SapMaterialDetail | null = null;
+      let lastPrice: SapLastPrice | null = null;
       try {
-        detail = (await getSapMaterialDetail(material.materialCode)).detail;
-      } catch {
-        detail = null; // best-effort only — the popup below just opens with blanker defaults
-      }
-
-      const finishLine = async () => {
-        await setManualLine(i, material.materialCode);
-        showToast(`Selected Material ${material.materialCode} from SAP`);
-      };
-
-      const maybeAddUomRule = async () => {
-        const baseUnit = (detail?.baseUnit || '').trim();
-        const alreadyHasRule = masters.uoms.some((u) =>
-          u.MaterialCode === material.materialCode
-            && String(u.ExtUom || '').trim().toLowerCase() === docUnit.toLowerCase(),
-        );
-        // With ocr.Material gone the SO mapping has no base unit and relies entirely on these
-        // UomConversion rules. Skip only when the document literally already uses a unit SAP knows
-        // for this material (its base unit or an alternative, e.g. "KG"/"BAG") — SAP takes that
-        // as-is. A word like "Kilogram" always needs a rule.
-        const alts = detail?.altUnits || [];
-        const sapUnits = [baseUnit, ...alts.map((a) => a.unit)].filter((u) => !!u && u.length > 0);
-        const docIsSapCode = sapUnits.some((u) => u.toLowerCase() === docUnit.toLowerCase());
-        if (alreadyHasRule || docUnit.length === 0 || docIsSapCode) {
-          await finishLine();
-          return;
-        }
-
-        // GLC only (this whole useSapMaterial path is GLC/SAP-only — see the MGT/Zoho counterpart
-        // below): NO unit conversion. Per the user, GLC sells in the document's own unit — almost
-        // always KG, occasionally G — even when the material is physically packaged as a BAG/DRUM,
-        // so the SAP unit must be the DOCUMENT's unit normalized to a SAP code (กิโลกรัม -> KG),
-        // NOT the material's SAP base unit (which for a "...-BG-..." material comes back as BAG and
-        // would wrongly turn "40 KG" into "40 BAG"). Factor is always 1 — this row is a pure
-        // KG->KG normalization, not a pack-size conversion. Picking the actual unit is a human
-        // decision (CS asks Sales) made outside the software; the popup just lets them confirm/
-        // correct the defaulted unit. Last Price (best-effort, live from SAP — see getSapLastPrice)
-        // is shown alongside purely as reference, never written to the saved row.
-        // Prefer the matched customer's SAP code (SoldToParty) for the billing lookup; for GLC it
-        // equals customerCode (both are ComcompyCodeSAP), but sapCode is the authoritative SAP key.
-        const lastPriceCustomer = map?.header.customer?.sapCode || customerCode;
-        let lastPrice: SapLastPrice | null = null;
-        try {
-          lastPrice = (await getSapLastPrice(lastPriceCustomer, material.materialCode)).price;
-        } catch {
-          lastPrice = null; // best-effort only — never blocks confirming the unit
-        }
-
-        setMasterEdit({
-          tab: 'uoms',
-          rowKey: null,
-          prefill: {
-            MaterialCode: material.materialCode,
-            ExtUom: docUnit,
-            // The document's own unit normalized to a SAP code (KG/G), NOT the material's SAP base
-            // unit — GLC never converts to the pack unit (BAG/DRUM). Falls back to the raw doc unit
-            // only if normalization can't map it, so the person can fix it in the popup.
-            SapUom: normUom(docUnit) || docUnit,
-            Factor: 1,
-          },
-          lastPrice,
-          onSaved: async () => {
-            await loadMasters(true);
-            await finishLine();
-          },
-        });
-      };
-
-      const finishSapMaterial = async () => {
-        const existingCm = masters.custmaterials.find((m) =>
-          m.MaterialCodeSAP === material.materialCode
-            && m.CustomerCode === customerCode
-            && String(m.SalesOrg) === companyCode
-            && customerMaterialCoversLine(m, line),
-        );
-        if (!existingCm) {
-          await createMaster('custmaterials', {
-            SalesOrg: companyCode,
-            CustomerCode: customerCode,
-            // MaterialCodeCode is required by the master form, so the SAP code stands in when the
-            // document has no customer item code (harmless: matching only uses it when the line has one).
-            MaterialCodeCode: line.extCode || material.materialCode,
-            // The DOCUMENT's wording, so the next PO is recognised (see customerMaterialCoversLine).
-            MaterialCodeName: line.desc || material.materialDescription,
-            MaterialCodeSAP: material.materialCode,
-            Isactive: 1,
-          });
-          await loadMasters(true);
-        }
-        await maybeAddUomRule();
-      };
-
-      // ocr.Material (apmaterials) master was removed — no material-master step anymore. Save the
-      // CustomerMaterial mapping directly, then (only if needed) confirm the UoM conversion rule.
-      await finishSapMaterial();
+        lastPrice = (await getSapLastPrice(map?.header.customer?.sapCode || customerCode, material.materialCode)).price;
+      } catch { /* Reference price is optional. */ }
+      openMaterialMapping(i, material.materialCode, material.materialDescription || '', normUom(line.uom || ''), 1, lastPrice);
     });
 
-  // MGT/Zoho counterpart of useSapMaterial: the candidate came from the matched Deal's Ordered
-  // Items, so there is nothing to look up in SAP — save a CustomerMaterial mapping straight away
-  // and, when the document unit differs from the Deal item's selling unit, save the conversion
-  // rule too. Example: Deal unit BAG, Sub Unit KG, ratio 25 => 1 KG = 0.04 BAG.
-  const saveZohoMaterial = (i: number, item: ZohoDealItem) =>
-    guard(async () => {
-      const customerCode = map?.header.customer?.code || doc.partnerCode;
-      if (!customerCode) {
-        showToast('Please identify the customer first');
-        return;
-      }
-      const matCode = (item.materialCode || '').trim();
-      if (!matCode) {
-        showToast('This item has no Material Code in Zoho');
-        return;
-      }
-      const line = doc.lines[i];
-      const existingCm = masters.custmaterials.find((m) =>
-        m.MaterialCodeSAP === matCode
-          && m.CustomerCode === customerCode
-          && String(m.SalesOrg) === companyCode
-          && customerMaterialCoversLine(m, line),
-      );
-      if (!existingCm) {
-        await createMaster('custmaterials', {
-          SalesOrg: companyCode,
-          CustomerCode: customerCode,
-          MaterialCodeCode: line.extCode || matCode,
-          // The DOCUMENT's wording, so the next PO is recognised (see customerMaterialCoversLine).
-          MaterialCodeName: line.desc || item.materialName || item.materialDescription,
-          MaterialCodeSAP: matCode,
-          Isactive: 1,
-        });
+  const openMaterialMapping = (
+    i: number, code: string, name: string, orderUnit: string, factor: number,
+    lastPrice?: SapLastPrice | null,
+  ) => {
+    const customerCode = map?.header.customer?.code || doc.partnerCode;
+    if (!customerCode) { showToast('Please identify the customer first'); return; }
+    const line = doc.lines[i];
+    const existing = masters.custmaterials.find((m) =>
+      m.MaterialCodeSAP === code && m.CustomerCode === customerCode
+        && String(m.SalesOrg) === companyCode && customerMaterialCoversLine(m, line));
+    const rule = masters.uoms.find((u) =>
+      String(u.MaterialCode || '') === code && String(u.SalesOrg || '') === companyCode
+        && String(u.ExtUom || '').trim().toLowerCase() === (line.uom || '').trim().toLowerCase());
+    setMasterEdit({
+      tab: 'custmaterials',
+      rowKey: existing?.Id ?? null,
+      lockMaterial: { code, name, docQty: Number(line.qty) || undefined, row: i + 1 },
+      prefill: {
+        SalesOrg: companyCode, CustomerCode: customerCode,
+        MaterialCodeCode: line.extCode || code,
+        MaterialCodeName: line.desc || name, MaterialCodeSAP: code, Isactive: 1,
+        ExtUom: line.uom || '', SapUom: rule?.SapUom || orderUnit,
+        Factor: rule?.Factor || factor, SapUomIso: rule?.SapUomIso || '',
+      },
+      lastPrice,
+      onSaved: async (savedCode) => {
         await loadMasters(true);
-      }
-
-      const docUnit = (line.uom || '').trim();
-      const zohoUnit = (item.unit || '').trim();
-      const existingRule = masters.uoms.find((u) =>
-        String(u.MaterialCode ?? u.MaterialCodeSAP ?? '') === matCode
-          && String(u.ExtUom || '').trim().toLowerCase() === docUnit.toLowerCase()
-          && (!u.SalesOrg || String(u.SalesOrg) === companyCode),
-      );
-      const ratio = Number(item.conversionRatio);
-      const zohoDefaultFactor = Number.isFinite(ratio) && ratio > 0 ? 1 / ratio : 1;
-      const existingFactor = Number(existingRule?.Factor);
-      const existingRuleMatchesZoho = !!existingRule
-        && String(existingRule.SapUom || '').trim().toLowerCase() === zohoUnit.toLowerCase()
-        && (!Number.isFinite(ratio) || ratio <= 0 || Math.abs(existingFactor - zohoDefaultFactor) < 0.000001);
-      const finishLine = async () => {
-        await loadMasters(true);
-        await setManualLine(i, matCode);
-        showToast(`Saved Material ${matCode} from Zoho`);
-      };
-
-      if (!docUnit || !zohoUnit || docUnit.toLowerCase() === zohoUnit.toLowerCase() || existingRuleMatchesZoho) {
-        await finishLine();
-        return;
-      }
-
-      const factor = zohoDefaultFactor;
-      setMasterEdit({
-        tab: 'uoms',
-        rowKey: existingRule?.Id ?? null,
-        prefill: {
-          MaterialCode: matCode,
-          ExtUom: docUnit,
-          SapUom: zohoUnit,
-          Factor: factor,
-          Note: Number.isFinite(ratio) && ratio > 0
-            ? `Zoho: 1 ${zohoUnit} = ${ratio} ${docUnit} (document #${doc.docId})`
-            : `Zoho unit conversion — please verify Factor (document #${doc.docId})`,
-        },
-        onSaved: finishLine,
-      });
+        await setManualLine(i, savedCode);
+        showToast('Saved Material ' + savedCode + ' and UOM', 'success');
+      },
     });
+  };
+
+  const saveZohoMaterial = (i: number, item: ZohoDealItem) => {
+    const code = (item.materialCode || '').trim();
+    if (!code) { showToast('This item has no Material Code in Zoho'); return; }
+    const ratio = Number(item.conversionRatio);
+    const sameUnit = (doc.lines[i].uom || '').trim().toLowerCase() === (item.unit || '').trim().toLowerCase();
+    openMaterialMapping(i, code, item.materialName || item.materialDescription || '',
+      (item.unit || '').trim(), !sameUnit && Number.isFinite(ratio) && ratio > 0 ? 1 / ratio : 1);
+  };
+
+  // MGT: a line Master Mapping already matched is changed to another Deal item / Zoho Material.
+  // Megachem (5 Nov 2026): for THIS document only -- no CustomerMaterial row and no UoM rule are
+  // written (Zoho converts with the Deal / Material's own Conversion Ratio at send time).
+  const pickZohoMaterialForDoc = (i: number, item: ZohoDealItem) => {
+    const matCode = (item.materialCode || '').trim();
+    if (!matCode) {
+      showToast('This item has no Material Code in Zoho');
+      return;
+    }
+    const name = item.materialName || item.materialDescription || '';
+    setManualLine(i, matCode, name ? `${matCode} — ${name}` : matCode);
+    showToast(`Row ${i + 1}: ${matCode} is used for this document only — Master Mapping is unchanged`);
+  };
 
   const addUomRule = (i: number) => {
     const l = doc.lines[i];
@@ -2376,6 +2254,7 @@ export default function DocumentPage() {
           dealItems={resolvedDeal?.items ?? []}
           dealIsWcd={!!resolvedDeal?.isWcd}
           onUseZohoMaterial={saveZohoMaterial}
+          onPickZohoMaterialForDoc={pickZohoMaterialForDoc}
           detailContent={isMgt && showDetail ? <DetailTable {...detailProps} bare isMgt /> : undefined}
         />
       )}

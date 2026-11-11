@@ -185,8 +185,13 @@ export function useDocumentEditor(user: string) {
     const itemNo = d?.lines?.[i]?.itemNo;
     return itemNo != null && String(itemNo) !== '' ? `item:${itemNo}` : String(i);
   };
-  const setManualLine = (i: number, v: string) => {
-    manual.current.lines[manualLineKey(i)] = v;
+  // `label` (optional): the name to show for a code that has no Master Mapping row -- an MGT
+  // Material picked for this document only (the engine reads it as "label:<key>").
+  const setManualLine = (i: number, v: string, label?: string) => {
+    const key = manualLineKey(i);
+    manual.current.lines[key] = v;
+    if (label) manual.current.lines[`label:${key}`] = label;
+    else delete manual.current.lines[`label:${key}`];
     runMap(true);
   };
 
