@@ -48,6 +48,9 @@ function load(code: string): Promise<SapUnitChoice[]> {
   return p;
 }
 
+/** The same cached lookup outside a component (e.g. checking every line before a send). */
+export const loadSapUnits = (materialCode: string) => (materialCode.trim() ? load(materialCode) : Promise.resolve([] as SapUnitChoice[]));
+
 export function useSapUnits(materialCode: string | null | undefined, enabled = true) {
   const code = (materialCode || '').trim();
   const [units, setUnits] = useState<SapUnitChoice[]>(() => (code ? cache.get(code.toUpperCase()) ?? [] : []));

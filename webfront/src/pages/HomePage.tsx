@@ -4,6 +4,8 @@ import { getDashboard, type DashboardData } from '../api/dashboard';
 import { useAppState } from '../state/AppState';
 import { dt, fmtCost, intFmt, moduleLabel, num, statusBadge } from '../utils/format';
 import StatTile from '../components/dashboard/StatTile';
+import JobTimeCard from '../components/dashboard/JobTimeCard';
+import { useMeta } from '../state/MetaContext';
 import {
   DocTrendChart,
   ModuleBarChart,
@@ -22,6 +24,10 @@ export default function HomePage() {
   const [days, setDays] = useState(7);
   const [data, setData] = useState<DashboardData | null>(null);
   const [failed, setFailed] = useState(false);
+  // Document Processing Time card is Admin only (the endpoint enforces it too).
+  const { me, loadMe } = useMeta();
+  useEffect(() => { void loadMe().catch(() => { /* not signed in / offline: card stays hidden */ }); }, [loadMe]);
+  const isAdmin = (me?.role ?? '').trim().toLowerCase() === 'admin';
 
   useEffect(() => {
     let alive = true;
@@ -359,6 +365,8 @@ export default function HomePage() {
           </div>
         </div>
       </div>
+
+      {isAdmin && <JobTimeCard days={days} />}
 
       {/* Recent documents */}
       <div className="card" style={{ marginTop: 20 }}>

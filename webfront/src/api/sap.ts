@@ -157,6 +157,31 @@ export const getSapLastPrice = (customerCode: string, materialCode: string) => {
   );
 };
 
+/* What this customer has bought before (GLC Material card, 15 Oct 2026): one row per material,
+   merged from SAP billing for this Sold-to (last 12 months) and Sales Orders posted through OCR.
+   Best-effort: an empty list when SAP is not configured, there is no history, or a source fails.
+   Backend: GET /api/sap/customer-materials (SapBillingClient.GetSoldMaterialsAsync +
+   SalesOrderPostRepository.SoldMaterialsAsync). */
+export interface SapCustomerMaterial {
+  materialCode: string;
+  /** SAP billing item text, or the document's own text when only OCR history has it. */
+  materialDescription: string;
+  /** How the customer's document described it on the last OCR-posted order (when there was one). */
+  docDescription?: string | null;
+  lastPrice?: number | null;
+  unit?: string | null;
+  /** dd/MM/yyyy */
+  lastDate?: string | null;
+  lastDocNo?: string | null;
+  times: number;
+  sources: ('SAP' | 'OCR')[];
+}
+
+export const getSapCustomerMaterials = (customerCode: string) =>
+  api.get<{ customer: string; count: number; results: SapCustomerMaterial[] }>(
+    '/api/sap/customer-materials?' + new URLSearchParams({ customer: customerCode }).toString(),
+  );
+
 /* Customer Payment Terms — GLC Sales Order flow: the payment terms SAP has on the customer master
    for the already-matched Sold-to, shown live in the Customer card so the person always sees SAP's
    own value instead of a blank "—". Source/priority mirrors the ZohoAccountPushJob account sync:
@@ -254,6 +279,8 @@ export const getSapLastSalesEmployee = (customerCode: string, materialCode: stri
 export interface SapSalesEmployee {
   personId: string;
   name?: string | null;
+  /** Ms_User.Division = this person's SAP Sales Group; null when not on file. */
+  salesGroup?: string | null;
   /** "db", "sap", or both — where this Person ID was found. */
   sources: string[];
   lastSalesOrder?: string | null;

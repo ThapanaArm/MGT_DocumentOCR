@@ -23,7 +23,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     SapClient sap, SapBusinessPartnerClient sapBp, AppConfig config, ICurrentUserAccessor currentUser,
     OcrJobRepository jobs, MgtOcr.Api.Services.DocumentIngestService ingest,
     SapProductClient sapProduct, SapPurchaseOrderClient sapPo, FileArchiveRepository archive, MgtOcr.Api.Services.GraphArchiveClient graph,
-    SalesOrderPostRepository soPosts, JobLogRepository jobLog, ILogger<DocumentsController> logger,
+    SalesOrderPostRepository soPosts, JobLogRepository jobLog, UserRepository users, ILogger<DocumentsController> logger,
     SapPostQueueRepository postQueue) : ControllerBase
 {
     // Who to stamp on CreatedBy / PerformedBy / PostedBy.
@@ -62,8 +62,21 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             ?? config.Companies.FirstOrDefault(c => string.Equals(c.Name, "GLC", StringComparison.OrdinalIgnoreCase));
     }
 
-    private async Task<string> SalesOrgAsync(Dictionary<string, object?> header)
+    // The company (SalesOrg) a Sales Order belongs to. The SalesOrg column stamped on the document
+    // when it was imported wins (12 Oct 2026): header.salesOrg is editable text and the current user
+    // may be an Admin of the other company, so either could map a GLC order with MGT's masters or
+    // learn into the wrong company's CustomerMaterial. Older documents without the column fall back
+    // to the header, then to the signed-in user, as before.
+    private async Task<string> SalesOrgAsync(Dictionary<string, object?> header, int? docId = null)
     {
+        // Separate MGT / GLC deployments (27 Oct 2026): a Sales Order on this site is always this
+        // site's company — see DeploymentCompany. The resolution below is kept for reference only.
+        if (DeploymentCompany.SalesOrg(config) is { Length: > 0 } site) return site;
+        if (docId is int id)
+        {
+            var stamped = (await repo.GetCompanyAsync(id) ?? "").Trim();
+            if (stamped is "1000" or "2000") return stamped;
+        }
         var org = header.GetStr("salesOrg");
         if (org is "1000" or "2000") return org;
         var user = await currentUser.RequireAsync();
@@ -95,10 +108,13 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     // the raw SalesOrg. A Sales Order that resolves to MGT never reaches this endpoint in practice
     // (that company posts through ZohoSalesOrderController instead), but this still asks rather
     // than assumes, so it stays correct if that ever changes.
-    private async Task<string> CompanyNameForPostAsync(string module, Dictionary<string, object?> header) =>
+    private async Task<string> CompanyNameForPostAsync(string module, Dictionary<string, object?> header, int? docId = null) =>
         module == "SO"
-            ? config.CompanyForSalesOrg(await SalesOrgAsync(header))?.Name ?? "GLC"
+            ? config.CompanyForSalesOrg(await SalesOrgAsync(header, docId))?.Name ?? "GLC"
             : "GLC";
+
+    private static int? DocIdOf(Dictionary<string, object?> doc) =>
+        int.TryParse(doc.Get("docId")?.ToString(), out var n) ? n : null;
 
     // Department gate for endpoints whose module is not a plain action argument (e.g. it
     // arrives inside the JSON body). DepartmentAccessFilter covers the rest of the controller.
@@ -187,6 +203,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         [FromForm(Name = "apDocCategory")] string? apDocCategory, [FromForm] IFormFile file, [FromForm] string? password,
         [FromForm(Name = "company")] string? company = null)
     {
+        var jobStartedAt = DateTime.Now; // Job Tasktime starts here: the upload reached the server
         var user = await ActorAsync();
         // AP = the single liability-recording (การตั้งหนี้) reading page: read the document first,
         // then route by PO number (poRef present -> Supplier Invoice / MIRO, still module "AP";
@@ -215,7 +232,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         // be validated up front against the pre-routing module before OCR decides AP vs II.
         var apCat = ValidateApDocCategory(mod == "AP" ? "AP" : mod, apDocCategory);
         var (docId, _, note) = await ingest.IngestAsync(mod, stored, fname, size, ocr_, apCat, user, password,
-            await ImportCompanyAsync(company));
+            mod == "SO" ? DeploymentCompany.SalesOrg(config) : await ImportCompanyAsync(company), jobStartedAt: jobStartedAt);
         var outDoc = await repo.GetDocumentAsync(docId);
         outDoc["ocrNote"] = note ?? "";
         return Ok(outDoc);
@@ -244,7 +261,8 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         var batchId = Guid.NewGuid();
         var result = new List<object>();
         // Resolved once: every file in one batch is filed under the same company.
-        var importCompany = await ImportCompanyAsync(company);
+        // A Sales Order is always filed under this site's company (DeploymentCompany).
+        var importCompany = mod == "SO" ? DeploymentCompany.SalesOrg(config) : await ImportCompanyAsync(company);
         foreach (var file in files)
         {
             var stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
@@ -292,7 +310,9 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         page = page < 1 ? 1 : page;
         pageSize = Math.Clamp(pageSize, 1, 200);
         var r = await repo.ListDocumentsPagedAsync(module, status, apDocCategory, search, dateFrom, dateTo,
-            invModule, page, pageSize, allowed, await CompanyScopeAsync());
+            invModule, page, pageSize, allowed,
+            // The Sales Order list shows this site's company only (DeploymentCompany); other modules unchanged.
+            string.Equals(module, "SO", StringComparison.OrdinalIgnoreCase) ? DeploymentCompany.SalesOrg(config) : await CompanyScopeAsync());
         return Ok(new
         {
             results = r.Rows,
@@ -357,7 +377,10 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     {
         var body = JsonBodyHelpers.Unwrap(rawBody);
         var doc = await repo.GetDocumentAsync(docId);
-        if (doc.GetStr("status") is "POSTED" or "PARTIAL") throw new HttpApiException(400, "This document has been posted (fully or partly) and cannot be edited");
+        if (doc.GetStr("status") is "POSTED" or "PARTIAL" or "POSTING") throw new HttpApiException(400, "This document has been posted (fully or partly), or is being sent right now, and cannot be edited");
+        // A split parent is read-only: its lines live in the child documents. Saving it used to flip
+        // it back to NEW, which let the whole order be mapped and sent a second time.
+        if (doc.GetStr("status") == "SPLIT") throw new HttpApiException(400, "This document was split into separate documents and cannot be edited");
         var module = doc.GetStr("module");
         var docT = DocumentTables.For(module).Doc;
         var header = body.Get("header") as Dictionary<string, object?> ?? (Dictionary<string, object?>)doc["header"]!;
@@ -365,7 +388,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         if (body.Get("lines") is List<object?> linesRaw)
             await repo.SaveLinesAsync(module, docId, linesRaw.OfType<Dictionary<string, object?>>().ToList());
         await using (var conn = await GetDbAsync())
-            await conn.ExecuteAsync($"UPDATE {docT} SET Status=CASE WHEN Status='POSTED' THEN Status ELSE 'NEW' END, MapStatus=NULL, MapMessage=NULL WHERE DocId=@docId", new { docId });
+            await conn.ExecuteAsync($"UPDATE {docT} SET Status=CASE WHEN Status IN ('POSTED','SPLIT') THEN Status ELSE 'NEW' END, MapStatus=NULL, MapMessage=NULL WHERE DocId=@docId", new { docId });
         await repo.LogAuditAsync(docId, module, "UPDATE", await ActorAsync(),
             detail: "Edited document data", fileName: doc.GetStr("fileName"));
         return Ok(await repo.GetDocumentAsync(docId));
@@ -644,12 +667,19 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     [HttpDelete("api/documents/{docId:int}")]
     public async Task<IActionResult> DeleteDocument(int docId)
     {
-        var user = await ActorAsync();
+        var actor = await currentUser.RequireAsync();
+        var user = actor.AuditName;
         var doc = await repo.GetDocumentAsync(docId);
-        // Already in SAP/Zoho (all or some of its Sales Orders) -> never delete; the list hides the
-        // checkbox, this stops a direct API call too.
-        if (doc.GetStr("status") is "POSTED" or "PARTIAL")
-            throw new HttpApiException(400, "This document has been posted (fully or partly) and cannot be deleted");
+        var docStatus = doc.GetStr("status");
+        // Being sent right now -> never (the send would record its result on a deleted document).
+        if (docStatus == "POSTING")
+            throw new HttpApiException(400, "This document is being sent right now — wait for it to finish, then try again");
+        // Already in SAP/Zoho (all or some of its Sales Orders): only an Admin may delete it (15 Oct
+        // 2026), e.g. to clear test data. The list hides the checkbox for everyone else; this stops a
+        // direct API call too. Deleting here does NOT cancel anything in SAP / Zoho.
+        var wasPosted = docStatus is "POSTED" or "PARTIAL";
+        if (wasPosted && !CompanyScope.SeesEveryCompany(actor))
+            throw new HttpApiException(403, "This document has been posted (fully or partly) — only an Admin can delete it");
         var module = doc.GetStr("module");
         var docT = DocumentTables.For(module).Doc;
         dynamic? fileRow = await GetDbInstance().QueryOneAsync($"SELECT StoredPath FROM {docT} WHERE DocId=@docId", new { docId });
@@ -660,7 +690,10 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         var fileNote = config.CleansModule(module) ? await DeleteStoredFileIfUnusedAsync(storedPath) : "";
         var header = (Dictionary<string, object?>)doc["header"]!;
         var docNo = header.GetStr("invoiceNo") is { Length: > 0 } inv ? inv : header.GetStr("poNo");
-        await repo.LogAuditAsync(docId, module, "DELETE", user, detail: "Deleted document" + fileNote, docNo: docNo, fileName: doc.GetStr("fileName"));
+        var postedNote = wasPosted
+            ? $" — it had been posted ({(doc.GetStr("sapDocNo") is { Length: > 0 } posted ? posted : docStatus)}); the document in SAP/Zoho was NOT deleted"
+            : "";
+        await repo.LogAuditAsync(docId, module, "DELETE", user, detail: "Deleted document" + fileNote + postedNote, docNo: docNo, fileName: doc.GetStr("fileName"));
         return Ok(new { ok = true });
     }
 
@@ -701,7 +734,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         object? fileExpiredAt = row.FileExpiredAt;
 
         var doc = await repo.GetDocumentAsync(docId);
-        if (doc.GetStr("status") is "POSTED" or "PARTIAL") throw new HttpApiException(400, "This document has been posted (fully or partly) and cannot be re-read");
+        if (doc.GetStr("status") is "POSTED" or "PARTIAL" or "POSTING") throw new HttpApiException(400, "This document has been posted (fully or partly), or is being sent right now, and cannot be re-read");
         if (doc.GetStr("status") == "SPLIT") throw new HttpApiException(400, "This document has already been split and cannot be re-read (kept as a reference for the split documents)");
         if (doc.Get("sourceDocId") != null) throw new HttpApiException(400, "This document is a split part of another document and cannot be re-read (it would overwrite the split lines with the full document data)");
         if (fileExpiredAt is DateTime) throw new HttpApiException(400, MissingFileMessage(fileExpiredAt) + " - it cannot be re-read");
@@ -723,6 +756,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             : "gemini";
         // Re-reading follows the company the document is already filed under, so a second read
         // never silently swaps MGT's rules for GLC's (CompanyRules treats an empty value as GLC).
+        var docCompany = await repo.GetCompanyAsync(docId);
         // ocr.JobLog: a re-read is a NEW run of this document, so it opens its own JobNumber —
         // the first read's tokens are already billed and must not be merged into this one.
         var reocrJobNumber = await jobLog.NextJobNumberAsync();
@@ -731,7 +765,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         ParsedDocument pd;
         try
         {
-            pd = await ocr.ExtractAsync(storedPath, module, reocrEngine, reocrPw, await repo.GetCompanyAsync(docId),
+            pd = await ocr.ExtractAsync(storedPath, module, reocrEngine, reocrPw, docCompany,
                 doc.GetStr("apDocCategory"));
         }
         catch (Exception ex)
@@ -781,7 +815,8 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
                 whtAmount = dn.Get("WhtAmount"), totalAmount = dn.Get("TotalAmount"), docId,
             });
         }
-        await repo.SaveLinesAsync(module, docId, pd.Lines.Select(l => ExtConversion.ToLineDict(l, pd.Header.GetValueOrDefault("deliveryDate") as string)).ToList());
+        var ocrItemNote = ExtConversion.OcrPrefillsItemNote(module, config, docCompany);
+        await repo.SaveLinesAsync(module, docId, pd.Lines.Select(l => ExtConversion.ToLineDict(l, pd.Header.GetValueOrDefault("deliveryDate") as string, ocrItemNote)).ToList());
         await repo.LogAuditAsync(docId, module, "REOCR", await ActorAsync(),
             detail: "Re-read document", fileName: fileNameOnDisk, ocrProvider: pd.Provider);
         var outDoc = await repo.GetDocumentAsync(docId);
@@ -818,7 +853,8 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         var user = await ActorAsync();
         if (message.Length == 0 && imageDataUrl.Length == 0) throw new HttpApiException(400, "Please type a message or attach an image");
         var doc = await repo.GetDocumentAsync(docId);
-        if (doc.GetStr("status") is "POSTED" or "PARTIAL") throw new HttpApiException(400, "This document has been posted (fully or partly) and cannot be edited");
+        if (doc.GetStr("status") is "POSTED" or "PARTIAL" or "POSTING") throw new HttpApiException(400, "This document has been posted (fully or partly), or is being sent right now, and cannot be edited");
+        if (doc.GetStr("status") == "SPLIT") throw new HttpApiException(400, "This document was split into separate documents and cannot be edited");
 
         string? imageB64 = null; var imageMediaType = "image/png"; byte[]? imageBytes = null;
         if (imageDataUrl.Length > 0)
@@ -851,13 +887,14 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         var authorizationGroup = "";
         if (module == "SO")
         {
-            var salesOrg = await SalesOrgAsync(header);
+            var salesOrg = await SalesOrgAsync(header, docId);
             var companyCode = CompanyCodeForSalesOrg(salesOrg);
             authorizationGroup = AuthorizationGroupForSalesOrg(salesOrg);
             var partnerCode = doc.GetStr("partnerCode");
             var masterData = MasterSchema.ForSalesOrg(await masters.LoadForMappingAsync(module, companyCode), companyCode);
-            var currentUserInfo = await currentUser.RequireAsync();
-            isGlc = currentUserInfo.PrimaryCompany?.CompanyCode != "MGT";
+            // GLC vs MGT follows the DOCUMENT's company, not the person chatting (an Admin of one
+            // company working the other company's order used to get the wrong lookups / actions).
+            isGlc = IsGlcSalesOrg(salesOrg);
 
             // Own CustomerMaterial rows first, then other customers' (same cross-customer set the
             // Material dropdown searches) -- covers the SAP send path (map.lines[i].code) directly.
@@ -989,7 +1026,9 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             var enableThisRound = lookupsEnabled && iter < maxRounds - 1;
             (result, chatFixErr) = await ChatFix.ChatFixDocumentAsync(module, header, lines, history, promptMessage,
                 imageB64, imageMediaType, provider, config, materialOptions, shipToOptions, accountOptions,
-                enableThisRound, lookupLog.ToString(), actionsEnabled);
+                enableThisRound, lookupLog.ToString(), actionsEnabled,
+                // GLC: Item Note 1 is the CS's own entry -- the AI keeps its hands off it.
+                protectItemNote1: module == "SO" && isGlc);
             if (result == null)
             {
                 var (label, envVar) = ChatFixProviderLabel[provider];
@@ -1068,7 +1107,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             await repo.SaveLinesAsync(module, docId, result.Lines);
             var docT = DocumentTables.For(module).Doc;
             await using (var conn = await GetDbAsync())
-                await conn.ExecuteAsync($"UPDATE {docT} SET Status=CASE WHEN Status='POSTED' THEN Status ELSE 'NEW' END, MapStatus=NULL, MapMessage=NULL WHERE DocId=@docId", new { docId });
+                await conn.ExecuteAsync($"UPDATE {docT} SET Status=CASE WHEN Status IN ('POSTED','SPLIT') THEN Status ELSE 'NEW' END, MapStatus=NULL, MapMessage=NULL WHERE DocId=@docId", new { docId });
             await repo.LogAuditAsync(docId, module, "UPDATE", user, detail: "Edited via AI chat: " + message[..Math.Min(200, message.Length)], fileName: doc.GetStr("fileName"));
         }
         var outDoc = await repo.GetDocumentAsync(docId);
@@ -1352,13 +1391,16 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         // A posted (or split-parent) document is read-only: mapping may still run so the page can
         // show the result, but nothing is written back - otherwise reopening it after posting would
         // silently replace the customer / ship-to / materials that were actually sent.
-        var locked = doc.GetStr("status") is "POSTED" or "SPLIT" or "PARTIAL";
+        var locked = doc.GetStr("status") is "POSTED" or "SPLIT" or "PARTIAL" or "POSTING";
 
         // Keep the customer / ship-to saved on the document (the person's earlier pick) unless this
         // call picks a new one or the header text itself was edited. Without this, a reload re-ran
         // the automatic match and, when two customer codes share one Tax ID, jumped back to the
         // first code.
-        var headerEdited = newHeader != null && !DictEquals(newHeader, oldHeader);
+        // The per-SO-Group ship-to picks (header.soGroupShipTos) and the GLC VAT mode
+        // (header.vatMode) are not document text: choosing one must not count as "the header was
+        // edited", or the saved customer / ship-to would be dropped and re-matched automatically.
+        var headerEdited = newHeader != null && !DictEquals(WithoutGroupShipTos(newHeader), WithoutGroupShipTos(oldHeader));
         if (module == "SO" && (locked || !headerEdited))
         {
             if (manual.Get("header") is not Dictionary<string, object?> mh) { mh = new(); manual["header"] = mh; }
@@ -1379,8 +1421,29 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
 
         if (module == "SO" && !locked)
         {
-            header["salesOrg"] = await SalesOrgAsync(header);
+            header["salesOrg"] = await SalesOrgAsync(header, docId);
             await repo.UpdateHeaderAsync(docId, module, header);
+        }
+
+        // Keep each line's earlier material pick (12 Oct 2026). The page starts every visit with no
+        // manual picks, so a reload re-ran the automatic match and silently replaced a material the
+        // person had corrected. A line whose stored result was a manual pick ("manual") and whose own
+        // text (code / description) is unchanged passes that pick on as "saved:{itemNo}"; the engine
+        // keeps it unless the person picks again (see MappingEngine.RunMapping).
+        if (module == "SO")
+        {
+            if (manual.Get("lines") is not Dictionary<string, object?> ml) { ml = new(); manual["lines"] = ml; }
+            var oldByItem = oldLines
+                .GroupBy(l => l.Get("itemNo")?.ToString() ?? "")
+                .ToDictionary(g => g.Key, g => g.First());
+            foreach (var l in lines)
+            {
+                var itemNo = l.Get("itemNo")?.ToString() ?? "";
+                if (itemNo.Length == 0 || !oldByItem.TryGetValue(itemNo, out var old)) continue;
+                if (old.GetStr("mapStatus") != "manual" || old.GetStr("materialCode").Length == 0) continue;
+                if (old.GetStr("extCode") != l.GetStr("extCode") || old.GetStr("desc") != l.GetStr("desc")) continue;
+                ml["saved:" + itemNo] = old.GetStr("materialCode");
+            }
         }
         var companyCode = module == "SO" ? CompanyCodeForSalesOrg(header.GetStr("salesOrg")) : null;
         var masterData = await masters.LoadForMappingAsync(module, companyCode);
@@ -1437,7 +1500,9 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
                     WHERE DocId=@docId AND ItemNo=@itemNo
                     """, new
                 {
-                    materialCode = r.GetStr("code") is { Length: > 0 } c ? c : null, status = r.Get("status"), method = r.Get("method"),
+                    materialCode = r.GetStr("code") is { Length: > 0 } c ? c : null, status = r.Get("status"),
+                    // MapMethod is nvarchar(100): cut a long explanation instead of failing the whole save.
+                    method = r.GetStr("method") is { Length: > 100 } longMethod ? longMethod[..100] : r.Get("method"),
                     sapQty = uStatus is "ok" or "convert" ? u.Get("sapQty") : null, sapUom = u.GetStr("sapUom") is { Length: > 0 } su ? su : null,
                     uomFactor = uStatus is "ok" or "convert" ? u.Get("factor") : null,
                     sapMaterialCode = r.GetStr("sapCode") is { Length: > 0 } sc ? sc : null, sapUomIso = u.GetStr("iso") is { Length: > 0 } iso ? iso : null,
@@ -1483,15 +1548,30 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         await using var conn = await GetDbAsync();
         if (doc.GetStr("module") == "SO")
         {
-            var salesOrg = CompanyCodeForSalesOrg(await SalesOrgAsync((Dictionary<string, object?>)doc["header"]!));
+            // Learn only for this document's own customer -- the code comes from the request body.
+            if (doc.GetStr("partnerCode") is { Length: > 0 } docPartner && docPartner != partner)
+                throw new HttpApiException(400, "The customer doesn't match this document's customer — run Data Mapping again first");
+            var salesOrg = CompanyCodeForSalesOrg(await SalesOrgAsync((Dictionary<string, object?>)doc["header"]!, docId));
+            var code = (extCode?.ToString() ?? "").Trim();
+            var name = (extDesc?.ToString() ?? "").Trim();
+            if (code.Length == 0 && name.Length == 0)
+                throw new HttpApiException(400, "This line has neither a customer item code nor a description to remember");
+            // A PO without customer item codes is remembered by its DESCRIPTION. Keying it on the
+            // empty code made every such learn overwrite the same row, so the customer kept only the
+            // last item learned. The stored name is kept when this line has none.
             await conn.ExecuteAsync("""
-                IF EXISTS(SELECT 1 FROM ocr.CustomerMaterial WHERE SalesOrg=@salesOrg AND CustomerCode=@partner AND MaterialCodeCode=@extCode)
-                  UPDATE ocr.CustomerMaterial SET MaterialCodeName=@extDesc, MaterialCodeSAP=@mat, Isactive=1, UpdatedAt=SYSDATETIME()
-                  WHERE SalesOrg=@salesOrg AND CustomerCode=@partner AND MaterialCodeCode=@extCode
+                IF EXISTS(SELECT 1 FROM ocr.CustomerMaterial WHERE SalesOrg=@salesOrg AND CustomerCode=@partner
+                          AND ((@code<>'' AND MaterialCodeCode=@code)
+                            OR (@code='' AND ISNULL(MaterialCodeCode,'')='' AND MaterialCodeName=@name)))
+                  UPDATE ocr.CustomerMaterial SET MaterialCodeName=COALESCE(NULLIF(@name,''), MaterialCodeName),
+                         MaterialCodeSAP=@mat, Isactive=1, UpdatedAt=SYSDATETIME()
+                  WHERE SalesOrg=@salesOrg AND CustomerCode=@partner
+                    AND ((@code<>'' AND MaterialCodeCode=@code)
+                      OR (@code='' AND ISNULL(MaterialCodeCode,'')='' AND MaterialCodeName=@name))
                 ELSE
                   INSERT ocr.CustomerMaterial(SalesOrg,CustomerCode,MaterialCodeCode,MaterialCodeName,MaterialCodeSAP,Isactive)
-                  VALUES(@salesOrg,@partner,@extCode,@extDesc,@mat,1)
-                """, new { salesOrg, partner, extCode, extDesc, mat });
+                  VALUES(@salesOrg,@partner,@code,NULLIF(@name,''),@mat,1)
+                """, new { salesOrg, partner, code, name, mat });
         }
         else
             await conn.ExecuteAsync("""
@@ -1524,9 +1604,15 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             if (module is not ("AP" or "II"))
                 throw new HttpApiException(400, "Splitting by vendor is only available for Supplier Invoice / Incoming Invoice documents");
         }
-        else if (module != "SO")
+        else
         {
-            throw new HttpApiException(400, "Split is only available for Sales Order documents");
+            // Sales Orders are no longer split into child documents (12 Oct 2026): the CS sets an
+            // "SO Group" per line instead, and Send creates one Sales Order per SO Group + delivery
+            // date from this same document (SoDeliveryGroups) -- one way to cut an order, so a line
+            // can never end up in two Sales Orders.
+            throw new HttpApiException(400, module == "SO"
+                ? "Splitting a Sales Order into separate documents is no longer used — set the SO Group on each line instead; Send creates one Sales Order per SO Group and delivery date"
+                : "Split is only available for Sales Order documents");
         }
         if (doc.GetStr("status") is "POSTED" or "SPLIT" or "PARTIAL") throw new HttpApiException(400, "This document has been posted (fully or partly) or already split");
         if (doc.Get("sourceDocId") != null) throw new HttpApiException(400, "A document split from another cannot be split again");
@@ -1668,13 +1754,13 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         var module = doc.GetStr("module");
         var header = (Dictionary<string, object?>)doc["header"]!;
         var companyCode = module == "SO"
-            ? CompanyCodeForSalesOrg(await SalesOrgAsync(header))
+            ? CompanyCodeForSalesOrg(await SalesOrgAsync(header, DocIdOf(doc)))
             : null;
         var masterData = await masters.LoadForMappingAsync(module, companyCode);
         var lines = (List<Dictionary<string, object?>>)doc["lines"]!;
         if (module == "SO")
         {
-            header["salesOrg"] = await SalesOrgAsync(header);
+            header["salesOrg"] = await SalesOrgAsync(header, DocIdOf(doc));
             masterData = MasterSchema.ForSalesOrg(masterData, CompanyCodeForSalesOrg(header.GetStr("salesOrg")));
         }
         var res = MappingEngine.RunMapping(module, header, lines, masterData, manual ?? StoredManual(doc), companyCode,
@@ -1818,7 +1904,8 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             return (TestReference(split, doc), res);
         }
 
-        var payload = SapPayloadBuilder.BuildPayload(config, module, header, lines, res, pm, source);
+        var payload = SapPayloadBuilder.BuildPayload(config, module, header, lines, res, pm, source,
+            module == "SO" ? await DivisionsByPersonIdAsync() : null);
         return ([payload], res);
     }
 
@@ -2201,6 +2288,9 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     {
         var body = JsonBodyHelpers.Unwrap(rawBody ?? new());
         var doc = await repo.GetDocumentAsync(docId);
+        // Sales Orders are sent per SO Group + delivery date (post-so / Zoho); this single-payload
+        // path would skip that and could race with it.
+        if (doc.GetStr("module") == "SO") throw new HttpApiException(400, "Sales Orders are sent from Step 3 (one Sales Order per group), not from this endpoint");
         if (doc.GetStr("status") == "POSTED") throw new HttpApiException(400, $"This document has already been posted to SAP ({doc.GetStr("sapDocNo")})");
         if (doc.GetStr("status") != "MAPPED" || doc.GetStr("mapStatus") != "PASS") throw new HttpApiException(400, "Mapping must pass before posting to SAP");
         var (payloads, res) = await PayloadForAsync(doc, forPost: true);
@@ -2221,7 +2311,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
                 + "— ถ้าส่งตอนนี้ระบบจะสร้างเลขเอกสารปลอมที่ไม่มีอยู่จริงใน SAP");
         }
         var docT = DocumentTables.For(module).Doc;
-        var companyCode = await CompanyNameForPostAsync(module, (Dictionary<string, object?>)doc["header"]!);
+        var companyCode = await CompanyNameForPostAsync(module, (Dictionary<string, object?>)doc["header"]!, docId);
         // One POST per supplier, in order, each logged on its own. They are NOT one transaction in
         // SAP — a bundle whose second supplier is refused leaves the first one posted, which is
         // why every attempt gets its own PostLog row and the message below names what went where.
@@ -2458,10 +2548,11 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         Dictionary<string, object?> Res, Dictionary<string, object?>? Pm, Dictionary<string, object?> Source)> SoMappingAsync(Dictionary<string, object?> doc)
     {
         var header = (Dictionary<string, object?>)doc["header"]!;
-        header["salesOrg"] = await SalesOrgAsync(header);
+        header["salesOrg"] = await SalesOrgAsync(header, DocIdOf(doc));
         var companyCode = CompanyCodeForSalesOrg(header.GetStr("salesOrg"));
         var masterData = MasterSchema.ForSalesOrg(await masters.LoadForMappingAsync("SO", companyCode), companyCode);
         var lines = (List<Dictionary<string, object?>>)doc["lines"]!;
+        await DivisionsByPersonIdAsync(); // loaded here so the sync SoGroupPayload can use it
         var res = MappingEngine.RunMapping("SO", header, lines, masterData, StoredManual(doc), companyCode,
             IsGlcSalesOrg(header.GetStr("salesOrg")));
         var custCode = ((Dictionary<string, object?>)res["header"]!).Get("customer") is Dictionary<string, object?> cr ? cr.GetStr("code") : "";
@@ -2475,18 +2566,45 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
 
     // The SAP payload of ONE delivery-date group: the group's lines + their own mapping rows; the
     // header date is set to the group's date (the builder prefers the lines' common date anyway).
+    // freight = this Sales Order's share of the document's shipping charge (SoCharges.FreightByGroup).
     private Dictionary<string, object?> SoGroupPayload(SoGroup g, Dictionary<string, object?> header,
         List<Dictionary<string, object?>> lines, Dictionary<string, object?> res, Dictionary<string, object?>? pm,
-        Dictionary<string, object?> source)
+        Dictionary<string, object?> source, double freight = 0)
     {
         var resLines = (List<Dictionary<string, object?>>)res["lines"]!;
         var gHeader = new Dictionary<string, object?>(header);
-        if (g.Key.Length > 0) gHeader["deliveryDate"] = g.Key;
+        if (g.Date.Length > 0) gHeader["deliveryDate"] = g.Date;
+        // Ship-to chosen for this SO Group (header.soGroupShipTos) replaces the document's mapped
+        // ship-to for this Sales Order only -- SapPayloadBuilder sends it as the SH partner.
+        var gResHeader = new Dictionary<string, object?>((Dictionary<string, object?>)res["header"]!);
+        if (SoDeliveryGroups.ShipToFor(header, g.SoGroupNo) is { } groupShipTo
+            && groupShipTo.GetStr("code").Trim() is { Length: > 0 } groupShipToCode)
+        {
+            gResHeader["shipTo"] = new Dictionary<string, object?>
+            {
+                ["status"] = "manual", ["code"] = groupShipToCode, ["sapCode"] = groupShipToCode,
+                ["text"] = groupShipTo.GetStr("name"), ["method"] = $"SO Group {g.SoGroupNo} ship-to",
+            };
+        }
         var gRes = new Dictionary<string, object?>(res)
         {
+            ["header"] = gResHeader,
             ["lines"] = g.Indexes.Select(i => resLines[i]).ToList(),
         };
-        return SapPayloadBuilder.BuildPayload(config, "SO", gHeader, g.Indexes.Select(i => lines[i]).ToList(), gRes, pm, source);
+        return SapPayloadBuilder.BuildPayload(config, "SO", gHeader, g.Indexes.Select(i => lines[i]).ToList(), gRes, pm, source,
+            _divisionsByPersonId, freight);
+    }
+
+    // PersonID -> Ms_User.Division, for the Sales Order header SalesGroup (Division of the first
+    // line's Sales Employee — see SapPayloadBuilder). Loaded once per request. Best-effort: if the
+    // user database can't be read, the payload just falls back to header.salesGroup as before.
+    private IReadOnlyDictionary<string, string>? _divisionsByPersonId;
+    private async Task<IReadOnlyDictionary<string, string>?> DivisionsByPersonIdAsync()
+    {
+        if (_divisionsByPersonId != null) return _divisionsByPersonId;
+        try { _divisionsByPersonId = await users.GetDivisionsByPersonIdAsync(); }
+        catch (Exception ex) { logger.LogWarning(ex, "Could not load Ms_User divisions for Sales Group"); }
+        return _divisionsByPersonId;
     }
 
     // GET /api/documents/{id}/so-posts -- the delivery-date groups of this Sales Order and the send
@@ -2497,7 +2615,10 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     {
         var doc = await repo.GetDocumentAsync(docId);
         if (doc.GetStr("module") != "SO") throw new HttpApiException(400, "Only Sales Order documents have delivery-date groups");
-        var groups = SoDeliveryGroups.Build((Dictionary<string, object?>)doc["header"]!, (List<Dictionary<string, object?>>)doc["lines"]!);
+        var docHeader = (Dictionary<string, object?>)doc["header"]!;
+        // GLC leaves the freight line out of the groups (it is not an item of any Sales Order).
+        var glc = IsGlcSalesOrg(await SalesOrgAsync(docHeader, docId));
+        var groups = SoDeliveryGroups.Build(docHeader, (List<Dictionary<string, object?>>)doc["lines"]!, skipCharges: glc);
         List<SoGroupState> states;
         try
         {
@@ -2522,11 +2643,19 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         var doc = await repo.GetDocumentAsync(docId);
         if (doc.GetStr("module") != "SO") throw new HttpApiException(400, "Only Sales Order documents");
         var (header, lines, res, pm, source) = await SoMappingAsync(doc);
-        var groups = SoDeliveryGroups.Build(header, lines);
+        var glc = IsGlcSalesOrg(header.GetStr("salesOrg"));
+        var groups = SoDeliveryGroups.Build(header, lines, skipCharges: glc);
+        var freight = glc ? SoCharges.FreightByGroup(header, lines, groups) : new Dictionary<string, double>();
         return Ok(new
         {
             pass = res.Get("pass"), errors = res["errors"],
-            payloads = groups.Select(g => new { key = g.Key, itemNos = g.ItemNos, payload = SoGroupPayload(g, header, lines, res, pm, source) }),
+            freightTotal = glc ? SoCharges.TotalFreight(lines) : 0,
+            payloads = groups.Select(g => new
+            {
+                key = g.Key, soGroup = g.SoGroupNo, deliveryDate = g.Date, itemNos = g.ItemNos,
+                freight = freight.GetValueOrDefault(g.Key),
+                payload = SoGroupPayload(g, header, lines, res, pm, source, freight.GetValueOrDefault(g.Key)),
+            }),
         });
     }
 
@@ -2543,46 +2672,98 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         if (status == "SPLIT") throw new HttpApiException(400, "This document was split into separate documents — send those instead");
         if (status != "PARTIAL" && (status != "MAPPED" || doc.GetStr("mapStatus") != "PASS"))
             throw new HttpApiException(400, "Mapping must pass before posting to SAP");
+        // Only GLC Sales Orders go to SAP; MGT's go to Zoho CRM (ZohoSalesOrderController).
+        if (!IsGlcSalesOrg(await SalesOrgAsync((Dictionary<string, object?>)doc["header"]!, docId)))
+            throw new HttpApiException(400, "This Sales Order belongs to MGT — it is sent to Zoho CRM, not SAP");
 
         var (header, lines, res, pm, source) = await SoMappingAsync(doc);
         if (res.Get("pass") is not true)
             throw new HttpApiException(400, $"Mapping has not passed — {((List<Dictionary<string, object?>>)res["errors"]!).Count} missing item(s)");
 
+        // GLC: every line carries its own Sales Employee (SAP item field YY1_SDSalesEmployeeI_SDI),
+        // and the header Sales Group comes from the first line's -- so each line must have one.
+        var noSalesEmployee = lines
+            .Where(l => l.GetStr("extCode") is not ("WHT" or "VAT")
+                        && !SoCharges.IsFreight(l) // a freight charge is not an item, it has no Sales Employee
+                        && (l.Get("extra") as Dictionary<string, object?>).GetStr("salesEmployee").Trim().Length == 0)
+            .Select(l => l.Get("itemNo")?.ToString() ?? "?").ToList();
+        if (noSalesEmployee.Count > 0)
+            throw new HttpApiException(400, $"Pick the Sales Employee for item {string.Join(", ", noSalesEmployee)} — it is required for SAP");
+
         var user = await ActorAsync();
-        var companyCode = await CompanyNameForPostAsync("SO", header);
-        var salesOrg = await OwnCompanyAsync() is { Length: > 0 } own ? own : null;
-        var groups = SoDeliveryGroups.Build(header, lines);
-        var states = (await soPosts.GroupStatesAsync(docId, groups)).ToDictionary(x => x.Key);
-        var results = new List<object>();
-        var anySimulated = false;
-        foreach (var g in groups)
+        var companyCode = await CompanyNameForPostAsync("SO", header, docId);
+        var salesOrg = DeploymentCompany.SalesOrg(config); // this site's company (DeploymentCompany)
+        var groups = SoDeliveryGroups.Build(header, lines, skipCharges: true); // this endpoint is GLC only
+        var freightByGroup = SoCharges.FreightByGroup(header, lines, groups);
+        if (groups.Count == 0)
+            throw new HttpApiException(400, "This document has no items to send — only a freight charge");
+
+        // One send at a time per document (double click, second tab): see TryClaimAsync.
+        var previousStatus = await soPosts.TryClaimAsync(docId)
+            ?? throw new HttpApiException(409, "This Sales Order is being sent right now — wait a moment, then refresh the page");
+        try
         {
-            if (states.TryGetValue(g.Key, out var done) && done.Posted)
+            var states = (await soPosts.GroupStatesAsync(docId, groups)).ToDictionary(x => x.Key);
+            var alreadyRecorded = states.Values.Where(s => s.Posted && !string.IsNullOrEmpty(s.DocNo)).Select(s => s.DocNo!).ToHashSet();
+            var results = new List<object>();
+            foreach (var g in groups)
             {
-                results.Add(new { key = g.Key, itemNos = g.ItemNos, success = true, skipped = true, docNo = done.DocNo, message = "Already posted" });
-                continue;
+                var hasState = states.TryGetValue(g.Key, out var done);
+                if (hasState && done!.Posted)
+                {
+                    results.Add(new { key = g.Key, itemNos = g.ItemNos, success = true, skipped = true, docNo = done.DocNo, message = "Already posted" });
+                    continue;
+                }
+                var payload = SoGroupPayload(g, header, lines, res, pm, source, freightByGroup.GetValueOrDefault(g.Key));
+                SapPostResult r;
+
+                // The previous attempt of this group failed. A timeout can fail AFTER SAP created the
+                // order, so look for it before sending again (same sold-to, customer PO, delivery date
+                // and materials, created in the last 7 days, not recorded on this document yet).
+                string? existing = null;
+                var po = payload.GetStr("PurchaseOrderByCustomer");
+                if (hasState && !string.IsNullOrEmpty(done!.Error) && po.Trim() is { Length: > 0 } and not "-")
+                {
+                    var materials = (payload.Get("to_Item") as IEnumerable<object>)?
+                        .OfType<Dictionary<string, object?>>().Select(i => i.GetStr("Material")).ToList() ?? [];
+                    existing = await HttpContext.RequestServices.GetRequiredService<SapSalesOrderClient>()
+                        .FindExistingOrderAsync(payload.GetStr("SoldToParty"), po, g.Date.Length > 0 ? g.Date : null,
+                            materials, DateTime.UtcNow.AddDays(-7), alreadyRecorded);
+                }
+                if (existing is not null)
+                {
+                    r = new SapPostResult(true, false, existing, SapPayloadBuilder.SoEndpoint,
+                        $"Already in SAP as {existing} (created by an earlier attempt that reported an error) — not sent again");
+                }
+                else
+                {
+                    try
+                    {
+                        r = await sap.PostAsync("SO", payload);
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.LogError(ex,
+                            "SAP Sales Order post failed for document {DocId}, group {Group}, items {ItemNos}",
+                            docId, g.Key, string.Join(",", g.ItemNos));
+                        r = new SapPostResult(false, false, "", SapPayloadBuilder.SoEndpoint, ex.Message);
+                    }
+                }
+                if (r.Success && !string.IsNullOrEmpty(r.SapDocNo)) alreadyRecorded.Add(r.SapDocNo);
+                await soPosts.RecordAsync(docId, "SO", g.ItemNos, r.Success, r.SapDocNo, r.Message,
+                    r.Endpoint, JsonSerializer.Serialize(payload, PyJson.Options), user, salesOrg);
+                results.Add(new { key = g.Key, itemNos = g.ItemNos, success = r.Success, skipped = false, docNo = r.SapDocNo, message = r.Message, simulated = false });
             }
-            var payload = SoGroupPayload(g, header, lines, res, pm, source);
-            SapPostResult r;
-            try
-            {
-                r = await sap.PostAsync("SO", payload);
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(ex,
-                    "SAP Sales Order post failed for document {DocId}, delivery-date group {DeliveryDate}, items {ItemNos}",
-                    docId, g.Key, string.Join(",", g.ItemNos));
-                r = new SapPostResult(false, false, "", SapPayloadBuilder.SoEndpoint, ex.Message);
-            }
-            anySimulated |= r.Simulated;
-            await soPosts.RecordAsync(docId, "SO", g.ItemNos, r.Success, r.SapDocNo, r.Message,
-                r.Endpoint, JsonSerializer.Serialize(payload, PyJson.Options), user, salesOrg);
-            results.Add(new { key = g.Key, itemNos = g.ItemNos, success = r.Success, skipped = false, docNo = r.SapDocNo, message = r.Message, simulated = r.Simulated });
+            var newStatus = await soPosts.FinalizeAsync(docId, groups, companyCode, user);
+            // Release before reading the document back so the response never shows POSTING.
+            await soPosts.ReleaseAsync(docId, previousStatus);
+            if (newStatus == "POSTED") await EnqueueSoArchiveAsync(docId, doc, header, companyCode);
+            return Ok(new { status = newStatus, simulated = false, results, document = await repo.GetDocumentAsync(docId) });
         }
-        var newStatus = await soPosts.FinalizeAsync(docId, groups, companyCode, user);
-        if (newStatus == "POSTED" && !anySimulated) await EnqueueSoArchiveAsync(docId, doc, header, companyCode);
-        return Ok(new { status = newStatus, simulated = anySimulated, results, document = await repo.GetDocumentAsync(docId) });
+        finally
+        {
+            await soPosts.ReleaseAsync(docId, previousStatus);
+        }
     }
 
     // Queue the source file for SharePoint once every group is posted (same folder rule as PostDocument).
@@ -2615,6 +2796,18 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
 
     private static bool DictEquals(Dictionary<string, object?> a, Dictionary<string, object?> b) =>
         JsonSerializer.Serialize(a) == JsonSerializer.Serialize(b);
+    private static Dictionary<string, object?> WithoutGroupShipTos(Dictionary<string, object?> h)
+    {
+        var copy = new Dictionary<string, object?>(h);
+        copy.Remove("soGroupShipTos");
+        copy.Remove("vatMode");
+        // Picking / changing the Requested Delivery Date isn't a customer or ship-to edit either -
+        // it must not drop the customer / ship-to the person already chose (15 Oct 2026).
+        copy.Remove("deliveryDate");
+        copy.Remove("poDate");
+        copy.Remove("soGroupFreight"); // Step 3 freight split per Sales Order
+        return copy;
+    }
     private static bool ListEquals(List<object?> a, List<Dictionary<string, object?>> b) =>
         JsonSerializer.Serialize(a) == JsonSerializer.Serialize(b);
 }

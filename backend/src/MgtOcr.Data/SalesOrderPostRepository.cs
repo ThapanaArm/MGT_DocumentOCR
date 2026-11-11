@@ -7,6 +7,10 @@ namespace MgtOcr.Data;
 /// <summary>Post state of one Sales Order line (sql/31_so_post_group.sql columns).</summary>
 public record SoLinePostState(string ItemNo, string? PostedSoNo, DateTime? PostedAt, string? PostError);
 
+/// <summary>A material this customer was sent on a Sales Order posted through OCR (latest post wins).</summary>
+public record OcrSoldMaterial(string MaterialCode, string? DocDescription, decimal? UnitPrice, string? Unit,
+    DateTime? PostedAt, string? PostedSoNo, int Times);
+
 /// <summary>Send state of one delivery-date group = one SAP / Zoho Sales Order.</summary>
 public record SoGroupState(string Key, List<string> ItemNos, bool Posted, string? DocNo, DateTime? PostedAt, string? Error);
 
@@ -19,6 +23,55 @@ public record SoGroupState(string Key, List<string> ItemNos, bool Posted, string
 /// </summary>
 public class SalesOrderPostRepository(Db db)
 {
+    /// <summary>GLC Material card (15 Oct 2026): every SAP material sent to this customer on a Sales
+    /// Order posted through OCR in the last <paramref name="months"/> months, one row per material
+    /// (its latest posted line). PartnerCode is the customer's SAP code (ocr.Customer.ComcompyCodeSAP).
+    /// <paramref name="salesOrgScope"/> "" = every company (Admin).</summary>
+    public async Task<List<OcrSoldMaterial>> SoldMaterialsAsync(string customerCode, string salesOrgScope, int months = 12)
+    {
+        await using var conn = await db.OpenAsync();
+        var rows = await conn.QueryAsync<SoldRow>("""
+            WITH base AS (
+                SELECT CAST(l.MaterialCode AS nvarchar(100)) AS MaterialCode,
+                       CAST(l.ExtDesc AS nvarchar(500)) AS ExtDesc,
+                       CAST(l.UnitPrice AS decimal(19,4)) AS UnitPrice,
+                       COALESCE(NULLIF(CAST(l.SapUom AS nvarchar(20)), ''), CAST(l.Uom AS nvarchar(20))) AS Unit,
+                       CAST(l.PostedAt AS datetime2) AS PostedAt,
+                       CAST(l.PostedSoNo AS nvarchar(100)) AS PostedSoNo
+                  FROM ocr.SalesOrderLine l
+                  JOIN ocr.SalesOrder s ON s.DocId = l.DocId
+                 WHERE s.PartnerCode = @customerCode
+                   AND l.PostedSoNo IS NOT NULL
+                   AND NULLIF(l.MaterialCode, '') IS NOT NULL
+                   AND l.PostedAt >= DATEADD(month, -@months, SYSDATETIME())
+                   AND (@salesOrgScope = '' OR s.SalesOrg = @salesOrgScope OR s.SalesOrg IS NULL)
+            ),
+            latest AS (
+                SELECT *, ROW_NUMBER() OVER (PARTITION BY MaterialCode ORDER BY PostedAt DESC) AS rn FROM base
+            ),
+            counts AS (
+                SELECT MaterialCode, COUNT(DISTINCT PostedSoNo) AS Times FROM base GROUP BY MaterialCode
+            )
+            SELECT x.MaterialCode, x.ExtDesc, x.UnitPrice, x.Unit, x.PostedAt, x.PostedSoNo, c.Times
+              FROM latest x JOIN counts c ON c.MaterialCode = x.MaterialCode
+             WHERE x.rn = 1
+             ORDER BY x.PostedAt DESC
+            """, new { customerCode, salesOrgScope = salesOrgScope ?? "", months });
+        return rows.Select(r => new OcrSoldMaterial(r.MaterialCode, r.ExtDesc, r.UnitPrice, r.Unit, r.PostedAt, r.PostedSoNo, r.Times))
+            .ToList();
+    }
+
+    private sealed class SoldRow
+    {
+        public string MaterialCode { get; set; } = "";
+        public string? ExtDesc { get; set; }
+        public decimal? UnitPrice { get; set; }
+        public string? Unit { get; set; }
+        public DateTime? PostedAt { get; set; }
+        public string? PostedSoNo { get; set; }
+        public int Times { get; set; }
+    }
+
     public async Task<Dictionary<string, SoLinePostState>> LineStateAsync(int docId)
     {
         await using var conn = await db.OpenAsync();
@@ -66,6 +119,57 @@ public class SalesOrderPostRepository(Db db)
             """, new { docId, module, extDocNo, endpoint, payloadJson, success = success ? 1 : 0, message, user,
                        salesOrg = string.IsNullOrWhiteSpace(salesOrg) ? null : salesOrg }, tx);
         await tx.CommitAsync();
+    }
+
+    /// <summary>
+    /// Claims the document for one send (12 Oct 2026): flips it to POSTING inside a locked
+    /// transaction and returns the status it had, or null when it is already being sent (double
+    /// click, a second tab, SAP and Zoho at once) or can't be sent (POSTED / SPLIT). A POSTING
+    /// claim older than 10 minutes counts as abandoned (the server stopped mid-send) and can be
+    /// taken over. Always pair with <see cref="ReleaseAsync"/> in a finally block.
+    /// </summary>
+    public async Task<string?> TryClaimAsync(int docId)
+    {
+        var t = DocumentTables.ForId(docId).Doc;
+        await using var conn = await db.OpenAsync();
+        return await conn.QuerySingleOrDefaultAsync<string?>($"""
+            SET XACT_ABORT ON;
+            BEGIN TRAN;
+            DECLARE @prev nvarchar(20), @stale bit;
+            SELECT @prev = Status,
+                   @stale = CASE WHEN Status = 'POSTING'
+                                  AND ISNULL(UpdatedAt, '19000101') < DATEADD(minute, -10, SYSDATETIME())
+                                 THEN 1 ELSE 0 END
+              FROM {t} WITH (UPDLOCK, HOLDLOCK) WHERE DocId = @docId;
+            IF @prev IS NOT NULL AND (@prev NOT IN ('POSTED', 'SPLIT', 'POSTING') OR @stale = 1)
+            BEGIN
+                UPDATE {t} SET Status = 'POSTING', UpdatedAt = SYSDATETIME() WHERE DocId = @docId;
+                COMMIT;
+                SELECT @prev;
+            END
+            ELSE
+            BEGIN
+                COMMIT;
+                SELECT CAST(NULL AS nvarchar(20));
+            END
+            """, new { docId });
+    }
+
+    /// <summary>Ends a send started by <see cref="TryClaimAsync"/>. FinalizeAsync has already set
+    /// POSTED / PARTIAL when something went through; otherwise the document goes back to where it
+    /// was (PARTIAL when an earlier send left posted lines; MAPPED for an abandoned claim).</summary>
+    public async Task ReleaseAsync(int docId, string previousStatus)
+    {
+        var t = DocumentTables.ForId(docId).Doc;
+        var restore = previousStatus is "POSTING" or "" ? "MAPPED" : previousStatus;
+        await using var conn = await db.OpenAsync();
+        await conn.ExecuteAsync($"""
+            UPDATE {t}
+               SET Status = CASE WHEN EXISTS(SELECT 1 FROM ocr.SalesOrderLine WHERE DocId = @docId AND PostedSoNo IS NOT NULL)
+                                 THEN 'PARTIAL' ELSE @restore END,
+                   UpdatedAt = SYSDATETIME()
+             WHERE DocId = @docId AND Status = 'POSTING'
+            """, new { docId, restore });
     }
 
     /// <summary>

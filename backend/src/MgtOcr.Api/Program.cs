@@ -130,6 +130,7 @@ var appConfig = new AppConfig
     SapSalesOrderWriteBaseUrl = Get($"Sap:SalesOrder:BaseUrl_{Cap(sapWriteEnv)}", Get("Sap:SalesOrder:BaseUrl")),
     SapSalesOrderAuthHeader = Get("Sap:SalesOrder:AuthHeader"),
     SapSalesOrderPriceConditionType = Get("Sap:SalesOrder:PriceConditionType", "ZPR0"),
+    SapSalesOrderFreightConditionType = Get("Sap:SalesOrder:FreightConditionType", "ZFHD"),
     SapSalesOrderItemNoteTextId = Get("Sap:SalesOrder:ItemNoteTextId", "ZI01"),
     SapSalesOrderItemNoteLanguages = Get("Sap:SalesOrder:ItemNoteLanguages", "TH,EN"),
     SapProductBaseUrl = Get($"Sap:Product:BaseUrl_{Cap(sapBpEnv)}", Get("Sap:Product:BaseUrl")),

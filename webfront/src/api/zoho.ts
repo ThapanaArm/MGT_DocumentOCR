@@ -245,6 +245,8 @@ export interface ZohoSalesOrderEdits {
   /** Delivery address explicitly selected on the Ship-to mapping card. */
   shipTo?: ZohoShipToInfo;
   lines?: ZohoSalesOrderLineEdit[];
+  /** The person confirmed sending on a Deal whose Account isn't this document's customer. */
+  acceptOtherAccount?: boolean;
 }
 
 export interface ZohoSalesOrderResult {

@@ -3,6 +3,7 @@ import {
   InteractionRequiredAuthError,
   type AccountInfo,
 } from '@azure/msal-browser';
+import { SSO_LOGIN_ENABLED } from '../constants/flags';
 
 /* =====================================================================
    Microsoft Entra ID sign-in — ONE multi-tenant app registration (MGT-OCR-SSO).
@@ -43,7 +44,8 @@ export const COMPANIES: AuthCompany[] = clientId
 
 // No client id = the app registration isn't configured, so the app runs exactly as it did before
 // sign-in existed. The backend has the matching switch (blank AzureAd:Tenants, Development only).
-export const AUTH_ENABLED = COMPANIES.length > 0;
+// SSO_LOGIN_ENABLED (constants/flags.ts) hides Microsoft sign-in entirely while it is not allowed yet.
+export const AUTH_ENABLED = SSO_LOGIN_ENABLED && COMPANIES.length > 0;
 
 // The sign-in screen (AuthGate) asks which company a typed name belongs to before redirecting.
 // With the one multi-tenant registration there is nothing to choose: every name goes to it, and

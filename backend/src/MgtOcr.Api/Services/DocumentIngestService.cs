@@ -8,7 +8,7 @@ namespace MgtOcr.Api.Services;
 // queue worker. Mirrors DocumentsController.Upload's core: read the saved file, route AP->AP/II by
 // PO number, then create the document row. Password prompting stays in the sync endpoint; the batch
 // path rejects encrypted PDFs before enqueuing, so `password` is normally null here.
-public class DocumentIngestService(OcrEngine ocr, DocumentRepository repo, JobLogRepository jobs)
+public class DocumentIngestService(OcrEngine ocr, DocumentRepository repo, JobLogRepository jobs, MgtOcr.Core.Config.AppConfig config)
 {
     public static string UploadEngineFor(string module, string? requested)
     {
@@ -20,8 +20,11 @@ public class DocumentIngestService(OcrEngine ocr, DocumentRepository repo, JobLo
 
     public async Task<(int DocId, string Module, string? Note)> IngestAsync(
         string module, string storedPath, string fileName, int size, string engine,
-        string apDocCategory, string user, string? password = null, string? salesOrg = null)
+        string apDocCategory, string user, string? password = null, string? salesOrg = null,
+        DateTime? jobStartedAt = null)
     {
+        // Job Tasktime starts when the upload started (passed in by the caller); fall back to now.
+        var jobStart = jobStartedAt ?? DateTime.Now;
         var mod = module.ToUpperInvariant();
         var detect = mod == "AP";
         var uploadEngine = UploadEngineFor(mod, engine);
@@ -75,8 +78,9 @@ public class DocumentIngestService(OcrEngine ocr, DocumentRepository repo, JobLo
                 : isInventoryPo ? "AP"
                 : pd.Header.GetStr("poRef").Trim().Length > 0 ? "AP" : "II";
         }
-        var ext = ExtConversion.ToExtDict(pd);
-        var docId = await repo.CreateDocumentAsync(mod, ext, fileName, storedPath, size, user, apDocCategory, durationMs, salesOrg);
+        var ext = ExtConversion.ToExtDict(pd, ExtConversion.OcrPrefillsItemNote(mod, config, salesOrg));
+        var docId = await repo.CreateDocumentAsync(mod, ext, fileName, storedPath, size, user, apDocCategory, durationMs, salesOrg,
+            jobStartedAt: jobStart);
         // DocId is only known now, after the row exists — so it is stamped on the job at the end.
         // The module can change too: AP/II routing above is decided by what the read found.
         await jobs.FinishAsync(job, "SUCCESS", docId: docId, tokensIn: pd.TokensIn, tokensOut: pd.TokensOut,

@@ -37,7 +37,8 @@ public class HealthController(Db db, AppConfig config) : ControllerBase
                 db = pingInfo,
                 counts = new { customers, vendors, materials, documents },
                 ocrProvider = config.OcrProvider,
-                sapMode = string.IsNullOrEmpty(config.SapBaseUrl) ? "simulate" : "live",
+                sapMode = string.IsNullOrEmpty(config.SapWriteBaseUrl) && string.IsNullOrEmpty(config.SapSalesOrderWriteBaseUrl)
+                    ? "not-configured" : "live",
             });
         }
         catch (Exception ex)

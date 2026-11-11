@@ -57,6 +57,7 @@ import WhtTable from '../components/document/WhtTable';
 import IncomingInvoiceCard from '../components/document/IncomingInvoiceCard';
 import MappingCards from '../components/document/MappingCards';
 import ChatFixCard from '../components/document/ChatFixCard';
+import SoMappingIssues from '../components/document/SoMappingIssues';
 import LineExtraModal from '../components/document/LineExtraModal';
 import MasterEditModal, {
   type MasterEditState,
@@ -83,6 +84,8 @@ import SapSalesOrderStep, {
   type SalesOrderStepHandle,
 } from '../components/document/steps/SapSalesOrderStep';
 import ZohoSalesOrderStep from '../components/document/steps/ZohoSalesOrderStep';
+import SoSplitBoard from '../components/document/SoSplitBoard';
+import { useSoShipToOptions } from '../components/document/useSoShipToOptions';
 
 // Deprecated. The backend no longer reads any "user" value sent by the client — it stamps the
 // identity from the validated Entra ID token instead, so whatever is passed here is discarded.
@@ -1000,7 +1003,7 @@ export default function DocumentPage() {
     editGlItem, addGlItem, delGlItem,
     editTaxItem, addTaxItem, delTaxItem,
     editWhtItem, addWhtItem, delWhtItem,
-    setManualLine,
+    setManualLine, manualLineKey,
   } = useDocumentEditor(USER);
   // Where this document is posted, decided by company x module: an MGT Sales Order goes to
   // Zoho CRM, everything else (liability modules, and Sales Orders under any other company)
@@ -1013,6 +1016,15 @@ export default function DocumentPage() {
   const [chatImage, setChatImage] = useState<string | null>(null);
   const [chatProvider, setChatProvider] = useState('gemini');
   const [reocrEngine, setReocrEngine] = useState('gemini');
+  // "Split Sales Order" board (SO only) and the ship-to list its cards pick from.
+  const [splitOpen, setSplitOpen] = useState(false);
+  const splitShipTos = useSoShipToOptions({
+    enabled: splitOpen && !!map,
+    isMgt,
+    customerCode: String(map?.header.customer?.code || ''),
+    soldToSapCode: String(map?.header.customer?.sapCode || map?.header.customer?.code || ''),
+    salesOrg: isMgt ? '1000' : '2000',
+  });
 
   // Keep the working document's salesOrg in step with the active company view. The /map, /payload
   // and /post requests all send doc.header, and the backend resolves the company from
@@ -1271,12 +1283,81 @@ export default function DocumentPage() {
   const isSplit = doc.status === 'SPLIT';
   // Some of this document's delivery-date Sales Orders are already in SAP/Zoho: locked like a posted
   // document (editing would diverge from what was sent) — only "send the remaining ones" is allowed.
-  const partial = doc.status === 'PARTIAL';
+  // POSTING = another request is sending this document right now: locked like a partly posted one.
+  const partial = doc.status === 'PARTIAL' || doc.status === 'POSTING';
   // A split parent must be read-only: its lines now live in the child Sales Orders, so editing it
   // would diverge from what was actually created. `locked` gates every editing surface (header/detail/
   // mapping/tax/wht/gl) for BOTH posted and split, while `posted` alone still drives the posted-only
   // UI (the "sent to SAP" banner, step 3). Split shows its own banner + status below.
   const locked = posted || isSplit || partial;
+  // Ship-to of one SO Group (Sales Order step's group table). Stored on the header as
+  // soGroupShipTos[soGroup] -- null clears it so the group falls back to the document's ship-to --
+  // and saved through the silent re-map like the per-line Delivery Date / SO Group edits. The
+  // backend does not treat this key as a header text edit, so the matched customer is kept.
+  const setGroupShipTo = (soGroup: string, data: Record<string, unknown> | null) => {
+    if (locked) return;
+    const current = { ...((doc.header.soGroupShipTos as Record<string, unknown>) || {}) };
+    if (data) current[soGroup] = data;
+    else delete current[soGroup];
+    const next = { ...doc, header: { ...doc.header, soGroupShipTos: current } };
+    setDoc(next);
+    void runMap(true, next);
+  };
+  // GLC VAT mode from the Step 3 summary (header.vatMode) -- saved the same silent way; 'include'
+  // makes the backend send each price ÷ 1.07 (see SapPayloadBuilder).
+  // "Change unit" popup (GLC Step 3): the line's unit, quantity and price change together so the
+  // amount stays the same (350 KG x 500 -> 7 DR x 25,000), saved through the silent re-map.
+  const fixLineUnit = (index: number, fix: { uom: string; qty: number; price: number; amount: number }) => {
+    if (locked || !doc.lines[index]) return;
+    const lines = doc.lines.slice();
+    lines[index] = { ...lines[index], uom: fix.uom, qty: fix.qty, price: fix.price, amount: fix.amount };
+    const next = { ...doc, lines };
+    setDoc(next);
+    void runMap(true, next);
+  };
+  // GLC freight charge (SHIPPING / ค่าขนส่ง): the person's call on a line -- 'freight' = send its amount
+  // as the Freight condition on the Sales Order header, 'item' = map it to a Material as usual.
+  // Stored on the line (extra.charge) and saved through the same silent re-map.
+  const setLineCharge = (index: number, value: 'freight' | 'item' | '') => {
+    if (locked || !doc.lines[index]) return;
+    const lines = doc.lines.slice();
+    lines[index] = { ...lines[index], extra: { ...(lines[index].extra || {}), charge: value } };
+    const next = { ...doc, lines };
+    setDoc(next);
+    void runMap(true, next);
+    showToast(value === 'freight' ? `Row ${index + 1} will be sent as Freight` : `Row ${index + 1} is an item again`, 'success');
+  };
+  // How the freight is shared between the Sales Orders (Step 3); null = all on the first one.
+  const setFreightSplit = (split: Record<string, number> | null) => {
+    if (locked) return;
+    const header = { ...doc.header };
+    if (split) header.soGroupFreight = split;
+    else delete header.soGroupFreight;
+    const next = { ...doc, header };
+    setDoc(next);
+    void runMap(true, next);
+  };
+  const setVatMode = (mode: string) => {
+    if (locked || doc.header.vatMode === mode) return;
+    const next = { ...doc, header: { ...doc.header, vatMode: mode } };
+    setDoc(next);
+    void runMap(true, next);
+  };
+  // Save from the Split Sales Order board: each line's SO Group + each Sales Order's ship-to, in one
+  // silent re-map (which stores them). Group "1" is stored blank, like a line never split.
+  const saveSplit = (groups: string[], shipTos: Record<string, Record<string, unknown>>) => {
+    if (locked) return;
+    const lines = doc.lines.map((l, i) => ({
+      ...l,
+      extra: { ...(l.extra || {}), soGroup: groups[i] && groups[i] !== '1' ? groups[i] : '' },
+    }));
+    const next = { ...doc, lines, header: { ...doc.header, soGroupShipTos: shipTos } };
+    setDoc(next);
+    setSplitOpen(false);
+    void runMap(true, next);
+    const n = new Set(groups).size;
+    showToast(n > 1 ? `Items split into ${n} Sales Orders` : 'All items are on one Sales Order', 'success');
+  };
   // Uploaded file of a never-posted document is removed after the retention period (FileCleanupWorker).
   const retention = fileRetention(doc, doc.retentionHours);
   const fileExpired = retention.kind === 'expired';
@@ -1301,6 +1382,59 @@ export default function DocumentPage() {
       setSelectedZohoShipTo(null);
     }
     runMap(true);
+  };
+
+  // Same comparison the mapping engine uses (MappingHelpers.Norm): lower-case, legal-entity words
+  // stripped, only a-z / 0-9 / Thai kept — so "MILOTT LABORATORIES CO., LTD." and
+  // "Milott Laboratories Co.,Ltd." count as the same name.
+  const normName = (v: unknown) =>
+    String(v ?? '')
+      .toLowerCase()
+      .replace(/บริษัท|จำกัด|มหาชน|หจก\.|ห้างหุ้นส่วนจำกัด|co\.,?\s*ltd\.?|company|limited|public|pcl\.?|corp\.?|inc\.?/g, '')
+      .replace(/[^a-z0-9\u0E00-\u0E7F]/g, '');
+
+  // A customer picked by hand on the Customer card (candidate list or "Select master mapping"):
+  // besides matching this document, REMEMBER the document's customer name for that code (7 Oct
+  // 2026). If no master row of that code already carries this name in CompanyName, a new row is
+  // added (copy of the code's existing row, CompanyName = the name on this document), so the next
+  // document written the same way — e.g. a branch that uses the English name — maps by itself.
+  const pickHeader = (k: string, v: string) => {
+    setManualHeader(k, v);
+    if (k !== 'customer' || !v || doc.module !== 'SO') return;
+    const docName = (h.customerName || '').trim();
+    if (!normName(docName)) return;
+    const sameCode = masters.customers.filter(
+      (c) => String(c.ComcompyCodeSAP ?? '').trim() === v && String(c.SalesOrg) === companyCode,
+    );
+    if (sameCode.length === 0 || sameCode.some((c) => normName(c.CompanyName) === normName(docName))) return;
+    // Mapping this document is immediate, but adding the OCR name as a permanent customer alias is
+    // a separate decision. Everyone who can map may still teach the master; confirmation prevents
+    // an OCR typo or an accidental customer click from silently affecting future documents.
+    if (!window.confirm(
+      `Use customer ${v} for this document and remember the name "${docName}" for future documents?`,
+    )) return;
+    const base = sameCode[0];
+    void (async () => {
+      try {
+        await createMaster('customers', {
+          SalesOrg: companyCode,
+          ComcompyCodeSAP: v,
+          CompanyName: docName,
+          CompanyNameSAP: base.CompanyNameSAP ?? '',
+          TaxId: base.TaxId || h.customerTaxId || '',
+          Branch: base.Branch ?? '',
+          DistChannel: base.DistChannel ?? '',
+          Division: base.Division ?? '',
+          Currency: base.Currency ?? '',
+          PaymentTerms: base.PaymentTerms ?? '',
+          IsActive: 1,
+        });
+        await loadMasters(true);
+        showToast(`Remembered "${docName}" for customer ${v}`);
+      } catch {
+        // Best-effort: the match on this document already stands; only the "remember" step failed.
+      }
+    })();
   };
 
   // GLC: apply the SAP sales area the person picked (or the single one auto-used) on the Customer
@@ -1923,7 +2057,7 @@ export default function DocumentPage() {
       prefill: so ? { SalesOrg: companyCode, CustomerCode: customerCode, MaterialCodeCode: l.extCode || '', MaterialCodeName: l.desc || '' } : { Description: l.desc || '', Uom: l.uom || '', Plant: '1000' },
       dupes: so ? findDupes(masters, 'custmaterials', l.desc, null, (x) => x.CustomerCode === customerCode && String(x.SalesOrg) === companyCode) : findDupes(masters, 'apmaterials', l.desc, null),
       onSaved: async (code) => {
-        manual.current.lines[i] = code;
+        manual.current.lines[manualLineKey(i)] = code;
         if (!so) await learnMaterial(doc.docId, { partnerCode: doc.partnerCode, extCode: l.extCode, extDesc: l.desc, materialCode: code });
         await loadMasters(true);
         await runMap(true);
@@ -1937,7 +2071,11 @@ export default function DocumentPage() {
   // point for the SAP Unit field in the confirmation popup below — the person still reviews and
   // can correct it in that popup, this is never applied blind to what gets saved or posted.
   const normUom = (s: string) => {
-    const t = (s || '').trim().toLowerCase().replace(/s$/, '');
+    // "G." / "KG." / "pcs." on a document: the trailing dot is an abbreviation mark, not part of the
+    // unit (Thai keys like "กก." are still looked up with their dot first, below).
+    const raw = (s || '').trim().toLowerCase();
+    const noDot = raw.replace(/\.+$/, '');
+    const t = noDot.replace(/s$/, '');
     const map: Record<string, string> = {
       kilogram: 'KG', kilo: 'KG', kg: 'KG',
       // Thai spellings — GLC documents write units in Thai ("กิโลกรัม", "กรัม"), which must still
@@ -1952,7 +2090,7 @@ export default function DocumentPage() {
       box: 'BOX', bag: 'BAG', drum: 'DRUM',
       'กล่อง': 'BOX', 'ถุง': 'BAG', 'ถัง': 'DRUM',
     };
-    return map[t] || t.toUpperCase();
+    return map[raw] || map[noDot] || map[t] || t.toUpperCase();
   };
 
   // Picking a SAP search result saves the CustomerMaterial mapping, then (only when needed) pops an
@@ -2370,7 +2508,7 @@ export default function DocumentPage() {
             // SAP path (or a Zoho code that only matched a CustomerMaterial row, not a Deal Item):
             // set the manual override for Step 2, same as picking a code straight from the Material
             // dropdown's plain (non-SAP-search) path.
-            manual.current.lines[idx] = code;
+            manual.current.lines[manualLineKey(idx)] = code;
           }
         }
         // The AI may also have picked a Ship-to for the whole document -- e.g. "เปลี่ยนที่อยู่จัดส่ง
@@ -2790,6 +2928,7 @@ export default function DocumentPage() {
     // Resolve a line's chosen Sales Employee Person ID to a display name for the DETAIL table's
     // "Sales Employee Name" column (GLC/SO). Falls back to the raw ID inside DetailTable when unknown.
     resolveSalesEmp: (id: string) => salesEmps.find((s) => s.personId === id)?.name || undefined,
+    onOpenSplit: doc.module === 'SO' && !locked ? () => setSplitOpen(true) : undefined,
   };
   // The MIRO tabs are read per vendor, so the Tax / Withholding rows show only that vendor's
   // invoices. Rows keep their real position in the header so editing and deleting still hit the
@@ -2855,17 +2994,13 @@ export default function DocumentPage() {
               </ul>
             )}
           </div>
+        ) : doc.module === 'SO' ? (
+          <SoMappingIssues map={map} isMgt={isMgt} onOpenMaster={() => navigate('/master')} />
         ) : (
           <div className="result bad">
             <h3>
               <span className="badge b-fail"><i className="fa-solid fa-xmark" /> Failed</span> {map.errors.length} items not found
             </h3>
-            {isMgt && (
-              <p className="hint">
-                This checks items against SAP-style Master Data and does not block Step 3 — you can still open the Sales
-                Order and review it before sending to Zoho CRM. The items below still need a match before they can be sent.
-              </p>
-            )}
             <ul>
               {map.errors.map((e, i) => (
                 <li key={i}>
@@ -3185,7 +3320,7 @@ export default function DocumentPage() {
           companyCode={companyCode}
           plant={me?.defaultPlant || ''}
           posted={locked}
-          onManualHeader={setManualHeader}
+          onManualHeader={pickHeader}
           onSetSalesArea={setSalesArea}
           onManualLine={setManualLine}
           onQuickAddVendor={quickAddVendor}
@@ -3193,6 +3328,7 @@ export default function DocumentPage() {
           onQuickAddShipTo={quickAddShipTo}
           onQuickAddMaterial={quickAddMaterial}
           onUseSapMaterial={useSapMaterial}
+          onSetLineCharge={setLineCharge}
           onAddUomRule={addUomRule}
           salesEmployees={salesEmps}
           lineSalesEmpSuggest={lineSalesEmpSuggest}
@@ -3476,8 +3612,9 @@ export default function DocumentPage() {
         <GlItemsTable key={`${vendorFilter || 'all'}-${glRows.items.length}`} {...glProps} />
       )}
 
-      {/* Chat fix */}
-      {!posted && (
+      {/* Chat fix -- hidden on every locked document (posted, partly posted, split): the chat
+          rewrites header and lines, and on a split parent it used to reopen it for a second send. */}
+      {!locked && (
         <ChatFixCard
           docId={doc.docId}
           history={matchChatLog.length ? [...chatHistory, ...matchChatLog] : chatHistory}
@@ -3508,6 +3645,7 @@ export default function DocumentPage() {
             showToast('Saved the CustomerMaterial from Zoho — it will be used for this Sales Order');
           }}
           onPosted={setDoc}
+          onGroupShipTo={setGroupShipTo}
         />
       )}
 
@@ -3519,6 +3657,27 @@ export default function DocumentPage() {
           salesOrg={salesOrg}
           posted={posted}
           onPosted={setDoc}
+          onGroupShipTo={setGroupShipTo}
+          onVatModeChange={setVatMode}
+          onFreightSplitChange={setFreightSplit}
+          salesEmployees={salesEmps}
+          uomRules={masters?.uoms || []}
+          onFixLineUnit={fixLineUnit}
+        />
+      )}
+
+      {splitOpen && doc.module === 'SO' && !locked && (
+        <SoSplitBoard
+          doc={doc}
+          skipCharges={!isMgt}
+          headerDate={String(doc.header.deliveryDate || '')}
+          shipToOptions={splitShipTos.options}
+          shipToLoading={splitShipTos.loading}
+          shipToError={splitShipTos.error}
+          docShipToLabel={[map?.header.shipTo?.code, map?.header.shipTo?.text].filter((x) => String(x || '').trim()).join(' — ')}
+          canPickShipTo={!!map?.header.customer?.code}
+          onClose={() => setSplitOpen(false)}
+          onSave={saveSplit}
         />
       )}
 

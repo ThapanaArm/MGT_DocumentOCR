@@ -16,7 +16,8 @@ namespace MgtOcr.Api.Controllers;
 [Route("api/sap")]
 public class SapProductController(
     SapProductClient client, SapBillingClient billingClient, SapSalesOrderClient salesOrderClient,
-    UserRepository users, AppConfig config, ICurrentUserAccessor currentUser, IMemoryCache cache) : ControllerBase
+    UserRepository users, SalesOrderPostRepository soPosts, AppConfig config, ICurrentUserAccessor currentUser,
+    IMemoryCache cache) : ControllerBase
 {
     [HttpGet("materials")]
     public async Task<IActionResult> SearchMaterials([FromQuery] string? description, [FromQuery] string? plant, [FromQuery] int top = 30)
@@ -24,6 +25,11 @@ public class SapProductController(
         if (string.IsNullOrWhiteSpace(description) || description.Trim().Length < 2)
             return BadRequest(new { detail = "Provide at least 2 characters in 'description'" });
 
+        // A non-Admin searches only their own company's plant (12 Oct 2026); the page's value is
+        // used for Admin, who works both companies.
+        var scope = CompanyScope.For(await currentUser.RequireAsync(), config);
+        if (scope.Length > 0 && config.CompanyForSalesOrg(scope)?.DefaultPlant is { Length: > 0 } ownPlant)
+            plant = ownPlant;
         if (string.IsNullOrWhiteSpace(plant))
             return BadRequest(new { detail = "Provide 'plant' for a company-scoped material search" });
         var results = await client.SearchByDescriptionAsync(description, plant, top);
@@ -81,6 +87,71 @@ public class SapProductController(
     // price is null (never an error) when SAP Billing isn't configured, there's no prior billing
     // line for this pair, or the lookup fails -- the frontend must treat this as optional, not a
     // blocker to picking the material.
+    // GET /api/sap/customer-materials?customer=2000017
+    // GLC Material card (15 Oct 2026): what has this customer bought before? One row per material,
+    // merged from SAP billing (A_BillingDocument for this Sold-to, last 12 months) and Sales Orders
+    // posted through OCR. The card calls it once per document, and only while a line is still
+    // unmapped. Cached 10 minutes per customer + company scope. Each source is best-effort: one
+    // failing still returns the other.
+    [HttpGet("customer-materials")]
+    public async Task<IActionResult> CustomerMaterials([FromQuery] string? customer, [FromQuery] int months = 12)
+    {
+        var cust = (customer ?? "").Trim();
+        if (cust.Length == 0) return BadRequest(new { detail = "Provide 'customer'" });
+        months = Math.Clamp(months, 1, 36);
+        var scope = CompanyScope.For(await currentUser.RequireAsync(), config);
+        var key = $"sap-customer-materials:{scope}:{cust}:{months}";
+        if (!cache.TryGetValue(key, out List<object>? items) || items is null)
+        {
+            var sapTask = billingClient.GetSoldMaterialsAsync(cust, months);
+            var ocrTask = soPosts.SoldMaterialsAsync(cust, scope, months);
+            List<SapSoldMaterial> sap;
+            List<OcrSoldMaterial> ocr;
+            try { sap = await sapTask; } catch { sap = new(); }
+            try { ocr = await ocrTask; } catch { ocr = new(); }
+
+            var ocrBy = ocr.GroupBy(x => x.MaterialCode, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+            static string? D(DateTime? d) => d?.ToString("dd/MM/yyyy", System.Globalization.CultureInfo.InvariantCulture);
+            var merged = new List<(DateTime? Sort, object Row)>();
+            foreach (var s in sap)
+            {
+                ocrBy.Remove(s.MaterialCode, out var o);
+                var last = o?.PostedAt is { } op && (s.LastDate is null || op > s.LastDate) ? op : s.LastDate;
+                merged.Add((last, new
+                {
+                    materialCode = s.MaterialCode,
+                    materialDescription = s.Description ?? o?.DocDescription ?? "",
+                    docDescription = o?.DocDescription,
+                    lastPrice = s.PricePerUnit ?? o?.UnitPrice,
+                    unit = s.Unit ?? o?.Unit,
+                    lastDate = D(last),
+                    lastDocNo = s.BillingDocument,
+                    // An order posted through OCR is usually billed in SAP later too - take the larger
+                    // count instead of adding the same order twice.
+                    times = Math.Max(s.Times, o?.Times ?? 0),
+                    sources = o is null ? new[] { "SAP" } : new[] { "SAP", "OCR" },
+                }));
+            }
+            foreach (var o in ocrBy.Values)
+                merged.Add((o.PostedAt, new
+                {
+                    materialCode = o.MaterialCode,
+                    materialDescription = o.DocDescription ?? "",
+                    docDescription = o.DocDescription,
+                    lastPrice = o.UnitPrice,
+                    unit = o.Unit,
+                    lastDate = D(o.PostedAt),
+                    lastDocNo = o.PostedSoNo,
+                    times = o.Times,
+                    sources = new[] { "OCR" },
+                }));
+            items = merged.OrderByDescending(m => m.Sort ?? DateTime.MinValue).Select(m => m.Row).ToList();
+            cache.Set(key, items, TimeSpan.FromMinutes(10));
+        }
+        return Ok(new { customer = cust, count = items!.Count, results = items });
+    }
+
     [HttpGet("last-price")]
     public async Task<IActionResult> LastPrice([FromQuery] string? customer, [FromQuery] string? material)
     {
@@ -107,6 +178,9 @@ public class SapProductController(
     [HttpGet("last-price/raw")]
     public async Task<IActionResult> LastPriceRaw([FromQuery] string? material, [FromQuery] string? customer, [FromQuery] int top = 50)
     {
+        // Diagnostic dump of any customer's billing lines -- Admin only.
+        if (!CompanyScope.SeesEveryCompany(await currentUser.RequireAsync()))
+            return StatusCode(403, new { detail = "Admin only" });
         var hasMaterial = !string.IsNullOrWhiteSpace(material);
         var hasCustomer = !string.IsNullOrWhiteSpace(customer);
         if (!hasMaterial && !hasCustomer)
@@ -167,11 +241,15 @@ public class SapProductController(
             var id = (d.TryGetValue("Code", out var c) ? c?.ToString() : null)?.Trim();
             if (string.IsNullOrEmpty(id) || !emitted.Add(id)) continue;
             var name = d.TryGetValue("Text", out var t) ? t?.ToString() : null;
+            // Ms_User.Division = this person's SAP Sales Group (the SO header SalesGroup is the
+            // first line's Sales Employee's Division — see SapPayloadBuilder).
+            var salesGroup = d.TryGetValue("Division", out var dv) ? dv?.ToString() : null;
             liveById.TryGetValue(id, out var seen);
             list.Add(new
             {
                 personId = id,
                 name,
+                salesGroup,
                 sources = seen != null ? new[] { "db", "sap" } : new[] { "db" },
                 lastSalesOrder = seen?.SalesOrder,
                 lastCreationDate = seen?.CreationDate,
@@ -185,6 +263,7 @@ public class SapProductController(
             {
                 personId = s.PersonId,
                 name = (string?)null,
+                salesGroup = (string?)null,
                 sources = new[] { "sap" },
                 lastSalesOrder = s.SalesOrder,
                 lastCreationDate = s.CreationDate,

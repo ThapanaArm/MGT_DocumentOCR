@@ -115,6 +115,41 @@ public class ZohoSalesOrderClient(ZohoClient zoho)
     /// to learn its Owner (the responsible sales person) and Account for the SharePoint folder.</summary>
     public async Task<JsonObject?> GetByIdAsync(string id) => await zoho.GetByIdAsync(await ResolveModuleAsync(), id);
 
+    /// <summary>
+    /// Duplicate guard before RE-sending a Sales Order group whose previous attempt failed (12 Oct
+    /// 2026): a timeout can come back after Zoho has in fact created the record. Finds the record on
+    /// this Deal with this Customer_Ref and Subject (the Subject carries "Doc#{id}" and the group
+    /// suffix), on this delivery date, created since <paramref name="sinceUtc"/> and not already
+    /// recorded on the document (<paramref name="exclude"/>, Sales Order Nos.). Returns its id and
+    /// Sales Order No. (Quote_No) when exactly one matches; null otherwise or when the lookup fails --
+    /// the caller then sends normally.
+    /// </summary>
+    public async Task<(string Id, string? SoNo)?> FindExistingAsync(string dealId, string customerRef, string subject,
+        string? deliveryDate, DateTime sinceUtc, IReadOnlyCollection<string> exclude)
+    {
+        try
+        {
+            var module = await ResolveModuleAsync();
+            static string Q(string s) => s.Replace("\\", "\\\\").Replace("'", "\\'");
+            var since = sinceUtc.ToString("yyyy-MM-dd'T'HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture) + "+00:00";
+            var where = $"((Deal_Name = '{Q(dealId)}' and Customer_Ref = '{Q(customerRef)}') and Created_Time >= '{since}')";
+            var rows = await zoho.QueryCoqlAsync(module, "id, Quote_No, Subject, Delivery_Date", where, "Created_Time desc");
+            var hits = rows.Where(r =>
+                    string.Equals((Str(r, "Subject") ?? "").Trim(), subject.Trim(), StringComparison.OrdinalIgnoreCase)
+                    && (string.IsNullOrWhiteSpace(deliveryDate) || (Str(r, "Delivery_Date") ?? "") == deliveryDate.Trim())
+                    && !exclude.Contains(Str(r, "Quote_No") ?? "")
+                    && !exclude.Contains(Str(r, "id") ?? ""))
+                .ToList();
+            if (hits.Count != 1) return null;
+            var id = Str(hits[0], "id");
+            return string.IsNullOrEmpty(id) ? null : (id, Str(hits[0], "Quote_No"));
+        }
+        catch
+        {
+            return null; // best effort: never blocks a send
+        }
+    }
+
     private async Task<string> ResolveOrderedItemsFieldAsync()
     {
         if (_orderedItemsField is not null) return _orderedItemsField;
