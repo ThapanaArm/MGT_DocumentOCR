@@ -243,10 +243,14 @@ public class SapClient(AppConfig config, HttpClient httpClient)
         if (text.Length > 50) text = text[..50];
         if (assignment.Length > 18) assignment = assignment[..18];
         static string Q(string v) => (v ?? "").Trim().Replace("'", "''");
+        // The SAP_COM_0002 communication user (Sap:JournalEntry:AuthHeader), falling back to the
+        // supplier invoice one -- see AppConfig.SapJournalEntryAuthHeader.
         void Auth(HttpRequestMessage r)
         {
-            if (!string.IsNullOrWhiteSpace(config.SapSupplierInvoiceAuthHeader))
-                r.Headers.TryAddWithoutValidation("Authorization", config.SapSupplierInvoiceAuthHeader);
+            var auth = !string.IsNullOrWhiteSpace(config.SapJournalEntryAuthHeader)
+                ? config.SapJournalEntryAuthHeader : config.SapSupplierInvoiceAuthHeader;
+            if (!string.IsNullOrWhiteSpace(auth))
+                r.Headers.TryAddWithoutValidation("Authorization", auth);
         }
 
         // 1. The accounting document's lines. An MM invoice's journal entry carries the invoice as
@@ -301,9 +305,20 @@ public class SapClient(AppConfig config, HttpClient httpClient)
         static string X(string v) => System.Security.SecurityElement.Escape(v) ?? "";
         var now = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture);
         var sb = new StringBuilder();
-        sb.Append("<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\" xmlns:sfin=\"http://sap.com/xi/SAPSCORE/SFIN\">");
-        sb.Append("<soapenv:Header/><soapenv:Body><sfin:JournalEntryBulkChangeRequestMessage>");
-        sb.Append($"<MessageHeader><ID>OCR-{X(supplierInvoice)}-{DateTime.UtcNow:HHmmssfff}</ID><CreationDateTime>{now}</CreationDateTime></MessageHeader>");
+        // The service is asynchronous and its WSDL binding requires WS-Addressing with WS-Reliable
+        // Messaging (wsaw:UsingAddressing + wsrmp:RMAssertion): SAP de-duplicates on the
+        // wsa:MessageID, and an empty soapenv:Header is answered with a bare 500 "Web service
+        // processing error" (5105600275). Each request gets its own MessageID.
+        var changeUrl = $"{new Uri(baseUrl).GetLeftPart(UriPartial.Authority)}/sap/bc/srt/scs_ext/sap/journalentrybulkchangerequest_";
+        const string soapAction = "http://sap.com/xi/SAPSCORE/SFIN/JournalEntryBulkChangeRequest_In/JournalEntryBulkChangeRequest_InRequest";
+        var msgUuid = Guid.NewGuid();
+        sb.Append("<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\" xmlns:sfin=\"http://sap.com/xi/SAPSCORE/SFIN\" xmlns:wsa=\"http://www.w3.org/2005/08/addressing\">");
+        sb.Append("<soapenv:Header>");
+        sb.Append($"<wsa:MessageID>urn:uuid:{msgUuid:D}</wsa:MessageID>");
+        sb.Append($"<wsa:Action>{soapAction}</wsa:Action>");
+        sb.Append($"<wsa:To>{X(changeUrl)}</wsa:To>");
+        sb.Append("</soapenv:Header><soapenv:Body><sfin:JournalEntryBulkChangeRequestMessage>");
+        sb.Append($"<MessageHeader><ID>OCR-{X(supplierInvoice)}-{DateTime.UtcNow:HHmmssfff}</ID><UUID>{msgUuid:D}</UUID><CreationDateTime>{now}</CreationDateTime></MessageHeader>");
         foreach (var l in todo)
         {
             sb.Append("<JournalEntryGLItem>");
@@ -320,15 +335,12 @@ public class SapClient(AppConfig config, HttpClient httpClient)
         }
         sb.Append("</sfin:JournalEntryBulkChangeRequestMessage></soapenv:Body></soapenv:Envelope>");
 
-        var host = new Uri(baseUrl).GetLeftPart(UriPartial.Authority);
-        var changeUrl = $"{host}/sap/bc/srt/scs_ext/sap/journalentrybulkchangerequest_";
         try
         {
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
             using var req = new HttpRequestMessage(HttpMethod.Post, changeUrl);
             Auth(req);
-            req.Headers.TryAddWithoutValidation("SOAPAction",
-                "http://sap.com/xi/SAPSCORE/SFIN/JournalEntryBulkChangeRequest_In/JournalEntryBulkChangeRequest_InRequest");
+            req.Headers.TryAddWithoutValidation("SOAPAction", $"\"{soapAction}\"");
             req.Content = new StringContent(sb.ToString(), Encoding.UTF8, "text/xml");
             using var resp = await httpClient.SendAsync(req, cts.Token);
             var body = await resp.Content.ReadAsStringAsync(cts.Token);
@@ -336,12 +348,23 @@ public class SapClient(AppConfig config, HttpClient httpClient)
             // message monitor, not here.
             return resp.IsSuccessStatusCode
                 ? (true, $"{todo[0].Doc}: Assignment/Text sent for line(s) {string.Join(", ", todo.Select(t => t.Item))}")
-                : (false, $"Journal Entry - Change refused: {(int)resp.StatusCode} {body[..Math.Min(300, body.Length)]}");
+                : (false, $"Journal Entry - Change refused: {(int)resp.StatusCode} {SoapFault(body)}");
         }
         catch (Exception e)
         {
             return (false, $"Journal Entry - Change failed: {e.Message}");
         }
+    }
+
+    /// <summary>The readable part of a SOAP fault (faultstring + any detail text), not the envelope.</summary>
+    private static string SoapFault(string body)
+    {
+        var parts = System.Text.RegularExpressions.Regex.Matches(body ?? "",
+                @"<(?:\w+:)?(?:faultstring|faultText|text|Message)[^>]*>([^<]+)<")
+            .Select(m => System.Net.WebUtility.HtmlDecode(m.Groups[1].Value.Trim()))
+            .Where(v => v.Length > 0).Distinct().ToList();
+        var s = parts.Count > 0 ? string.Join(" | ", parts) : (body ?? "");
+        return s.Length > 600 ? s[..600] : s;
     }
 
     private static string? TryGetString(JsonElement el, string prop) =>

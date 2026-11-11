@@ -153,7 +153,9 @@ export default function PoReferenceTable({
   const poConditionTypes = new Set(
     (sapItems ?? []).flatMap((item) => item.conditions ?? []).map((condition) => condition.conditionType.trim().toUpperCase()),
   );
-  const conditionOptions = (sapItems?.length ?? 0) > 0
+  // ...unless SAP returned none at all: that is a lookup that said nothing, not a PO without
+  // conditions, and an empty list left the column with nothing but "— Select —".
+  const conditionOptions = poConditionTypes.size > 0
     ? CONDITIONS.filter(([code]) => poConditionTypes.has(code))
     : CONDITIONS;
   const condOf = (l: DocLine) =>

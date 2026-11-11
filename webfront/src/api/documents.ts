@@ -241,6 +241,12 @@ export interface PurchaseOrderReconciliationBatchResult {
 export const reconcileAllPurchaseOrders = () =>
   api.post<PurchaseOrderReconciliationBatchResult>('/api/reconcile/run');
 
+/** Fills the empty Assignment / Text of the posted supplier invoices' journal entries
+ *  (Journal Entry - Change). One result per SAP supplier invoice of the document. */
+export const fillJournalEntryTexts = (id: number) =>
+  api.post<{ results: { supplierInvoice: string; fiscalYear: string; ok: boolean; message: string }[] }>(
+    '/api/documents/' + id + '/fill-je-texts', {});
+
 export const reopenDeletedApInvoice = (id: number, sapDocNo: string) =>
   api.post<DocModel>('/api/documents/' + id + '/reopen-deleted-ap-invoice', { sapDocNo });
 

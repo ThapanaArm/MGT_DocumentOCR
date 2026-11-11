@@ -158,6 +158,12 @@ public class AppConfig
     // of that arrangement need not be the one the PO service accepts; empty = use the PO one.
     public string SapMaterialDocumentBaseUrl { get; init; } = "";
     public string SapMaterialDocumentAuthHeader { get; init; } = "";
+    // Journal Entry - Change (SOAP, journalentrybulkchangerequest_) and the Operational Journal
+    // Entry Item read (API_OPLACCTGDOCITEMCUBE_SRV) used to fill Assignment/Text after a supplier
+    // invoice posts. Both sit in SAP_COM_0002, whose communication user is usually NOT the supplier
+    // invoice one (that one answers 403 "no start authorization for R3TR IWSV
+    // API_OPLACCTGDOCITEMCUBE_SRV"). Sap:JournalEntry:AuthHeader; blank = the supplier invoice's.
+    public string SapJournalEntryAuthHeader { get; init; } = "";
     // "dev" / "prod" — which tenant the supplier-invoice routes point at, stamped on reconciliation rows.
     public string SapSupplierInvoiceEnvironment { get; init; } = "dev";
 

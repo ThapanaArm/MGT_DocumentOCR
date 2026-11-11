@@ -151,6 +151,8 @@ var appConfig = new AppConfig
     SapPurchaseOrderBaseUrl = Get($"Sap:PurchaseOrder:BaseUrl_{Cap(sapPurchaseOrderEnv)}"),
     SapMaterialDocumentBaseUrl = Get($"Sap:MaterialDocument:BaseUrl_{Cap(sapPurchaseOrderEnv)}"),
     SapMaterialDocumentAuthHeader = Get("Sap:MaterialDocument:AuthHeader", Get("Sap:PurchaseOrder:AuthHeader")),
+    SapJournalEntryAuthHeader = Get("Sap:JournalEntry:AuthHeader",
+        Get("Sap:SupplierInvoice:AuthHeader", Get("Sap:BusinessPartner:AuthHeader"))),
     SapSupplierInvoiceEnvironment = sapSupplierInvoiceEnv,
     SapPurchaseOrderAuthHeader = Get("Sap:PurchaseOrder:AuthHeader", Get("Sap:BusinessPartner:AuthHeader")),
     // MGT/GLC: SalesOrganization/CompanyCode/DefaultPlant per company (see CompanyProfile).

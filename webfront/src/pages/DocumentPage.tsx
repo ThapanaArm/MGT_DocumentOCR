@@ -14,6 +14,7 @@ import {
   postToSapQueued,
   reconcilePurchaseOrder,
   reopenDeletedApInvoice,
+  fillJournalEntryTexts,
   reocrDocument,
   setDocCategory,
   type ChatMessage,
@@ -1453,6 +1454,17 @@ export default function DocumentPage() {
       showToast(`AP invoice ${sapDocNo} reopened for correction`, 'success');
     });
 
+  const fillJeTexts = () =>
+    guard(async () => {
+      const r = await fillJournalEntryTexts(doc.docId);
+      const lines = (r.results || []).map((x) => `${x.supplierInvoice}: ${x.ok ? '' : 'NOT DONE — '}${x.message}`);
+      const allOk = (r.results || []).every((x) => x.ok);
+      showToast(
+        `Assignment/Text — ${lines.join(' · ')}${allOk ? ' (SAP applies the change within a few seconds)' : ''}`,
+        allOk ? 'success' : 'error',
+      );
+    });
+
   const refreshApReconciliation = () =>
     guard(async () => {
       const po = String(h.poRef ?? '').trim();
@@ -2634,13 +2646,21 @@ export default function DocumentPage() {
         if (['2', '3'].includes(String(h.refDocType ?? '').trim())) {
           const conds = r.items.flatMap((i) => i.conditions ?? []);
           const onPo = new Set(conds.map((x) => x.conditionType.trim().toUpperCase()));
+          // The delivery-cost conditions the PO really holds. A forwarder's bill is usually ONE
+          // ZLH1 entered as a lump sum (17,838 for DO + storage + trucking + …), so no single line
+          // ever equals it and the amount match below cannot place them; when the PO holds exactly
+          // one such condition, that is the one every unplaced cost line settles.
+          const knownTypes = new Set(['ZFRE', 'ZLH1', 'ZED1', 'ZFE2', 'ZINS', 'ZIM1', 'ZOVS', 'ZOTH']);
+          const costTypes = [...onPo].filter((c) => knownTypes.has(c));
+          const onlyType = costTypes.length === 1 ? costTypes[0] : '';
           (doc.lines || []).forEach((l, i) => {
             const extra = (l.extra ?? {}) as Record<string, unknown>;
             const current = String(extra.deliveryCondType ?? '').trim().toUpperCase();
             // A condition the person chose stays. One filled from the document stays too when the
-            // PO really holds it; when it does not, it is re-matched below on the amount.
-            if (current && (extra.deliveryCondAuto !== '1' || onPo.has(current))) return;
-            if (current) editLineExtra(i, 'deliveryCondType', '');
+            // PO really holds it -- or when SAP returned no conditions at all, which says nothing
+            // about the PO (it used to wipe every line's ZLH1 and leave the column on "— Select —").
+            // Otherwise it is re-matched below.
+            if (current && (extra.deliveryCondAuto !== '1' || onPo.has(current) || onPo.size === 0)) return;
             if (['VAT', 'WHT'].includes(String(l.extCode ?? '').trim().toUpperCase())) return;
             const amount = Number(l.amount) || 0;
             if (amount === 0) return;
@@ -2650,7 +2670,13 @@ export default function DocumentPage() {
                   || Math.abs(x.amount - amount) <= 0.01)
                 .map((x) => x.conditionType),
             )];
-            if (hits.length === 1) editLineExtra(i, 'deliveryCondType', hits[0]);
+            const next = hits.length === 1 ? hits[0] : onlyType;
+            if (next) {
+              editLineExtra(i, 'deliveryCondType', next);
+              editLineExtra(i, 'deliveryCondAuto', '1');
+            } else if (current) {
+              editLineExtra(i, 'deliveryCondType', '');
+            }
           });
         }
         // On a delivery-cost document the point of the button is the purchase order itself —
@@ -2847,6 +2873,17 @@ export default function DocumentPage() {
                   </button>
                   <span className="hint">
                     Use only after deleting that parked invoice in SAP. Other supplier invoices stay protected.
+                  </span>
+                </div>
+              )}
+              {(doc.module === 'AP' || doc.module === 'II') && (
+                <div className="row" style={{ marginTop: 8 }}>
+                  <button className="btn" onClick={fillJeTexts}>
+                    <i className="fa-solid fa-pen-to-square" /> Fill Assignment/Text in SAP
+                  </button>
+                  <span className="hint">
+                    Fills the empty Assignment and Text on the posted journal entry (Local Hand&amp;Fr, Fee,
+                    Purchase Variance) — only empty fields are changed.
                   </span>
                 </div>
               )}

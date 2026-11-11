@@ -246,7 +246,7 @@ public partial class DocumentRepository(Db db)
                     if (name.Length == 0) continue;
                     await conn.ExecuteAsync(
                         "INSERT ocr.SupplierTaxMap(TaxId,SupplierName,IsVerified,FirstDocId) VALUES(@taxId,@name,0,@docId)",
-                        new { taxId, name = name.Length > 200 ? name[..200] : name, docId }, tx);
+                        new { taxId, name = name.Length > 50 ? name[..50].TrimEnd() : name, docId }, tx);
                     extra["issuerMap"] = "NEW";
                     continue;
                 }

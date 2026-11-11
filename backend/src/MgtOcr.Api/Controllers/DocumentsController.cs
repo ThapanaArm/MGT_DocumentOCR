@@ -346,6 +346,74 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         return Ok(await repo.GetDocumentAsync(docId));
     }
 
+    /// <summary>Fills the empty Assignment / Text of the journal entries behind this document's
+    /// supplier invoices that are already posted -- the same step the post now runs right after
+    /// creating each invoice (Journal Entry - Change, SAP_COM_0002), for invoices posted before it
+    /// existed or when that step failed. Uses each successful post's own payload (ocr.PostLog), so
+    /// the text and assignment are exactly what the invoice was sent with. Only empty fields are
+    /// filled; nothing else in SAP is touched.</summary>
+    [HttpPost("api/documents/{docId:int}/fill-je-texts")]
+    public async Task<IActionResult> FillJournalEntryTexts(int docId)
+    {
+        var doc = await repo.GetDocumentAsync(docId);
+        var module = doc.GetStr("module");
+        if (module is not ("AP" or "II"))
+            throw new HttpApiException(400, "This action is only available for AP supplier invoices");
+
+        List<(string SapDocNo, string PayloadJson)> posts;
+        await using (var conn = await GetDbAsync())
+        {
+            posts = (await conn.QueryAsync<(string, string)>("""
+                SELECT SapDocNo, PayloadJson FROM ocr.PostLog
+                 WHERE DocId=@docId AND Module IN ('AP','II') AND Success=1 AND ISNULL(SapDocNo,'')<>''
+                 ORDER BY LogId
+                """, new { docId })).ToList();
+        }
+        if (posts.Count == 0)
+            throw new HttpApiException(404, "This document has no supplier invoice posted to SAP yet");
+
+        var results = new List<object>();
+        foreach (var (sapDocNo, payloadJson) in posts.GroupBy(x => x.SapDocNo, StringComparer.OrdinalIgnoreCase).Select(g => g.Last()))
+        {
+            string company = "", text = "", assignment = "", year = "";
+            try
+            {
+                using var pj = System.Text.Json.JsonDocument.Parse(payloadJson ?? "{}");
+                var root = pj.RootElement;
+                string Str(string k) => root.ValueKind == System.Text.Json.JsonValueKind.Object
+                    && root.TryGetProperty(k, out var v) && v.ValueKind == System.Text.Json.JsonValueKind.String
+                    ? v.GetString() ?? "" : "";
+                company = Str("CompanyCode");
+                text = Str("SupplierPostingLineItemText");
+                assignment = Str("AssignmentReference");
+                // "/Date(1794355200000)/" -> its year, the invoice's fiscal year (calendar = fiscal here).
+                var m = System.Text.RegularExpressions.Regex.Match(Str("PostingDate"), @"-?\d+");
+                if (m.Success && long.TryParse(m.Value, out var ms))
+                    year = DateTimeOffset.FromUnixTimeMilliseconds(ms).UtcDateTime.Year.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+            catch (System.Text.Json.JsonException) { }
+            if (year.Length == 0) year = DateTime.Today.Year.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            if (company.Length == 0) company = await CompanyNameForPostAsync(module, (Dictionary<string, object?>)doc["header"]!);
+
+            var fill = await sap.FillJournalEntryTextsAsync(sapDocNo, year, company, text, assignment);
+            logger.LogInformation("[AP] Manual journal entry text fill for {Inv}/{Year}: {Ok} {Msg}", sapDocNo, year, fill.Ok, fill.Message);
+            results.Add(new { supplierInvoice = sapDocNo, fiscalYear = year, ok = fill.Ok, message = fill.Message });
+        }
+        // ocr.AuditLog.Detail is short: keep the gist there (the full message is in the response
+        // and in the API log above). A failure here must not hide the result from the person.
+        try
+        {
+            var detail = string.Join(" | ", results.Select(r => System.Text.Json.JsonSerializer.Serialize(r)));
+            await repo.LogAuditAsync(docId, module, "FILL_JE_TEXTS", await ActorAsync(),
+                detail: detail.Length > 500 ? detail[..500] : detail);
+        }
+        catch (Exception e)
+        {
+            logger.LogWarning(e, "[AP] Could not write the FILL_JE_TEXTS audit row for document {DocId}", docId);
+        }
+        return Ok(new { results });
+    }
+
     [HttpPost("api/documents/{docId:int}/reopen-deleted-ap-invoice")]
     public async Task<IActionResult> ReopenDeletedApInvoice(int docId, [FromBody] Dictionary<string, object?> rawBody)
     {
@@ -2101,6 +2169,24 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             // Stop at the first refusal: posting the rest would scatter half a bundle across SAP
             // and leave the person reconciling it by hand.
             var one = await sap.PostAsync(module, p);
+            // The posted journal entry leaves Assignment / Text EMPTY on the lines SAP builds itself
+            // (the GR/IR delivery-cost line, Purchase Variance) -- the invoice API has no field for
+            // the one and drops the other (5100000129). Filled right after with Journal Entry -
+            // Change (SAP_COM_0002), only where empty: the vendor line, the D1 lines and the customs
+            // receipt keep what they were posted with. Best effort -- the invoice is already in SAP,
+            // so whatever happens here only lands in the message (and ocr.PostLog).
+            if (one.Success && !one.Simulated && module is "AP" or "II" && one.SapDocNo.Length > 0)
+            {
+                var year = "";
+                if (one.Raw is System.Text.Json.JsonElement raw && raw.ValueKind == System.Text.Json.JsonValueKind.Object
+                    && raw.TryGetProperty("FiscalYear", out var fy) && fy.ValueKind == System.Text.Json.JsonValueKind.String)
+                    year = fy.GetString() ?? "";
+                if (year.Length == 0) year = DateTime.Today.Year.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                var fill = await sap.FillJournalEntryTextsAsync(one.SapDocNo, year,
+                    p.GetStr("CompanyCode"), p.GetStr("SupplierPostingLineItemText"), p.GetStr("AssignmentReference"));
+                logger.LogInformation("[AP] Journal entry text fill for {Inv}/{Year}: {Ok} {Msg}", one.SapDocNo, year, fill.Ok, fill.Message);
+                one = one with { Message = $"{one.Message} · Assignment/Text: {(fill.Ok ? "" : "NOT DONE — ")}{fill.Message}" };
+            }
             results.Add((p, one));
             if (!one.Success) break;
         }

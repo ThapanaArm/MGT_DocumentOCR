@@ -35,7 +35,7 @@ public static class DeferredVatReversal
     }
 
     /// <summary>One entry per tax invoice whose VAT is still deferred: the text SAP's own documents
-    /// carry ("PROMPT,INV.PI-2608010"), that invoice's number, and its VAT amount.</summary>
+    /// carry (the issuer's name -- no invoice number since 2026-11-11), that invoice's number, and its VAT amount.</summary>
     public static List<(string Text, string Assignment, double Amount)> Pairs(
         Dictionary<string, object?> doc)
     {
@@ -51,11 +51,12 @@ public static class DeferredVatReversal
                 : code.StartsWith('D') || code.StartsWith('d');
             if (!deferred) continue;
 
-            var issuer = ShortName(t.GetStr("issuerName"));
+            // AP, 2026-11-11: Input tax text = the issuer's name only (Master 8 "Tax Invoice
+            // Issuer" name, max 50), no ",INV.<no>"; the tax invoice number stays the Assignment.
+            var issuer = t.GetStr("issuerName").Trim().ToUpperInvariant();
+            if (issuer.Length > 50) issuer = issuer[..50].TrimEnd();
             var docNo = t.GetStr("taxDocNo").Trim();
-            var text = issuer.Length > 0 && docNo.Length > 0 ? $"{issuer},INV.{docNo}"
-                : issuer.Length > 0 ? issuer
-                : docNo;
+            var text = issuer.Length > 0 ? issuer : docNo;
             pairs.Add((text, docNo, amount));
         }
         return pairs;

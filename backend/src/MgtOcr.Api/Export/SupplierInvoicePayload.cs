@@ -362,19 +362,15 @@ public static class SupplierInvoicePayload
                     deferred, amt, Num(t.Get("baseAmount")) > 0 ? Num(t.Get("baseAmount")) : Math.Round(amt / 0.07, 2),
                     docNo, t.GetStr("issuerName").Trim().ToUpperInvariant(), DeferredVatReversal.IsImportVat(t)));
             }
-            // Every VAT line carries the invoicing party and ITS invoice, the way Accounting writes
-            // it (PRD 5100001131: both D1 lines "PROMPT,INV.PI-2608011", the pass-through receipts
-            // included), with the PO as Assignment (PRD 5105604002). The per-receipt detail the
-            // tax report needs travels on the Input VAT journal entry, not here.
-            static string Short(string name)
-            {
-                var n = (name ?? "").Trim();
-                var cut = n.IndexOfAny([' ', ',']);
-                return (cut > 0 ? n[..cut] : n).Trim().ToUpperInvariant();
-            }
-            var partyName = Short(Or(vatLines.FirstOrDefault(v => v.Own).Issuer ?? "",
-                Or(header.GetStr("vendorName").Trim(), vatLines.FirstOrDefault().Issuer ?? "")));
-            var vatText = partyName.Length > 0 && ownInvoice.Length > 0 ? $"{partyName},INV.{ownInvoice}" : itemText;
+            // Every VAT line carries the invoicing party's NAME only -- no ",INV.<no>" (AP, 2026-11-11:
+            // "Input tax -> supplier name, no invoice number"), the pass-through receipts included,
+            // with the PO as Assignment (PRD 5105604002). The name is the one in Master 8 "Tax
+            // Invoice Issuer" (ocr.SupplierTaxMap, max 50 = SAP's item Text): the read already swaps
+            // the issuer name for the table's at save time, so the party's own tax row carries it.
+            // The per-receipt detail the tax report needs travels on the Input VAT journal entry.
+            var partyName = Or(vatLines.FirstOrDefault(v => v.Own).Issuer ?? "",
+                Or(header.GetStr("vendorName").Trim(), vatLines.FirstOrDefault().Issuer ?? "")).Trim();
+            var vatText = partyName.Length > 0 ? partyName : itemText;
             foreach (var g in vatLines.GroupBy(v => (v.Code, v.Deferred,
                          Key: v.Customs ? "CUSTOMS|" + v.DocNo : v.Own ? "OWN|" + v.DocNo : "PAID-ON-BEHALF")))
             {
@@ -399,8 +395,10 @@ public static class SupplierInvoicePayload
                     ["AssignmentReference"] = g.Key.Key.StartsWith("CUSTOMS|")
                         ? Cut(Or(docs.FirstOrDefault() ?? "", Or(poRef, assignment)), 18)
                         : Cut(Or(poRef, Or(docs.FirstOrDefault() ?? "", assignment)), 18),
+                    // Customs: always the department's full legal name as SAP's supplier record spells
+                    // it (AP, 2026-11-11: "THE CUSTOMS DEPARTMENT", not the read's "CUSTOMS DEPARTMENT").
                     ["SupplierInvoiceItemText"] = g.Key.Key.StartsWith("CUSTOMS|")
-                        ? Cut(Or(items.First().Issuer, vatText), 50)
+                        ? CustomsDepartmentName
                         : Cut(vatText, 50),
                     ["_vatAsGlLine"] = g.Key.Code,
                     ["_vatDocs"] = string.Join(", ", docs),
@@ -809,6 +807,7 @@ public static class SupplierInvoicePayload
     /// <summary>Purchase Variance (YCOA, Primary Costs) — where Accounting books the satang between
     /// the PO's accrual and the invoice.</summary>
     private const string PurchaseVarianceAccount = "52110001";
+    private const string CustomsDepartmentName = "THE CUSTOMS DEPARTMENT";
 
     private static double PoAmount(object item) =>
         Num(((Dictionary<string, object?>)item).Get("SupplierInvoiceItemAmount"));

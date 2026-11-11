@@ -87,9 +87,11 @@ public static class JournalEntryAccruedExcel
         // the bundle, the pass-through receipts included. Reference stays per tax invoice.
         var poAssignment = header.GetStr("poRef").Trim();
         var ownInvoice = header.GetStr("invoiceNo").Trim();
-        var party = ShortName(Or(rows.FirstOrDefault(r => string.Equals(r.DocNo, ownInvoice, StringComparison.OrdinalIgnoreCase))?.Text ?? "",
-            Or(header.GetStr("vendorName").Trim(), rows.FirstOrDefault()?.Text ?? "")));
-        var apText = party.Length > 0 && ownInvoice.Length > 0 ? $"{party},INV.{ownInvoice}" : "";
+        // AP, 2026-11-11: the Input tax text is the invoicing party's NAME only, no ",INV.<no>" --
+        // the same expression SupplierInvoicePayload uses, so the JV still matches the AP's lines.
+        var party = Or(rows.FirstOrDefault(r => string.Equals(r.DocNo, ownInvoice, StringComparison.OrdinalIgnoreCase))?.Text ?? "",
+            Or(header.GetStr("vendorName").Trim(), rows.FirstOrDefault()?.Text ?? "")).Trim();
+        var apText = party.Length > 50 ? party[..50].TrimEnd() : party;
         rows = rows.Select(r => r with
         {
             Text = Or(apText, r.Text),
