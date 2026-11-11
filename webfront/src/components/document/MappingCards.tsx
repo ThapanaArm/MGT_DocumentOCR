@@ -30,6 +30,7 @@ import {
   getZohoAccountFullByCode,
   getZohoAccountSoldTo,
   getZohoDealsByAccountCode,
+  getZohoDealById,
   searchZohoDeals,
   NEW_DEAL_ID,
   getZohoWebLinks,
@@ -2862,6 +2863,15 @@ function MatchBadge({ deal, lines }: { deal: ZohoDeal; lines: DocModel['lines'] 
 }
 
 function autoPickDeal(deals: ZohoDeal[], lines: DocModel['lines'], poNo?: string | null, quoteDealId?: string | null, customerCode?: string) {
+  // No Deal at all for this customer (Megachem, 11 Nov 2026): "Open a new Deal" is the default.
+  // Deals exist but none matches: '' -- CS picks one or opens a new Deal themselves.
+  if (deals.length === 0) return NEW_DEAL_ID;
+  const sameCustomer = (d: ZohoDeal) =>
+    !!customerCode && String(d.accountCode || '').trim().toLowerCase() === customerCode.trim().toLowerCase();
+  // The PO quotes Megachem's own Quote No.: that Quote's Deal wins before the product check
+  // (27 Oct 2026 rule), whatever its Stage -- as long as it is this customer's Deal.
+  const byQuote = quoteDealId ? deals.find((d) => d.id === quoteDealId && sameCustomer(d)) : undefined;
+  if (byQuote) return byQuote.id;
   // 1. Customer Code + Stage + Material Code + Qty; 2. else Customer Code + Stage + Material Code.
   const eligible = deals.filter((d) => DEAL_SEARCH_STAGES.includes(dealStageKey(d.stage))
     && !!customerCode && String(d.accountCode || '').trim().toLowerCase() === customerCode.trim().toLowerCase());
@@ -2939,7 +2949,7 @@ function ZohoDealCard({
   // The Megachem Quote No. the PO refers to, if any, and that Quote's Deal (27 Oct 2026).
   const quoteRefs = docQuoteRefs(doc.header as Record<string, unknown>, doc.lines);
   const quoteRefsKey = quoteRefs.join(',');
-  const [quoteRef, setQuoteRef] = useState<{ quoteNo: string; dealId?: string | null } | null>(null);
+  const [quoteRef, setQuoteRef] = useState<{ quoteNo: string; dealId?: string | null; stage?: string | null } | null>(null);
   useEffect(() => {
     let cancelled = false;
     setQuoteRef(null);
@@ -2947,7 +2957,9 @@ function ZohoDealCard({
       for (const no of quoteRefs) {
         try {
           const q = await getZohoQuoteByNo(no);
-          if (!cancelled) setQuoteRef({ quoteNo: q.quoteNo || no, dealId: q.dealId });
+          // A Completed Quote is never reused (11 Nov 2026), so its Deal is not preferred either.
+          const done = (q.stage || '').trim().toLowerCase() === 'completed';
+          if (!cancelled) setQuoteRef({ quoteNo: q.quoteNo || no, dealId: done ? null : q.dealId, stage: q.stage });
           return;
         } catch { /* not a Zoho Quote No. -- try the next */ }
       }
@@ -2983,7 +2995,7 @@ function ZohoDealCard({
         if (cancelled) return;
         setDeals(r.deals);
         // A Deal the person chose stays chosen; otherwise the system picks by products (autoPickDeal).
-        // No eligible matching Deal leaves selection unresolved; creating a new Deal is explicit.
+        // No Deal at all for this customer: autoPickDeal returns "Open a new Deal" (11 Nov 2026).
         if (keep && r.deals.some((d) => d.id === keep)) {
           userPicked.current = true;
           onSelectId(keep);
@@ -3010,6 +3022,26 @@ function ZohoDealCard({
     onSelectId(autoPickDeal(deals, doc.lines, doc.header.poNo, quoteRef?.dealId, customerCode));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [deals, linesKey, doc.header.poNo, quoteRef?.dealId]);
+
+  // The Deal of the Quote No. on the PO is not in the list (e.g. its Stage moved on after "Convert
+  // to Quote", so the by-account-code lookup filtered it out): fetch it, add it and select it --
+  // only for this customer's Deal, and not when that Quote is already Completed (11 Nov 2026).
+  useEffect(() => {
+    const dealId = quoteRef?.dealId;
+    if (!deals || !dealId || userPicked.current || deals.some((d) => d.id === dealId)) return;
+    if ((quoteRef?.stage || '').trim().toLowerCase() === 'completed') return;
+    let cancelled = false;
+    getZohoDealById(dealId)
+      .then((d) => {
+        if (cancelled || userPicked.current || !d?.id) return;
+        if (!customerCode || String(d.accountCode || '').trim().toLowerCase() !== customerCode.trim().toLowerCase()) return;
+        setDeals((prev) => (prev && !prev.some((x) => x.id === d.id) ? [d, ...prev] : prev));
+        onSelectId(d.id);
+      })
+      .catch(() => { /* not readable -- keep the normal pick */ });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deals, quoteRef?.dealId, quoteRef?.stage, customerCode]);
 
   const hint = (text: string) => <div className="hint" style={{ padding: '6px 0' }}>{text}</div>;
   const deal = deals?.find((d) => d.id === selectedId);
@@ -3250,6 +3282,8 @@ function ZohoDealCard({
                     </table>
                   )}
                 </div>
+                {/* No Deal for this customer: CS may still open a new Deal (not WCD) after checking. */}
+                <div style={{ marginTop: 12 }}>{newDealRow()}</div>
               </>
             )
           : showList

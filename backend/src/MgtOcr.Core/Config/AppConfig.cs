@@ -298,9 +298,19 @@ public sealed record SharePointTarget(
     string DriveId = "",
     string RootFolder = "OCR",
     string SiteUrl = "",          // informational only (shown on the admin test page)
-    // Folder order. false (MGT): {Root}/{subPath}/{yyyy}/{MM}/file. true (GLC, per Megachem 2 Oct
-    // 2026): {Root}/{yyyy}/{MM}/{subPath}/file - year and month first, then the customer folder.
-    bool DateFirst = false)
+    // Folder order. false (MGT): {Root}/{subPath}/{year}/{MM}/file. true (GLC, per Megachem 2 Oct
+    // 2026): {Root}/{year}/{MM}/{subPath}/file - year and month first, then the customer folder.
+    bool DateFirst = false,
+    // Name of the year folder; "{yyyy}" is replaced by the year. Not set: MGT = "PO.{yyyy}"
+    // (Megachem, 11 Nov 2026: Data/Customer PO Template/{Sales}/{Code}_{Name}/PO.2026/{PO}_{yyMMdd}.pdf),
+    // other companies = "{yyyy}".
+    string? YearFolder = null,
+    // Month folder under the year. Not set: MGT = no month folder (year only), others = yes.
+    bool? MonthFolder = null)
 {
+    private bool IsMgt => string.Equals(Company?.Trim(), "MGT", StringComparison.OrdinalIgnoreCase);
+    public string YearFolderOrDefault => string.IsNullOrWhiteSpace(YearFolder) ? (IsMgt ? "PO.{yyyy}" : "{yyyy}") : YearFolder;
+    public bool MonthFolderOrDefault => MonthFolder ?? !IsMgt;
+
     public bool IsUsable => TenantId != "" && ClientId != "" && ClientSecret != "" && DriveId != "";
 }

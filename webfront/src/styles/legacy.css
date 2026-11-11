@@ -717,7 +717,12 @@
          flex-wrap:wrap;margin-top:18px}
 .so-send .hint{color:rgba(255,255,255,.7)}
 .so-send b{font-size:14px;color:#fff}
-@media(max-width:600px){.so-send{flex-direction:column;align-items:stretch}}
+/* Status text next to the Send buttons: takes the rest of the row and wraps inside it, so the
+   title and the hint line stay aligned together (a long hint used to push the block onto its own
+   line with only the title right-aligned). */
+.so-send-status{flex:1 1 320px;min-width:0;text-align:right}
+.so-send-status .hint{margin-top:2px}
+@media(max-width:600px){.so-send{flex-direction:column;align-items:stretch}.so-send-status{text-align:left}}
 /* Master mapping: document fields and external-system fields stay visibly separate. */
 .master-field-groups { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }
 .master-field-groups section { min-width: 0; }

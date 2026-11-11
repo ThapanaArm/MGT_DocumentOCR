@@ -77,7 +77,7 @@ public class GraphArchiveClient(AppConfig config, IHttpClientFactory httpFactory
     public static string JoinFolder(params string?[] parts) =>
         string.Join('/', parts.Select(p => SafeName(p ?? "")).Select(p => p == "" ? "_Unknown" : p));
 
-    /// <summary>Folder layout: {RootFolder}/{subPath}/{yyyy}/{MM}/{file} - or, for a DateFirst target
+    /// <summary>Folder layout: {RootFolder}/{subPath}/{year}/{MM}/{file} - or, for a DateFirst target
     /// (GLC), {RootFolder}/{yyyy}/{MM}/{subPath}/{file} - where subPath is what the post decided
     /// (MGT Sales Order: "{Sales}/{Code}_{Customer}", GLC Sales Order: "{Code}_{Customer}") or, when none was stored,
     /// "{Company}/{Module}". Uses the supplied archive filename when present, otherwise the
@@ -88,7 +88,14 @@ public class GraphArchiveClient(AppConfig config, IHttpClientFactory httpFactory
         var d = postedAt ?? DateTime.Now;
         var parts = new List<string>();
         foreach (var p in t.RootFolder.Split('/', StringSplitOptions.RemoveEmptyEntries)) parts.Add(SafeName(p));
-        if (t.DateFirst) { parts.Add(d.ToString("yyyy")); parts.Add(d.ToString("MM")); }
+        // The year folder follows the target's YearFolder template ("{yyyy}" or e.g. "PO.{yyyy}");
+        // the month folder can be switched off (MonthFolder=false).
+        var dateParts = new List<string>();
+        var year = SafeName(t.YearFolderOrDefault
+            .Replace("{yyyy}", d.ToString("yyyy", System.Globalization.CultureInfo.InvariantCulture)));
+        dateParts.Add(year == "" ? d.ToString("yyyy", System.Globalization.CultureInfo.InvariantCulture) : year);
+        if (t.MonthFolderOrDefault) dateParts.Add(d.ToString("MM", System.Globalization.CultureInfo.InvariantCulture));
+        if (t.DateFirst) parts.AddRange(dateParts);
         if (!string.IsNullOrWhiteSpace(subPath))
             parts.AddRange(subPath.Split('/', StringSplitOptions.RemoveEmptyEntries).Select(SafeName).Where(p => p != ""));
         else
@@ -96,7 +103,7 @@ public class GraphArchiveClient(AppConfig config, IHttpClientFactory httpFactory
             parts.Add(SafeName(company));
             if (!string.IsNullOrWhiteSpace(module)) parts.Add(SafeName(module.Trim().ToUpperInvariant()));
         }
-        if (!t.DateFirst) { parts.Add(d.ToString("yyyy")); parts.Add(d.ToString("MM")); }
+        if (!t.DateFirst) parts.AddRange(dateParts);
         parts.Add(SafeName(Path.GetFileName(string.IsNullOrWhiteSpace(remoteFileName) ? localPath : remoteFileName)));
         return string.Join('/', parts);
     }

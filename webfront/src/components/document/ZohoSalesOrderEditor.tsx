@@ -116,6 +116,9 @@ export default function ZohoSalesOrderEditor({
 }) {
   const multiDate = dateGroups.length > 1;
   const remaining = dateGroups.filter((g) => !groupStatus(g, posts).ok).length;
+  // Every group already has its Zoho Sales Order (or the document is POSTED): Send stays disabled,
+  // and the bar says why instead of showing a greyed-out button with no reason.
+  const allSent = posted || (dateGroups.length > 0 && remaining === 0);
   // Which skipped line (by itemNo) currently has the "Ask AI to suggest a match" popup open.
   const [aiMatchItemNo, setAiMatchItemNo] = useState<string | null>(null);
 
@@ -420,18 +423,22 @@ export default function ZohoSalesOrderEditor({
                 : result?.success
                   ? 'Sent ✓'
                   : multiDate
-                    ? `⎋ Send ${remaining} Sales Order${remaining === 1 ? '' : 's'} to Zoho CRM`
-                    : '⎋ Send to Zoho CRM'}
+                    ? `Send ${remaining} Sales Order${remaining === 1 ? '' : 's'} to Zoho CRM`
+                    : 'Send to Zoho CRM'}
             </button>
             <button className="btn" onClick={onViewPayload} disabled={preview.lines.length === 0}>
               {'{}'} View payload
             </button>
           </div>
-          {(result?.success || shipToMissing || multiDate || preview.lines.length === 0 || preview.skipped.length > 0) && (
-          <div style={{ textAlign: 'right' }}>
+          {(result?.success || shipToMissing || multiDate || preview.lines.length === 0 || preview.skipped.length > 0 || allSent || SEND_DISABLED) && (
+          <div className="so-send-status">
             <b>
               {result?.success
                 ? 'Sent to Zoho CRM'
+                : SEND_DISABLED
+                ? 'Sending is switched off'
+                : allSent
+                ? 'Already sent to Zoho CRM'
                 : shipToMissing
                 ? 'Ship-to required'
                 : preview.lines.length === 0
@@ -441,7 +448,11 @@ export default function ZohoSalesOrderEditor({
                     : `${preview.skipped.length} line${preview.skipped.length === 1 ? '' : 's'} not matched`}
             </b>
             <div className="hint">
-              {shipToMissing && !result?.success
+              {SEND_DISABLED && !result?.success
+                ? 'SEND_DISABLED is on in constants/flags.ts'
+                : allSent && !result?.success
+                ? `Every Sales Order of this document is already in Zoho (${posts.filter((p) => p.posted).map((p) => p.docNo).filter(Boolean).join(', ') || 'see the Sales Orders table'}) — nothing left to send`
+                : shipToMissing && !result?.success
                 ? multiDate
                   ? 'Select a Ship-to in the mapping cards above, or one for each SO Group in the Sales Orders table'
                   : 'Select a Ship-to in the mapping cards above before sending'

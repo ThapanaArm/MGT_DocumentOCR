@@ -51,7 +51,13 @@ public class DocumentIngestService(OcrEngine ocr, DocumentRepository repo, MgtOc
                 : pd.Header.GetStr("poRef").Trim().Length > 0 ? "AP" : "II";
         }
         var ext = ExtConversion.ToExtDict(pd, ExtConversion.OcrPrefillsItemNote(mod, config, salesOrg));
-        var docId = await repo.CreateDocumentAsync(mod, ext, fileName, storedPath, size, user, apDocCategory, durationMs, salesOrg,
+        // MGT Sales Order: name the document <PO>_<delivery yyMMdd>.pdf once it has been read
+        // (keeps the uploaded name when the PO number or delivery date could not be read).
+        var docFileName = mod == "SO" && MgtOcr.Core.Auth.DeploymentCompany.IsMgt
+            ? SalesOrderFileName.Build(pd.Header.GetStr("poNo"), pd.Header.GetStr("deliveryDate"),
+                pd.Lines.Select(l => (string?)l.DueDate), fileName) ?? fileName
+            : fileName;
+        var docId = await repo.CreateDocumentAsync(mod, ext, docFileName, storedPath, size, user, apDocCategory, durationMs, salesOrg,
             jobStartedAt: jobStart);
         return (docId, mod, pd.Note);
     }

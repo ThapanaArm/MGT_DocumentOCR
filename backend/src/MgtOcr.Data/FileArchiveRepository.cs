@@ -37,19 +37,23 @@ public class FileArchiveRepository(DbConnectionFactory factory)
             $"SELECT StoredPath, FileName, PostedAt, HeaderJson FROM {docTable} WHERE DocId=@docId", new { docId });
         if (string.IsNullOrWhiteSpace(d.StoredPath)) return;
         var archiveFileName = d.FileName;
+        // ocr.FileArchive.PostedAt is only used to pick the archive's year/month folder.
+        var folderDate = d.PostedAt;
         if (string.Equals(companyCode, "MGT", StringComparison.OrdinalIgnoreCase)
             && string.Equals(module, "SO", StringComparison.OrdinalIgnoreCase))
         {
             var header = JsonNode.Parse(d.HeaderJson ?? "{}");
             archiveFileName = SalesOrderFileName.Build(header?["poNo"]?.ToString(),
                 deliveryDate ?? header?["deliveryDate"]?.ToString(), d.FileName ?? d.StoredPath) ?? d.FileName;
+            // MGT folder "PO.{yyyy}" = the year of the PO date (falls back to the post date).
+            folderDate = SalesOrderFileName.FolderDate(header?["poDate"]?.ToString(), d.PostedAt ?? DateTime.Now);
         }
         await conn.ExecuteAsync("""
             MERGE ocr.FileArchive AS t
             USING (SELECT @StoredPath AS StoredPath) s ON t.StoredPath=s.StoredPath
             WHEN NOT MATCHED THEN INSERT(StoredPath,FileName,CompanyCode,Status,Attempts,DocId,Module,SubPath,PostedAt,MachineName)
                  VALUES(@StoredPath,@FileName,@companyCode,'PENDING',0,@docId,@module,@subPath,COALESCE(@PostedAt,SYSDATETIME()),@machine);
-            """, new { d.StoredPath, FileName = archiveFileName, d.PostedAt, companyCode, docId, module, subPath, machine = Environment.MachineName });
+            """, new { d.StoredPath, FileName = archiveFileName, PostedAt = folderDate, companyCode, docId, module, subPath, machine = Environment.MachineName });
     }
 
     // Queued files to send now: PENDING, or FAILED with attempts left once its back-off has passed

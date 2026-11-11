@@ -343,9 +343,27 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             await repo.SaveLinesAsync(module, docId, linesRaw.OfType<Dictionary<string, object?>>().ToList());
         await using (var conn = await GetDbAsync())
             await conn.ExecuteAsync($"UPDATE {docT} SET Status=CASE WHEN Status IN ('POSTED','SPLIT') THEN Status ELSE 'NEW' END, MapStatus=NULL, MapMessage=NULL WHERE DocId=@docId", new { docId });
+        var saved = await repo.GetDocumentAsync(docId);
+        saved["fileName"] = await SyncSoFileNameAsync(docId, module, saved);
         await repo.LogAuditAsync(docId, module, "UPDATE", await ActorAsync(),
-            detail: "Edited document data", fileName: doc.GetStr("fileName"));
-        return Ok(await repo.GetDocumentAsync(docId));
+            detail: "Edited document data", fileName: saved.GetStr("fileName"));
+        return Ok(saved);
+    }
+
+    // MGT Sales Order: keep the document's file name as <PO>_<delivery yyMMdd>.pdf after a re-read or
+    // an edit of the PO number / delivery date. Leaves the name alone when either value is missing.
+    private async Task<string> SyncSoFileNameAsync(int docId, string module, Dictionary<string, object?> doc)
+    {
+        var current = doc.GetStr("fileName");
+        if (!string.Equals(module, "SO", StringComparison.OrdinalIgnoreCase) || !DeploymentCompany.IsMgt) return current;
+        var header = doc.Get("header") as Dictionary<string, object?>;
+        var lineDates = ((doc.Get("lines") as System.Collections.IEnumerable)?.OfType<Dictionary<string, object?>>() ?? [])
+            .Select(l => (string?)(l.Get("extra") as Dictionary<string, object?>).GetStr("deliveryDate"));
+        var name = SalesOrderFileName.Build(header.GetStr("poNo"), header.GetStr("deliveryDate"), lineDates, current);
+        if (name is null || name == current) return current;
+        await using var conn = await GetDbAsync();
+        await conn.ExecuteAsync($"UPDATE {DocumentTables.For(module).Doc} SET FileName=@name WHERE DocId=@docId", new { name, docId });
+        return name;
     }
 
     [HttpPost("api/documents/{docId:int}/category")]
@@ -451,7 +469,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         var docT = DocumentTables.ForId(docId).Doc;
         dynamic? row = await GetDbInstance().QueryOneAsync($"SELECT Module, StoredPath, FileName, FileExpiredAt FROM {docT} WHERE DocId=@docId", new { docId });
         if (row == null) throw new HttpApiException(404, "Document not found");
-        string storedPath = row.StoredPath ?? ""; string module = row.Module; string fileNameOnDisk = row.FileName ?? "";
+        string storedPath = row.StoredPath ?? ""; string module = row.Module;
         object? fileExpiredAt = row.FileExpiredAt;
 
         var doc = await repo.GetDocumentAsync(docId);
@@ -516,9 +534,10 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         }
         var ocrItemNote = ExtConversion.OcrPrefillsItemNote(module, config, docCompany);
         await repo.SaveLinesAsync(module, docId, pd.Lines.Select(l => ExtConversion.ToLineDict(l, pd.Header.GetValueOrDefault("deliveryDate") as string, ocrItemNote)).ToList());
-        await repo.LogAuditAsync(docId, module, "REOCR", await ActorAsync(),
-            detail: "Re-read document", fileName: fileNameOnDisk, ocrProvider: pd.Provider);
         var outDoc = await repo.GetDocumentAsync(docId);
+        outDoc["fileName"] = await SyncSoFileNameAsync(docId, module, outDoc);
+        await repo.LogAuditAsync(docId, module, "REOCR", await ActorAsync(),
+            detail: "Re-read document", fileName: outDoc.GetStr("fileName"), ocrProvider: pd.Provider);
         outDoc["ocrNote"] = pd.Note is { Length: > 0 } n ? n : $"Document re-read successfully ({pd.Provider})";
         return Ok(outDoc);
     }

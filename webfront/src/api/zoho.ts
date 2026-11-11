@@ -232,6 +232,11 @@ export const getZohoWebLinks = () => {
 // Looks up open Deals by the Deal's own Account_Code field (same customer code stored locally
 // as CustomerCode) rather than a Zoho Account record id -- see ZohoDealClient.
 // FindOpenDealsByAccountCodeAsync for why: this needs no Zoho account link to exist at all.
+/* One Deal by its Zoho record id, with its Deal Items -- GET /api/zoho/deals/{id}. Used for the Deal
+   of a Quote No. the PO refers to, which the by-account-code list may leave out (its Stage). */
+export const getZohoDealById = (dealId: string) =>
+  api.get<ZohoDeal>('/api/zoho/deals/' + encodeURIComponent(dealId));
+
 export const getZohoDealsByAccountCode = (accountCode: string) =>
   api.get<{ count: number; deals: ZohoDeal[] }>(
     '/api/zoho/deals/by-account-code/' + encodeURIComponent(accountCode),

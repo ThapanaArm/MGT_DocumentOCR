@@ -297,9 +297,20 @@ const ZohoSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function Zoho
 
   const buildEdits = (): ZohoSalesOrderEdits => {
     const mappedShipTo = shipTos.find((item) => String(item.SapShipToCode ?? '') === String(map.header.shipTo.code ?? ''));
-    const shipTo = selectedShipTo || (mappedShipTo ? {
-      code: String(mappedShipTo.ShipToCode ?? mappedShipTo.SapShipToCode ?? ''),
-      address: String(mappedShipTo.ShipToAddress ?? mappedShipTo.Address ?? ''),
+    // The Ship-to master row picked in Step 2. Since Oct 2026 ShipToCode / ShipToAddress hold the
+    // DOCUMENT's own text (often blank); the Zoho values are SapShipToCode and the address
+    // sub-fields. Reading the document columns first ("??" keeps an empty string) left code and
+    // address blank, so Send said "Ship-to required" after a page reload even with one picked.
+    const t = (v: unknown) => String(v ?? '').trim();
+    const st = mappedShipTo;
+    const shipTo = selectedShipTo || (st ? {
+      code: t(st.SapShipToCode) || t(st.ShipToCode),
+      address: [st.HouseNumber, st.Street, st.Street2, st.Street3, st.Street4, st.Street5, st.District, st.City, st.PostCode]
+        .map(t).filter(Boolean).join(' ') || t(st.ShipToAddress) || t(st.Address),
+      street: t(st.Street) || undefined, street2: t(st.Street2) || undefined, street3: t(st.Street3) || undefined,
+      street4: t(st.Street4) || undefined, street5: t(st.Street5) || undefined, houseNumber: t(st.HouseNumber) || undefined,
+      district: t(st.District) || undefined, city: t(st.City) || undefined, differenceCity: t(st.DifferenceCity) || undefined,
+      postCode: t(st.PostCode) || undefined, countryReg: t(st.CountryReg) || undefined,
     } : undefined);
     return {
       ...Object.fromEntries(Object.entries(header).map(([key, value]) => [key, value || undefined])),

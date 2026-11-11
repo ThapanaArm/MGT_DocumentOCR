@@ -363,46 +363,66 @@ public class ZohoSalesOrderController(
 
     // Which of the Deal's Quotes this document's Sales Order is made from (Megachem, 27 Oct 2026):
     // 1) a Quote whose Customer Ref is the document's PO no. (items matching wins among several);
-    // 2) no PO match (e.g. the customer didn't quote a number): a Quote whose items match the
-    //    document -- same materials, quantities and unit prices; 3) none -> a new Quote is created.
+    // 2) no PO match (e.g. a Quote made with "Convert to Quote" before the PO came): the newest Quote
+    //    whose items match the document by the Deal rule (QuoteItemsMatch); 3) none -> a new Quote.
     private async Task<QuotePlan> PlanQuoteAsync(ZohoDeal deal, string? customerRef, IReadOnlyList<ZohoSalesOrderLine> lines,
         IReadOnlyList<string>? quoteRefs = null)
     {
         var refs = quoteRefs ?? [];
         var refNote = refs.Count > 0 ? $" (the PO mentions Quote {string.Join(", ", refs)}, which is not on this Deal)" : "";
         if (string.IsNullOrEmpty(deal.Id)) return new(null, "New Deal — a new Quote will be created" + refNote);
-        var quotes = await quoteClient.FindByDealAsync(deal.Id);
+        // A Quote at Stage "Completed" is finished and never reused (Megachem, 11 Nov 2026); Open and
+        // In Process Quotes are candidates.
+        var quotes = (await quoteClient.FindByDealAsync(deal.Id))
+            .Where(q => !string.Equals((q.Stage ?? "").Trim(), "Completed", StringComparison.OrdinalIgnoreCase))
+            .ToList();
         // 0) The PO quotes Megachem's own Quote No. -- that Quote wins over every other rule.
         var byNo = quotes.FirstOrDefault(q => refs.Contains((q.QuoteNo ?? "").Trim().ToUpperInvariant()));
         if (byNo is not null) return new(byNo, $"The PO refers to Quote {byNo.QuoteNo}");
-        if (quotes.Count == 0) return new(null, "The Deal has no Quote yet — a new Quote will be created" + refNote);
+        if (quotes.Count == 0) return new(null, "The Deal has no open Quote (none, or all Completed) — a new Quote will be created" + refNote);
         var po = (customerRef ?? "").Trim();
         var byRef = po.Length > 0 && po != "-"
             ? quotes.Where(q => string.Equals((q.CustomerRef ?? "").Trim(), po, StringComparison.OrdinalIgnoreCase)).ToList()
             : new List<ZohoQuote>();
-        var hit = byRef.FirstOrDefault(q => QuoteItemsMatch(q, lines));
+        var hit = byRef.FirstOrDefault(q => QuoteItemsMatch(q, lines, deal.IsWcd));
         if (hit is not null) return new(hit, $"Customer Ref {po} and items match");
         if (byRef.Count > 0) return new(byRef[0], $"Customer Ref {po} matches");
-        hit = quotes.FirstOrDefault(q => QuoteItemsMatch(q, lines));
-        if (hit is not null) return new(hit, "Items match (material, quantity, unit price)");
+        hit = quotes.FirstOrDefault(q => QuoteItemsMatch(q, lines, deal.IsWcd));
+        if (hit is not null)
+            return new(hit, deal.IsWcd ? "Items match (Forecast (WCD): materials)" : "Items match (materials and quantities)");
         return new(null, $"None of the Deal's {quotes.Count} Quote(s) matches this document's Customer Ref or items — a new Quote will be created" + refNote);
     }
 
-    private static bool QuoteItemsMatch(ZohoQuote q, IReadOnlyList<ZohoSalesOrderLine> lines)
+    // Does an existing Quote fit this document? Same rule as picking the Deal (Megachem, 11 Nov 2026):
+    // every document line's material must be on the Quote (the PO may carry only some of the Quote's
+    // items). Forecast (WCD) Deal: materials only, quantities may differ. Not WCD: the quantity per
+    // material must match too (document rows of one material are added up, likewise the Quote's
+    // items -- one item may be split over several delivery dates). Unit prices are not compared.
+    private static bool QuoteItemsMatch(ZohoQuote q, IReadOnlyList<ZohoSalesOrderLine> lines, bool isWcd)
     {
-        if (lines.Count == 0 || q.Items.Count != lines.Count) return false;
-        var pool = q.Items.ToList();
+        if (lines.Count == 0 || q.Items.Count == 0) return false;
+        var groups = new List<(ZohoSalesOrderLine First, decimal Qty)>();
         foreach (var l in lines)
         {
-            var i = pool.FindIndex(it =>
-                SameMaterial(it, l)
-                && it.Quantity is decimal qq && Math.Round(qq, 3) == Math.Round(l.Quantity, 3)
-                && (l.UnitPrice is null || it.UnitPrice is null || Math.Round(it.UnitPrice.Value, 2) == Math.Round(l.UnitPrice.Value, 2)));
-            if (i < 0) return false;
-            pool.RemoveAt(i);
+            if (!q.Items.Any(it => SameMaterial(it, l))) return false;
+            var i = groups.FindIndex(g => SameLineMaterial(g.First, l));
+            if (i < 0) groups.Add((l, l.Quantity));
+            else groups[i] = (groups[i].First, groups[i].Qty + l.Quantity);
+        }
+        if (isWcd) return true;
+        foreach (var g in groups)
+        {
+            var quoted = q.Items.Where(it => SameMaterial(it, g.First)).Sum(it => it.Quantity ?? 0m);
+            if (Math.Round(quoted, 3) != Math.Round(g.Qty, 3)) return false;
         }
         return true;
     }
+
+    private static bool SameLineMaterial(ZohoSalesOrderLine a, ZohoSalesOrderLine b) =>
+        (!string.IsNullOrEmpty(a.MaterialId) && a.MaterialId == b.MaterialId)
+        || (!string.IsNullOrWhiteSpace(a.MaterialCode) && string.Equals(a.MaterialCode.Trim(), (b.MaterialCode ?? "").Trim(), StringComparison.OrdinalIgnoreCase))
+        || (string.IsNullOrWhiteSpace(a.MaterialId) && string.IsNullOrWhiteSpace(a.MaterialCode)
+            && string.Equals((a.Description ?? "").Trim(), (b.Description ?? "").Trim(), StringComparison.OrdinalIgnoreCase));
 
     private static bool SameMaterial(ZohoQuoteItem it, ZohoSalesOrderLine l) =>
         (!string.IsNullOrEmpty(it.MaterialId) && it.MaterialId == l.MaterialId)
@@ -755,7 +775,7 @@ public class ZohoSalesOrderController(
             PaymentTerms: body.PaymentTerms is { Length: > 0 } ? body.PaymentTerms : d.PaymentTerms,
             PaymentCurrency: body.PaymentCurrency is { Length: > 0 } ? body.PaymentCurrency : d.PaymentCurrency,
             Incoterms: body.Incoterms is { Length: > 0 } ? body.Incoterms : d.Incoterms,
-            ShipTo: body.ShipTo,
+            ShipTo: await FillShipToAddressAsync(d.Deal, body.ShipTo, docId),
             // Null means no override; an explicit empty string clears the document's Remark.
             Remarks: body.Remarks ?? d.Remarks,
             SoLines: soLines,
@@ -1003,6 +1023,47 @@ public class ZohoSalesOrderController(
         if (stored is null) return null;
         try { return JsonSerializer.Deserialize<ZohoShipToInfo>(JsonSerializer.Serialize(stored), WebJson); }
         catch (JsonException) { return null; }
+    }
+
+    // The Ship-to from the mapping may carry only its code (e.g. 1000939) when the Ship-to master row
+    // has no address saved -- the Zoho Sales Order then got Address Code only (Megachem, 11 Nov 2026).
+    // Fill the empty address fields from the Account's Ship-tos in Zoho: the one with the same code;
+    // else, when the code is the customer's own code, the Account's own Ship-to; else the only one.
+    // Best effort: a Zoho error keeps the Ship-to as it was.
+    private async Task<ZohoShipToInfo?> FillShipToAddressAsync(ZohoDeal deal, ZohoShipToInfo? s, int docId)
+    {
+        if (s is null || string.IsNullOrWhiteSpace(s.Code) || string.IsNullOrWhiteSpace(deal.AccountId)) return s;
+        static bool Blank(string? v) => string.IsNullOrWhiteSpace(v);
+        if (!(Blank(s.Street) && Blank(s.Street2) && Blank(s.Street3) && Blank(s.Street4) && Blank(s.Street5)
+              && Blank(s.HouseNumber) && Blank(s.District) && Blank(s.City) && Blank(s.PostCode))) return s;
+        try
+        {
+            var all = (await accountClient.GetAllShipTosAsync(deal.AccountId)).ShipTos;
+            var code = s.Code.Trim();
+            var hit = all.FirstOrDefault(x => string.Equals((x.Code ?? "").Trim(), code, StringComparison.OrdinalIgnoreCase))
+                ?? (string.Equals(code, (deal.AccountCode ?? "").Trim(), StringComparison.OrdinalIgnoreCase)
+                    ? all.FirstOrDefault(x => x.Source == "account") : null)
+                ?? (all.Count == 1 ? all[0] : null);
+            if (hit is null)
+            {
+                log.LogInformation("Ship-to {Code} of doc {DocId}: no matching Ship-to with an address on Zoho Account {AccountId}", code, docId, deal.AccountId);
+                return s;
+            }
+            static string? F(string? mine, string? zoho) => Blank(mine) ? zoho : mine;
+            return s with
+            {
+                Address = F(s.Address, hit.Address),
+                Street = hit.Street, Street2 = hit.Street2, Street3 = hit.Street3, Street4 = hit.Street4, Street5 = hit.Street5,
+                HouseNumber = hit.HouseNumber, District = hit.District, City = hit.City, DifferenceCity = F(s.DifferenceCity, hit.DifferenceCity),
+                PostCode = hit.PostCode, CountryReg = F(s.CountryReg, hit.CountryReg),
+                Source = F(s.Source, hit.Source), RecordId = F(s.RecordId, hit.RecordId),
+            };
+        }
+        catch (Exception e)
+        {
+            log.LogWarning(e, "Ship-to {Code} of doc {DocId}: could not read the Account's Ship-tos from Zoho", s.Code, docId);
+            return s;
+        }
     }
 
     private static bool HasShipTo(ZohoShipToInfo? s) =>
