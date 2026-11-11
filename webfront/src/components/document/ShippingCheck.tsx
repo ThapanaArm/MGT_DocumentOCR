@@ -34,6 +34,9 @@ export interface SourceDoc {
   shipper?: string;
   blNo?: string;
   shipperInvoiceNo?: string;
+  /** Who issued it, set by hand in the สถานะ dropdown: 'agent' | 'third' | 'separate' | 'shipper'.
+   *  Empty = worked out automatically (issuerRoleOf). */
+  role?: string;
 }
 
 /* "KCC SILICONE CORPORATION" vs the form's SUPPLIER "KCC SILICONE CORP." — same party when the
@@ -64,6 +67,84 @@ const beforeVat = (d: SourceDoc) => {
   return Math.round((num(d.totalAmount) - num(d.vatAmount)) * 100) / 100;
 };
 
+/* Who issued each document of the bundle, worked out from what the read already has — nothing to
+   tick by hand:
+     agent       — the forwarder's own invoice: its number is the document's Invoice No., or its
+                   issuer's Tax ID / name is the forwarder's
+     shipper     — the goods supplier's commercial invoice (KCC SILICONE KCCCI…): not a shipping
+                   cost at all
+     separate    — a supplier invoiced to us on its own SAP invoice in this bundle (the Customs
+                   Department: its Tax-tab rows carry their own vendor code)
+     third party — anyone else: a receipt the forwarder paid on our behalf (Cargoport, the Port
+                   Authority, a trucker); "included" when it is re-billed inside the forwarder's
+                   invoice (รวมอยู่ในใบ filled)
+   The Tax ID comes from the Tax tab row of the same document number. */
+export type IssuerRole = 'agent' | 'shipper' | 'separate' | 'third' | 'thirdIncluded';
+
+const digits = (v: unknown) => String(v ?? '').replace(/\D/g, '');
+const sameNo = (a: unknown, b: unknown) => {
+  const x = String(a ?? '').trim().toUpperCase();
+  const y = String(b ?? '').trim().toUpperCase();
+  return x !== '' && x === y;
+};
+
+const MANUAL_ROLES = ['agent', 'third', 'separate', 'shipper'] as const;
+
+/** The role shown and used: the one picked by hand, else the automatic one. */
+export function issuerRoleOf(doc: DocModel, d: SourceDoc): IssuerRole {
+  const picked = String(d.role ?? '').trim();
+  if ((MANUAL_ROLES as readonly string[]).includes(picked)) {
+    if (picked === 'third') return String(d.includedIn ?? '').trim() ? 'thirdIncluded' : 'third';
+    return picked as IssuerRole;
+  }
+  return autoRoleOf(doc, d);
+}
+
+export function autoRoleOf(doc: DocModel, d: SourceDoc, depth = 0): IssuerRole {
+  const h = doc.header as Record<string, any>;
+  const taxRows = (h.taxItems as Array<Record<string, any>>) || [];
+  const rowOf = (no: unknown) => taxRows.find((t) => sameNo(t.taxDocNo, no));
+  const invoiceNo = String(h.invoiceNo ?? '').trim();
+  const agentRow = rowOf(invoiceNo);
+  const agentTaxId = digits(agentRow?.issuerTaxId) || digits(h.vendorTaxId);
+  const mainVendor = String(h.vendorCode ?? '').trim();
+
+  if (sameNo(d.docNo, invoiceNo)) return 'agent';
+  const myRow = rowOf(d.docNo);
+  const myTaxId = digits(myRow?.issuerTaxId);
+  if (agentTaxId.length === 13 && myTaxId === agentTaxId) return 'agent';
+
+  // The goods supplier's own invoice is checked before the name fallback below: on a bundle whose
+  // header vendor is the goods supplier, a name match would otherwise call it the agent.
+  const goodsInvoice = String(h.goodsInvoiceNo ?? '').trim();
+  if (sameNo(d.docNo, goodsInvoice) || sameNo(d.docNo, d.shipperInvoiceNo)
+      || (firstWord(d.issuerName) !== '' && firstWord(d.issuerName) === firstWord(h.goodsSupplier))) return 'shipper';
+
+  if (!myTaxId && firstWord(d.issuerName) !== '' && firstWord(d.issuerName) === firstWord(h.vendorName)) return 'agent';
+
+  const ownVendor = String(myRow?.vendorCode ?? '').trim();
+  if (ownVendor && ownVendor !== mainVendor) return 'separate';
+  // A document with no tax row of its own (the Customs Department's 200.00 fee receipt, no VAT)
+  // belongs with the other documents of the same issuer: if one of them is a separate invoice,
+  // so is this one.
+  if (depth === 0) {
+    const all: SourceDoc[] = Array.isArray(h.sourceDocs) ? h.sourceDocs : [];
+    const me = firstWord(d.issuerName);
+    if (me !== '' && all.some((o) => o !== d && firstWord(o.issuerName) === me
+        && (String(o.role ?? '').trim() === 'separate' || autoRoleOf(doc, o, 1) === 'separate'))) return 'separate';
+  }
+
+  return String(d.includedIn ?? '').trim() ? 'thirdIncluded' : 'third';
+}
+
+const ROLE_BADGE: Record<IssuerRole, { label: string; cls: string; tip: string }> = {
+  agent: { label: 'ตัวแทน', cls: 'b-ok', tip: 'ใบแจ้งหนี้ของตัวแทนชิปปิ้งเอง (ผู้ขายหลักของชุด)' },
+  shipper: { label: 'Shipper · ค่าสินค้า', cls: 'b-idle', tip: 'ใบแจ้งหนี้ค่าสินค้าของผู้ขายสินค้า — ไม่ใช่ค่าใช้จ่ายขนส่ง แสดงไว้แต่ไม่นับในยอดข้อ 2' },
+  separate: { label: 'ผู้ขายแยกใบ', cls: 'b-idle', tip: 'ตั้งหนี้เป็นใบแจ้งหนี้ของตัวเองใน SAP (มีรหัสผู้ขายของตัวเองในแท็บ Tax)' },
+  third: { label: 'Third party', cls: 'b-warn', tip: 'ตัวแทนจ่ายแทน — ใบกำกับภาษีออกโดยบุคคลที่สาม ถ้าตัวแทนเรียกเก็บรวมในใบแจ้งหนี้ของตัวเองแล้ว ให้ใส่เลขใบนั้นในช่องรวมอยู่ในใบ' },
+  thirdIncluded: { label: 'Third party · รวมในใบตัวแทน', cls: 'b-idle', tip: 'ตัวแทนจ่ายแทนแล้วเรียกเก็บรวมในใบแจ้งหนี้ของตัวเอง — ไม่นับยอดซ้ำ' },
+};
+
 export function shippingCheckRows(doc: DocModel) {
   const form: Record<string, number> = {};
   for (const l of doc.lines || []) {
@@ -76,6 +157,9 @@ export function shippingCheckRows(doc: DocModel) {
   const counted: Record<string, { nonVat: number; before: number; vat: number; total: number; n: number }> = {};
   for (const d of docs) {
     if (String(d.includedIn ?? '').trim()) continue;
+    // The goods supplier's own commercial invoice (KCCCI…) is the goods, not a shipping cost: the
+    // form never carries it, so counting it only made Overseas show -25,834.00.
+    if (issuerRoleOf(doc, d) === 'shipper') continue;
     const t = norm(d.costType);
     if (!t) continue;
     const c = (counted[t] ??= { nonVat: 0, before: 0, vat: 0, total: 0, n: 0 });
@@ -171,6 +255,7 @@ export default function ShippingCheck({ doc, onDocsChange, posted }: {
                 <thead>
                   <tr>
                     <th>Issuer</th>
+                    <th>สถานะ</th>
                     <th>Doc No.</th>
                     <th>Type</th>
                     <th>Date</th>
@@ -187,8 +272,33 @@ export default function ShippingCheck({ doc, onDocsChange, posted }: {
                 </thead>
                 <tbody>
                   {docs.map((d, i) => (
-                    <tr key={i} style={String(d.includedIn ?? '').trim() ? { opacity: 0.6 } : undefined}>
+                    <tr key={i} style={String(d.includedIn ?? '').trim() || issuerRoleOf(doc, d) === 'shipper' ? { opacity: 0.6 } : undefined}>
                       <td>{d.issuerName}</td>
+                      <td>
+                        {(() => {
+                          const role = issuerRoleOf(doc, d);
+                          const b = ROLE_BADGE[role];
+                          if (!onDocsChange || posted)
+                            return <span className={'badge ' + b.cls} title={b.tip} style={{ whiteSpace: 'nowrap' }}>{b.label}</span>;
+                          const auto = ROLE_BADGE[autoRoleOf(doc, d)];
+                          const picked = String(d.role ?? '').trim();
+                          return (
+                            <select
+                              value={(MANUAL_ROLES as readonly string[]).includes(picked) ? picked : ''}
+                              onChange={(e) => setDoc(i, 'role', e.target.value)}
+                              title={b.tip}
+                              className={'badge ' + b.cls}
+                              style={{ border: 'none', cursor: 'pointer', fontWeight: 600 }}
+                            >
+                              <option value="">อัตโนมัติ: {auto.label}</option>
+                              <option value="agent">{ROLE_BADGE.agent.label}</option>
+                              <option value="third">Third party</option>
+                              <option value="separate">{ROLE_BADGE.separate.label}</option>
+                              <option value="shipper">{ROLE_BADGE.shipper.label}</option>
+                            </select>
+                          );
+                        })()}
+                      </td>
                       <td>{d.docNo}</td>
                       <td>{d.docType}</td>
                       <td>{d.docDate}</td>
@@ -228,7 +338,8 @@ export default function ShippingCheck({ doc, onDocsChange, posted }: {
               </table>
             </div>
             <p className="hint">
-              แถวที่ใส่ "รวมอยู่ในใบ" คือใบเสร็จที่ตัวแทนจ่ายแทนแล้วเรียกเก็บรวมในใบแจ้งหนี้ของตัวแทนอีกที — แสดงไว้แต่ไม่นับในยอดข้อ 2
+              สถานะคำนวณเองจากเลขที่ใบ / Tax ID / ชื่อผู้ออก ("อัตโนมัติ") หรือเลือกเองจาก dropdown แล้วกด Save (ชี้เมาส์เพื่อดูความหมาย) ·{' '}
+              แถวที่ใส่ "รวมอยู่ในใบ" คือใบเสร็จที่ตัวแทนจ่ายแทนแล้วเรียกเก็บรวมในใบแจ้งหนี้ของตัวแทนอีกที และแถว Shipper · ค่าสินค้า — แสดงไว้แต่ไม่นับในยอดข้อ 2
               · แก้หมวดหรือช่องนี้แล้วกด Save
             </p>
           </>

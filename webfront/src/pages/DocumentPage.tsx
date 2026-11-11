@@ -15,6 +15,7 @@ import {
   reconcilePurchaseOrder,
   reopenDeletedApInvoice,
   fillJournalEntryTexts,
+  postDeferredVatJv,
   reocrDocument,
   setDocCategory,
   type ChatMessage,
@@ -1465,6 +1466,33 @@ export default function DocumentPage() {
       );
     });
 
+  const postDeferredJv = () =>
+    guard(async () => {
+      const today = new Date();
+      const iso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+      const postingDate = window.prompt(
+        'Posting date of the deferred VAT transfer (yyyy-mm-dd) — the day the forwarder was paid:',
+        iso,
+      )?.trim();
+      if (!postingDate) return;
+      if (!window.confirm(`Post the deferred VAT transfer (Dr Input tax V1 / Cr Deferred input tax D1, one journal entry per tax invoice) to SAP on ${postingDate}?`)) return;
+      let r;
+      try {
+        r = await postDeferredVatJv(doc.docId, postingDate);
+      } catch (e: any) {
+        // Already posted once: SAP would book the input tax twice, so it asks before going again.
+        if (String(e?.message || '').includes('already posted')
+          && window.confirm(`${e.message}\n\nPost anyway?`)) {
+          r = await postDeferredVatJv(doc.docId, postingDate, true);
+        } else throw e;
+      }
+      const lines = (r.results || []).map((x) => `${x.reference}: ${x.ok ? x.message : 'NOT POSTED — ' + x.message}`);
+      if (r.notSent?.length) lines.push(`Not sent: ${r.notSent.join(', ')}`);
+      showToast(`Deferred VAT JV — ${lines.join(' · ')}`, r.ok ? 'success' : 'error');
+      // Reload so the JV numbers appear in the "Sent to SAP" box for whoever looks next.
+      try { setDoc(await getDocument(doc.docId)); } catch { /* the toast already has them */ }
+    });
+
   const refreshApReconciliation = () =>
     guard(async () => {
       const po = String(h.poRef ?? '').trim();
@@ -1500,6 +1528,15 @@ export default function DocumentPage() {
     }
     if (!String(map?.header.vendor.code ?? '').trim()) {
       out.push('ยังไม่ได้จับคู่ผู้ขาย (Vendor) ใน Step 2');
+    }
+    // Issuer names go to SAP as the Input tax line's Text and to the input tax report: English
+    // only (AP, 2026-11-11). The read is asked for English and Thai agency names are mapped, so a
+    // Thai name left here is one the read kept — corrected once in Master 8, it stays English.
+    const thaiIssuers = [...new Set(((h.taxItems as Array<Record<string, any>>) || [])
+      .map((t) => String(t.issuerName ?? '').trim())
+      .filter((n) => /[\u0E00-\u0E7F]/.test(n)))];
+    if (thaiIssuers.length) {
+      out.push(`ชื่อผู้ออกใบกำกับต้องเป็นภาษาอังกฤษ: ${thaiIssuers.join(', ')} — แก้ในแท็บ Tax หรือ Master Mapping → 8. Tax Invoice Issuer`);
     }
     if (isInventoryPoDoc(doc)) {
       if (!poNumberOf(h)) {
@@ -2866,6 +2903,21 @@ export default function DocumentPage() {
                 {toZoho ? 'Zoho Sales Order' : 'SAP Document'}: <code>{sapDocumentNumbers}</code> | {moduleLabel(doc.module)} |{' '}
                 {dt(doc.postedAt)}
               </div>
+              {(doc.module === 'AP' || doc.module === 'II') && (doc.deferredJvs?.length ?? 0) > 0 && (
+                <div style={{ marginTop: 8 }}>
+                  Deferred VAT JV:{' '}
+                  {doc.deferredJvs!.map((j, k) => (
+                    <span key={k} style={{ marginRight: 12, whiteSpace: 'nowrap' }}>
+                      <code>{j.journalEntry}</code>
+                      {j.reference && <span className="hint"> ({j.reference})</span>}
+                    </span>
+                  ))}
+                  <span className="hint">
+                    {' '}| {dt(doc.deferredJvs![doc.deferredJvs!.length - 1].postedAt)}
+                    {doc.deferredJvs![doc.deferredJvs!.length - 1].postedBy ? ` · ${doc.deferredJvs![doc.deferredJvs!.length - 1].postedBy}` : ''}
+                  </span>
+                </div>
+              )}
               {(doc.module === 'AP' || doc.module === 'II') && (
                 <div className="row" style={{ marginTop: 12 }}>
                   <button className="btn" onClick={reopenDeletedAp}>
@@ -2880,6 +2932,9 @@ export default function DocumentPage() {
                 <div className="row" style={{ marginTop: 8 }}>
                   <button className="btn" onClick={fillJeTexts}>
                     <i className="fa-solid fa-pen-to-square" /> Fill Assignment/Text in SAP
+                  </button>
+                  <button className="btn" onClick={postDeferredJv}>
+                    <i className="fa-solid fa-file-invoice" /> Post Deferred VAT JV to SAP
                   </button>
                   <span className="hint">
                     Fills the empty Assignment and Text on the posted journal entry (Local Hand&amp;Fr, Fee,

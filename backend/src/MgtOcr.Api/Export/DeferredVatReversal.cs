@@ -53,7 +53,7 @@ public static class DeferredVatReversal
 
             // AP, 2026-11-11: Input tax text = the issuer's name only (Master 8 "Tax Invoice
             // Issuer" name, max 50), no ",INV.<no>"; the tax invoice number stays the Assignment.
-            var issuer = t.GetStr("issuerName").Trim().ToUpperInvariant();
+            var issuer = MgtOcr.Ocr.VisionPrompt.EnglishIssuerName(t.GetStr("issuerName").Trim()).ToUpperInvariant();
             if (issuer.Length > 50) issuer = issuer[..50].TrimEnd();
             var docNo = t.GetStr("taxDocNo").Trim();
             var text = issuer.Length > 0 ? issuer : docNo;

@@ -269,8 +269,8 @@ public static class SupplierInvoicePayload
                                 ["SupplierInvoiceItemAmount"] = F2(amt),
                                 ["DebitCreditCode"] = "S",
                                 ["TaxCode"] = code,
-                                ["AssignmentReference"] = Cut(Or(t.GetStr("taxDocNo").Trim(), assignment), 18),
-                                ["SupplierInvoiceItemText"] = Cut(Or(t.GetStr("issuerName").Trim().ToUpperInvariant(), itemText), 50),
+                                ["AssignmentReference"] = Cut(Or(DocNoKey(t.GetStr("taxDocNo")), assignment), 18),
+                                ["SupplierInvoiceItemText"] = Cut(Or(MgtOcr.Ocr.VisionPrompt.EnglishIssuerName(t.GetStr("issuerName").Trim()).ToUpperInvariant(), itemText), 50),
                                 // A line on a tax account must carry the base it was taxed on, or
                                 // SAP refuses to post it: F5A375 "Enter the tax base amounts for
                                 // account 0011720000" — here the declared value on the receipt.
@@ -353,7 +353,7 @@ public static class SupplierInvoicePayload
                 // Already booked as a G/L line above (the customs import VAT).
                 if (glAccountItems.Any(g => ((Dictionary<string, object?>)g).GetStr("_vatAsGlLine") == code
                         && Math.Abs(Num(((Dictionary<string, object?>)g).Get("SupplierInvoiceItemAmount")) - amt) < 0.005
-                        && ((Dictionary<string, object?>)g).GetStr("AssignmentReference") == Cut(Or(t.GetStr("taxDocNo").Trim(), assignment), 18)))
+                        && ((Dictionary<string, object?>)g).GetStr("AssignmentReference") == Cut(Or(DocNoKey(t.GetStr("taxDocNo")), assignment), 18)))
                     continue;
                 var deferred = string.Equals(t.GetStr("taxKind").Trim(), "DEFERRED", StringComparison.OrdinalIgnoreCase)
                     || code.StartsWith('D');
@@ -370,7 +370,7 @@ public static class SupplierInvoicePayload
             // The per-receipt detail the tax report needs travels on the Input VAT journal entry.
             var partyName = Or(vatLines.FirstOrDefault(v => v.Own).Issuer ?? "",
                 Or(header.GetStr("vendorName").Trim(), vatLines.FirstOrDefault().Issuer ?? "")).Trim();
-            var vatText = partyName.Length > 0 ? partyName : itemText;
+            var vatText = partyName.Length > 0 ? MgtOcr.Ocr.VisionPrompt.EnglishIssuerName(partyName) : itemText;
             foreach (var g in vatLines.GroupBy(v => (v.Code, v.Deferred,
                          Key: v.Customs ? "CUSTOMS|" + v.DocNo : v.Own ? "OWN|" + v.DocNo : "PAID-ON-BEHALF")))
             {
@@ -393,7 +393,7 @@ public static class SupplierInvoicePayload
                     // number, Text = the department's full name. Every other VAT line: the PO and
                     // the invoicing party's text.
                     ["AssignmentReference"] = g.Key.Key.StartsWith("CUSTOMS|")
-                        ? Cut(Or(docs.FirstOrDefault() ?? "", Or(poRef, assignment)), 18)
+                        ? Cut(Or(DocNoKey(docs.FirstOrDefault() ?? ""), Or(poRef, assignment)), 18)
                         : Cut(Or(poRef, Or(docs.FirstOrDefault() ?? "", assignment)), 18),
                     // Customs: always the department's full legal name as SAP's supplier record spells
                     // it (AP, 2026-11-11: "THE CUSTOMS DEPARTMENT", not the read's "CUSTOMS DEPARTMENT").
@@ -533,6 +533,12 @@ public static class SupplierInvoicePayload
             gross = park && accrualDelta == 0 ? BalanceToStated(stated, gross, purOrdRef, glAccountItems, taxItems) : stated;
         }
 
+        // The invoicing party's own invoice number (its tax invoice), else the document's, else
+        // the PO. Reference of the SAP invoice, and the payables line's Assignment on a shipping
+        // document.
+        var supplierRef = Or(vendor.Length > 0 ? DocNoKey(InvoiceNoOf(taxRows)) : "",
+            Or(header.GetStr("invoiceNo").Trim(),
+               Or(header.GetStr("goodsInvoiceNo").Trim(), poRef)));
         var payload = new Dictionary<string, object?>
         {
             ["_target"] = Endpoint,
@@ -543,10 +549,7 @@ public static class SupplierInvoicePayload
             ["InvoicingParty"] = invoicingParty,
             // Each supplier's document carries ITS OWN invoice number — the one on its tax
             // invoice — not the bundle's. Falls back to the document's number, then the PO.
-            ["SupplierInvoiceIDByInvcgParty"] = Cut(
-                Or(vendor.Length > 0 ? InvoiceNoOf(taxRows) : "",
-                   Or(header.GetStr("invoiceNo").Trim(),
-                      Or(header.GetStr("goodsInvoiceNo").Trim(), poRef))), 16),
+            ["SupplierInvoiceIDByInvcgParty"] = Cut(supplierRef, 16),
             ["DocumentCurrency"] = currency,
             // NO ExchangeRate here. A_SupplierInvoice has no such property: sending it — even as
             // null, which this dictionary serialises rather than drops — is answered with
@@ -573,7 +576,15 @@ public static class SupplierInvoicePayload
             // The vendor (payables) line SAP creates takes these from the header: Assignment is
             // what Finance reconciles on, Header Text is what they read in the line-item list.
             // BKTXT is 25 characters, ZUONR is 18.
-            ["AssignmentReference"] = Cut(assignment, 18),
+            // ...but on a shipping (delivery-cost) document the payables line carries the invoicing
+            // party's OWN invoice number, not the PO: PRD 5100001131 line 1 (PROMPT, PK 31)
+            // Assignment = PI-2608011, while every G/L line carries the PO. Sending the PO here put
+            // 2230000084 on the vendor line of DEV 5100000133. A goods (PO-keyed) invoice keeps
+            // its own rule (assignment = the supplier's invoice number already).
+            ["AssignmentReference"] = Cut(isPoKeyed ? assignment : Or(supplierRef, assignment), 18),
+            // What the G/L lines of this invoice carry as Assignment (the PO on a shipping
+            // document) -- used after posting to fill the lines SAP leaves empty. Not sent to SAP.
+            ["_lineAssignment"] = Cut(assignment, 18),
             ["DocumentHeaderText"] = Cut(headerText, 25),
             // The TEXT on the vendor (payables) line is its own field: DocumentHeaderText lands
             // on the document header (BKTXT) and leaves the line's own Text (BSEG-SGTXT) empty,
@@ -629,7 +640,13 @@ public static class SupplierInvoicePayload
         // kept in "_wht", which is stripped before sending, so SAP never saw any withholding.
         // A row without a type or code is not sent: SAP refuses a type the supplier master does
         // not carry, and the type is Accounting's to choose (TI/TJ/TK at invoice, OA/OB/OC at payment).
-        var whtNode = new List<object>();
+        // SAP keys withholding data on the TYPE: two rows of one type are refused with M8_2/152
+        // "Duplicate key for withholding tax data is not allowed" (11.11.2026, a forwarder bill with
+        // its service 3% and a second row on the same type OA). So rows are added up per type +
+        // code, and a second code on an already-used payment type moves to the next one of the
+        // family Accounting uses for this -- OA, OB, OC ("WHT Type for Payment Posting 1/2/3",
+        // all three on the supplier, PRD 5105603148). More codes than types is refused here, named.
+        var whtSums = new List<(string Type, string Code, double Base, double Amt)>();
         foreach (var w in ReadWhtRows(header).Where(Mine))
         {
             var type = w.GetStr("wtType").Trim().ToUpperInvariant();
@@ -638,6 +655,29 @@ public static class SupplierInvoicePayload
             var baseFc = Num(w.Get("baseFc"));
             var amtFc = Num(w.Get("amtFc"));
             if (baseFc == 0 && amtFc == 0) continue;
+            var at = whtSums.FindIndex(x => x.Type == type && x.Code == code);
+            if (at >= 0)
+            {
+                var x = whtSums[at];
+                whtSums[at] = (x.Type, x.Code, x.Base + baseFc, x.Amt + amtFc);
+                continue;
+            }
+            if (whtSums.Any(x => x.Type == type))
+            {
+                string[] family = ["OA", "OB", "OC"];
+                var free = family.Contains(type) ? family.FirstOrDefault(t => whtSums.All(x => x.Type != t)) : null;
+                if (free == null)
+                    throw new MgtOcr.Core.HttpApiException(400,
+                        $"Withholding Tax: ประเภท {type} ใช้ได้ครั้งเดียวต่อใบแจ้งหนี้ (SAP M8_2/152) แต่มีหลายรหัส "
+                        + $"({string.Join(", ", whtSums.Where(x => x.Type == type).Select(x => x.Code).Append(code))}) "
+                        + "— รวมเป็นแถวเดียว หรือเปลี่ยนประเภทในแท็บ Withholding Tax");
+                type = free;
+            }
+            whtSums.Add((type, code, baseFc, amtFc));
+        }
+        var whtNode = new List<object>();
+        foreach (var (type, code, baseFc, amtFc) in whtSums)
+        {
             var row = new Dictionary<string, object?>
             {
                 ["WithholdingTaxType"] = type,
@@ -646,12 +686,12 @@ public static class SupplierInvoicePayload
             };
             if (baseFc > 0)
             {
-                row["WithholdingTaxBaseAmount"] = F2(baseFc);
+                row["WithholdingTaxBaseAmount"] = F2(Math.Round(baseFc, 2));
                 row["WhldgTaxBaseIsEnteredManually"] = true;
             }
             if (amtFc > 0)
             {
-                row["ManuallyEnteredWhldgTaxAmount"] = F2(amtFc);
+                row["ManuallyEnteredWhldgTaxAmount"] = F2(Math.Round(amtFc, 2));
                 row["WhldgTaxIsEnteredManually"] = true;
             }
             whtNode.Add(row);
@@ -843,6 +883,17 @@ public static class SupplierInvoicePayload
                 break;
         }
         return rows;
+    }
+
+    /// <summary>A document number without the date the Customs Department prints after it:
+    /// "0152-091126/03-08-69" -> "0152-091126" (AP, 2026-11-11). Cut at 18 the full form came
+    /// out as "0152-091126/03-08-" on the Input tax line's Assignment, and at 16 as the invoice's
+    /// Reference. Numbers without a "/" are returned as they are.</summary>
+    private static string DocNoKey(string? docNo)
+    {
+        var v = (docNo ?? "").Trim();
+        var slash = v.IndexOf('/');
+        return slash > 0 ? v[..slash].Trim() : v;
     }
 
     private static string InvoiceNoOf(IEnumerable<Dictionary<string, object?>> taxRows) =>

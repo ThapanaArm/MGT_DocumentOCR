@@ -153,6 +153,12 @@ var appConfig = new AppConfig
     SapMaterialDocumentAuthHeader = Get("Sap:MaterialDocument:AuthHeader", Get("Sap:PurchaseOrder:AuthHeader")),
     SapJournalEntryAuthHeader = Get("Sap:JournalEntry:AuthHeader",
         Get("Sap:SupplierInvoice:AuthHeader", Get("Sap:BusinessPartner:AuthHeader"))),
+    SapJournalEntryTaxConditionType = cfg.GetSection("Sap:JournalEntry:TaxConditionType").GetChildren()
+        .Where(c => !string.IsNullOrWhiteSpace(c.Value))
+        .ToDictionary(c => c.Key, c => c.Value!.Trim(), StringComparer.OrdinalIgnoreCase),
+    SapJournalEntryTaxItemClassification = cfg.GetSection("Sap:JournalEntry:TaxItemClassification").GetChildren()
+        .Where(c => !string.IsNullOrWhiteSpace(c.Value))
+        .ToDictionary(c => c.Key, c => c.Value!.Trim(), StringComparer.OrdinalIgnoreCase),
     SapSupplierInvoiceEnvironment = sapSupplierInvoiceEnv,
     SapPurchaseOrderAuthHeader = Get("Sap:PurchaseOrder:AuthHeader", Get("Sap:BusinessPartner:AuthHeader")),
     // MGT/GLC: SalesOrganization/CompanyCode/DefaultPlant per company (see CompanyProfile).

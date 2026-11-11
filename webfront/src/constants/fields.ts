@@ -578,7 +578,7 @@ export const MASTER_DEF: Record<string, MasterDef> = {
   suppliertaxmaps: {
     label: 'Tax Invoice Issuer', mod: 'AP', key: 'TaxId', cols: [
       { k: 'TaxId', l: 'Tax ID', required: true, maxLen: 13, help: '13-digit tax ID of whoever issued the tax invoice' },
-      { k: 'SupplierName', l: 'Supplier Name', required: true, maxLen: 50, help: 'The name every document will use for this Tax ID — max 50 characters, the length of the item Text in SAP (used as the Text of the Input tax line)' },
+      { k: 'SupplierName', l: 'Supplier Name', required: true, maxLen: 50, help: 'The name every document will use for this Tax ID — ENGLISH ONLY (translate a Thai name), max 50 characters, the length of the item Text in SAP (used as the Text of the Input tax line)' },
       { k: 'IsVerified', l: 'Verified', help: '0 = added by the read, waiting for AP to check · 1 = checked' },
       { k: 'FirstDocId', l: 'First seen in document' },
       { k: 'Note', l: 'Note' }],

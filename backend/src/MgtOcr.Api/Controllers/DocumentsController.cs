@@ -317,6 +317,31 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
                 "SELECT SapDocNo FROM ocr.PostLog WHERE DocId=@docId AND Module IN ('AP','II') AND Success=1 AND ISNULL(SapDocNo,'')<>'' ORDER BY LogId",
                 new { docId });
             d["sapDocNos"] = numbers.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+
+            // Deferred VAT JVs posted from this document (button "Post Deferred VAT JV to SAP"), so
+            // anyone opening the document can find them: one row per tax invoice -> journal entry.
+            var jvRuns = await conn.QueryAsync<(string? Detail, string? DocNo, DateTime CreatedAt, string? PerformedBy)>("""
+                SELECT Detail, DocNo, CreatedAt, PerformedBy FROM ocr.AuditLog
+                 WHERE DocId=@docId AND Action='POST_DEFERRED_JV' AND ISNULL(DocNo,'')<>''
+                 ORDER BY LogId
+                """, new { docId });
+            var jvs = new List<object>();
+            foreach (var run in jvRuns)
+            {
+                var pairs = System.Text.RegularExpressions.Regex.Matches(run.Detail ?? "", @"([^;=]+)=(\d+)")
+                    .Select(m => (Ref: m.Groups[1].Value.Trim(), Jv: m.Groups[2].Value.Trim())).ToList();
+                // The first runs wrote "PI-2608012: Posted 0100000755 · Assignment/Text: …".
+                if (pairs.Count == 0)
+                    pairs = System.Text.RegularExpressions.Regex.Matches(run.Detail ?? "", @"(?:^|\| )([^:|]+): Posted (\d+)")
+                        .Select(m => (Ref: m.Groups[1].Value.Trim(), Jv: m.Groups[2].Value.Trim())).ToList();
+                // Any number in DocNo the detail did not name (cut at 500 characters) is still listed.
+                foreach (var n in (run.DocNo ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                    if (!pairs.Any(p => p.Jv.TrimStart('0') == n.TrimStart('0')))
+                        pairs.Add((Ref: "", Jv: n));
+                foreach (var (r, jv) in pairs)
+                    jvs.Add(new { reference = r, journalEntry = jv.TrimStart('0'), postedAt = run.CreatedAt, postedBy = run.PerformedBy });
+            }
+            d["deferredJvs"] = jvs;
         }
         return Ok(d);
     }
@@ -385,7 +410,8 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
                     ? v.GetString() ?? "" : "";
                 company = Str("CompanyCode");
                 text = Str("SupplierPostingLineItemText");
-                assignment = Str("AssignmentReference");
+                // The G/L lines' assignment (the PO); older posts only have the header's.
+                assignment = Str("_lineAssignment") is { Length: > 0 } la ? la : Str("AssignmentReference");
                 // "/Date(1794355200000)/" -> its year, the invoice's fiscal year (calendar = fiscal here).
                 var m = System.Text.RegularExpressions.Regex.Match(Str("PostingDate"), @"-?\d+");
                 if (m.Success && long.TryParse(m.Value, out var ms))
@@ -412,6 +438,93 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             logger.LogWarning(e, "[AP] Could not write the FILL_JE_TEXTS audit row for document {DocId}", docId);
         }
         return Ok(new { results });
+    }
+
+    /// <summary>Posts the deferred-VAT transfer (D1 -> V1, one journal entry per tax invoice)
+    /// straight to SAP with Journal Entry - Post -- the same entries the "Journal Entry (Deferred
+    /// VAT)" Excel holds (JournalEntryAccruedExcel.Batches), without the upload step. Refuses a
+    /// second run for the same document unless force=true: posting twice would double the input
+    /// tax. Body: { postingDate: "yyyy-MM-dd" (default today -- the day the VAT may be claimed,
+    /// i.e. when the forwarder was paid), force: bool }.</summary>
+    [HttpPost("api/documents/{docId:int}/post-deferred-vat-jv")]
+    public async Task<IActionResult> PostDeferredVatJv(int docId, [FromBody] Dictionary<string, object?>? rawBody)
+    {
+        var body = rawBody is null ? new Dictionary<string, object?>() : JsonBodyHelpers.Unwrap(rawBody);
+        var doc = await repo.GetDocumentAsync(docId);
+        var module = doc.GetStr("module");
+        if (module is not ("AP" or "II"))
+            throw new HttpApiException(400, "This action is only available for AP supplier invoices");
+        if (doc.GetStr("status") is not ("POSTED" or "PARTIAL"))
+            throw new HttpApiException(400, "Post the supplier invoice to SAP first — the deferred VAT this entry transfers is booked by that invoice");
+
+        var postingDate = DateTime.Today;
+        if (body.GetStr("postingDate").Trim() is { Length: > 0 } pd)
+        {
+            if (!DateTime.TryParseExact(pd, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.None, out postingDate))
+                throw new HttpApiException(400, "postingDate must be yyyy-MM-dd");
+        }
+        var force = body.Get("force") is true || string.Equals(body.GetStr("force"), "true", StringComparison.OrdinalIgnoreCase);
+
+        await using (var conn = await GetDbAsync())
+        {
+            var earlier = await conn.ExecuteScalarAsync<string?>("""
+                SELECT TOP (1) DocNo FROM ocr.AuditLog
+                 WHERE DocId=@docId AND Action='POST_DEFERRED_JV' AND ISNULL(DocNo,'')<>''
+                 ORDER BY LogId DESC
+                """, new { docId });
+            if (!string.IsNullOrWhiteSpace(earlier) && !force)
+                throw new HttpApiException(409,
+                    $"The deferred VAT of this document was already posted as journal entry {earlier}. "
+                    + "Reverse it in SAP first if it has to be posted again (then confirm to post anyway).");
+        }
+
+        var batches = Export.JournalEntryAccruedExcel.Batches(doc);
+        if (batches.Count == 0)
+            throw new HttpApiException(400, "This document has no deferred input tax to transfer — the Tax tab holds no row "
+                + "marked Deferred (Input Tax Type = Deferred, or a tax code starting with D)");
+
+        // Names reach SAP and the input tax report in English only (AP, 2026-11-11).
+        var thai = batches.Where(b => MgtOcr.Ocr.VisionPrompt.HasThai(b.Text)).Select(b => $"{b.Reference} \"{b.Text}\"").ToList();
+        if (thai.Count > 0)
+            throw new HttpApiException(400, "The issuer name must be in English before it goes to SAP: "
+                + string.Join(", ", thai) + " — correct it in Master Mapping → 8. Tax Invoice Issuer (or the Tax tab) and save the document");
+
+        var company = await ExportCompanyAsync(docId);
+        var header = (Dictionary<string, object?>)doc["header"]!;
+        var entries = batches.Select(b => new MgtOcr.Sap.SapClient.DeferredVatJv(
+            b.Reference, b.Text, b.Assignment,
+            Math.Round((decimal)b.Amount, 2), Math.Round((decimal)b.Base, 2), b.TaxDate)).ToList();
+        var results = await sap.PostDeferredVatJournalEntriesAsync(entries, company?.CompanyCode ?? "2000",
+            postingDate, Export.DeferredVatReversal.Reference(header),
+            header.GetStr("currency").Trim() is { Length: > 0 } c ? c : "THB");
+
+        var posted = results.Where(r => r.Ok).Select(r => r.AccountingDocument).ToList();
+        foreach (var r in results)
+            logger.LogInformation("[AP] Deferred VAT JV for document {DocId}, {Ref}: {Ok} {Msg}", docId, r.Reference, r.Ok, r.Message);
+        try
+        {
+            // Compact on purpose -- "PI-2608012=100000755; RC26070747=100000756" -- so every pair fits
+            // the 500-character Detail and the document page can list them (ReadDocument); the full
+            // SAP messages are in the API log above.
+            var detail = string.Join("; ", results.Select(r => r.Ok ? $"{r.Reference}={r.AccountingDocument}" : $"{r.Reference}=FAILED"));
+            var nos = string.Join(",", posted);
+            await repo.LogAuditAsync(docId, module, "POST_DEFERRED_JV", await ActorAsync(),
+                detail: detail.Length > 500 ? detail[..500] : detail,
+                docNo: nos.Length > 100 ? nos[..100] : nos);
+        }
+        catch (Exception e)
+        {
+            logger.LogWarning(e, "[AP] Could not write the POST_DEFERRED_JV audit row for document {DocId}", docId);
+        }
+
+        return Ok(new
+        {
+            ok = results.Count == entries.Count && results.All(r => r.Ok),
+            postingDate = postingDate.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture),
+            results = results.Select(r => new { reference = r.Reference, ok = r.Ok, accountingDocument = r.AccountingDocument, message = r.Message }),
+            notSent = entries.Skip(results.Count).Select(e => e.Reference),
+        });
     }
 
     [HttpPost("api/documents/{docId:int}/reopen-deleted-ap-invoice")]
@@ -2183,7 +2296,8 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
                     year = fy.GetString() ?? "";
                 if (year.Length == 0) year = DateTime.Today.Year.ToString(System.Globalization.CultureInfo.InvariantCulture);
                 var fill = await sap.FillJournalEntryTextsAsync(one.SapDocNo, year,
-                    p.GetStr("CompanyCode"), p.GetStr("SupplierPostingLineItemText"), p.GetStr("AssignmentReference"));
+                    p.GetStr("CompanyCode"), p.GetStr("SupplierPostingLineItemText"),
+                    p.GetStr("_lineAssignment") is { Length: > 0 } lineAsg ? lineAsg : p.GetStr("AssignmentReference"));
                 logger.LogInformation("[AP] Journal entry text fill for {Inv}/{Year}: {Ok} {Msg}", one.SapDocNo, year, fill.Ok, fill.Message);
                 one = one with { Message = $"{one.Message} · Assignment/Text: {(fill.Ok ? "" : "NOT DONE — ")}{fill.Message}" };
             }

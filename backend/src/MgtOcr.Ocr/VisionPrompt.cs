@@ -61,7 +61,7 @@ public static partial class VisionPrompt
             "poLines": [{"extCode": "รหัส/ล็อตสินค้าตามใบสั่งซื้อ", "desc": "ชื่อสินค้า",
                          "qty": 0, "uom": "หน่วยนับ", "price": 0, "amount": 0}],
             "subTotal": 0, "vatRate": 7, "vatAmount": 0, "whtAmount": 0, "totalAmount": 0,
-            "sourceDocs": [{"docType": "Invoice / Tax Invoice / Receipt / Debit Note", "issuerName": "ชื่อผู้ออกเอกสาร", "docNo": "เลขที่เอกสาร", "docDate": "YYYY-MM-DD", "costType": "Local หรือ Insurance หรือ Fee หรือ Overseas", "currency": "THB", "nonVatAmount": 0, "amountBeforeVat": 0, "vatAmount": 0, "totalAmount": 0, "includedIn": "", "shipper": "", "blNo": "", "shipperInvoiceNo": ""}]
+            "sourceDocs": [{"docType": "Invoice / Tax Invoice / Receipt / Debit Note", "issuerName": "ชื่อผู้ออกเอกสารเป็นภาษาอังกฤษเท่านั้น (ใช้ชื่ออังกฤษที่พิมพ์ในใบ ถ้ามีแต่ภาษาไทยให้แปลเป็นชื่ออังกฤษทางการขององค์กร หรือถอดเสียงเป็นอักษรอังกฤษถ้าเป็นชื่อบุคคล เช่น วิเชียร ยอดแก้ว = WICHIAN YODKAEW)", "docNo": "เลขที่เอกสาร", "docDate": "YYYY-MM-DD", "costType": "Local หรือ Insurance หรือ Fee หรือ Overseas", "currency": "THB", "nonVatAmount": 0, "amountBeforeVat": 0, "vatAmount": 0, "totalAmount": 0, "includedIn": "", "shipper": "", "blNo": "", "shipperInvoiceNo": ""}]
           },
           "lines": [{"extCode": "รหัสสินค้า/บริการถ้ามี", "desc": "ชื่อ/รายละเอียดสินค้าหรือบริการ",
                      "qty": 0, "uom": "หน่วยนับ", "price": 0, "amount": 0,
@@ -72,7 +72,7 @@ public static partial class VisionPrompt
                      "taxKind": "เฉพาะแถว VAT: \"INPUT\" ถ้ามาจากใบกำกับภาษี/ใบเสร็จรับเงิน หรือ \"DEFERRED\" ถ้ามาจากใบแจ้งหนี้/ใบวางบิล แถวอื่นใส่สตริงว่าง",
                      "taxDocNo": "เฉพาะแถว VAT: เลขที่ใบกำกับภาษีของใบนั้น แถวอื่นใส่สตริงว่าง",
                      "taxDocDate": "เฉพาะแถว VAT: วันที่ของใบกำกับภาษีนั้น YYYY-MM-DD แถวอื่นใส่สตริงว่าง",
-                     "issuerName": "เฉพาะแถว VAT: ชื่อผู้ออกใบกำกับภาษีตามที่พิมพ์ในใบ แถวอื่นใส่สตริงว่าง",
+                     "issuerName": "เฉพาะแถว VAT: ชื่อผู้ออกใบกำกับภาษีเป็นภาษาอังกฤษเท่านั้น (ชื่ออังกฤษที่พิมพ์ในใบ ถ้ามีแต่ไทยให้แปลเป็นชื่ออังกฤษทางการ หรือถอดเสียงถ้าเป็นชื่อบุคคล) แถวอื่นใส่สตริงว่าง",
                      "issuerTaxId": "เฉพาะแถว VAT: เลขประจำตัวผู้เสียภาษี 13 หลักของผู้ออกใบ (ตัวเลขล้วน ไม่ต้องมีขีด) แถวอื่นใส่สตริงว่าง",
                      "issuerBranch": "เฉพาะแถว VAT: รหัสสาขาของผู้ออกใบ 4 หลัก สำนักงานใหญ่ = \"0000\" สาขาที่ 1 = \"0001\" ห้ามตอบ 5 หลัก แถวอื่นใส่สตริงว่าง",
                      "baseAmount": 0}]
@@ -182,6 +182,11 @@ public static partial class VisionPrompt
             d.TryGetValue(k, out var o) && o != null && double.TryParse(o.ToString(), System.Globalization.NumberStyles.Any,
                 System.Globalization.CultureInfo.InvariantCulture, out var n) ? n : 0;
         var src = docs.OfType<Dictionary<string, object?>>().ToList();
+        // English names only (AP, 2026-11-11): the Shipping Check list showed "การท่าเรือแห่งประเทศไทย"
+        // and "กรมศุลกากร" where the model kept the Thai.
+        foreach (var d in src)
+            if (d.TryGetValue("issuerName", out var nm) && nm?.ToString() is { Length: > 0 } name)
+                d["issuerName"] = NormIssuerName(name);
         foreach (var l in doc.Lines)
         {
             if (l.NonVatAmount != 0 || l.BeforeVatAmount != 0 || l.VatAmount != 0) continue;
@@ -308,7 +313,7 @@ public static partial class VisionPrompt
 
     private const string SupportingSchema = """
         {
-          "header": {"sourceDocs": [{"docType": "Invoice / Tax Invoice / Receipt / Debit Note", "issuerName": "ชื่อผู้ออกเอกสาร", "docNo": "เลขที่เอกสาร", "docDate": "YYYY-MM-DD", "costType": "Local หรือ Insurance หรือ Fee หรือ Overseas", "currency": "THB", "nonVatAmount": 0, "amountBeforeVat": 0, "vatAmount": 0, "totalAmount": 0, "includedIn": "", "shipper": "", "blNo": "", "shipperInvoiceNo": ""}]},
+          "header": {"sourceDocs": [{"docType": "Invoice / Tax Invoice / Receipt / Debit Note", "issuerName": "ชื่อผู้ออกเอกสารเป็นภาษาอังกฤษเท่านั้น (ใช้ชื่ออังกฤษที่พิมพ์ในใบ ถ้ามีแต่ภาษาไทยให้แปลเป็นชื่ออังกฤษทางการขององค์กร หรือถอดเสียงเป็นอักษรอังกฤษถ้าเป็นชื่อบุคคล เช่น วิเชียร ยอดแก้ว = WICHIAN YODKAEW)", "docNo": "เลขที่เอกสาร", "docDate": "YYYY-MM-DD", "costType": "Local หรือ Insurance หรือ Fee หรือ Overseas", "currency": "THB", "nonVatAmount": 0, "amountBeforeVat": 0, "vatAmount": 0, "totalAmount": 0, "includedIn": "", "shipper": "", "blNo": "", "shipperInvoiceNo": ""}]},
           "lines": [{"extCode": "VAT หรือ WHT หรือ DUTY เท่านั้น", "desc": "",
                      "qty": 1, "uom": "EA", "price": 0, "amount": 0, "vendorCode": "",
                      "taxKind": "", "taxDocNo": "", "taxDocDate": "",
@@ -331,7 +336,7 @@ public static partial class VisionPrompt
         "- ทุกแถว VAT ต้องกรอกข้อมูลของใบนั้นให้ครบ เพราะต้องนำไปออกรายงานภาษีซื้อ: "
             + "taxKind = \"INPUT\" ถ้าเป็นใบกำกับภาษี/ใบเสร็จรับเงิน หรือ \"DEFERRED\" ถ้าเป็นใบแจ้งหนี้/ใบวางบิล, "
             + "taxDocNo = เลขที่ใบ, taxDocDate = วันที่ของใบ, "
-            + "issuerName = ชื่อผู้ออกใบ (ผู้ขาย ไม่ใช่ MEGACHEM/GREEN LEAF ที่เป็นผู้ซื้อ) เป็นภาษาอังกฤษ, "
+            + "issuerName = ชื่อผู้ออกใบ (ผู้ขาย ไม่ใช่ MEGACHEM/GREEN LEAF ที่เป็นผู้ซื้อ) เป็นภาษาอังกฤษเท่านั้น ห้ามมีอักษรไทย ถ้าในใบมีแต่ชื่อไทยให้แปลเป็นชื่ออังกฤษทางการ หรือถอดเสียงถ้าเป็นชื่อบุคคล, "
             + "issuerTaxId = เลขผู้เสียภาษี 13 หลัก (ตัวเลขล้วน) ถ้าในใบไม่มีให้ใส่สตริงว่าง ห้ามเดา, "
             + "issuerBranch = รหัสสาขา 4 หลัก สำนักงานใหญ่ = \"0000\" (ห้าม 5 หลัก), baseAmount = มูลค่าก่อน VAT ของใบนั้น\n" +
         "- WHT: ภาษีหัก ณ ที่จ่ายที่พบในใบเหล่านี้ 1 แถวต่อ 1 รายการ extCode = \"WHT\", "
@@ -811,6 +816,14 @@ public static partial class VisionPrompt
         ("สถานกงสุล", "Consulate"),
         ("สถานเอกอัครราชทูต", "Embassy"),
     ];
+
+    /// <summary>True when the text holds any Thai letter -- names going to SAP (item text, the
+    /// input tax report) must be English only (AP, 2026-11-11).</summary>
+    public static bool HasThai(string? value) => (value ?? "").Any(ch => ch >= '\u0E00' && ch <= '\u0E7F');
+
+    /// <summary>An issuer name in English: a Thai agency name becomes its official English name;
+    /// anything else is returned as it is (a remaining Thai name is caught by HasThai).</summary>
+    public static string EnglishIssuerName(string? value) => NormIssuerName(value ?? "");
 
     private static string NormIssuerName(string value)
     {
