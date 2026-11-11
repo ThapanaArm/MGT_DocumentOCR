@@ -319,6 +319,9 @@ public class ZohoSalesOrderClient(ZohoClient zoho)
     /// without sending it -- used by the "View Payload" preview so a person can see precisely what
     /// will be created in Zoho CRM before pressing Send, exactly as the SAP side's View Payload does.
     /// </summary>
+    /// <summary>Status of a Sales Order created from OCR (API name "Status").</summary>
+    public const string NewSalesOrderStatus = "Open";
+
     public async Task<JsonObject> BuildRecordAsync(
         string dealId,
         string accountId,
@@ -343,6 +346,9 @@ public class ZohoSalesOrderClient(ZohoClient zoho)
             ["Subject"] = subject,
             ["Deal_Name"] = new JsonObject { ["id"] = dealId },
             ["Account_Name"] = new JsonObject { ["id"] = accountId },
+            // Every Sales Order sent from OCR starts at Status "Open" (Megachem, 11 Nov 2026). Zoho
+            // picklist: In Process / Open / Completed / Update / Cancelled.
+            ["Status"] = NewSalesOrderStatus,
         };
         // The Quote this Sales Order was made from (27 Oct 2026, Deal -> Quote -> Sales Order):
         // Quote_Name (Lookup to Quotes) + Quote_No1 (Single Line, the Quote No. as text) -- manual
