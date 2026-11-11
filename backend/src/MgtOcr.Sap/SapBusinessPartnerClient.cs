@@ -28,7 +28,12 @@ public record BusinessPartner(
     string? AddressHouseNumber = null, string? AddressDistrict = null, string? AddressPostalCode = null,
     string? AddressCountry = null, string? AddressStreet2 = null, string? AddressStreet3 = null,
     string? AddressStreet4 = null, string? AddressStreet5 = null, string? AddressDifferenceCity = null,
-    string? TaxId = null);
+    string? TaxId = null,
+    // Vendor lookups only (party=vendor): whether this BP is extended to the signed-in company's
+    // SAP Company Code (A_SupplierCompany). false = it exists in SAP but posting a supplier invoice
+    // to it would fail with F5/104 "Vendor ... is not defined in company code ...". null = not
+    // checked (customer lookups, simulation mode, or the check itself failed).
+    bool? InCompanyCode = null);
 
 // One row from A_BusinessPartnerAddress, before it's applied onto a BusinessPartner -- kept as its
 // own small record (rather than a bare tuple) since it carries 11 fields. Field-to-property names
@@ -263,6 +268,47 @@ public class SapBusinessPartnerClient(AppConfig config, HttpClient httpClient)
         var clean = (code ?? "").Trim();
         if (clean.Length == 0) return [];
         return await EnrichAsync(await FetchByIdsAsync(new List<string> { clean }, top, authorizationGroup));
+    }
+
+    /// <summary>Vendor lookups: flag each result with whether it is extended to <paramref name="companyCode"/>
+    /// (one A_SupplierCompany round trip for the whole list), and put the extended ones first.
+    /// Vendors are NOT scoped by AuthorizationGroup the way customers are -- that field is maintained
+    /// for customers, and supplier BPs carrying another value (e.g. UBE 1000144 on DEV) were being
+    /// hidden from every vendor search, even by exact code. Company-code extension is the meaningful
+    /// scope for a supplier: it is exactly what a supplier invoice post needs. Assumes the Supplier
+    /// number equals the BusinessPartner number (S/4HANA Cloud default). Best-effort: on any error
+    /// the list comes back unflagged rather than failing the search.</summary>
+    public async Task<List<BusinessPartner>> MarkSupplierCompanyAsync(List<BusinessPartner> results, string? companyCode)
+    {
+        var baseUrl = config.SapBusinessPartnerBaseUrl;
+        if (results.Count == 0 || string.IsNullOrWhiteSpace(baseUrl) || string.IsNullOrWhiteSpace(companyCode))
+            return results;
+
+        var ids = results.Select(r => r.BusinessPartnerId).Where(id => !string.IsNullOrWhiteSpace(id)).Distinct().ToList();
+        var idFilter = string.Join(" or ", ids.Select(id => $"Supplier eq '{EscapeODataLiteral(id)}'"));
+        var filter = $"({idFilter}) and CompanyCode eq '{EscapeODataLiteral(companyCode.Trim())}'";
+        var url = $"{baseUrl.TrimEnd('/')}/A_SupplierCompany?$filter={Uri.EscapeDataString(filter)}" +
+                  $"&$select=Supplier,CompanyCode&$top={Math.Max(ids.Count, 1)}";
+
+        HashSet<string> extended;
+        try
+        {
+            var text = await GetJsonAsync(url);
+            extended = EnumerateResults(text)
+                .Select(x => x.TryGetProperty("Supplier", out var v) ? v.GetString() : null)
+                .Where(v => !string.IsNullOrWhiteSpace(v))
+                .Select(v => v!.Trim())
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return results;
+        }
+
+        return results
+            .Select(r => r with { InCompanyCode = extended.Contains(r.BusinessPartnerId) })
+            .OrderByDescending(r => r.InCompanyCode == true)
+            .ToList();
     }
 
     // Scope results to the signed-in company's AuthorizationGroup so one company can't read another's

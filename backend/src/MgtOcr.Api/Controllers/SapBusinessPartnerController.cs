@@ -17,8 +17,12 @@ public class SapBusinessPartnerController(
 {
     [HttpGet("business-partner")]
     public async Task<IActionResult> Find([FromQuery] string? name, [FromQuery] string? taxId,
-        [FromQuery] string? code, [FromQuery] int top = 20)
+        [FromQuery] string? code, [FromQuery] string? party, [FromQuery] int top = 20)
     {
+        // party=vendor: the Vendor/Supplier card. Same BP search, but scoped by Company Code
+        // extension instead of AuthorizationGroup -- see SapBusinessPartnerClient.MarkSupplierCompanyAsync.
+        var isVendor = string.Equals(party, "vendor", StringComparison.OrdinalIgnoreCase);
+
         if (string.IsNullOrWhiteSpace(name) && string.IsNullOrWhiteSpace(taxId) && string.IsNullOrWhiteSpace(code))
             return BadRequest(new { detail = "Provide 'taxId', 'code' and/or 'name'" });
 
@@ -31,8 +35,10 @@ public class SapBusinessPartnerController(
         // or its SAP CompanyCode ("1000"/"2000") — see AppConfig.CompanyForUser's own comment.
         var user = await currentUser.RequireAsync();
         var profile = config.CompanyForUser(user.PrimaryCompany?.CompanyCode, user.SalesOrganization);
-        var authorizationGroup = profile?.AuthorizationGroup;
-        if (string.IsNullOrWhiteSpace(authorizationGroup))
+        var authorizationGroup = isVendor ? null : profile?.AuthorizationGroup;
+        if (isVendor && string.IsNullOrWhiteSpace(profile?.CompanyCode))
+            return BadRequest(new { detail = "No SAP CompanyCode is configured for this account's company" });
+        if (!isVendor && string.IsNullOrWhiteSpace(authorizationGroup))
             return BadRequest(new { detail = "No AuthorizationGroup is configured for this account's company" });
 
         // Cascade most-precise → broadest: exact Tax ID, then the SAP customer code (substring),
@@ -45,6 +51,9 @@ public class SapBusinessPartnerController(
             results = await client.FindByCodeAsync(code, authorizationGroup, top);
         if (results.Count == 0 && !string.IsNullOrWhiteSpace(name))
             results = await client.FindByNameAsync(name, authorizationGroup, top);
+
+        if (isVendor)
+            results = await client.MarkSupplierCompanyAsync(results, profile!.CompanyCode);
 
         return Ok(new { count = results.Count, results });
     }

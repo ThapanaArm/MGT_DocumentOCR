@@ -221,7 +221,12 @@ function SapCustomerPanel({
     // A manual search term is sent as both name and code, so it matches a SAP customer code too
     // (the backend cascades Tax ID -> code -> name). The document's own Tax ID is only used for the
     // first auto-lookup, not once the person has typed their own term.
-    searchSapBusinessPartner({ name, code: appliedQuery ?? undefined, taxId: appliedQuery ? undefined : tax })
+    searchSapBusinessPartner({
+      name,
+      code: appliedQuery ?? undefined,
+      taxId: appliedQuery ? undefined : tax,
+      party: partyLabel === 'Vendor' ? 'vendor' : undefined,
+    })
       .then((r) => {
         if (cancelled) return;
         // Defensive: an unexpected response shape (e.g. an HTML page from a stale/mismatched
@@ -322,8 +327,11 @@ function SapCustomerPanel({
       </div>
     );
 
+  // Blocked partners last; for vendors, ones not extended to our Company Code after usable ones.
   const sorted = [...results].sort(
-    (a, b) => Number(!!a.businessPartnerIsBlocked) - Number(!!b.businessPartnerIsBlocked),
+    (a, b) =>
+      Number(!!a.businessPartnerIsBlocked) - Number(!!b.businessPartnerIsBlocked) ||
+      Number(a.inCompanyCode === false) - Number(b.inCompanyCode === false),
   );
   const aiCandidates: CompareCandidateItem<SapBusinessPartner>[] = results.map((bp) => ({
     id: bp.businessPartnerId,
@@ -365,6 +373,12 @@ function SapCustomerPanel({
                 <b>{bp.businessPartnerId}</b> — {bp.businessPartnerFullName || bp.businessPartnerName}
                 {bp.businessPartnerIsBlocked && (
                   <span className="badge b-fail" style={{ marginLeft: 4 }}>Blocked</span>
+                )}
+                {bp.inCompanyCode === false && (
+                  <span className="badge b-fail" style={{ marginLeft: 4 }}
+                    title="This supplier exists in SAP but is not extended to your company's company code — posting a supplier invoice to it will fail (F5/104). Extend it in Manage Business Partner Master Data first.">
+                    Not extended to company code
+                  </span>
                 )}
                 {/* Always shown when SAP has one on file — even if the document itself had no Tax ID
                     to search with, this is what SAP says the customer's Tax ID actually is. */}

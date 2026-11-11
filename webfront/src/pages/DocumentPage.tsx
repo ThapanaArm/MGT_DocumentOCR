@@ -1504,7 +1504,15 @@ export default function DocumentPage() {
       const want = isInventoryPoDoc(doc) ? taxDefaultsForVendor(vendorCode) : null;
       const haveCode = String(h.taxCode ?? '').trim().toUpperCase();
       const haveCalc = String(h.calculateTax ?? '').trim().toUpperCase() === 'X';
-      if (want && haveCode && haveCode !== want.taxCode) {
+      // Exception: a 1xxxxxx (Thai-registered) supplier billing imported goods in a foreign
+      // currency with NO VAT on the invoice — e.g. UBE FINE CHEMICALS (ASIA), CIF shipment from
+      // Japan, invoice in USD with VAT 0: the import VAT is paid at Customs, so the invoice itself
+      // is correctly VX. The document's own figures are the evidence, so V1 is not forced there.
+      const docVat = Number(String(h.vatAmount ?? '').replace(/,/g, '')) || 0;
+      const docCurrency = String(h.currency ?? '').trim().toUpperCase();
+      const importNoVat = want?.taxCode === 'V1' && haveCode === 'VX'
+        && docVat === 0 && docCurrency.length > 0 && docCurrency !== 'THB';
+      if (want && haveCode && haveCode !== want.taxCode && !importNoVat) {
         out.push(
           `ผู้ขาย ${vendorCode} ควรใช้ภาษี ${want.taxCode}`
             + `${want.taxCode === 'V1' ? ' (ในประเทศ มี VAT 7%)' : ' (ต่างประเทศ ไม่มี VAT)'}`

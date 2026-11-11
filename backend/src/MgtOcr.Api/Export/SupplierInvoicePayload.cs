@@ -1390,6 +1390,13 @@ public static class SupplierInvoicePayload
                     + "ผูกให้ครบทุกบรรทัดในแท็บ PO Reference ก่อนส่ง (หรือลบบรรทัดที่ไม่มีใน PO ออก)");
             }
 
+            var sendGrRef = matDoc.Length > 0 && match?.GrBasedIv != false;
+            // A hand-assigned line used to reach here with NO PO read at all, so its currency, unit
+            // and tax code came from the screen. The PO is now read for those lines too, but only
+            // to learn the GR-based IV flag above -- letting the PO's tax code win as well changed
+            // posted documents (a PO item carrying a 7% code turned a 25,600.00 invoice into
+            // M8/534 "Balance not zero: 1,792.00-"). So for those lines the screen still decides.
+            var poFields = assigned.Length > 0 ? null : match;
             result.Add(new Dictionary<string, object?>
             {
                 ["SupplierInvoiceItem"] = (++no).ToString(),
@@ -1400,23 +1407,30 @@ public static class SupplierInvoicePayload
                 // blank whenever the PO lookup did not run (the item numbers were typed by hand,
                 // or the gateway refused the read). The invoice's own currency is the same one
                 // the PO carries, so it stands in.
-                ["DocumentCurrency"] = Or(match?.Currency ?? "", headerCurrency),
+                ["DocumentCurrency"] = Or(poFields?.Currency ?? "", headerCurrency),
                 ["SupplierInvoiceItemAmount"] = F2(amount),
                 ["QuantityInPurchaseOrderUnit"] = F3(Num(l.Get("qty"))),
-                ["PurchaseOrderQuantityUnit"] = Or(match?.Unit ?? "", l.GetStr("uom")),
+                ["PurchaseOrderQuantityUnit"] = Or(poFields?.Unit ?? "", l.GetStr("uom")),
                 // Same story for the tax code: the PO's when it was read, otherwise what the
                 // person set on the line, otherwise the document's.
+                // What the screen shows wins: the PO Reference tab displays the line's own code,
+                // else the header's (PoReferenceTable), so the payload must send the same --
+                // otherwise a header switched to VX still posted the PO's V1 and SAP answered
+                // M8/534 "Balance not zero: 1,792.00-". The PO's code only fills a total blank.
                 ["TaxCode"] = Or(
-                    match?.TaxCode ?? "",
                     Or(l.Get("extra") is Dictionary<string, object?> tx ? tx.GetStr("taxCode").Trim() : "",
-                       headerTaxCode)),
+                       headerTaxCode),
+                    poFields?.TaxCode ?? ""),
                 // GR-based invoice verification: the material document, its fiscal year and
                 // the GR ITEM this invoice line settles. Sent only when the document carries
                 // them — a PO item without GR-based IV takes the invoice with the PO reference
                 // alone, and sending an empty ReferenceDocument would fail that case instead.
-                ["ReferenceDocument"] = matDoc.Length > 0 ? matDoc : null,
-                ["ReferenceDocumentFiscalYear"] = matDoc.Length > 0 ? matDocYear : null,
-                ["ReferenceDocumentItem"] = matDoc.Length > 0 ? GrItem(l, no) : null,
+                // And only when the PO item really is GR-based: a PO item without the flag rejects
+                // the reference with M8/376 (seen on test-tenant PO 2130000032, while production's
+                // stock POs carry it). Unknown flag (PO not read) = old behaviour.
+                ["ReferenceDocument"] = sendGrRef ? matDoc : null,
+                ["ReferenceDocumentFiscalYear"] = sendGrRef ? matDocYear : null,
+                ["ReferenceDocumentItem"] = sendGrRef ? GrItem(l, no) : null,
                 // Item Text only: A_SuplrInvcItemPurOrdRefType has SupplierInvoiceItemText but
                 // NO AssignmentReference (unlike the G/L item), so the assignment travels on the
                 // header instead and SAP copies it onto the vendor line.

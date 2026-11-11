@@ -1534,11 +1534,18 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             // too: its charges are spread over the PO items that accrued each condition, and only
             // the purchase order says which items those are.
             var isDeliveryCostDoc = header.GetStr("refDocType").Trim() is "2" or "3";
+            // ...except when the document carries a goods-receipt material document: whether that
+            // reference may be sent at all depends on the PO item's GR-based IV flag (M8/375 when
+            // it is set and missing, M8/376 when it is NOT set and sent), and only the PO says.
+            // In that case a failed lookup is not fatal -- the hand-assigned items still post,
+            // with the reference sent as before.
+            var needGrFlag = header.GetStr("refMatDoc").Trim().Length > 0;
+            var lookupOptional = assignedByHand && !isDeliveryCostDoc;
             if (poRef.Length > 0 && sapPo.Configured
-                && ((Export.SapImportSupplierInvoiceExcel.IsPoKeyed(doc) && !assignedByHand) || isDeliveryCostDoc))
+                && ((Export.SapImportSupplierInvoiceExcel.IsPoKeyed(doc) && (!assignedByHand || needGrFlag)) || isDeliveryCostDoc))
             {
                 try { poItems = await sapPo.ItemsAsync(poRef); }
-                catch (Exception ex) when (!forPost)
+                catch (Exception ex) when (!forPost || lookupOptional)
                 {
                     // Preview only: show what there is. The item numbers come back empty and the
                     // screen says so, which is more useful than an error page.

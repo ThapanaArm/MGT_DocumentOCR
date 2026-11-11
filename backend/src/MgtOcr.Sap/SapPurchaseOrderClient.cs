@@ -24,7 +24,12 @@ public record SapPurchaseOrderItem(
     // The rate this item was priced at — PriceDetnExchangeRate, 33.50860 on PO 2230000031. SAP
     // uses it for an invoice that names this PO, because it is the rate the goods receipt
     // accrued at, so it is the figure the screen shows before anything is posted.
-    decimal ExchangeRate);
+    decimal ExchangeRate,
+    // InvoiceIsGoodsReceiptBased (GR-based invoice verification). true = the invoice line MUST
+    // name the goods-receipt material document (M8/375 if missing); false = it must NOT
+    // (M8/376 "Only fill fields 'ReferenceDocument, -FiscalYear, -Item' ... if GR-based IV is
+    // active"). null = the field was not in SAP's response, so the caller keeps its old behaviour.
+    bool? GrBasedIv = null);
 
 /// <summary>One pricing element of a purchase order item, from to_PurchaseOrderPricingElement.
 ///
@@ -94,7 +99,9 @@ public class SapPurchaseOrderClient(AppConfig config, HttpClient httpClient)
                 GetString(el, "Plant") ?? "",
                 GetString(el, "TaxCode") ?? "",
                 Conditions(el),
-                ExchangeRateOf(el)))
+                ExchangeRateOf(el),
+                el.TryGetProperty("InvoiceIsGoodsReceiptBased", out _)
+                    ? (bool?)IsFlag(el, "InvoiceIsGoodsReceiptBased") : null))
             .Where(x => x.Item.Length > 0)
             .ToList();
 

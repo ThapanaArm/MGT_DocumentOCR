@@ -39,6 +39,10 @@ export interface SapBusinessPartner {
    *  filled in when SAP has one, regardless of whether the search was by Tax ID or by name, so it
    *  can be shown/used even when the document being matched had none of its own. */
   taxId?: string | null;
+  /** Vendor searches only (party='vendor'): true = extended to the signed-in company's SAP Company
+   *  Code; false = exists in SAP but a supplier invoice posted to it fails with F5/104;
+   *  null/undefined = not checked. */
+  inCompanyCode?: boolean | null;
 }
 
 export interface SapBusinessPartnerSearchResult {
@@ -51,14 +55,17 @@ export interface SapBusinessPartnerSearchParams {
   taxId?: string;
   /** SAP customer code (BusinessPartner id) — matched as a substring, so a prefix works. */
   code?: string;
+  /** 'vendor' scopes by Company Code extension instead of the customer AuthorizationGroup. */
+  party?: 'customer' | 'vendor';
   top?: number;
 }
 
 // companyCode is NOT sent here on purpose: the backend derives the AuthorizationGroup scope from
 // the signed-in user's own company (see SapBusinessPartnerController.Find), not from anything the
 // client passes, so a caller can't ask for another company's data by changing a query param.
-export const searchSapBusinessPartner = ({ name, taxId, code, top = 10 }: SapBusinessPartnerSearchParams) => {
+export const searchSapBusinessPartner = ({ name, taxId, code, party, top = 10 }: SapBusinessPartnerSearchParams) => {
   const qs = new URLSearchParams();
+  if (party) qs.set('party', party);
   if (taxId) qs.set('taxId', taxId);
   if (code) qs.set('code', code);
   if (name) qs.set('name', name);
