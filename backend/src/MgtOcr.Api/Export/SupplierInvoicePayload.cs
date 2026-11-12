@@ -113,7 +113,7 @@ public static class SupplierInvoicePayload
 
         var purOrdRef = wantsGoods
             ? PurchaseOrderItems(doc, poRef, poItems, currency, header.GetStr("taxCode").Trim(),
-                matDoc, matDocYear, assignment, itemText)
+                matDoc, matDocYear, assignment, itemText, goodsReceiptItems)
             : [];
 
         // Planned delivery costs. These are NOT G/L lines: the purchase order already booked them
@@ -1403,7 +1403,8 @@ public static class SupplierInvoicePayload
     private static List<object> PurchaseOrderItems(
         Dictionary<string, object?> doc, string poRef, IReadOnlyList<SapPurchaseOrderItem> poItems,
         string headerCurrency, string headerTaxCode, string matDoc, string matDocYear,
-        string assignment, string itemText)
+        string assignment, string itemText,
+        IReadOnlyList<System.Text.Json.JsonElement>? goodsReceiptItems = null)
     {
         var result = new List<object>();
         if (doc.Get("lines") is not System.Collections.IEnumerable lines) return result;
@@ -1464,9 +1465,18 @@ public static class SupplierInvoicePayload
                 // the GR ITEM this invoice line settles. Sent only when the document carries
                 // them — a PO item without GR-based IV takes the invoice with the PO reference
                 // alone, and sending an empty ReferenceDocument would fail that case instead.
-                ["ReferenceDocument"] = matDoc.Length > 0 ? matDoc : null,
-                ["ReferenceDocumentFiscalYear"] = matDoc.Length > 0 ? matDocYear : null,
-                ["ReferenceDocumentItem"] = matDoc.Length > 0 ? GrItem(l, no) : null,
+                //
+                // When the bundle names no material document (no MatDoc_… in the file name and none
+                // typed), or names one, the goods receipt read from SAP (API_MATERIAL_DOCUMENT_SRV)
+                // supplies the number, year and GR item of THIS PO item — SAP answers M8/375
+                // "Fill in mandatory field 'ReferenceDocument, -FiscalYear, -Item'" otherwise.
+                ["ReferenceDocument"] = GrRef(goodsReceiptItems, poRef, itemNo, matDoc) is { } gr1 ? gr1.Doc
+                    : matDoc.Length > 0 ? matDoc : null,
+                ["ReferenceDocumentFiscalYear"] = GrRef(goodsReceiptItems, poRef, itemNo, matDoc) is { } gr2 ? gr2.Year
+                    : matDoc.Length > 0 ? matDocYear : null,
+                ["ReferenceDocumentItem"] = TypedGrItem(l) is { Length: > 0 } typedGr ? typedGr
+                    : GrRef(goodsReceiptItems, poRef, itemNo, matDoc) is { } gr3 ? gr3.Item
+                    : matDoc.Length > 0 ? GrItem(l, no) : null,
                 // Item Text only: A_SuplrInvcItemPurOrdRefType has SupplierInvoiceItemText but
                 // NO AssignmentReference (unlike the G/L item), so the assignment travels on the
                 // header instead and SAP copies it onto the vendor line.
@@ -1488,6 +1498,37 @@ public static class SupplierInvoicePayload
     /// 2026 0010 is invalid" — the GR simply has no item 10. The position is a guess that is
     /// right only when the whole PO was received at once, in PO order, so a document whose GR
     /// was split still needs the numbers typed in.</summary>
+    private static string TypedGrItem(Dictionary<string, object?> line) =>
+        line.Get("extra") is Dictionary<string, object?> ex ? ex.GetStr("sapGrItem").Trim() : "";
+
+    /// <summary>The goods receipt (101, not reversed) of this PO item, from the material documents
+    /// SAP returned for the PO: the latest one, or the one named on the bundle when it names one.
+    /// Null when SAP returned none for the item — the caller then falls back to what the screen has.</summary>
+    private static (string Doc, string Year, string Item)? GrRef(
+        IReadOnlyList<System.Text.Json.JsonElement>? rows, string poRef, string poItem, string matDoc)
+    {
+        if (rows is null || rows.Count == 0 || poItem.Length == 0) return null;
+        static string S(System.Text.Json.JsonElement r, string n) =>
+            r.ValueKind == System.Text.Json.JsonValueKind.Object && r.TryGetProperty(n, out var v)
+            && v.ValueKind == System.Text.Json.JsonValueKind.String ? (v.GetString() ?? "").Trim() : "";
+        static string Key(string v) => int.TryParse(v, out var n) ? n.ToString() : v.TrimStart('0');
+        var mine = rows.Where(r => Key(S(r, "PurchaseOrderItem")) == Key(poItem)
+                && (poRef.Length == 0 || S(r, "PurchaseOrder") == poRef || S(r, "PurchaseOrder").Length == 0))
+            .ToList();
+        // Receipts reversed by a 102 (same document/item referenced) drop out.
+        var reversed = mine.Where(r => S(r, "GoodsMovementType") is "102" or "122")
+            .Select(r => S(r, "ReversedMaterialDocument") + "|" + Key(S(r, "ReversedMaterialDocumentItem")))
+            .ToHashSet();
+        var receipts = mine.Where(r => S(r, "GoodsMovementType") == "101"
+                && !reversed.Contains(S(r, "MaterialDocument") + "|" + Key(S(r, "MaterialDocumentItem"))))
+            .ToList();
+        var pick = (matDoc.Length > 0 ? receipts.FirstOrDefault(r => S(r, "MaterialDocument") == matDoc) : default)
+            is { ValueKind: System.Text.Json.JsonValueKind.Object } named ? named
+            : receipts.OrderByDescending(r => S(r, "MaterialDocumentYear") + S(r, "MaterialDocument")).FirstOrDefault();
+        if (pick.ValueKind != System.Text.Json.JsonValueKind.Object) return null;
+        return (S(pick, "MaterialDocument"), S(pick, "MaterialDocumentYear"), Key(S(pick, "MaterialDocumentItem")));
+    }
+
     private static string GrItem(Dictionary<string, object?> line, int position)
     {
         var typed = line.Get("extra") is Dictionary<string, object?> ex

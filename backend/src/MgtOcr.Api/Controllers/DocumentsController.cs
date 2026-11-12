@@ -1824,6 +1824,19 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             // Planned-delivery-cost lines must only be assigned to PO items that have a net goods
             // receipt. Read GRs from SAP before building the payload; fail closed on submit so a
             // missing API authorization can never send costs to unreceived PO items.
+            // Goods keyed against the PO: the goods receipt names the material document, year and
+            // GR item SAP wants on every PO line of a GR-based invoice (M8/375). Best effort — the
+            // screen's MatDoc number still stands in when SAP cannot be read.
+            if (poRef.Length > 0 && !isDeliveryCostDoc && sapPo.Configured
+                && !string.IsNullOrWhiteSpace(config.SapMaterialDocumentBaseUrl)
+                && Export.SapImportSupplierInvoiceExcel.IsPoKeyed(doc))
+            {
+                try { goodsReceiptItems = await sapPo.GoodsReceiptItemsAsync(poRef); }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "[AP] Goods-receipt lookup failed for {Po} (PO-keyed goods)", poRef);
+                }
+            }
             if (poRef.Length > 0 && isDeliveryCostDoc)
             {
                 // GoodsReceiptItemsAsync deliberately returns an empty list when its endpoint is
