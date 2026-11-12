@@ -502,6 +502,8 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
                     + "Reverse it in SAP first if it has to be posted again (then confirm to post anyway).");
         }
 
+        if (Export.DeferredVatReversal.MissingTaxIds(doc) is { Count: > 0 } noTaxId)
+            throw new HttpApiException(400, Export.DeferredVatReversal.MissingTaxIdMessage(noTaxId));
         var batches = Export.JournalEntryAccruedExcel.Batches(doc);
         if (batches.Count == 0)
             throw new HttpApiException(400, "This document has no deferred input tax to transfer — the Tax tab holds no row "
@@ -1753,6 +1755,11 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     {
         var module = doc.GetStr("module");
         var header = (Dictionary<string, object?>)doc["header"]!;
+        // Every tax invoice needs its issuer's Tax ID before anything goes to SAP (Accounting,
+        // 2026-11-12). The preview still opens so the person can see what is missing.
+        if (forPost && module is "AP" or "II"
+            && Export.DeferredVatReversal.MissingTaxIds(doc) is { Count: > 0 } noTaxId)
+            throw new HttpApiException(400, Export.DeferredVatReversal.MissingTaxIdMessage(noTaxId));
         var companyCode = module == "SO"
             ? CompanyCodeForSalesOrg(await SalesOrgAsync(header, DocIdOf(doc)))
             : null;

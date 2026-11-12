@@ -69,6 +69,32 @@ public static class DeferredVatReversal
     /// the database once somebody saves the document. An export read the stored header, found no
     /// tax rows on a document nobody had saved yet, and answered "no deferred input tax" while the
     /// screen was showing three tax rows — which is exactly as confusing as it sounds.</summary>
+    /// <summary>
+    /// Tax rows that cannot go out because the issuer's Tax ID is missing or not 13 digits.
+    /// Required by Accounting (2026-11-12): every tax invoice on the input tax report carries its
+    /// issuer's Tax ID, and it is printed on every one of these papers. "PI-2608011 (PROMPT …)".
+    /// </summary>
+    public static List<string> MissingTaxIds(Dictionary<string, object?> doc)
+    {
+        var missing = new List<string>();
+        foreach (var t in TaxRows(doc))
+        {
+            if (Num(t.Get("docCurrencyAmt")) == 0) continue;
+            var code = t.GetStr("taxCode").Trim().ToUpperInvariant();
+            if (code is "VX" or "") continue;
+            var digits = new string(t.GetStr("issuerTaxId").Where(char.IsDigit).ToArray());
+            if (digits.Length == 13) continue;
+            var doc_ = t.GetStr("taxDocNo").Trim();
+            var who = t.GetStr("issuerName").Trim();
+            missing.Add($"{(doc_.Length > 0 ? doc_ : "(no tax invoice no.)")}{(who.Length > 0 ? $" ({who})" : "")}");
+        }
+        return missing;
+    }
+
+    public static string MissingTaxIdMessage(List<string> missing) =>
+        "ยังไม่มีเลขประจำตัวผู้เสียภาษี (Tax ID 13 หลัก) ของผู้ออกใบกำกับภาษี: " + string.Join(", ", missing)
+        + " — ตรวจในเอกสารอีกครั้ง (มักพิมพ์ใต้ชื่อผู้ออกใบหรือมุมบน) แล้วกรอกในแท็บ Tax ให้ครบก่อนส่ง";
+
     public static List<Dictionary<string, object?>> TaxRows(Dictionary<string, object?> doc)
     {
         var header = doc.Get("header") as Dictionary<string, object?> ?? doc;
