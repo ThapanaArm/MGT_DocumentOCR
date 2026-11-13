@@ -262,18 +262,26 @@ public class SapClient(AppConfig config, HttpClient httpClient)
     /// <summary>The same fill for a journal entry known by its own number (a JV this app posted
     /// with Journal Entry - Post, whose tax lines have no Assignment field).</summary>
     public Task<(bool Ok, string Message)> FillAccountingDocumentLinesAsync(
-        string accountingDocument, string fiscalYear, string companyCode, string text, string assignment)
-        => FillJournalEntryLinesAsync(accountingDocument, fiscalYear, companyCode, text, assignment, byAccountingDocument: true);
+        string accountingDocument, string fiscalYear, string companyCode, string text, string assignment,
+        string accountOverride = "", string assignmentOverride = "")
+        => FillJournalEntryLinesAsync(accountingDocument, fiscalYear, companyCode, text, assignment, byAccountingDocument: true,
+            accountOverride, assignmentOverride);
 
     private async Task<(bool Ok, string Message)> FillJournalEntryLinesAsync(
         string supplierInvoice, string fiscalYear, string companyCode, string text, string assignment,
-        bool byAccountingDocument)
+        bool byAccountingDocument, string accountOverride = "", string assignmentOverride = "")
     {
+        // One G/L account whose lines take a different Assignment (the deferred VAT JV's input tax
+        // line: a third party's Tax ID). Compared without leading zeros.
+        static string Acct(string? a) => (a ?? "").Trim().TrimStart('0');
+        accountOverride = Acct(accountOverride);
+        assignmentOverride = (assignmentOverride ?? "").Trim();
+        if (assignmentOverride.Length > 18) assignmentOverride = assignmentOverride[..18];
         var baseUrl = config.SapSupplierInvoiceBaseUrl;
         if (string.IsNullOrWhiteSpace(baseUrl)) return (false, "Sap:SupplierInvoice base URL is not configured");
         text = (text ?? "").Trim();
         assignment = (assignment ?? "").Trim();
-        if (text.Length == 0 && assignment.Length == 0) return (true, "nothing to fill");
+        if (text.Length == 0 && assignment.Length == 0 && assignmentOverride.Length == 0) return (true, "nothing to fill");
         if (text.Length > 50) text = text[..50];
         if (assignment.Length > 18) assignment = assignment[..18];
         static string Q(string v) => (v ?? "").Trim().Replace("'", "''");
@@ -321,10 +329,13 @@ public class SapClient(AppConfig config, HttpClient httpClient)
                 // Empty, or the "<payables text> <what it is>" stand-in the invoice was created with.
                 var fixText = text.Length > 0 && (curText.Length == 0
                     || curText.StartsWith(text + " ", StringComparison.OrdinalIgnoreCase));
-                var fixAssign = assignment.Length > 0 && curAssign.Length == 0;
+                var lineAssignment = accountOverride.Length > 0 && assignmentOverride.Length > 0
+                    && Acct(TryGetString(it, "GLAccount")) == accountOverride
+                        ? assignmentOverride : assignment;
+                var fixAssign = lineAssignment.Length > 0 && curAssign.Length == 0;
                 if (!int.TryParse(TryGetString(it, "AccountingDocumentItem"), out var itemNo)) continue;
                 lines.Add((TryGetString(it, "AccountingDocument") ?? "", TryGetString(it, "FiscalYear") ?? fiscalYear,
-                    itemNo, fixText || fixAssign, fixText ? text : "", fixAssign ? assignment : ""));
+                    itemNo, fixText || fixAssign, fixText ? text : "", fixAssign ? lineAssignment : ""));
             }
         }
         catch (Exception e)
@@ -394,7 +405,15 @@ public class SapClient(AppConfig config, HttpClient httpClient)
     /// <summary>One deferred-VAT transfer: D1 (deferred input tax) -> V1 (input tax) for ONE tax
     /// invoice, posted as its own journal entry so the input tax report lists each tax invoice with
     /// its own number (Reference) and issuer (Text).</summary>
-    public record DeferredVatJv(string Reference, string Text, string Assignment, decimal Amount, decimal Base, DateTime? TaxDate);
+    /// <param name="TaxPartner">The SAP Business Partner who issued the tax invoice (found by its
+    /// Tax ID). A G/L-only entry has no supplier line, so the Thai input tax report had no partner
+    /// to read the Tax Number from and the column stayed blank (PROMPT 1000134, TH3 0115551002992).
+    /// It goes on the header as the country-specific business partner. "" = none found.</param>
+    /// <param name="InputTaxAccount">The input tax (V1) G/L account, and <paramref name="InputTaxAssignment"/>
+    /// what its line carries as Assignment: a third party's Tax ID (AP, 2026-11-12). Every other
+    /// line gets <paramref name="Assignment"/> (the PO).</param>
+    public record DeferredVatJv(string Reference, string Text, string Assignment, decimal Amount, decimal Base, DateTime? TaxDate,
+        string TaxPartner = "", string InputTaxAccount = "", string InputTaxAssignment = "");
 
     /// <summary>Posts each entry with Journal Entry - Post (Synchronous), SAP_COM_0002
     /// (journalentrycreaterequestconfi), the same entry the "Journal Entry (Deferred VAT)" Excel
@@ -459,6 +478,10 @@ public class SapClient(AppConfig config, HttpClient httpClient)
             sb.Append($"<PostingDate>{D(postingDate)}</PostingDate>");
             sb.Append($"<TaxReportingDate>{D(postingDate)}</TaxReportingDate>");
             sb.Append($"<TaxDeterminationDate>{D(taxDate)}</TaxDeterminationDate>");
+            // Country/Region-specific Business Partner 1, which the Thai reports use for a
+            // document without a supplier line: the tax invoice's issuer.
+            if (e.TaxPartner.Trim().Length > 0)
+                sb.Append($"<JrnlEntryCntrySpecificBp1>{X(Cut(e.TaxPartner, 10))}</JrnlEntryCntrySpecificBp1>");
             void TaxItem(string code, decimal amount, decimal taxBase, string dc)
             {
                 sb.Append("<ProductTaxItem>");
@@ -514,11 +537,14 @@ public class SapClient(AppConfig config, HttpClient httpClient)
                 break;
             }
             var year = postingDate.Year;   // calendar fiscal year (GLC / MGT)
-            var fill = await FillAccountingDocumentLinesAsync(docNo, year.ToString(inv), companyCode, e.Text, e.Assignment);
+            var fill = await FillAccountingDocumentLinesAsync(docNo, year.ToString(inv), companyCode, e.Text, e.Assignment,
+                e.InputTaxAccount, e.InputTaxAssignment);
             // SAP answers with the 10-digit key (0100000755); people read and search it as 100000755.
             var shown = docNo.TrimStart('0');
             results.Add((e.Reference, true, shown,
-                $"Posted {shown}" + (fill.Ok ? $" · Assignment/Text: {fill.Message}" : $" · Assignment/Text NOT DONE — {fill.Message}")));
+                $"Posted {shown}"
+                + (e.TaxPartner.Trim().Length > 0 ? $" · Tax partner {e.TaxPartner.Trim()}" : " · NO tax partner (no SAP BP for this Tax ID)")
+                + (fill.Ok ? $" · Assignment/Text: {fill.Message}" : $" · Assignment/Text NOT DONE — {fill.Message}")));
         }
         return results;
     }

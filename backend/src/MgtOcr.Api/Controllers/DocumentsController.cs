@@ -504,10 +504,12 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
 
         if (Export.DeferredVatReversal.MissingTaxIds(doc) is { Count: > 0 } noTaxId)
             throw new HttpApiException(400, Export.DeferredVatReversal.MissingTaxIdMessage(noTaxId));
+        // The text is "<abbreviation>,INV.<invoice no>" like the supplier invoice's lines.
+        await ApplyShortNamesAsync(doc);
         var batches = Export.JournalEntryAccruedExcel.Batches(doc);
         if (batches.Count == 0)
-            throw new HttpApiException(400, "This document has no deferred input tax to transfer — the Tax tab holds no row "
-                + "marked Deferred (Input Tax Type = Deferred, or a tax code starting with D)");
+            throw new HttpApiException(400, "ไม่มีภาษีที่ต้องกลับค่า — JV นี้ทำเฉพาะแถวในแท็บ Tax ที่เลือกเป็น V1 (ภาษีซื้อ) "
+                + "ซึ่งตอนบันทึก Supplier Invoice ถูกพักไว้ที่ D1; แถวที่เลือกเป็น D1 จะคงเป็นภาษีซื้อไม่ถึงกำหนดและไม่ต้องกลับค่า");
 
         // Names reach SAP and the input tax report in English only (AP, 2026-11-11).
         var thai = batches.Where(b => MgtOcr.Ocr.VisionPrompt.HasThai(b.Text)).Select(b => $"{b.Reference} \"{b.Text}\"").ToList();
@@ -517,9 +519,29 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
 
         var company = await ExportCompanyAsync(docId);
         var header = (Dictionary<string, object?>)doc["header"]!;
+        // The issuer of each tax invoice as a SAP Business Partner, by its Tax ID, so the input tax
+        // report can show the Tax Number (a G/L-only entry has no supplier line to take it from).
+        // A Tax ID with no BP in SAP simply goes without one; the result says so.
+        static string Digits(string? v) => new((v ?? "").Where(char.IsDigit).ToArray());
+        var partnerByTaxId = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var taxId in batches.Select(b => Digits(b.TaxId)).Where(t => t.Length == 13).Distinct())
+        {
+            try
+            {
+                var bp = (await sapBp.FindByTaxIdAsync(taxId)).Select(p => p.BusinessPartnerId)
+                    .FirstOrDefault(id => !string.IsNullOrWhiteSpace(id));
+                if (bp != null) partnerByTaxId[taxId] = bp.Trim();
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "[AP] BP lookup by Tax ID {TaxId} failed (deferred VAT JV)", taxId);
+            }
+        }
         var entries = batches.Select(b => new MgtOcr.Sap.SapClient.DeferredVatJv(
             b.Reference, b.Text, b.Assignment,
-            Math.Round((decimal)b.Amount, 2), Math.Round((decimal)b.Base, 2), b.TaxDate)).ToList();
+            Math.Round((decimal)b.Amount, 2), Math.Round((decimal)b.Base, 2), b.TaxDate,
+            partnerByTaxId.GetValueOrDefault(Digits(b.TaxId), ""),
+            Export.DeferredVatReversal.GlInputTax, b.InputTaxAssignment)).ToList();
         var results = await sap.PostDeferredVatJournalEntriesAsync(entries, company?.CompanyCode ?? "2000",
             postingDate, Export.DeferredVatReversal.Reference(header),
             header.GetStr("currency").Trim() is { Length: > 0 } c ? c : "THB");
@@ -1269,6 +1291,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             throw new HttpApiException(400, "The journal-entry file is only produced for supplier invoices");
 
         var company = await ExportCompanyAsync(docId);
+        await ApplyShortNamesAsync(doc);
         var bytes = Export.JournalEntryAccruedExcel.Build(
             doc,
             companyCode: company?.CompanyCode ?? "2000",
@@ -1305,6 +1328,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             throw new HttpApiException(400, "The SAP import file is only produced for supplier invoices");
 
         var company = await ExportCompanyAsync(docId);
+        await ApplyShortNamesAsync(doc);
         var bytes = Export.SapImportSupplierInvoiceExcel.Build(
             doc,
             // A bundle can carry costs from several suppliers, and one SAP supplier invoice takes
@@ -1331,6 +1355,26 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             string.IsNullOrWhiteSpace(vendor)
                 ? $"SapImportSupplierInvoice_{docId}.xlsx"
                 : $"SapImportSupplierInvoice_{docId}_{vendor.Trim()}.xlsx");
+    }
+
+    /// <summary>The Excel exports have no mapping run behind them, so the abbreviations
+    /// (ocr.Vendor.ShortName) are put on the header here, by the document's own supplier code.</summary>
+    private async Task ApplyShortNamesAsync(Dictionary<string, object?> doc)
+    {
+        try
+        {
+            if (doc.Get("header") is not Dictionary<string, object?> header) return;
+            var all = await masters.LoadAllAsync();
+            if (!all.TryGetValue("vendors", out var rows)) return;
+            var vendors = MgtOcr.Core.DynamicRow.ToDictList(rows);
+            var code = doc.GetStr("partnerCode").Trim() is { Length: > 0 } pc ? pc : header.GetStr("vendorCode").Trim();
+            var main = vendors.FirstOrDefault(v =>
+                string.Equals(v.GetStr("VendorCode").Trim(), code, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(v.GetStr("SapVendorCode").Trim(), code, StringComparison.OrdinalIgnoreCase));
+            Export.SupplierShortNames.Apply(header, vendors, main);
+            Export.SupplierShortNames.RewriteGeneratedTexts(header);
+        }
+        catch { /* the file is still worth producing with the first-word fallback */ }
     }
 
     /// <summary>Supplier code -> supplier name, both the internal code and the SAP one, so a row
@@ -1785,6 +1829,18 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             var venCode = (resHeader.Get("vendor") as Dictionary<string, object?>).GetStr("code");
             pm = masterData.Vendors.FirstOrDefault(v => v.GetStr("VendorCode") == venCode);
         }
+        if (module is "AP" or "II")
+        {
+            // The supplier's abbreviation (Vendor card, ocr.Vendor.ShortName) leads every
+            // "<abbr>,INV.<no>" text. The user types it; a supplier without one cannot be sent
+            // (AP, 2026-11-12).
+            var abbr = Export.SupplierShortNames.Apply(header, masterData.Vendors, pm);
+            if (forPost && pm != null && abbr.Length == 0)
+                throw new HttpApiException(400,
+                    $"ผู้ขาย {pm.GetStr("VendorCode")} {pm.GetStr("VendorName")} ยังไม่มีอักษรย่อ — "
+                    + "เพิ่มอักษรย่อที่การ์ด Vendor / Supplier ใน Step 2 ก่อนส่งเข้า SAP");
+            Export.SupplierShortNames.RewriteGeneratedTexts(header);
+        }
         var source = new Dictionary<string, object?>
         {
             ["docId"] = doc.Get("docId"), ["file"] = doc.Get("fileName"), ["ocrProvider"] = doc.Get("provider"), ["confidence"] = doc.Get("confidence"),
@@ -1808,6 +1864,15 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             // too: its charges are spread over the PO items that accrued each condition, and only
             // the purchase order says which items those are.
             var isDeliveryCostDoc = header.GetStr("refDocType").Trim() is "2" or "3";
+            // Items assigned by hand still want the PO's own unit and currency: without the read,
+            // the line's unit went as the document printed it ("Gram") and SAP refused the whole
+            // invoice ("Property 'PurchaseOrderQuantityUnit' has invalid value 'Gram'"). Read it
+            // anyway, but a failure here does not stop the post -- the numbers are the person's.
+            if (poRef.Length > 0 && sapPo.Configured && Export.SapImportSupplierInvoiceExcel.IsPoKeyed(doc) && assignedByHand)
+            {
+                try { poItems = await sapPo.ItemsAsync(poRef); }
+                catch (Exception ex) { logger.LogWarning(ex, "[AP] PO {Po} read for units failed (items assigned by hand)", poRef); }
+            }
             if (poRef.Length > 0 && sapPo.Configured
                 && ((Export.SapImportSupplierInvoiceExcel.IsPoKeyed(doc) && !assignedByHand) || isDeliveryCostDoc))
             {
@@ -1872,6 +1937,35 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
                         + $"cannot be sent safely until API_MATERIAL_DOCUMENT_SRV is configured and authorized: {ex.Message}");
                 }
             }
+            // One shipping bundle for several purchase orders (one FORM SHIPPING EXPENSE per PO,
+            // e.g. 2230000511 / 604 / 605 on PILOT INCI26080148): each PO's items and receipts are
+            // read so every PO's charges settle that PO's own accrual (PRD 5100001207/1208/1209).
+            var poList = Export.SupplierInvoicePayload.PoNumbers(header);
+            Dictionary<string, Export.SupplierInvoicePayload.PoData>? perPo = null;
+            if (poList.Count > 1 && isDeliveryCostDoc && !Export.SapImportSupplierInvoiceExcel.IsPoKeyed(doc))
+            {
+                perPo = new Dictionary<string, Export.SupplierInvoicePayload.PoData>(StringComparer.OrdinalIgnoreCase);
+                foreach (var po in poList)
+                {
+                    try
+                    {
+                        if (!sapPo.Configured) throw new InvalidOperationException("Sap:PurchaseOrder is not configured");
+                        var items = await sapPo.ItemsAsync(po);
+                        var receipts = await sapPo.GoodsReceiptItemsAsync(po);
+                        perPo[po] = new Export.SupplierInvoicePayload.PoData(items, receipts);
+                    }
+                    catch (Exception ex) when (!forPost)
+                    {
+                        logger.LogWarning(ex, "[AP] PO {Po} of a multi-PO bundle could not be read (preview)", po);
+                        perPo[po] = new Export.SupplierInvoicePayload.PoData([], []);
+                    }
+                    catch (Exception ex)
+                    {
+                        throw new HttpApiException(502,
+                            $"อ่าน PO {po} หรือ Goods Receipt ของ PO นี้จาก SAP ไม่ได้ จึงยังส่งชุดหลาย PO ไม่ได้: {ex.Message}");
+                    }
+                }
+            }
             var apCompany = (await ExportCompanyAsync(Convert.ToInt32(doc.Get("docId") ?? 0)))?.CompanyCode
                 ?? config.SapCompanyCode;
             var party = doc.GetStr("partnerCode") is { Length: > 0 } pc ? pc : header.GetStr("vendorCode");
@@ -1894,7 +1988,8 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             {
                 var only = Export.SupplierInvoicePayload.Build(
                     doc, apCompany, party, poItems, source, apTerms, goodsReceiptItems: goodsReceiptItems,
-                    taxBaseClearingAccount: config.SapSupplierInvoiceTaxBaseClearingAccount, sameParty: SameParty);
+                    taxBaseClearingAccount: config.SapSupplierInvoiceTaxBaseClearingAccount, sameParty: SameParty,
+                    perPo: perPo);
                 // One condition billed under two tax codes on a PO with one item for it cannot be one
                 // SAP document (M8/321 / FF812) — it goes as one document per tax code.
                 return (TestReference(Export.SupplierInvoicePayload.SplitByTaxCode(only).Select(MapVendors).ToList(), doc), res);
@@ -1909,9 +2004,27 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             {
                 try
                 {
+                    if (perPo != null && Export.SupplierInvoicePayload.IsOverseasOnly(doc, v, SameParty))
+                    {
+                        // The goods supplier's Overseas charge: one document per PO, in the PO
+                        // condition's own currency, Reference = the PO (PRD 5100001099).
+                        foreach (var po in poList)
+                        {
+                            var data = perPo.TryGetValue(po, out var d) ? d : new Export.SupplierInvoicePayload.PoData([], []);
+                            var ccy = data.Items.SelectMany(i => i.Conditions)
+                                .FirstOrDefault(c => string.Equals(c.ConditionType.Trim(), "ZOVS", StringComparison.OrdinalIgnoreCase))
+                                ?.RateCurrency ?? "";
+                            var poDoc = Export.SupplierInvoicePayload.DocForPo(doc, po, ccy);
+                            if (!Export.SupplierInvoicePayload.IsOverseasOnly(poDoc, v, SameParty)) continue;
+                            split.AddRange(Export.SupplierInvoicePayload.SplitByTaxCode(Export.SupplierInvoicePayload.Build(
+                                poDoc, apCompany, v, data.Items, source, apTerms, v, data.GoodsReceipts,
+                                config.SapSupplierInvoiceTaxBaseClearingAccount, SameParty)).Select(MapVendors));
+                        }
+                        continue;
+                    }
                     split.AddRange(Export.SupplierInvoicePayload.SplitByTaxCode(Export.SupplierInvoicePayload.Build(
                         doc, apCompany, v, poItems, source, apTerms, v, goodsReceiptItems,
-                        config.SapSupplierInvoiceTaxBaseClearingAccount, SameParty)).Select(MapVendors));
+                        config.SapSupplierInvoiceTaxBaseClearingAccount, SameParty, perPo)).Select(MapVendors));
                 }
                 catch (Export.TaxOverBaseException ex)
                 {

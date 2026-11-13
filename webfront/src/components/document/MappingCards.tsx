@@ -2675,6 +2675,10 @@ interface Props {
   onFetchSapUom?: (i: number) => void;
   onUseSapCustomer: (bp: SapBusinessPartner) => void;
   onUseSapVendor: (bp: SapBusinessPartner) => void;
+  /** The matched vendor's abbreviation (ocr.Vendor.ShortName), '' when none yet. */
+  vendorShortName?: string;
+  /** Saves the abbreviation the user typed onto the vendor master. */
+  onSaveVendorShortName?: (vendorCode: string, abbr: string) => void;
   onUseZohoAccount: (acc: ZohoAccount) => void;
   /** AI-driven "press Search Zoho": opens the customer search panel and runs this query. */
   customerSearchSignal?: { query: string; nonce: number };
@@ -2741,6 +2745,8 @@ export default function MappingCards({
   onFetchSapUom,
   onUseSapCustomer,
   onUseSapVendor,
+  vendorShortName = '',
+  onSaveVendorShortName,
   onUseZohoAccount,
   customerSearchSignal,
   isMgt,
@@ -2757,6 +2763,8 @@ export default function MappingCards({
 }: Props) {
   const { ocrProviders } = useMeta();
   const [vendorAiOpen, setVendorAiOpen] = useState(false);
+  // Abbreviation editor on the Vendor card (null = closed).
+  const [abbrDraft, setAbbrDraft] = useState<string | null>(null);
   // External searches are opened explicitly by the person, regardless of mapping status. This
   // keeps Customer, Ship-to and Material consistent: first click Search, then inspect the initial
   // result and optionally type another query inside the opened panel.
@@ -2913,6 +2921,59 @@ export default function MappingCards({
               >
                 <i className="fa-solid fa-magnifying-glass" /> Search SAP
               </button>
+            )}
+            {/* Supplier abbreviation (AP, 2026-11-12): the word every item text starts with —
+                "KCC,INV.KCCCI260715-012". Always typed by the user; a supplier without one cannot
+                be sent, so the button is red until it is added. */}
+            {r.code && onSaveVendorShortName && (
+              abbrDraft !== null && !posted ? (
+                <span style={{ marginLeft: 6, display: 'inline-flex', gap: 4, alignItems: 'center' }}>
+                  <input
+                    className="txt"
+                    autoFocus
+                    maxLength={20}
+                    placeholder="เช่น KCC"
+                    value={abbrDraft}
+                    style={{ width: 110, textTransform: 'uppercase' }}
+                    onChange={(e) => setAbbrDraft(e.target.value.toUpperCase())}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && abbrDraft.trim()) {
+                        onSaveVendorShortName(String(r.code), abbrDraft);
+                        setAbbrDraft(null);
+                      }
+                      if (e.key === 'Escape') setAbbrDraft(null);
+                    }}
+                  />
+                  <button
+                    className="btn sm primary"
+                    disabled={!abbrDraft.trim()}
+                    onClick={() => { onSaveVendorShortName(String(r.code), abbrDraft); setAbbrDraft(null); }}
+                  >
+                    <i className="fa-solid fa-check" /> Save
+                  </button>
+                  <button className="btn sm ghost" onClick={() => setAbbrDraft(null)}>Cancel</button>
+                </span>
+              ) : vendorShortName ? (
+                <span
+                  className="badge b-ok"
+                  style={{ marginLeft: 6, cursor: posted ? 'default' : 'pointer' }}
+                  title={`Text: ${vendorShortName},INV.<invoice no.>` + (posted ? '' : ' — click to change')}
+                  onClick={() => { if (!posted) setAbbrDraft(vendorShortName); }}
+                >
+                  Abbr: {vendorShortName} {!posted && <i className="fa-solid fa-pen" style={{ fontSize: 10 }} />}
+                </span>
+              ) : (
+                !posted && (
+                  <button
+                    className="btn sm danger"
+                    style={{ marginLeft: 6 }}
+                    onClick={() => setAbbrDraft('')}
+                    title="ผู้ขายนี้ยังไม่มีอักษรย่อ — ต้องเพิ่มก่อนส่งเข้า SAP"
+                  >
+                    <i className="fa-solid fa-plus" /> Add abbreviation
+                  </button>
+                )
+              )
             )}
           </>
         }

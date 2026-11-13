@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useRef, useState, type SetStateAction } from 'react';
 import { useAppState } from '../../../state/AppState';
 import { mapDocument, type DocModel, type MapResult } from '../../../api/documents';
 import { num } from '../../../utils/format';
@@ -20,7 +20,23 @@ import { WHT_CODE_RATE } from '../../../constants/fields';
 export function useDocumentEditor(user: string) {
   const { guard, showToast } = useAppState();
 
-  const [doc, setDoc] = useState<DocModel | null>(null);
+  const [doc, setDocState] = useState<DocModel | null>(null);
+  // The SAP numbers (sapDocNos, deferredJvs) come only from GET /api/documents/:id. The mapping and
+  // save endpoints answer with the document WITHOUT them, so every re-map used to wipe the Deferred
+  // VAT JV numbers off the "Sent to SAP" box. They are carried over while it is the same document;
+  // a response that does carry them (the reload after posting) still replaces them.
+  const setDoc = useCallback((next: SetStateAction<DocModel | null>) => {
+    setDocState((prev) => {
+      const n = typeof next === 'function' ? (next as (p: DocModel | null) => DocModel | null)(prev) : next;
+      if (!n || !prev || n.docId !== prev.docId) return n;
+      if (n.sapDocNos !== undefined && n.deferredJvs !== undefined) return n;
+      return {
+        ...n,
+        sapDocNos: n.sapDocNos ?? prev.sapDocNos,
+        deferredJvs: n.deferredJvs ?? prev.deferredJvs,
+      };
+    });
+  }, []);
   const [map, setMap] = useState<MapResult | null>(null);
   const [failed, setFailed] = useState(false);
   const manual = useRef<{ header: Record<string, string>; lines: Record<string, string> }>({

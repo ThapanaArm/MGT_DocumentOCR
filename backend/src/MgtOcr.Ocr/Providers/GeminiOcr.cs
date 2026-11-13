@@ -142,8 +142,10 @@ public static partial class GeminiOcr
                         : $"สำคัญ: {formPages.Count} ภาพแรกคือหน้า FORM SHIPPING EXPENSE (หน้า {string.Join(", ", formPageNos)} ของไฟล์) " +
                              "lines ต้องมาจากตารางในภาพเหล่านี้เท่านั้น ห้ามใช้รายการจากใบแจ้งหนี้/ใบเสร็จในภาพอื่นเป็น lines " +
                              (formPages.Count > 1
-                                ? "ฟอร์มมีหลายใบเพราะมีหลาย PO — ให้รวมรายการชื่อเดียวกันของ vendor เดียวกันจากทุกใบเป็นแถวเดียวโดยบวกยอดกัน " +
-                                  "และใส่ poRef เป็นเลข PO ทุกใบคั่นด้วย \", \" "
+                                ? "ฟอร์มมีหลายใบเพราะมีหลาย PO (1 ใบต่อ 1 PO) — ห้ามรวมแถวข้ามใบ: อ่านทุกใบแยกกัน 1 แถวต่อ 1 รายการต่อ 1 ใบ " +
+                                  "และใส่ lines[].poRef = เลข PO. NO. ที่หัวของใบที่แถวนั้นอยู่ (แถวที่ AMOUNT เป็น - หรือ 0 ยังข้ามเหมือนเดิม); " +
+                                  "header.poRef = เลข PO ทุกใบคั่นด้วย \", \" เรียงตามที่พิมพ์ใน MEMO (CONSOLIDATED … Pos #…) " +
+                                  "และ header.poList = [{\"po\": เลข PO. NO., \"goodsInvoiceNo\": เลขในช่อง INVOICE NO. ของใบนั้น, \"grDoc\": \"\"}] หนึ่งรายการต่อใบ เรียงตาม MEMO "
                                 : "") +
                              "ภาพที่เหลือเป็นเอกสารประกอบ ให้ใช้เพื่อหายอดหัก ณ ที่จ่ายมาต่อท้าย lines ตามกติกาด้านล่าง\n\n" + prompt;
                 }
@@ -156,7 +158,8 @@ public static partial class GeminiOcr
             // a minute, and the first one is MORE accurate on its own than it was buried in twenty
             // other pages.
             if (isPdf && imgs.Count > ChunkThreshold)
-                return await ChunkedAsync(imgs, formCount, mime, prompt, module, config, dpi, salesOrg, apDocCategory);
+                return ShippingFormText.ApplyMultiForm(path, module,
+                    await ChunkedAsync(imgs, formCount, mime, prompt, module, config, dpi, salesOrg, apDocCategory));
 
             // A file short enough to read in one request still needs the customs rows pointed at the
             // customs vendor: the model fills vendorCode from the form when it can, but it leaves it
@@ -168,7 +171,7 @@ public static partial class GeminiOcr
                 VisionPrompt.FillLineVatFromSourceDocs(oneShot.Doc);
                 VisionPrompt.FillLineVatFromTaxRows(oneShot.Doc);
             }
-            return oneShot;
+            return ShippingFormText.ApplyMultiForm(path, module, oneShot);
         }
         catch (Exception ex)
         {

@@ -137,6 +137,9 @@ public class OcrEngine(AppConfig config)
         // confidenceNote is distinct from Note ("_note" — a fallback/failure explanation): it
         // explains why a normal-but-imperfect read isn't 100% confident.
         doc.ConfidenceNote = doc.Provider is "demo" or "failed" ? (doc.Note ?? "") : ConfidenceNote(module, doc.Header, doc.Lines, doc.Provider);
+        // Multi-PO shipping bundle: whether the forms were read from their text layer (ShippingFormText).
+        if (doc.Header.TryGetValue("formTextNote", out var ft) && ft?.ToString() is { Length: > 0 } ftNote)
+            doc.ConfidenceNote = doc.ConfidenceNote.Length > 0 ? $"{doc.ConfidenceNote} / {ftNote}" : ftNote;
 
         if (TokenPrice.TryGetValue(doc.Provider, out var price) && doc.TokensIn is { } tin && doc.TokensOut is { } tout)
         {

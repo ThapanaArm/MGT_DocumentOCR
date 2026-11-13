@@ -216,6 +216,9 @@ export const AP_H: FieldDef[] = [
   ['docType', 'Document Type'], ['invoiceNo', 'Invoice No.'], ['invoiceDate', 'Invoice Date'],
   ['postingDate', 'Posting Date'], ['vendorName', 'Vendor Name'], ['vendorTaxId', 'Tax ID'],
   ['branch', 'Branch'], ['poRef', 'PO Reference'], ['currency', 'Currency'], ['paymentTerms', 'Payment Terms'],
+  // Shipping bundle: the goods supplier and ITS invoice no. (import declaration "INVNO.KCCCI260715-012"),
+  // which the cost-line Text is built from ("KCC,INV.KCCCI260715-012"). Editable when the read missed it.
+  ['goodsSupplier', 'Goods Supplier'], ['goodsInvoiceNo', 'Goods Invoice No. (INVNO.)'],
 ];
 export const AP_TOTALS_H: FieldDef[] = [
   ['subTotal', 'Amount before Tax'], ['vatRate', 'Tax Rate (%)'], ['vatAmount', 'VAT'],
@@ -522,6 +525,7 @@ export const MASTER_DEF: Record<string, MasterDef> = {
     label: 'Vendor', mod: 'AP', key: 'VendorCode', cols: [
       { k: 'VendorCode', l: 'Vendor Code (Internal)' }, { k: 'SapVendorCode', l: 'SAP Code (Supplier)', sap: true },
       { k: 'VendorName', l: 'Vendor Name' },
+      { k: 'ShortName', l: 'Abbreviation (Text: <abbr>,INV.<no>)' },
       { k: 'TaxId', l: 'Tax ID' }, { k: 'Branch', l: 'Branch' }, { k: 'Currency', l: 'Currency' },
       { k: 'PaymentTerms', l: 'Payment Terms' }, { k: 'ReconAcct', l: 'Recon. Account' }, { k: 'WhtCode', l: 'Withholding Tax' }],
   },

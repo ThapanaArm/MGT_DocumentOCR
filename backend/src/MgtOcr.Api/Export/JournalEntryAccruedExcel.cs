@@ -88,13 +88,15 @@ public static class JournalEntryAccruedExcel
     /// <summary>One journal entry per deferred tax invoice: Reference = that invoice's number,
     /// Text = its issuer, Assignment = the PO. Shared by the Excel upload file and the direct post
     /// (DocumentsController.PostDeferredVatJv) so the two can never send different entries.</summary>
-    public static List<(string Reference, string Text, string Assignment, double Amount, double Base, DateTime? TaxDate)> Batches(
+    public static List<(string Reference, string Text, string Assignment, double Amount, double Base, DateTime? TaxDate, string TaxId,
+        string InputTaxAssignment)> Batches(
         Dictionary<string, object?> doc)
     {
         var header = (Dictionary<string, object?>)doc["header"]!;
         var reference = Or(header.GetStr("invoiceNo").Trim(), header.GetStr("poRef").Trim());
         return BatchRows(doc)
-            .Select(r => (Cut(Or(r.DocNo, reference), 16), r.Text, r.Assignment, r.Amount, r.Base, r.TaxDate))
+            .Select(r => (Cut(Or(r.DocNo, reference), 16), r.Text, r.Assignment, r.Amount, r.Base, r.TaxDate, r.TaxId,
+                r.InputTaxAssignment))
             .ToList();
     }
 
@@ -110,12 +112,34 @@ public static class JournalEntryAccruedExcel
         // "Tax Invoice Issuer" (ocr.SupplierTaxMap, swapped in at save), max 50 = SAP's item text.
         // Assignment stays the PO, so the JV still clears against the invoice's D1 lines in
         // 11730000. Reference stays per tax invoice (one batch each).
-        var poAssignment = header.GetStr("poRef").Trim();
-        rows = rows.Select(r => r with
+        // A multi-PO bundle's lines carry "2230000511,604,605" (PRD 5100001207), so the D1 line
+        // here does too, or it would not clear against them in 11730000.
+        var bundlePos = SupplierInvoicePayload.PoNumbers(header);
+        var poAssignment = bundlePos.Count > 1
+            ? SupplierInvoicePayload.MultiPoAssignment(bundlePos)
+            : header.GetStr("poRef").Trim();
+        var invoiceNo = header.GetStr("invoiceNo").Trim();
+        static string Digits(string? v) => new((v ?? "").Where(char.IsDigit).ToArray());
+        var partyTaxId = Digits(header.GetStr("vendorTaxId"));
+        rows = rows.Select(r =>
         {
-            // English only (AP, 2026-11-11): a Thai agency name becomes its official English name.
-            Text = Cut(MgtOcr.Ocr.VisionPrompt.EnglishIssuerName(r.Text).ToUpperInvariant(), 50),
-            Assignment = Or(poAssignment, r.Assignment),
+            // AP, 2026-11-12 (JV 100000765): Text = the ISSUER of this tax invoice + ",INV." + its
+            // own number — "CARGOPORT,INV.RC26070748" — not the invoicing party's.
+            var text = DeferredVatReversal.IssuerInvText(header, r.Text, r.TaxId, r.DocNo);
+            var po = Or(poAssignment, r.Assignment);
+            // A tax invoice issued by somebody other than the invoicing party (Cargoport, the Port
+            // Authority — VAT the agent paid on our behalf): the Input tax (V1) line's Assignment is
+            // that issuer's Tax ID. The party's own tax invoice and the Deferred (D1) line keep the
+            // PO, so the D1 line still clears against the supplier invoice in 11730000.
+            var taxId = Digits(r.TaxId);
+            var own = (taxId.Length == 13 && taxId == partyTaxId)
+                || (r.DocNo.Length > 0 && string.Equals(r.DocNo, invoiceNo, StringComparison.OrdinalIgnoreCase));
+            return r with
+            {
+                Text = Cut(text, 50),
+                Assignment = po,
+                InputTaxAssignment = !own && taxId.Length == 13 ? taxId : po,
+            };
         }).ToList();
         return rows;
     }
@@ -193,7 +217,7 @@ public static class JournalEntryAccruedExcel
 
             var line = start + (FirstLineRow - BlockFirstRow);
             var taxDate = r.TaxDate ?? postingDate;
-            Line(ws, line++, companyCode, DeferredVatReversal.GlInputTax, r.Text, r.Assignment, r.Amount,
+            Line(ws, line++, companyCode, DeferredVatReversal.GlInputTax, r.Text, Or(r.InputTaxAssignment, r.Assignment), r.Amount,
                 debit: true, DeferredVatReversal.InputTaxCode, postingDate, r.Base, taxDate);
             Line(ws, line++, companyCode, DeferredVatReversal.GlDeferredInputTax, r.Text, r.Assignment, r.Amount,
                 debit: false, DeferredVatReversal.DeferredTaxCode, postingDate, r.Base, taxDate);
@@ -225,7 +249,8 @@ public static class JournalEntryAccruedExcel
         }
     }
 
-    private sealed record DeferredRow(string Text, string Assignment, double Amount, double Base, DateTime? TaxDate, string DocNo);
+    private sealed record DeferredRow(string Text, string Assignment, double Amount, double Base, DateTime? TaxDate, string DocNo,
+        string TaxId = "", string InputTaxAssignment = "");
 
     /// <summary>The deferred (D-code) tax rows of the document, one per tax invoice.</summary>
     private static List<DeferredRow> DeferredRows(Dictionary<string, object?> doc)
@@ -240,7 +265,9 @@ public static class JournalEntryAccruedExcel
             var deferred = kind.Length > 0
                 ? string.Equals(kind, "DEFERRED", StringComparison.OrdinalIgnoreCase)
                 : code.StartsWith('D') || code.StartsWith('d');
-            if (!deferred) continue;
+            // Only the rows chosen as V1 (posted deferred, claimed now); a row chosen as D1 stays
+            // deferred and gets no entry (AP, 2026-11-12).
+            if (!deferred || !DeferredVatReversal.ClaimedNow(t)) continue;
             var issuer = t.GetStr("issuerName").Trim().ToUpperInvariant();
             var docNo = t.GetStr("taxDocNo").Trim();
             var taxId = t.GetStr("issuerTaxId").Trim();
@@ -251,7 +278,7 @@ public static class JournalEntryAccruedExcel
             list.Add(new DeferredRow(
                 Text: Or(issuer, docNo),
                 Assignment: Or(taxId, docNo),
-                Amount: amount, Base: baseAmt, TaxDate: taxDate, DocNo: docNo));
+                Amount: amount, Base: baseAmt, TaxDate: taxDate, DocNo: docNo, TaxId: taxId));
         }
         return list;
     }

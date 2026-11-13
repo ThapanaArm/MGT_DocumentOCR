@@ -243,7 +243,10 @@ public static class SapImportSupplierInvoiceExcel
                 // 1 = Invoice, 2 = Credit Memo.
                 Code(ws.Cell(row, C_Transaction), IsCreditMemo(header) ? "2" : "1");
                 Code(ws.Cell(row, C_Party), Cut(party, 10));
-                Text(ws.Cell(row, C_Reference), Cut(header.GetStr("invoiceNo"), 16));
+                // Goods keyed against the PO: Reference = the purchase order (AP, 2026-11-12,
+                // PRD 5100001086). Everything else keeps the supplier's invoice number.
+                Text(ws.Cell(row, C_Reference), Cut(IsPoKeyed(doc) && header.GetStr("poRef").Trim().Length > 0
+                    ? header.GetStr("poRef").Trim() : header.GetStr("invoiceNo"), 16));
                 Date(ws.Cell(row, C_DocDate), header.GetStr("invoiceDate"));
                 Date(ws.Cell(row, C_PostingDate), header.GetStr("postingDate"));
                 Text(ws.Cell(row, C_DocType), Cut(Or(header.GetStr("sapDocType"), "RE"), 2));
@@ -347,7 +350,7 @@ public static class SapImportSupplierInvoiceExcel
     /// Cutting at the first word (what this did before) was wrong on every name that is genuinely
     /// two words — "KS PEARL", "BIO ACTIVES", "CLARIANT (AG)" — which the posted documents and the
     /// RPA vouchers are full of.</summary>
-    private static string ShortVendor(string? name)
+    internal static string ShortVendor(string? name)
     {
         var n = System.Text.RegularExpressions.Regex.Replace(name ?? "", @"\s+", " ").Trim();
         if (n.Length == 0) return "";
@@ -370,9 +373,15 @@ public static class SapImportSupplierInvoiceExcel
         // "KS PEARL" and "BIO ACTIVES" on the RPA vouchers. Only a name that had to come from the
         // document's own supplier field is shortened, since that one carries the legal suffix.
         var fromForm = header.GetStr("goodsSupplier").Trim();
+        // On a shipping bundle invoiceNo is the AGENT's invoice (PI-2608011), never the goods
+        // supplier's, so without the goods invoice number (from the import declaration, INVNO.…)
+        // only the PO may stand in.
         var invoiceNo = Or(header.GetStr("goodsInvoiceNo").Trim(),
-            Or(header.GetStr("invoiceNo").Trim(), header.GetStr("poRef").Trim()));
-        var vendor = fromForm.Length > 0 ? fromForm.ToUpperInvariant() : ShortVendor(header.GetStr("vendorName"));
+            fromForm.Length > 0 ? header.GetStr("poRef").Trim()
+                : Or(header.GetStr("invoiceNo").Trim(), header.GetStr("poRef").Trim()));
+        // Behind the form's SUPPLIER box: the abbreviation typed on the Vendor card
+        // (ocr.Vendor.ShortName), and only without one the first word of the name.
+        var vendor = fromForm.Length > 0 ? fromForm.ToUpperInvariant() : SupplierShortNames.Main(header);
         if (vendor.Length == 0) return invoiceNo.Length > 0 ? $"INV.{invoiceNo}" : "";
         return invoiceNo.Length > 0 ? $"{vendor},INV.{invoiceNo}" : vendor;
     }
@@ -504,9 +513,14 @@ public static class SapImportSupplierInvoiceExcel
                 ["assignment"] = t.GetStr("taxDocNo"),
                 // The issuer of THIS tax invoice and its own number — "PROMPT,INV.PI-2608010" on
                 // the posted document, while the cost rows carry the goods supplier.
-                ["itemText"] = ShortVendor(t.GetStr("issuerName")) is { Length: > 0 } iss
-                    && t.GetStr("taxDocNo").Trim() is { Length: > 0 } tdn
-                        ? $"{iss},INV.{tdn}"
+                // AP, 2026-11-12: the invoicing party's abbreviation and ITS invoice number on every
+                // VAT row ("PROMPT,INV.PI-2608011"), the same text as the API post and the deferred
+                // VAT JV. Customs import VAT keeps the department's name.
+                ["itemText"] = DeferredVatReversal.IsImportVat(t)
+                    ? "THE CUSTOMS DEPARTMENT"
+                    : SupplierShortNames.Main(header) is { Length: > 0 } iss
+                      && header.GetStr("invoiceNo").Trim() is { Length: > 0 } ino
+                        ? $"{iss},INV.{ino}"
                         : t.GetStr("issuerName"),
                 ["costCenter"] = "",
                 ["vendorCode"] = t.GetStr("vendorCode").Trim(),

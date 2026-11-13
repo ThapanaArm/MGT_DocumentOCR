@@ -41,7 +41,7 @@ import {
   dutyLabelEn,
 } from '../constants/fields';
 import { SEND_DISABLED_AP } from '../constants/flags';
-import { dt, fileRetention, fmt, fmtCost, intFmt, moduleLabel, statusBadge } from '../utils/format';
+import { dt, fileRetention, fmt, fmtAmt, fmtCost, intFmt, moduleLabel, statusBadge } from '../utils/format';
 import ShippingCheck from '../components/document/ShippingCheck';
 import { findDupes } from '../utils/dupes';
 import Steps from '../components/Steps';
@@ -56,6 +56,7 @@ import TaxDataTable from '../components/document/TaxDataTable';
 import WhtTable from '../components/document/WhtTable';
 import IncomingInvoiceCard from '../components/document/IncomingInvoiceCard';
 import MappingCards from '../components/document/MappingCards';
+import SapDocsPreview from '../components/document/SapDocsPreview';
 import ChatFixCard from '../components/document/ChatFixCard';
 import SoMappingIssues from '../components/document/SoMappingIssues';
 import LineExtraModal from '../components/document/LineExtraModal';
@@ -438,10 +439,17 @@ const INVENTORY_PO_CATEGORY = 'INVENTORY_PO';
 /** The item text Finance writes on every row: the supplier's short name, then the invoice number
  *  — "KIMEX,INV.2230000581", the same shape as "PILOT,INV.INCI26081151" on posted document
  *  5100001269. The PO number stands in when the supplier's own invoice number was not read. */
+function firstWordOf(name: unknown): string {
+  const n = String(name ?? '').trim();
+  const cut = n.search(/[\s,]/);
+  return (cut > 0 ? n.slice(0, cut) : n).toUpperCase();
+}
+
+/** The supplier's abbreviation, typed by the user on the Vendor card (ocr.Vendor.ShortName) and
+ *  kept on the header as vendorShortName; the first word of the name only until one is added
+ *  (AP, 2026-11-12: "KCC,INV.KCCCI260715-012" — abbreviation, INV., the supplier's invoice no). */
 function itemTextFor(h: Record<string, any>): string {
-  const name = String(h.vendorName ?? '').trim();
-  const cut = name.search(/[\s,]/);
-  const vendor = (cut > 0 ? name.slice(0, cut) : name).toUpperCase();
+  const vendor = String(h.vendorShortName ?? '').trim().toUpperCase() || firstWordOf(h.vendorName);
   const invoiceNo = String(h.invoiceNo ?? '').trim() || String(h.poRef ?? '').trim();
   if (!vendor) return invoiceNo ? `INV.${invoiceNo}` : '';
   return invoiceNo ? `${vendor},INV.${invoiceNo}` : vendor;
@@ -533,7 +541,31 @@ function matchLinesToPoItems(
  *  KIMEX bundle (PO 2230000020 against reference 2230000581), and looking the wrong one up is why
  *  "Assign all" found no items. */
 function poNumberOf(h: Record<string, any>): string {
+  // A bundle for several POs reads "2230000511, 2230000604, 2230000605"; the first stands for it
+  // wherever one PO is asked for (same rule as the backend's PoNumber).
+  const all = docPosOf(h);
+  if (all.length > 1) return all[0];
   return String(h.PurchasingOrder ?? '').trim() || String(h.poRef ?? '').trim();
+}
+
+/** Every purchase order of a shipping bundle, in the order that builds the SAP Assignment and
+ *  Text ("2230000511,604,605"): the order set on the PO Reference tab (header.poOrder), else the
+ *  FORMs' MEMO order (header.poList), else as written in the PO box. Mirrors the backend. */
+function docPosOf(h: Record<string, any>): string[] {
+  const out: string[] = [];
+  const add = (v: unknown) => {
+    for (const m of String(v ?? '').match(/\b\d{10}\b/g) ?? []) if (!out.includes(m)) out.push(m);
+  };
+  if (Array.isArray(h.poOrder)) h.poOrder.forEach(add);
+  if (Array.isArray(h.poList)) h.poList.forEach((e: any) => add(e?.po));
+  add(h.PurchasingOrder);
+  add(h.poRef);
+  return out;
+}
+
+/** The PO of the FORM a cost row was read from (extra.poRef), '' when the row names none. */
+function poOfLine(l: DocLine): string {
+  return /\d{10}/.exec(String((l.extra as Record<string, unknown> | undefined)?.poRef ?? ''))?.[0] ?? '';
 }
 
 function isInventoryPoDoc(d: DocModel): boolean {
@@ -698,8 +730,19 @@ function seedRefDocument(d: DocModel): DocModel {
   // poRef stands behind it: on these bundles the reference the reader picked up IS the supplier's
   // invoice number (2230000581 on the KIMEX one, against purchase order 2230000020), and every
   // export already falls back to it the same way — Or(invoiceNo, poRef).
-  const goodsInvoiceNo = String((h as Record<string, any>).goodsInvoiceNo ?? '').trim() || poRef;
-  if (isInventoryPoDoc(d) && goodsInvoiceNo && !String(h.invoiceNo ?? '').trim()) {
+  // AP, 2026-11-12 (#929): the goods supplier's invoice is the import declaration's
+  // "INVNO.KCCCI260715-012", and the bundle's file name carries it too —
+  // "C-MatDoc_5000002086_KCCCI260715-012.pdf". A PO number (2230xxxxxx) is never the invoice;
+  // an Invoice No. that is only the PO is replaced, one somebody typed otherwise is kept.
+  const looksLikePo = (v: string) => !!v && (v === poRef || /^2230\d{6}$/.test(v));
+  const fromFile = /MatDoc[_\s-]*\d{6,12}[_\s-]+([A-Z0-9][A-Z0-9\-\/]{3,})/i.exec(
+    String(d.fileName ?? '').replace(/\.[a-z0-9]+$/i, ''))?.[1] ?? '';
+  const readGoodsNo = String((h as Record<string, any>).goodsInvoiceNo ?? '').trim();
+  const realGoodsNo = [readGoodsNo, fromFile].find((v) => v && !looksLikePo(v)) ?? '';
+  const goodsInvoiceNo = realGoodsNo || readGoodsNo || poRef;
+  const curInvoiceNo = String(h.invoiceNo ?? '').trim();
+  if (isInventoryPoDoc(d) && goodsInvoiceNo && (!curInvoiceNo || (looksLikePo(curInvoiceNo) && realGoodsNo
+    && !['POSTED', 'PARTIAL', 'POSTING', 'SPLIT'].includes(String(d.status))))) {
     next.invoiceNo = goodsInvoiceNo;
   }
   // The goods-receipt material document, needed whenever the PO item uses GR-based invoice
@@ -1119,6 +1162,8 @@ export default function DocumentPage() {
   const [rawText, setRawText] = useState<string | null>(null);
   const [payload, setPayload] = useState<Record<string, any> | null>(null);
   const [vendorFilter, setVendorFilter] = useState('');
+  // Multi-PO shipping bundle: the PO chip picked on the PO Reference tab ('' = all POs).
+  const [selectedPo, setSelectedPo] = useState('');
   const [lineExtraIdx, setLineExtraIdx] = useState<number | null>(null);
   const [postOpen, setPostOpen] = useState(false);
   // SAP's own words when it refused the document, shown inside the confirmation dialog.
@@ -1256,6 +1301,37 @@ export default function DocumentPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isMgt, doc?.docId, map]);
 
+  // The matched vendor's abbreviation from the master. Kept on the header (vendorShortName) so the
+  // generated texts use it; texts that were generated with the old prefix move over with it.
+  const vendorAbbr = (() => {
+    if (!doc || !masters || !map || doc.module === 'SO') return '';
+    const code = String(map.header.vendor?.code ?? '').trim();
+    const row = code ? (masters.vendors || []).find((v) => String(v.VendorCode ?? '').trim() === code) : undefined;
+    return String(row?.ShortName ?? '').trim().toUpperCase();
+  })();
+  useEffect(() => {
+    if (!doc || doc.module === 'SO' || !map) return;
+    if (['POSTED', 'SPLIT', 'PARTIAL', 'POSTING'].includes(String(doc.status))) return;
+    const hh = doc.header as Record<string, any>;
+    const prev = String(hh.vendorShortName ?? '').trim().toUpperCase();
+    if (prev === vendorAbbr) return;
+    const oldPrefix = (prev || firstWordOf(hh.vendorName)) + ',INV.';
+    const newPrefix = (vendorAbbr || firstWordOf(hh.vendorName)) + ',INV.';
+    const fix = (t: unknown, max: number) => {
+      const v = String(t ?? '');
+      return oldPrefix.length > 5 && v.toUpperCase().startsWith(oldPrefix)
+        ? (newPrefix + v.slice(oldPrefix.length)).slice(0, max)
+        : v;
+    };
+    const header: Record<string, any> = { ...hh, vendorShortName: vendorAbbr };
+    if (hh.headerText) header.headerText = fix(hh.headerText, 25);
+    if (Array.isArray(hh.glItems))
+      header.glItems = (hh.glItems as Array<Record<string, any>>).map((g) =>
+        g.itemText ? { ...g, itemText: fix(g.itemText, 50) } : g);
+    setDoc({ ...doc, header });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doc?.docId, vendorAbbr, map?.header.vendor?.code]);
+
   if (failed)
     return (
       <div className="card">
@@ -1270,6 +1346,20 @@ export default function DocumentPage() {
   if (!doc || !masters) return <div className="card"><div className="empty">Loading…</div></div>;
 
   const h = doc.header;
+  // One shipping bundle for several purchase orders (one FORM SHIPPING EXPENSE per PO): every PO
+  // of the bundle in its posting order, and whether this document is such a bundle.
+  const docPos = docPosOf(h as Record<string, any>);
+  const multiPo = docPos.length > 1 && ['2', '3'].includes(String(h.refDocType ?? '').trim());
+  // Cost rows (not VAT / WHT, non-zero) of a multi-PO bundle, by the PO their FORM names.
+  const multiPoCostRows = multiPo
+    ? (doc.lines || []).map((l, i) => ({ l, i })).filter(({ l }) =>
+        (Number(l.amount) || 0) !== 0
+        && !['VAT', 'WHT', 'DUTY'].includes(String(l.extCode ?? '').trim().toUpperCase())
+        && !/^\s*(VAT|WITHHOLDING)/i.test(String(l.desc ?? '')))
+    : [];
+  const unplacedPoRows = multiPoCostRows.filter(({ l }) => !docPos.includes(poOfLine(l)));
+  const setPoOrder = (order: string[]) =>
+    setDoc((d) => (d ? { ...d, header: { ...d.header, poOrder: order } } : d));
   // For a Sales Order the company context follows the CURRENT view — `isMgt` already tracks the
   // "View as" dev toggle through effectiveMe (AppLayout), so an admin simulating GLC actually
   // maps/posts as GLC (salesOrg 2000), not as their own signed-in company or a stale stored
@@ -1660,8 +1750,13 @@ export default function DocumentPage() {
     if (!String(h.invoiceNo ?? '').trim() && !String(h.poRef ?? '').trim()) {
       out.push('ยังไม่มีเลขที่ใบแจ้งหนี้ (Invoice No.) — SAP ใช้เป็น Reference ของเอกสาร');
     }
+    if (multiPo && unplacedPoRows.length > 0) {
+      out.push(`ชุดนี้มีหลาย PO แต่ ${unplacedPoRows.length} แถวยังไม่ระบุว่าเป็นของ PO ไหน — เลือก PO ของแถวในแท็บ PO Reference`);
+    }
     if (!String(map?.header.vendor.code ?? '').trim()) {
       out.push('ยังไม่ได้จับคู่ผู้ขาย (Vendor) ใน Step 2');
+    } else if (!vendorAbbr) {
+      out.push('ผู้ขายยังไม่มีอักษรย่อ — เพิ่มที่การ์ด Vendor / Supplier ใน Step 2 (ใช้ขึ้นต้น Text เช่น KCC,INV.<เลขที่ invoice>)');
     }
     // Issuer names go to SAP as the Input tax line's Text and to the input tax report: English
     // only (AP, 2026-11-11). The read is asked for English and Thai agency names are mapped, so a
@@ -1878,14 +1973,16 @@ export default function DocumentPage() {
       'Journal entry (deferred VAT reversal) downloaded',
     );
 
-  // How many tax rows the journal entry would reverse. Only the deferred ones: a V1 row is
-  // already claimable this period, so there is nothing to move. Shown on the menu item so it is
-  // obvious which rows it will take rather than a surprise when the file opens.
-  const deferredTaxCount = ((h.taxItems as Array<Record<string, any>>) || []).filter((t) => {
+  // How many tax rows the journal entry would move to V1 (AP, 2026-11-12): the rows chosen as V1
+  // on the Tax tab, which a shipping bundle posts deferred (D1) first. A row chosen as D1 stays
+  // deferred and is not reversed; the Customs Department's import VAT goes straight to V1.
+  const isShippingBundleDoc = !isInventoryPoDoc(doc) && ['2', '3'].includes(String(h.refDocType ?? '').trim());
+  const deferredTaxCount = !isShippingBundleDoc ? 0 : ((h.taxItems as Array<Record<string, any>>) || []).filter((t) => {
     if ((Number(t.docCurrencyAmt) || 0) === 0) return false;
-    const kind = String(t.taxKind ?? '').trim().toUpperCase();
     const code = String(t.taxCode ?? '').trim().toUpperCase();
-    return kind ? kind === 'DEFERRED' : code.startsWith('D');
+    const issuer = String(t.issuerName ?? '');
+    if (/CUSTOMS|ศุลกากร|กรมศุล/i.test(issuer)) return false;
+    return code.length === 2 && code[0] === 'V' && code !== 'VX';
   }).length;
   const hasDeferredTax = deferredTaxCount > 0;
 
@@ -1933,6 +2030,17 @@ export default function DocumentPage() {
       await loadMasters(true);
       setManualHeader('vendor', code);
       showToast(already ? 'Vendor refreshed from SAP and matched' : 'Vendor added from SAP and matched');
+    });
+
+  // The supplier's abbreviation, typed on the Vendor card (Step 2). Saved on the vendor master so
+  // every later document of this supplier has it; the effect above moves the texts over.
+  const saveVendorShortName = (code: string, abbr: string) =>
+    guard(async () => {
+      const v = abbr.trim().toUpperCase().slice(0, 20);
+      if (!code || !v) { showToast('กรอกอักษรย่อของผู้ขายก่อน'); return; }
+      await updateMaster('vendors', code, { ShortName: v });
+      await loadMasters(true);
+      showToast(`บันทึกอักษรย่อ ${v} ให้ผู้ขาย ${code} แล้ว`, 'success');
     });
 
   // MGT uses the real Zoho Account Code stored in Customer.ComcompyCodeSAP.
@@ -2704,7 +2812,10 @@ export default function DocumentPage() {
     const keep = (l: DocLine) => !costsOnly
       || !(['VAT', 'WHT'].includes(String(l.extCode ?? '').trim().toUpperCase())
         || /^\s*(VAT|WITHHOLDING)/i.test(String(l.desc ?? '')));
-    const kept = rows.map((l, i) => ({ l, i })).filter((x) => keep(x.l));
+    const kept = rows.map((l, i) => ({ l, i }))
+      .filter((x) => keep(x.l))
+      // Multi-PO bundle with one PO chip picked: that PO's rows only.
+      .filter((x) => !selectedPo || !multiPo || poOfLine(x.l) === selectedPo);
     const all = { items: kept.map((x) => x.l), at: kept.map((x) => x.i) };
     if (!vendorFilter) return all;
     const items: DocLine[] = [];
@@ -2765,9 +2876,15 @@ export default function DocumentPage() {
     return hits.size;
   };
 
+  // A multi-PO bundle reads the picked PO, or every PO in turn on "All"; each read only touches
+  // the rows of its own PO, so one PO's conditions never land on another's charges.
   const assignFromPo = () =>
     guard(async () => {
-      const po = poNumberOf(h);
+      const targets = multiPo ? (selectedPo ? [selectedPo] : docPos) : [poNumberOf(h)];
+      for (const po of targets) await readPoFor(po, multiPo ? po : '');
+    });
+  const readPoFor = async (po: string, linePo: string) => {
+    {
       if (!po) throw new Error('Enter the purchase order number first');
       setPoAssigning(true);
       try {
@@ -2829,6 +2946,7 @@ export default function DocumentPage() {
           const costTypes = [...onPo].filter((c) => knownTypes.has(c));
           const onlyType = costTypes.length === 1 ? costTypes[0] : '';
           (doc.lines || []).forEach((l, i) => {
+            if (linePo && poOfLine(l) !== linePo) return;
             const extra = (l.extra ?? {}) as Record<string, unknown>;
             const current = String(extra.deliveryCondType ?? '').trim().toUpperCase();
             // A condition the person chose stays. One filled from the document stays too when the
@@ -2874,7 +2992,8 @@ export default function DocumentPage() {
       } finally {
         setPoAssigning(false);
       }
-    });
+    }
+  };
 
   /* Fills every unassigned line with the item number SAP would use if the purchase order numbers
      its items 10, 20, 30 ... with no gaps — the same arithmetic the Invoice Item column already
@@ -3335,6 +3454,8 @@ export default function DocumentPage() {
           onSetLineSalesEmployee={setLineSalesEmployee}
           onUseSapCustomer={useSapCustomer}
           onUseSapVendor={useSapVendor}
+          vendorShortName={vendorAbbr}
+          onSaveVendorShortName={saveVendorShortName}
           onUseZohoAccount={useZohoCustomer}
           onUseSapShipTo={useSapShipTo}
           isMgt={isMgt}
@@ -3411,26 +3532,33 @@ export default function DocumentPage() {
               // in the supplier's currency — PROMPT bills in THB against a purchase order kept in
               // USD — so the rate is the only thing that says whether 13,751.73 is a few hundred
               // dollars or half a million baht. Shown rather than left to be discovered in SAP.
-              'Basic Data': (() => {
-                const cur = String(h.currency ?? '').trim().toUpperCase();
-                const rate = Number(h.exchangeRate) || 0;
-                const amount = Number((vendorTotals ?? h).totalAmount) || 0;
-                if (!cur || cur === 'THB') return null;
-                if (!rate) {
-                  return (
-                    <span className="hint">
-                      เอกสารเป็น {cur} — ปล่อยช่อง Exchange Rate ว่างไว้ SAP จะใช้อัตราในระบบ ณ วันลงบัญชี
-                      ถ้าอยากล็อกอัตราให้ตรงกับ PO (Fixed Exch.Rate) ให้กรอกลงไป
-                    </span>
-                  );
-                }
-                return (
-                  <span className="hint">
-                    1 {cur} = {rate.toLocaleString()} THB · {fmt(amount)} {cur} ≈{' '}
-                    <b>{fmt(Math.round(amount * rate * 100) / 100)} THB</b>
-                  </span>
-                );
-              })(),
+              'Basic Data': (
+                <>
+                  {(() => {
+                    const cur = String(h.currency ?? '').trim().toUpperCase();
+                    const rate = Number(h.exchangeRate) || 0;
+                    const amount = Number((vendorTotals ?? h).totalAmount) || 0;
+                    if (!cur || cur === 'THB') return null;
+                    if (!rate) {
+                      return (
+                        <span className="hint">
+                          เอกสารเป็น {cur} — ปล่อยช่อง Exchange Rate ว่างไว้ SAP จะใช้อัตราในระบบ ณ วันลงบัญชี
+                          ถ้าอยากล็อกอัตราให้ตรงกับ PO (Fixed Exch.Rate) ให้กรอกลงไป
+                        </span>
+                      );
+                    }
+                    return (
+                      <span className="hint">
+                        1 {cur} = {rate.toLocaleString()} THB · {fmt(amount)} {cur} ≈{' '}
+                        <b>{fmt(Math.round(amount * rate * 100) / 100)} THB</b>
+                      </span>
+                    );
+                  })()}
+                  {/* Every SAP document this bundle becomes, with its own Reference — the box above
+                      shows only the document's. AP / II with a supplier split only. */}
+                  {(doc.module === 'AP' || doc.module === 'II') && <SapDocsPreview docId={doc.docId} />}
+                </>
+              ),
               'PO Reference': (
                 <>
                   {(() => {
@@ -3523,10 +3651,88 @@ export default function DocumentPage() {
                     // lines (Document Type = Goods/service items) or the PO copy the read kept
                     // beside the delivery costs (header.poLines). The second has nowhere to save
                     // an edit, so the grid is read-only there.
+                    <>
+                    {multiPo && (() => {
+                      // One tile per PO of the bundle, in posting order — the order builds the SAP
+                      // Assignment "2230000511,604,605" and the Text. A tile shows that PO's FORM:
+                      // the goods invoice, how many charges, their total, and whether every charge
+                      // names its condition. Clicking narrows the grid to it; "All" groups the grid
+                      // by PO. The whole bundle is still sent together.
+                      const invOf = (po: string) =>
+                        String(((h.poList as Array<Record<string, any>>) || []).find((e) => e?.po === po)?.goodsInvoiceNo ?? '');
+                      const allTotal = multiPoCostRows.reduce((a, { l }) => a + (Number(l.amount) || 0), 0);
+                      const tile = (active: boolean, warn: boolean): React.CSSProperties => ({
+                        display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, textAlign: 'left',
+                        padding: '8px 12px', borderRadius: 8, cursor: 'pointer',
+                        border: `1.5px solid ${active ? 'var(--primary, #0a6ed1)' : warn ? 'var(--warn, #e08900)' : 'var(--line, #d9e0e6)'}`,
+                        background: active ? 'var(--primary-soft, #e3effb)' : 'var(--card, #fff)',
+                      });
+                      return (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12 }}>
+                          <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline', gap: 8 }}>
+                            <b>PO ในชุดนี้ ({docPos.length})</b>
+                            <span className="hint">ลำดับ PO = ลำดับใน Assignment / Text ที่ส่ง SAP · กด ‹ › เพื่อสลับ</span>
+                          </div>
+                          <div style={{ display: 'grid', gridTemplateColumns: `repeat(auto-fill, minmax(190px, 1fr))`, gap: 8 }}>
+                            <button type="button" style={tile(!selectedPo, false)} onClick={() => setSelectedPo('')}>
+                              <span style={{ fontWeight: 600 }}>ทั้งหมด</span>
+                              <span className="hint">{multiPoCostRows.length} แถว · {fmtAmt(allTotal)}</span>
+                              {unplacedPoRows.length > 0
+                                ? <span className="badge b-fail" style={{ alignSelf: 'flex-start' }}>ยังไม่ระบุ PO {unplacedPoRows.length} แถว</span>
+                                : <span className="badge b-ok" style={{ alignSelf: 'flex-start' }}>ทุกแถวมี PO</span>}
+                            </button>
+                            {docPos.map((po, k) => {
+                              const rows = multiPoCostRows.filter(({ l }) => poOfLine(l) === po);
+                              const total = rows.reduce((a, { l }) => a + (Number(l.amount) || 0), 0);
+                              const missing = rows.filter(({ l }) =>
+                                !String((l.extra as Record<string, unknown> | undefined)?.deliveryCondType ?? '').trim()).length;
+                              const warn = rows.length === 0 || missing > 0;
+                              const move = (dir: number) => {
+                                const next = docPos.slice();
+                                const j2 = k + dir;
+                                if (j2 < 0 || j2 >= next.length) return;
+                                [next[k], next[j2]] = [next[j2], next[k]];
+                                setPoOrder(next);
+                              };
+                              return (
+                                <div key={po} role="button" tabIndex={0} style={tile(selectedPo === po, warn)}
+                                  onClick={() => setSelectedPo(selectedPo === po ? '' : po)}
+                                  onKeyDown={(e) => { if (e.key === 'Enter') setSelectedPo(selectedPo === po ? '' : po); }}>
+                                  <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', gap: 4 }}>
+                                    <span style={{ fontWeight: 600 }}>{k + 1}. {po}</span>
+                                    {!locked && (
+                                      <span className="row" style={{ gap: 2 }}>
+                                        <button type="button" className="btn sm ghost" disabled={k === 0} aria-label="Move earlier"
+                                          title="เลื่อนขึ้นก่อน" onClick={(e) => { e.stopPropagation(); move(-1); }}>‹</button>
+                                        <button type="button" className="btn sm ghost" disabled={k === docPos.length - 1} aria-label="Move later"
+                                          title="เลื่อนลงหลัง" onClick={(e) => { e.stopPropagation(); move(1); }}>›</button>
+                                      </span>
+                                    )}
+                                  </div>
+                                  <span className="hint">INV {invOf(po) || '—'}</span>
+                                  <span className="hint">{rows.length} แถว · {fmtAmt(total)}</span>
+                                  {rows.length === 0
+                                    ? <span className="badge b-warn" style={{ alignSelf: 'flex-start' }}>ไม่มีแถว</span>
+                                    : missing > 0
+                                      ? <span className="badge b-warn" style={{ alignSelf: 'flex-start' }}>ยังไม่เลือก Condition {missing}</span>
+                                      : <span className="badge b-ok" style={{ alignSelf: 'flex-start' }}>Condition ครบ</span>}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      );
+                    })()}
                     <PoReferenceTable
                       key={vendorFilter || 'all'}
                       lines={poGridLines.items}
-                      poRef={poNumberOf(h)}
+                      poRef={multiPo ? (selectedPo || docPos.join(', ')) : poNumberOf(h)}
+                      poChoices={multiPo ? docPos : undefined}
+                      onLinePo={
+                        multiPo && !usePoCopy && !locked
+                          ? (i, po) => editLineExtra(poGridLines.at[i], 'poRef', po)
+                          : undefined
+                      }
                       taxDate={String(h.invoiceDate ?? '').trim()}
                       headerTaxCode={String(h.taxCode ?? '').trim()}
                       posted={locked}
@@ -3577,6 +3783,7 @@ export default function DocumentPage() {
                           : (i, code) => { editLineExtra(poGridLines.at[i], 'deliveryCondType', code); editLineExtra(poGridLines.at[i], 'deliveryCondAuto', ''); }
                       }
                     />
+                    </>
                   ) : (
                     <DetailTable {...detailProps} bare />
                   )}

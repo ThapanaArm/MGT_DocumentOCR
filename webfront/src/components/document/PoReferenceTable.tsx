@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { fmtAmt, num } from '../../utils/format';
 import { TAX_CODES } from '../../constants/fields';
 import type { DocLine } from '../../api/documents';
@@ -60,6 +61,8 @@ export default function PoReferenceTable({
   onCondType,
   showCondition,
   deliveryCostsOnly,
+  poChoices,
+  onLinePo,
 }: {
   lines: DocLine[];
   poRef: string;
@@ -111,6 +114,11 @@ export default function PoReferenceTable({
    *  "Assign all" is left to do the one thing that still matters here — read the purchase order
    *  for its currency, its rate and its conditions. */
   deliveryCostsOnly?: boolean;
+  /** A shipping bundle for several purchase orders: the POs a row can belong to. Shows the PO
+   *  column; each row's PO decides which PO's accrual its charge settles. */
+  poChoices?: string[];
+  /** Moves a row to another PO of the bundle (extra.poRef). Absent = read-only column. */
+  onLinePo?: (i: number, po: string) => void;
 }) {
   const total = lines.reduce((a, l) => a + num(l.amount), 0);
   const editable = !posted && !!onTaxCode;
@@ -161,6 +169,43 @@ export default function PoReferenceTable({
   const condOf = (l: DocLine) =>
     String((l.extra as Record<string, unknown> | undefined)?.deliveryCondType ?? '').trim();
   const showCond = !!showCondition && !!onCondType;
+  const showPo = (poChoices?.length ?? 0) > 1;
+  const linePo = (l: DocLine) =>
+    /\d{10}/.exec(String((l.extra as Record<string, unknown> | undefined)?.poRef ?? ''))?.[0] ?? '';
+  /* Several POs in view ("All"): the rows are grouped under one band per PO, in posting order,
+     with that PO's row count and total, and rows that name no PO last — so each PO's charges can
+     be checked against its own FORM total at a glance. */
+  const grouped = showPo && new Set(lines.map(linePo)).size > 1;
+  const colCount = (deliveryCostsOnly ? 0 : 2) + 2 + (showPo ? 1 : 0) + (showCond ? 1 : 0) + 5
+    + (showGr ? 1 : 0) + (onDelLine ? 1 : 0);
+  const renderBody = (row: (l: DocLine, i: number) => ReactNode): ReactNode[] => {
+    if (!grouped) return lines.map(row);
+    const indexed = lines.map((l, i) => ({ l, i }));
+    return [...(poChoices ?? []), ''].flatMap((po) => {
+      const rows = indexed.filter(({ l }) =>
+        po ? linePo(l) === po : !(poChoices ?? []).includes(linePo(l)));
+      if (!rows.length) return [];
+      const sum = rows.reduce((a, { l }) => a + num(l.amount), 0);
+      return [
+        <tr key={`g-${po || 'none'}`}>
+          <td
+            colSpan={colCount}
+            style={{
+              background: po ? 'var(--bg-soft, #f3f6f9)' : 'rgba(192,0,0,.08)',
+              fontWeight: 600,
+              borderLeft: `4px solid ${po ? 'var(--primary, #0a6ed1)' : 'var(--danger, #c00000)'}`,
+            }}
+          >
+            {po ? `PO ${po}` : 'ยังไม่ระบุ PO'}
+            <span className="hint" style={{ fontWeight: 400, marginLeft: 10 }}>
+              {rows.length} แถว · รวม {fmtAmt(sum)}
+            </span>
+          </td>
+        </tr>,
+        ...rows.map(({ l, i }) => row(l, i)),
+      ];
+    });
+  };
 
   return (
     <>
@@ -227,6 +272,7 @@ export default function PoReferenceTable({
             {!deliveryCostsOnly && <th style={{ width: 80 }}>Assigned</th>}
             <th style={{ width: 100 }}>Invoice Item</th>
             <th>Short Text</th>
+            {showPo && <th style={{ minWidth: 140 }}>PO</th>}
             {!deliveryCostsOnly && <th style={{ minWidth: 190 }}>Purchasing Document/Item</th>}
             {showCond && <th style={{ minWidth: 170 }}>Condition</th>}
             <th style={{ textAlign: 'right', minWidth: 110 }}>Amount</th>
@@ -240,7 +286,7 @@ export default function PoReferenceTable({
         </thead>
         <tbody>
           {lines.length ? (
-            lines.map((l, i) => {
+            renderBody((l, i) => {
               const code = String(
                 (l.extra as Record<string, unknown> | undefined)?.taxCode ?? headerTaxCode ?? '',
               ).trim();
@@ -268,6 +314,24 @@ export default function PoReferenceTable({
                   )}
                   <td>{(i + 1) * 10}</td>
                   <td>{shortText(l)}</td>
+                  {showPo && (
+                    <td>
+                      {onLinePo && !posted ? (
+                        <select
+                          value={linePo(l)}
+                          onChange={(e) => onLinePo(i, e.target.value)}
+                          style={{ minWidth: 130, ...(linePo(l) ? {} : { borderColor: 'var(--danger, #c00000)' }) }}
+                        >
+                          <option value="">— เลือก PO —</option>
+                          {poChoices!.map((po) => (
+                            <option key={po} value={po}>{po}</option>
+                          ))}
+                        </select>
+                      ) : (
+                        linePo(l) || <span className="badge b-fail">ไม่ระบุ</span>
+                      )}
+                    </td>
+                  )}
                   {!deliveryCostsOnly && (
                   <td>
                     {!poRef ? (
@@ -399,7 +463,7 @@ export default function PoReferenceTable({
             })
           ) : (
             <tr>
-              <td colSpan={(onDelLine ? 10 : 9) + (showGr ? 1 : 0)} className="hint" style={{ textAlign: 'center' }}>
+              <td colSpan={(onDelLine ? 10 : 9) + (showGr ? 1 : 0) + (showPo ? 1 : 0)} className="hint" style={{ textAlign: 'center' }}>
                 No data found. Enter a reference document, for example a purchase order.
               </td>
             </tr>
@@ -411,7 +475,7 @@ export default function PoReferenceTable({
               {/* As many cells as there are columns before Amount: Assigned and Purchasing
                   Document/Item only on goods, Condition only when shown — a fixed 4 put the total
                   under Quantity on a delivery-cost document. */}
-              <td colSpan={(deliveryCostsOnly ? 2 : 4) + (showCond ? 1 : 0)} style={{ textAlign: 'right' }}><b>Total</b></td>
+              <td colSpan={(deliveryCostsOnly ? 2 : 4) + (showCond ? 1 : 0) + (showPo ? 1 : 0)} style={{ textAlign: 'right' }}><b>Total</b></td>
               <td style={{ textAlign: 'right' }}><b>{fmtAmt(total)}</b></td>
               <td colSpan={(onDelLine ? 5 : 4) + (showGr ? 1 : 0)} />
             </tr>

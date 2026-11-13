@@ -35,6 +35,11 @@ public class LineItem
     // to, so it travels with the line. Empty on anything that is not a form cost row.
     public string CostType { get; set; } = "";
 
+    // The PO of the FORM SHIPPING EXPENSE this row was read from. A bundle for several purchase
+    // orders has one form per PO and each form's rows settle that PO's own accrual, so the row
+    // keeps it (extra.poRef). Empty on a single-form bundle.
+    public string PoRef { get; set; } = "";
+
     // How a form cost row splits on the document behind it — Cargoport's D/O receipt under the
     // 12,386.00 "DO" row: 1,752.50 NON VAT + 10,633.50 SALES 7% + VAT 744.35. NonVat + BeforeVat is
     // the cost (what Amount holds); + Vat is what the supplier is paid. All 0 when not known.

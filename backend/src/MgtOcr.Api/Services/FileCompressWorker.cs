@@ -60,6 +60,13 @@ public class FileCompressWorker(AppConfig config, FileArchiveRepository repo, Co
             if (!fi.Exists) { await repo.MarkCompressedAsync(stored, "SKIPPED", 0, 0, "file missing"); return; }
             var before = fi.Length;
             if (before < config.CompressMinBytes) { await repo.MarkCompressedAsync(stored, "SKIPPED", before, before, "below min size"); return; }
+            // A shipping bundle for several POs (one FORM SHIPPING EXPENSE per PO) is read from the
+            // forms' text layer, one row per line per PO (ShippingFormText). Compressing rasterises
+            // every page and loses that text, so a Re-read would fall back to the AI, which merges
+            // the forms into the first PO. Such a file is kept as it is.
+            if (fi.Extension.Equals(".pdf", StringComparison.OrdinalIgnoreCase)
+                && ShippingFormText.ReadForms(full).Select(f => f.Po).Distinct().Count() >= 2)
+            { await repo.MarkCompressedAsync(stored, "SKIPPED", before, before, "multi-PO shipping forms (text kept for re-read)"); return; }
 
             tmp = full + ".cmp.tmp" + fi.Extension;
             if (File.Exists(tmp)) File.Delete(tmp);

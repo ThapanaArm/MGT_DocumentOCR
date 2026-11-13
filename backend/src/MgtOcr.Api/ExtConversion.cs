@@ -59,6 +59,8 @@ public static partial class ExtConversion
         // The form's COSTS heading — Local / Insurance / Fee / Overseas — which decides the G/L
         // account the cost posts to in the SAP import file.
         if (!string.IsNullOrWhiteSpace(l.CostType)) extra["costType"] = l.CostType.Trim();
+        // The PO of the form the row came from, on a bundle for several purchase orders.
+        if (!string.IsNullOrWhiteSpace(l.PoRef)) extra["poRef"] = l.PoRef.Trim();
         // INPUT / DEFERRED for a VAT row — drives the input-VAT report vs ภาษีซื้อรอเรียกเก็บ.
         if (!string.IsNullOrWhiteSpace(l.TaxKind)) extra["taxKind"] = l.TaxKind.Trim();
         // Identity of the tax invoice behind a VAT row — one row per invoice in the Input VAT file
