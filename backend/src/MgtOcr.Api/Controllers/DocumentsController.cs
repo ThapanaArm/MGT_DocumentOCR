@@ -1471,7 +1471,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
                 salesOrg = await OwnCompanyAsync() is { Length: > 0 } own ? own : null,
             }, tx);
             if (r.Success)
-                await conn.ExecuteAsync($"UPDATE {docT} SET Status='POSTED', SapDocNo=@sapDocNo, CompanyCode=@companyCode, PostedAt=SYSDATETIME(), PostedBy=@user, UpdatedAt=SYSDATETIME() WHERE DocId=@docId",
+                await conn.ExecuteAsync($"UPDATE {docT} SET Status='POSTED', SapDocNo=@sapDocNo, CompanyCode=@companyCode, PostedAt=SYSDATETIME(), {DocumentRepository.JobTaskTimeMsSet}, PostedBy=@user, UpdatedAt=SYSDATETIME() WHERE DocId=@docId",
                     new { sapDocNo = r.SapDocNo, companyCode, user, docId }, tx);
             await tx.CommitAsync();
         }

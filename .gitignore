@@ -27,3 +27,6 @@ backend/src/MgtOcr.Api/appsettings.Development.json
 # PaddleOCR-Standalone portable exe + models (hundreds of MB, install per machine)
 tools/
 /docs
+
+# Scratch / build output from review sessions (not part of the project)
+/outputs/
