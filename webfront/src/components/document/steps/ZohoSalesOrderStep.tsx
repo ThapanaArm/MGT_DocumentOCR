@@ -132,6 +132,8 @@ const ZohoSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function Zoho
   const [error, setError] = useState<string | null>(null);
   const [overrides, setOverrides] = useState<Record<string, ZohoDealItem>>({});
   const [header, setHeader] = useState<ZohoSalesOrderEditorHeader>(EMPTY_HEADER);
+  // New Deal: Sales person picked as Deal Owner ('' = the customer's Account Owner), 12 Nov 2026.
+  const [salesUserId, setSalesUserId] = useState('');
   const [lineEdits, setLineEdits] = useState<Record<string, LineEdit>>({});
   const [sending, setSending] = useState(false);
   const [result, setResult] = useState<ZohoSalesOrderResult | null>(null);
@@ -174,6 +176,7 @@ const ZohoSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function Zoho
   useEffect(() => {
     setOverrides({});
     setResult(null);
+    setSalesUserId('');
     dirtyHeader.current = new Set();
     dirtyLines.current = {};
   }, [doc.docId, selectedDealId]);
@@ -317,6 +320,7 @@ const ZohoSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function Zoho
       // Preserve explicit clearing of Description instead of restoring the document's Remark.
       remarks: dirtyHeader.current.has('remarks') ? header.remarks : header.remarks || undefined,
       shipTo,
+      salesUserId: preview?.flow?.newDeal && salesUserId ? salesUserId : undefined,
       // Only what the person typed (plus an AI-confirmed material) goes as an override; untouched
       // quantities / prices come from the backend's own conversion. Numbers accept "1,250.50".
       lines: Object.entries(lineEdits)
@@ -441,6 +445,9 @@ const ZohoSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function Zoho
             lineEdits={lineEdits} onLineChange={userEditLine} onUseAiMatch={useAiMatch}
             sending={sending} result={result} onSend={send} onViewPayload={viewPayload} posted={posted}
             shipToMissing={!hasShipTo}
+            salesUserId={salesUserId}
+            onOwnerChange={setSalesUserId}
+            ownerMissing={!!preview?.flow?.newDeal && preview.dealOwnerActive === false && !salesUserId}
             dateGroups={groups}
             posts={posts}
             groupShipTo={groupShipTo}

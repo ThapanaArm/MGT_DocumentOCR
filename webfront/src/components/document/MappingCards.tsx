@@ -129,6 +129,44 @@ function zohoItemFields(r: MapEntry, line: DocModel['lines'][number]): MapField[
     });
 }
 
+/* Zoho Material Name (Materials module Product_Name) per Material Code, shared by every card on the
+   page: one lookup per code. null = not found in Zoho. */
+const zohoNameCache = new Map<string, Promise<string | null>>();
+function zohoMaterialName(code: string): Promise<string | null> {
+  const key = code.trim().toUpperCase();
+  let p = zohoNameCache.get(key);
+  if (!p) {
+    p = searchZohoMaterials(code.trim(), 10)
+      .then((r) => r.materials.find((m) => (m.code || '').trim().toUpperCase() === key)?.name?.trim() || null)
+      .catch(() => { zohoNameCache.delete(key); return null; });
+    zohoNameCache.set(key, p);
+  }
+  return p;
+}
+
+/* MGT "Data from Zoho CRM" column (12 Nov 2026): the Description row shows the Material Name from
+   Zoho -- not the CustomerMaterial text, which is another customer's own wording for the item. The
+   name comes from the selected Deal's items when the code is there, else from Zoho Materials. */
+function ZohoItemSideList({ r, line, dealItems }: { r: MapEntry; line: DocModel['lines'][number]; dealItems?: ZohoDealItem[] }) {
+  const code = String(r.code || '').trim();
+  const fromDeal = (dealItems || [])
+    .find((it) => (it.materialCode || '').trim().toUpperCase() === code.toUpperCase())?.materialName?.trim() || '';
+  const [zohoName, setZohoName] = useState<{ code: string; name: string | null } | null>(null);
+  useEffect(() => {
+    if (!code || fromDeal) return;
+    let cancelled = false;
+    void zohoMaterialName(code).then((name) => { if (!cancelled) setZohoName({ code, name }); });
+    return () => { cancelled = true; };
+  }, [code, fromDeal]);
+  const name = fromDeal || (zohoName?.code === code ? zohoName.name : undefined);
+  const items = zohoItemFields(r, line).map((f) => f.label !== 'Description' ? f : {
+    label: 'Material Name',
+    value: name === undefined ? 'Reading from Zoho…' : name || '—',
+    match: null,
+  });
+  return <SideList items={items} side="sap" system="Zoho CRM" />;
+}
+
 /* "1 DR = 160 KG · Material Group" -- the second line of a Zoho option in the Material dropdown. */
 function zohoOptionHint(it: { unit?: string | null; conversionRatio?: number | null; subUnit?: string | null; materialGroup?: string | null }) {
   const r = Number(it.conversionRatio);
@@ -1494,35 +1532,30 @@ function ZohoCustomerPanel({
 /* Every confirmed raw sub-field of one Sold-to/Ship-to address, shown as-is rather than only a
    collapsed joined string -- per request, pull everything Zoho has on file and just display it.
    Field names/order match the manual's own field tables (section 5.2.8 / 5.4.3). */
-function AddressFieldRows({ info }: { info: ZohoShipToInfo }) {
+/* A Zoho address (Sold-to / Ship-to) field by field, in Zoho's own field order. Rendered through
+   SideList so it has the same label/value font and weight as every other row on the card (12 Nov
+   2026: the Sold-to labels used to be the lighter "hint" style). prefix gives Zoho's labels, e.g.
+   "Sold to " -> "Sold to Street". Empty fields are skipped. */
+function AddressFieldRows({ info, prefix = '' }: { info: ZohoShipToInfo; prefix?: string }) {
   const allRows: [string, string | null | undefined][] = [
     ['Code', info.code],
-    ['House Number', info.houseNumber],
     ['Street', info.street],
     ['Street 2', info.street2],
     ['Street 3', info.street3],
     ['Street 4', info.street4],
     ['Street 5', info.street5],
+    ['House Number', info.houseNumber],
     ['District', info.district],
     ['City', info.city],
     ['Difference City', info.differenceCity],
     ['Post Code', info.postCode],
     ['Country / Reg', info.countryReg],
   ];
-  const rows = allRows.filter(([, v]) => !!v && v.trim() !== '');
+  const rows: MapField[] = allRows
+    .map(([label, v]) => ({ label: prefix + label, value: String(v ?? '').trim(), match: null }))
+    .filter((f) => f.value !== '');
   if (rows.length === 0) return <span className="hint">(no address fields on file)</span>;
-  return (
-    <table className="cmp">
-      <tbody>
-        {rows.map(([label, value]) => (
-          <tr key={label}>
-            <td className="hint">{label}</td>
-            <td>{value}</td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
-  );
+  return <SideList items={rows} side="sap" system="Zoho CRM" />;
 }
 
 /* SAP counterpart to AddressFieldRows above -- added 2026-09-22 so the live SAP search results
@@ -2098,6 +2131,63 @@ function ZohoCustomerBrief({ customerCode, masters }: { customerCode?: string; m
   );
 }
 
+/* MGT Ship-to, "Data from Zoho CRM" column (12 Nov 2026): the ship-to read live from the Zoho Account's
+   ship-tos (same list as the Ship-to dropdown), found by ShipToCode -- the local ShipTo master row
+   often has no address of its own. Megachem: shown field by field with Zoho's own labels (Ship to
+   Code, Ship to Street, ... Post Code, Country / Reg); no Location Name on this side. */
+const SHIPTO_ADDRESS_LABELS = ['House Number', 'Street', 'Street 2', 'Street 3', 'Street 4', 'Street 5',
+  'District', 'City', 'Difference City', 'Post Code', 'Country / Reg'];
+function ZohoShipToSideList({ items, customerCode, shipToCode }: { items?: MapField[]; customerCode?: string; shipToCode?: string }) {
+  const account = String(customerCode || '').trim();
+  const code = String(shipToCode || '').trim();
+  const [state, setState] = useState<{ key: string; info: ZohoShipToInfo | null; error?: boolean } | null>(null);
+  const key = account + '|' + code;
+  useEffect(() => {
+    if (!account || !code) return;
+    let cancelled = false;
+    getZohoAccountShipTosByCode(account)
+      .then((r) => {
+        if (cancelled) return;
+        const info = (r?.shipTos || []).find((s) => String(s.code || '').trim().toUpperCase() === code.toUpperCase()) || null;
+        setState({ key, info });
+      })
+      .catch(() => { if (!cancelled) setState({ key, info: null, error: true }); });
+    return () => { cancelled = true; };
+  }, [account, code, key]);
+
+  const base = (items || []).filter((f) => !SHIPTO_ADDRESS_LABELS.includes(f.label) && f.label !== 'Location Name');
+  if (!base.length || !account || !code) return <SideList items={items} side="sap" system="Zoho CRM" />;
+  const cur = state?.key === key ? state : null;
+  const info = cur?.info;
+  if (!info) {
+    const status: MapField = {
+      label: 'Ship to Address',
+      value: !cur ? 'Reading from Zoho…' : cur.error ? 'Zoho CRM is temporarily unavailable' : '— not found in Zoho for this ShipToCode —',
+      match: null,
+    };
+    return <SideList items={[...base, status]} side="sap" system="Zoho CRM" />;
+  }
+  // Same fields and labels as the Ship-to Information block in Zoho CRM; empty fields are skipped.
+  const zohoRows: [string, string | null | undefined][] = [
+    ['Ship to Code', info.code || code],
+    ['Ship to Street', info.street],
+    ['Ship to Street 2', info.street2],
+    ['Ship to Street 3', info.street3],
+    ['Ship to Street 4', info.street4],
+    ['Ship to Street 5', info.street5],
+    ['Ship to House Number', info.houseNumber],
+    ['Ship to District', info.district],
+    ['Ship to City', info.city],
+    ['Ship to Difference City', info.differenceCity],
+    ['Ship to Post Code', info.postCode],
+    ['Ship to Country / Reg', info.countryReg],
+  ];
+  const rows: MapField[] = zohoRows
+    .map(([label, v]) => ({ label, value: String(v ?? '').trim(), match: null }))
+    .filter((f) => f.value !== '');
+  return <SideList items={rows} side="sap" system="Zoho CRM" />;
+}
+
 function ZohoSoldToAddressPanel({ customerCode, masters }: { customerCode?: string; masters: MastersData }) {
   const accountId: string | undefined = masters.customers.find(
     (c) => c.CustomerCode === customerCode,
@@ -2134,7 +2224,7 @@ function ZohoSoldToAddressPanel({ customerCode, masters }: { customerCode?: stri
   if (loading) return <span className="hint">Reading Sold-to address from Zoho CRM…</span>;
   if (error) return <span className="hint">Zoho CRM information is temporarily unavailable.</span>;
   if (!info) return <span className="hint">(no address on file)</span>;
-  return <AddressFieldRows info={info} />;
+  return <AddressFieldRows info={info} prefix="Sold to " />;
 }
 
 // Credit limit / balance / payment terms / payment currency / Incoterms straight off the Zoho
@@ -4124,7 +4214,9 @@ export default function MappingCards({
                   }}
                 />
               ) : (
-                <SideList items={sh.sap} side="sap" system={isMgt ? 'Zoho CRM' : 'SAP'} />
+                isMgt
+                  ? <ZohoShipToSideList items={sh.sap} customerCode={c.code} shipToCode={sh.code} />
+                  : <SideList items={sh.sap} side="sap" system="SAP" />
               )}
             </div>
           </div>
@@ -4141,7 +4233,8 @@ export default function MappingCards({
             </div>
             <div className="cmp-body">
               <div className="cmp-col">
-                {doc.header.customerAddress || <span className="hint">—</span>}
+                {/* Same table style as the Ship-to rows above (was plain text). */}
+                <SideList items={[{ label: 'Sold-to Address', value: String(doc.header.customerAddress || '') }]} side="doc" />
               </div>
               <div className="cmp-arrow">→</div>
               <div className="cmp-col sap">
@@ -4423,7 +4516,7 @@ export default function MappingCards({
                         Master Mapping is unchanged, so the next document still gets the usual match.
                       </div>
                     )}
-                    <SideList items={zohoItemFields(r, l)} side="sap" system="Zoho CRM" />
+                    <ZohoItemSideList r={r} line={l} dealItems={dealItems} />
                   </>
                 ) : undefined
               )

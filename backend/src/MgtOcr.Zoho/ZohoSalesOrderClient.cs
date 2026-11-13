@@ -305,13 +305,14 @@ public class ZohoSalesOrderClient(ZohoClient zoho)
         List<ZohoSalesOrderLine> items,
         string? remarks = null,
         string? quoteId = null,
-        string? quoteNo = null)
+        string? quoteNo = null,
+        string? ownerId = null)
     {
         var module = await ResolveModuleAsync();
         var record = await BuildRecordAsync(
             dealId, accountId, subject, accountCode, taxId, customerRef, deliveryDate,
-            paymentTerms, paymentCurrency, incoterms, shipTo, items, remarks, quoteId, quoteNo);
-        return await zoho.InsertAsync(module, record);
+            paymentTerms, paymentCurrency, incoterms, shipTo, items, remarks, quoteId, quoteNo, ownerId);
+        return await zoho.InsertAsync(module, record, triggers: InsertTriggers);
     }
 
     /// <summary>
@@ -321,6 +322,11 @@ public class ZohoSalesOrderClient(ZohoClient zoho)
     /// </summary>
     /// <summary>Status of a Sales Order created from OCR (API name "Status").</summary>
     public const string NewSalesOrderStatus = "Open";
+
+    /// <summary>"trigger" sent with every Sales Order / Quote insert (12 Nov 2026): Zoho enters the record
+    /// into its Blueprint so the transition buttons (e.g. "Request for Approval Above 1M") show; workflow
+    /// rules and approval processes still don't run. Shown in View Payload too.</summary>
+    public static readonly string[] InsertTriggers = ["blueprint"];
 
     public async Task<JsonObject> BuildRecordAsync(
         string dealId,
@@ -337,7 +343,10 @@ public class ZohoSalesOrderClient(ZohoClient zoho)
         List<ZohoSalesOrderLine> items,
         string? remarks = null,
         string? quoteId = null,
-        string? quoteNo = null)
+        string? quoteNo = null,
+        // Zoho user id of the Deal Owner (12 Nov 2026): the Sales Order belongs to the same Sales as
+        // its Deal. Null = not set (Zoho makes the API user the owner, as before).
+        string? ownerId = null)
     {
         var itemsField = await ResolveOrderedItemsFieldAsync();
 
@@ -477,6 +486,7 @@ public class ZohoSalesOrderClient(ZohoClient zoho)
             rows.Add(row);
         }
         record[itemsField] = rows;
+        if (!string.IsNullOrWhiteSpace(ownerId)) record["Owner"] = new JsonObject { ["id"] = ownerId.Trim() };
         return record;
     }
 

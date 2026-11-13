@@ -3,7 +3,7 @@ import Modal, { ModalHeader } from '../Modal';
 import { MASTER_DEF, M_LABEL } from '../../constants/fields';
 import { createMaster, deleteMaster, updateMaster, type MasterRow, type MastersData } from '../../api/masters';
 import { searchSapBusinessPartner, type SapBusinessPartner, type SapLastPrice } from '../../api/sap';
-import { searchZohoAccount, type ZohoAccount } from '../../api/zoho';
+import { getZohoMaterialNames, searchZohoAccount, type ZohoAccount } from '../../api/zoho';
 import { useAppState } from '../../state/AppState';
 import type { Dupe } from '../../utils/dupes';
 import { useSapUnits, type SapUnitChoice } from '../../hooks/useSapUnits';
@@ -98,6 +98,33 @@ export default function MasterEditModal({
     return ((m?.SapMaterialCode as string) || code).toString().trim();
   })();
   const { units: sapUnits, loading: sapUnitsLoading } = useSapUnits(uomMaterial, uomSapEnabled && !!uomMaterial);
+
+  // Unit Conversion "Material code" dropdown (12 Nov 2026): the material list (masters.materials) is
+  // built from CustomerMaterial of every company, so it is narrowed to the codes the chosen Company
+  // has in its own CustomerMaterial; for MGT (1000) the text after the code is the Zoho Material
+  // Name instead of the customer's PO wording.
+  const uomSalesOrg = state?.tab === 'uoms' ? String(form.SalesOrg ?? '').trim() : '';
+  const uomCompanyCodes = useMemo(() => {
+    if (!uomSalesOrg) return null;
+    return new Set((masters.custmaterials || [])
+      .filter((r) => String(r.SalesOrg ?? '').trim() === uomSalesOrg)
+      .map((r) => String(r.MaterialCodeSAP ?? r.MaterialCode ?? '').trim().toUpperCase())
+      .filter(Boolean));
+  }, [masters.custmaterials, uomSalesOrg]);
+  const [zohoMatNames, setZohoMatNames] = useState<Record<string, string>>({});
+  useEffect(() => {
+    if (uomSalesOrg !== '1000' || !uomCompanyCodes || uomCompanyCodes.size === 0) return;
+    let cancelled = false;
+    getZohoMaterialNames([...uomCompanyCodes])
+      .then((r) => {
+        if (cancelled) return;
+        const upper: Record<string, string> = {};
+        Object.entries(r.names || {}).forEach(([k, v]) => { upper[k.trim().toUpperCase()] = v; });
+        setZohoMatNames(upper);
+      })
+      .catch(() => { /* keep the CustomerMaterial text */ });
+    return () => { cancelled = true; };
+  }, [uomSalesOrg, uomCompanyCodes]);
   const commonUnits = useMemo<SapUnitChoice[]>(() => {
     const seen = new Set<string>();
     const out: SapUnitChoice[] = [];
@@ -320,12 +347,19 @@ export default function MasterEditModal({
           >
             {!c.blank && <option value="">— Select —</option>}
             {c.blank && <option value="">— All materials (global rule) —</option>}
-            {(masters[c.ref] || []).filter((o) => (o.IsActive == null || !!Number(o.IsActive)) && (c.ref !== 'customers' || !form.SalesOrg || (state!.tab !== 'custmaterials' && state!.tab !== 'shiptos') || String(o.SalesOrg) === String(form.SalesOrg))).map((o, index) => {
+            {(masters[c.ref] || []).filter((o) => (o.IsActive == null || !!Number(o.IsActive)) && (c.ref !== 'customers' || !form.SalesOrg || (state!.tab !== 'custmaterials' && state!.tab !== 'shiptos') || String(o.SalesOrg) === String(form.SalesOrg))
+              // Unit Conversion: only the chosen Company's materials (the current value always stays).
+              && (c.ref !== 'materials' || state!.tab !== 'uoms' || !uomCompanyCodes
+                || uomCompanyCodes.has(String(o.MaterialCode ?? '').trim().toUpperCase())
+                || String(o.MaterialCode ?? '') === String(form[c.k] ?? ''))).map((o, index) => {
               const vk = MASTER_DEF[c.ref!].matchKey || MASTER_DEF[c.ref!].key;
               const lk = M_LABEL[c.ref!];
+              const zohoName = c.ref === 'materials' && uomSalesOrg === '1000'
+                ? zohoMatNames[String(o[vk] ?? '').trim().toUpperCase()] : undefined;
+              const text = zohoName ?? o[lk];
               return (
-                <option key={index} value={o[vk]} title={`${o[vk]} — ${o[lk] ?? ''}`}>
-                  {o[vk]} — {shortLabel(o[lk])}
+                <option key={index} value={o[vk]} title={`${o[vk]} — ${text ?? ''}`}>
+                  {o[vk]} — {shortLabel(text)}
                 </option>
               );
             })}

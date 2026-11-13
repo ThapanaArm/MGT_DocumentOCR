@@ -32,11 +32,38 @@ namespace MgtOcr.Zoho;
 /// </summary>
 public class ZohoClient(AppConfig config, ILogger<ZohoClient> logger)
 {
-    private static readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(120) };
+    // Pooled connections are recycled before Zoho drops them (12 Nov 2026): reusing a keep-alive
+    // connection the server had already closed threw "An existing connection was forcibly closed by
+    // the remote host" (HttpRequestException / SocketException) on a plain read.
+    private static readonly HttpClient _http = new(new SocketsHttpHandler
+    {
+        PooledConnectionLifetime = TimeSpan.FromMinutes(2),
+        PooledConnectionIdleTimeout = TimeSpan.FromSeconds(30),
+    }) { Timeout = TimeSpan.FromSeconds(120) };
+
+    // READS ONLY (GET, COQL): a dropped connection is retried up to twice, after 0.3 s / 0.6 s. Never
+    // used for inserts/updates -- Zoho may already have written the record when the reply was lost.
+    // build() makes a fresh request each time (an HttpRequestMessage can only be sent once).
+    private async Task<HttpResponseMessage> SendReadAsync(Func<HttpRequestMessage> build, CancellationToken ct = default)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            var req = build();
+            try { return await _http.SendAsync(req, ct); }
+            catch (HttpRequestException e) when (attempt < 3 && !ct.IsCancellationRequested)
+            {
+                logger.LogWarning("[ZOHO] {Method} {Url} failed ({Message}) -- retry {Attempt}/2",
+                    req.Method, req.RequestUri, e.InnerException?.Message ?? e.Message, attempt);
+                await Task.Delay(300 * attempt, ct);
+            }
+        }
+    }
     private string? _accessToken;
     private DateTime _expireAt = DateTime.MinValue;
     private readonly ConcurrentDictionary<string, (JsonArray Fields, DateTime Expires)> _fieldsCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _fieldsLocks = new(StringComparer.OrdinalIgnoreCase);
+    private (List<ZohoUser> Users, DateTime Expires)? _usersCache;
+    private readonly SemaphoreSlim _usersLock = new(1, 1);
 
     private string ApiDomain =>
         string.IsNullOrWhiteSpace(config.ZohoApiDomain) ? "https://www.zohoapis.com" : config.ZohoApiDomain.TrimEnd('/');
@@ -123,11 +150,14 @@ public class ZohoClient(AppConfig config, ILogger<ZohoClient> logger)
         return res;
     }
 
-    public async Task<ZohoUpsertResult> InsertAsync(string module, JsonObject record, string? sapKey = null, bool useDefaultAutomation = false)
+    // triggers: Zoho automations to run for this insert ("workflow", "approval", "blueprint"); null =
+    // none (the default "trigger": []). useDefaultAutomation = omit "trigger" so Zoho runs all of them.
+    public async Task<ZohoUpsertResult> InsertAsync(string module, JsonObject record, string? sapKey = null, bool useDefaultAutomation = false,
+        IEnumerable<string>? triggers = null)
     {
         string token = await GetAccessTokenAsync();
         string url = $"{ApiDomain}/crm/v8/{module}";
-        return await SendWriteAsync(HttpMethod.Post, url, record, token, sapKey, useDefaultAutomation);
+        return await SendWriteAsync(HttpMethod.Post, url, record, token, sapKey, useDefaultAutomation, triggers);
     }
 
     public async Task<ZohoUpsertResult> UpdateAsync(string module, string recordId, JsonObject record, string? sapKey = null)
@@ -172,12 +202,15 @@ public class ZohoClient(AppConfig config, ILogger<ZohoClient> logger)
     }
 
     private async Task<ZohoUpsertResult> SendWriteAsync(
-        HttpMethod method, string url, JsonObject record, string token, string? sapKey, bool useDefaultAutomation = false)
+        HttpMethod method, string url, JsonObject record, string token, string? sapKey, bool useDefaultAutomation = false,
+        IEnumerable<string>? triggers = null)
     {
+        var trigger = new JsonArray(); // empty = skip workflow/approval/blueprint
+        foreach (var t in triggers ?? Array.Empty<string>()) trigger.Add(t);
         var payload = new JsonObject
         {
             ["data"] = new JsonArray(record.DeepClone()),
-            ["trigger"] = new JsonArray() // skip workflow/approval; drop this line to let it run
+            ["trigger"] = trigger
         };
         if (useDefaultAutomation) payload.Remove("trigger");
         using var req = new HttpRequestMessage(method, url);
@@ -240,12 +273,15 @@ public class ZohoClient(AppConfig config, ILogger<ZohoClient> logger)
             string q = $"select {selectFields} from {module} " +
                        $"where {where} " +
                        $"order by {orderByField} limit {offset}, {PAGE}";
-            using var req = new HttpRequestMessage(HttpMethod.Post, $"{ApiDomain}/crm/v8/coql");
-            req.Headers.Authorization = new AuthenticationHeaderValue("Zoho-oauthtoken", token);
-            req.Content = new StringContent(
-                new JsonObject { ["select_query"] = q }.ToJsonString(),
-                Encoding.UTF8, "application/json");
-            using var resp = await _http.SendAsync(req);
+            using var resp = await SendReadAsync(() =>
+            {
+                var req = new HttpRequestMessage(HttpMethod.Post, $"{ApiDomain}/crm/v8/coql");
+                req.Headers.Authorization = new AuthenticationHeaderValue("Zoho-oauthtoken", token);
+                req.Content = new StringContent(
+                    new JsonObject { ["select_query"] = q }.ToJsonString(),
+                    Encoding.UTF8, "application/json");
+                return req;
+            });
             if (resp.StatusCode == HttpStatusCode.NoContent)
                 break;
             string body = await resp.Content.ReadAsStringAsync();
@@ -320,6 +356,80 @@ public class ZohoClient(AppConfig config, ILogger<ZohoClient> logger)
         if (!resp.IsSuccessStatusCode)
             throw new Exception($"Zoho modules {(int)resp.StatusCode}: {body[..Math.Min(400, body.Length)]}");
         return JsonNode.Parse(body)?["modules"] as JsonArray ?? new JsonArray();
+    }
+
+    // GET /crm/v8/users?type=ActiveConfirmedUsers — every Zoho CRM user a record can be assigned to
+    // (its Owner), sorted by name. Megachem (12 Nov 2026): a new Deal takes the customer's Account
+    // Owner, and Zoho rejects it when that user is no longer active (e.g. the Sales person left). This
+    // list flags that case and turns the Sales person CS picks from Ms_User into a Zoho user id
+    // (FindActiveUserAsync). Needs the ZohoCRM.users.READ scope on the refresh token. Cached for 10
+    // minutes (refresh = true reloads).
+    public async Task<List<ZohoUser>> GetActiveUsersAsync(bool refresh = false)
+    {
+        if (!refresh && _usersCache is { } cached && DateTime.UtcNow < cached.Expires) return cached.Users;
+        await _usersLock.WaitAsync();
+        try
+        {
+            if (!refresh && _usersCache is { } again && DateTime.UtcNow < again.Expires) return again.Users;
+            string token = await GetAccessTokenAsync();
+            var users = new List<ZohoUser>();
+            for (var page = 1; page <= 20; page++)
+            {
+                string url = $"{ApiDomain}/crm/v8/users?type=ActiveConfirmedUsers&page={page}&per_page=200";
+                using var resp = await SendReadAsync(() =>
+                {
+                    var req = new HttpRequestMessage(HttpMethod.Get, url);
+                    req.Headers.Authorization = new AuthenticationHeaderValue("Zoho-oauthtoken", token);
+                    return req;
+                });
+                string body = await resp.Content.ReadAsStringAsync();
+                if ((int)resp.StatusCode == 204 || string.IsNullOrWhiteSpace(body)) break;
+                if ((int)resp.StatusCode == 429) throw new Exception("Zoho 429 Too Many Requests: " + body);
+                if (!resp.IsSuccessStatusCode)
+                {
+                    if (body.Contains("OAUTH_SCOPE_MISMATCH", StringComparison.OrdinalIgnoreCase))
+                        throw new Exception("The Zoho refresh token is not allowed to read users (scope ZohoCRM.users.READ is missing). Generate a new refresh token that includes this scope.");
+                    throw new Exception($"Zoho users {(int)resp.StatusCode}: {body[..Math.Min(400, body.Length)]}");
+                }
+                var root = JsonNode.Parse(body);
+                if (root?["users"] is not JsonArray arr) break;
+                foreach (var u in arr.OfType<JsonObject>())
+                {
+                    var id = AsStr(u["id"]);
+                    if (string.IsNullOrWhiteSpace(id)) continue;
+                    var name = AsStr(u["full_name"]);
+                    if (string.IsNullOrWhiteSpace(name))
+                        name = $"{AsStr(u["first_name"])} {AsStr(u["last_name"])}".Trim();
+                    var email = AsStr(u["email"]);
+                    users.Add(new ZohoUser(id, string.IsNullOrWhiteSpace(name) ? email ?? id : name, email,
+                        AsStr(u["role"]?["name"]), AsStr(u["profile"]?["name"])));
+                }
+                if (!(root["info"]?["more_records"] is JsonValue more && more.TryGetValue<bool>(out var hasMore) && hasMore)) break;
+            }
+            users = users.OrderBy(u => u.Name, StringComparer.OrdinalIgnoreCase).ToList();
+            _usersCache = (users, DateTime.UtcNow.AddMinutes(10));
+            logger.LogInformation("[ZOHO] read {Count} active users", users.Count);
+            return users;
+        }
+        finally { _usersLock.Release(); }
+    }
+
+    // The active Zoho user for a Sales person from Ms_User (12 Nov 2026): Email first (case-insensitive),
+    // then the English name against Zoho's full_name (case and extra spaces ignored; must be unique).
+    // A miss re-reads the user list once, in case the person was added to Zoho in the last 10 minutes.
+    public async Task<ZohoUser?> FindActiveUserAsync(string? email, string? name)
+    {
+        static string Norm(string? s) =>
+            string.Join(" ", (s ?? "").Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)).ToLowerInvariant();
+        static ZohoUser? Pick(List<ZohoUser> users, string em, string nm)
+        {
+            if (em.Length > 0 && users.FirstOrDefault(u => Norm(u.Email) == em) is { } byEmail) return byEmail;
+            if (nm.Length == 0) return null;
+            var byName = users.Where(u => Norm(u.Name) == nm).ToList();
+            return byName.Count == 1 ? byName[0] : null;
+        }
+        var e = Norm(email); var n = Norm(name);
+        return Pick(await GetActiveUsersAsync(), e, n) ?? Pick(await GetActiveUsersAsync(refresh: true), e, n);
     }
 
     // GET /crm/v8/settings/fields?module={module} — every field defined on a module (standard +
@@ -458,9 +568,12 @@ public class ZohoClient(AppConfig config, ILogger<ZohoClient> logger)
         string url = $"{ApiDomain}/crm/v8/{module}/{Uri.EscapeDataString(recordId)}";
         if (!string.IsNullOrEmpty(fields))
             url += $"?fields={Uri.EscapeDataString(fields)}";
-        using var req = new HttpRequestMessage(HttpMethod.Get, url);
-        req.Headers.Authorization = new AuthenticationHeaderValue("Zoho-oauthtoken", token);
-        using var resp = await _http.SendAsync(req);
+        using var resp = await SendReadAsync(() =>
+        {
+            var req = new HttpRequestMessage(HttpMethod.Get, url);
+            req.Headers.Authorization = new AuthenticationHeaderValue("Zoho-oauthtoken", token);
+            return req;
+        });
         if (resp.StatusCode == HttpStatusCode.NoContent || resp.StatusCode == HttpStatusCode.NotFound)
         {
             logger.LogInformation("[ZOHO] GET {Module}/{Id} -> not found ({Status})", module, recordId, (int)resp.StatusCode);

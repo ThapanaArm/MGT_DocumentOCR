@@ -14,7 +14,7 @@ namespace MgtOcr.Api.Controllers;
 [ApiController]
 [Route("api/zoho")]
 public class ZohoAccountController(ZohoAccountClient client, ZohoClient zoho, ZohoDealClient deals, ZohoQuoteClient quotes, ZohoMaterialClient materials, ZohoLastPriceClient lastPrices,
-    ICurrentUserAccessor currentUser, AppConfig config) : ControllerBase, IAsyncActionFilter
+    ICurrentUserAccessor currentUser, AppConfig config, MgtOcr.Data.UserRepository userRepo) : ControllerBase, IAsyncActionFilter
 {
     // Zoho CRM is MGT's system (12 Oct 2026): a user of another company (GLC) gets 403 here instead
     // of MGT's accounts and deals. Admin and a user with no company on file are left unfiltered,
@@ -28,6 +28,18 @@ public class ZohoAccountController(ZohoAccountClient client, ZohoClient zoho, Zo
             && !string.Equals(config.CompanyForSalesOrg(scope)?.Name, "MGT", StringComparison.OrdinalIgnoreCase))
             throw new HttpApiException(403, "Zoho CRM lookups are available to MGT users only");
         await next();
+    }
+
+    // GET /api/zoho/sales — the Sales list for the owner of a NEW Deal (12 Nov 2026): active users of
+    // Sales Organization 1000 (MGT) from MGT_Datawarehouse.dbo.Ms_User, English name (FullName) +
+    // Email. On Send the Zoho user is found by Email, then by name (ZohoSalesOrderController).
+    public const string MgtSalesOrg = "1000";
+
+    [HttpGet("sales")]
+    public async Task<IActionResult> Sales()
+    {
+        var sales = await userRepo.GetSalesUsersAsync(MgtSalesOrg, HttpContext.RequestAborted);
+        return Ok(new { count = sales.Count, sales });
     }
 
     [HttpGet("account/by-code/{code}")]
@@ -180,6 +192,19 @@ public class ZohoAccountController(ZohoAccountClient client, ZohoClient zoho, Zo
             return BadRequest(new { detail = "Provide 'q'" });
         var found = await materials.SearchAsync(q, Math.Clamp(top, 1, 100));
         return Ok(new { count = found.Count, materials = found });
+    }
+
+    // POST /api/zoho/materials/names { codes: [...] } -> { names: { code: Material Name } } — Zoho
+    // Material Names for the Unit Conversion master's Material dropdown (MGT, 12 Nov 2026).
+    public record MaterialNamesRequest(List<string>? Codes);
+
+    [HttpPost("materials/names")]
+    public async Task<IActionResult> MaterialNames([FromBody] MaterialNamesRequest body)
+    {
+        var codes = (body?.Codes ?? []).Take(2000).ToList();
+        if (codes.Count == 0) return Ok(new { names = new Dictionary<string, string>() });
+        var names = await materials.GetNamesByCodesAsync(codes);
+        return Ok(new { names });
     }
 
     // GET /api/zoho/last-prices?account=1000939&codes=A,B — this customer's last price per Material

@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useState } from 'react';
-import { getZohoAccountFullByCode } from '../../api/zoho';
+import { getMgtSales, getZohoAccountFullByCode } from '../../api/zoho';
 import type { DocLine } from '../../api/documents';
 import type { OcrProvider } from '../../api/masters';
 import type {
@@ -8,6 +8,7 @@ import type {
   ZohoSalesOrderFlow,
   ZohoSalesOrderPreview,
   ZohoSalesOrderResult,
+  SalesUser,
 } from '../../api/zoho';
 import CompareModal, { type CompareCandidateItem } from './CompareModal';
 import type { CompareField } from '../../api/compare';
@@ -16,6 +17,67 @@ import DateInput, { formatDate } from '../common/DateInput';
 import type { DeliveryDateGroup } from './SapSalesOrderEditor';
 import type { SoGroupState } from '../../api/documents';
 import SoGroupPanel, { groupStatus, type GroupShipToControl } from './SoGroupPanel';
+import MaterialSearchSelect from './MaterialSearchSelect';
+
+/* Sales person (Owner) of the NEW Deal (12 Nov 2026), picked from the MGT Sales list (Ms_User,
+   Sales Organization 1000). Defaults to the customer's Account Owner; when that user is not active in
+   Zoho any more (Zoho rejects the Owner id), CS must pick someone before Send. On Send the backend
+   finds the Zoho user by Email, then English name. An existing Deal keeps its own Owner (read-only). */
+function DealOwnerPicker({ preview, salesUserId, onChange, posted }: {
+  preview: ZohoSalesOrderPreview;
+  salesUserId: string;
+  onChange: (salesUserId: string) => void;
+  posted: boolean;
+}) {
+  const [sales, setSales] = useState<SalesUser[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    setLoading(true);
+    setError('');
+    getMgtSales()
+      .then((r) => setSales(r.sales))
+      .catch((e) => setError(e instanceof Error ? e.message : 'Could not read the Sales list'))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const accountOwnerInactive = preview.dealOwnerActive === false;
+
+  // Compact (12 Nov 2026): the Responsible Sales box with just a labelled dropdown, plus one short
+  // red line when the Account Owner can't own the new Deal.
+  return (
+    <div className="notice" style={{ margin: '10px 0', padding: 12 }}>
+      <div className="row" style={{ gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+        <b>Responsible Sales / Deal Owner:</b>
+        <div style={{ flex: '1 1 420px', maxWidth: 560 }}>
+          <MaterialSearchSelect
+            options={sales.map((u) => ({
+              value: u.userId,
+              description: u.name,
+              label: u.email ? `${u.name} (${u.email})` : u.name,
+              searchText: [u.name, u.email].filter(Boolean).join(' '),
+            }))}
+            value={salesUserId}
+            disabled={posted || loading}
+            minWidth={420}
+            emptyLabel={loading
+              ? 'Loading Sales…'
+              : accountOwnerInactive ? '— Select Sales —' : `Account Owner${preview.dealOwnerName ? `: ${preview.dealOwnerName}` : ''}`}
+            searchPlaceholder="Type a Sales name or email…"
+            ariaLabel="Search and select the Sales person"
+            onChange={(value) => onChange(value)}
+          />
+        </div>
+      </div>
+      {accountOwnerInactive && !salesUserId && (
+        <div className="hint" style={{ color: 'var(--red, #c0392b)', marginTop: 4 }}>
+          Account Owner “{preview.dealOwnerName}” is inactive in Zoho — select a Sales.
+        </div>
+      )}
+      {error && <div className="hint" style={{ color: 'var(--red, #c0392b)', marginTop: 4 }}>{error}</div>}
+    </div>
+  );
+}
 
 function DealOwnerPreview({ preview }: { preview: ZohoSalesOrderPreview }) {
   const [accountOwner, setAccountOwner] = useState('');
@@ -81,6 +143,9 @@ export default function ZohoSalesOrderEditor({
   posts = [],
   shipToMissing = false,
   groupShipTo,
+  salesUserId = '',
+  onOwnerChange,
+  ownerMissing = false,
 }: {
   /** The merged preview (backend defaults + any AI-confirmed matches) -- fetched by DocumentPage
    *  as soon as a Deal is picked, so this table is visible without pressing Send first. */
@@ -113,6 +178,11 @@ export default function ZohoSalesOrderEditor({
   shipToMissing?: boolean;
   /** Per-SO-Group ship-to picker (Zoho ship-tos of the matched Account). */
   groupShipTo?: GroupShipToControl;
+  /** New Deal: Ms_User.UserID of the Sales person picked as Deal Owner ('' = Account Owner). */
+  salesUserId?: string;
+  onOwnerChange?: (salesUserId: string) => void;
+  /** New Deal whose Account Owner is not an active Zoho user, and no Sales picked yet. */
+  ownerMissing?: boolean;
 }) {
   const multiDate = dateGroups.length > 1;
   const remaining = dateGroups.filter((g) => !groupStatus(g, posts).ok).length;
@@ -231,7 +301,10 @@ export default function ZohoSalesOrderEditor({
           {preview.flow?.newDeal ? <>a new Deal <b>{preview.dealName || 'Name will be calculated from the matched Materials'}</b></> : <>Deal <b>{preview.dealName}</b></>}.
         </p>
 
-        <DealOwnerPreview preview={preview} />
+        {/* New Deal: pick the Sales (Deal Owner) here; an existing Deal shows its own Owner. */}
+        {preview.flow?.newDeal && onOwnerChange
+          ? <DealOwnerPicker preview={preview} salesUserId={salesUserId} onChange={onOwnerChange} posted={posted} />
+          : <DealOwnerPreview preview={preview} />}
         {preview.flow && (
           // Zoho chain Deal -> Quote -> Sales Order (27 Oct 2026): what Send does, one step per card.
           <ZohoFlowSteps flow={preview.flow} dealName={preview.dealName} salesOrders={Math.max(1, dateGroups.length)} />
@@ -416,7 +489,7 @@ export default function ZohoSalesOrderEditor({
             <button
               className="btn success"
               onClick={onSend}
-              disabled={SEND_DISABLED || sending || posted || shipToMissing || preview.lines.length === 0 || !!result?.success || remaining === 0}
+              disabled={SEND_DISABLED || sending || posted || shipToMissing || ownerMissing || preview.lines.length === 0 || !!result?.success || remaining === 0}
             >
               {sending
                 ? 'Sending…'
@@ -430,7 +503,7 @@ export default function ZohoSalesOrderEditor({
               {'{}'} View payload
             </button>
           </div>
-          {(result?.success || shipToMissing || multiDate || preview.lines.length === 0 || preview.skipped.length > 0 || allSent || SEND_DISABLED) && (
+          {(result?.success || shipToMissing || ownerMissing || multiDate || preview.lines.length === 0 || preview.skipped.length > 0 || allSent || SEND_DISABLED) && (
           <div className="so-send-status">
             <b>
               {result?.success
@@ -441,6 +514,8 @@ export default function ZohoSalesOrderEditor({
                 ? 'Already sent to Zoho CRM'
                 : shipToMissing
                 ? 'Ship-to required'
+                : ownerMissing
+                ? 'Sales person required'
                 : preview.lines.length === 0
                   ? 'Nothing to send yet'
                   : multiDate
@@ -456,6 +531,8 @@ export default function ZohoSalesOrderEditor({
                 ? multiDate
                   ? 'Select a Ship-to in the mapping cards above, or one for each SO Group in the Sales Orders table'
                   : 'Select a Ship-to in the mapping cards above before sending'
+                : ownerMissing && !result?.success
+                ? 'Select a Sales above'
                 : multiDate
                 ? `${dateGroups.length} Sales Orders (by SO Group and delivery date) — same Customer PO, each with its own Delivery Date and Ship-to`
                 : preview.lines.length === 0

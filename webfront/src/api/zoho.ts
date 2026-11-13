@@ -171,6 +171,11 @@ export interface ZohoMaterialHit {
   /** Selling unit, how many sub-units make one, and the sub-unit (e.g. DR, 160, KG). */
   unit?: string | null; conversionRatio?: number | null; subUnit?: string | null;
 }
+/* Zoho Material Name per Material Code (Unit Conversion master dropdown, MGT). Codes not in Zoho are
+   left out. Backend: POST /api/zoho/materials/names (COQL, 50 codes per query, cached). */
+export const getZohoMaterialNames = (codes: string[]) =>
+  api.post<{ names: Record<string, string> }>('/api/zoho/materials/names', { codes });
+
 export const searchZohoMaterials = (query: string, top = 30) =>
   api.get<{ count: number; materials: ZohoMaterialHit[] }>(
     '/api/zoho/materials/search?q=' + encodeURIComponent(query) + '&top=' + top,
@@ -284,9 +289,26 @@ export interface ZohoSalesOrderPreviewLine {
   lastPriceSo?: string | null;
 }
 
+/** A Sales person from MGT_Datawarehouse.dbo.Ms_User (Sales Organization 1000): English name + Email.
+ *  On Send the backend finds the Zoho user by Email, then by this name, for the new Deal's Owner. */
+export interface SalesUser {
+  userId: string;
+  name: string;
+  email?: string | null;
+  department?: string | null;
+}
+
+/** GET /api/zoho/sales -- the MGT Sales list (Ms_User, Sales Organization 1000), sorted by name. */
+export const getMgtSales = () => api.get<{ count: number; sales: SalesUser[] }>('/api/zoho/sales');
+
 export interface ZohoSalesOrderPreview {
   dealOwnerName?: string | null;
   dealOwnerError?: string | null;
+  /** Zoho user id of the Deal Owner (new Deal: the customer's Account Owner). */
+  dealOwnerId?: string | null;
+  /** New Deal only: false = the Account Owner is not an active Zoho user (Zoho would reject it),
+   *  null = not checked (existing Deal, or the user list could not be read). */
+  dealOwnerActive?: boolean | null;
   dealName: string;
   accountCode?: string | null;
   subject: string;
@@ -356,6 +378,8 @@ export interface ZohoSalesOrderEdits {
   lines?: ZohoSalesOrderLineEdit[];
   /** The person confirmed sending on a Deal whose Account isn't this document's customer. */
   acceptOtherAccount?: boolean;
+  /** New Deal only: Ms_User.UserID of the Sales person picked as Deal Owner (blank = Account Owner). */
+  salesUserId?: string;
 }
 
 export interface ZohoSalesOrderResult {

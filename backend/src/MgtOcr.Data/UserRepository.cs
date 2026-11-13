@@ -16,6 +16,9 @@ namespace MgtOcr.Data;
 //   FindByEmailAsync  — for Microsoft SSO, whose token only carries an e-mail.
 //   FindByUserIdAsync — for password login, where identity is the row that was just password-verified
 //                       (UserID), so it works even for accounts that have no e-mail on file.
+/// <summary>A Sales person from Ms_User (MGT new-Deal owner picker): UserID, English name (FullName), Email.</summary>
+public record SalesUser(string UserId, string Name, string? Email, string? Department);
+
 public partial class UserRepository(Db db, AppConfig config)
 {
     // A database name is an identifier, not a value, so it cannot be passed as a SQL parameter.
@@ -79,6 +82,40 @@ public partial class UserRepository(Db db, AppConfig config)
               AND PersonID IS NOT NULL
               AND LTRIM(RTRIM(CAST(PersonID AS NVARCHAR(50)))) <> ''
             ORDER BY [Text]", new { }, ct);
+
+    // Sales list for the MGT new-Deal owner picker (12 Nov 2026): active users of one Sales
+    // Organization (MGT = 1000) whose Department is "Sales" only. FullName is the person's English name, as kept in Zoho CRM; the
+    // Zoho user is found by Email first, then by that name (ZohoClient.FindActiveUserAsync).
+    public async Task<List<SalesUser>> GetSalesUsersAsync(string salesOrg, CancellationToken ct = default) =>
+        (await db.QueryAsync(SalesUserSql(""), new { salesOrg }, ct)).Select(ToSalesUser).ToList();
+
+    public async Task<SalesUser?> FindSalesUserAsync(string userId, string salesOrg, CancellationToken ct = default)
+    {
+        var row = await db.QueryOneAsync(SalesUserSql("AND CAST(UserID AS NVARCHAR(50)) = @userId"),
+            new { salesOrg, userId = (userId ?? "").Trim() }, ct);
+        return row is null ? null : ToSalesUser((object)row);
+    }
+
+    private string SalesUserSql(string extraWhere) => $@"
+            SELECT CAST(UserID AS NVARCHAR(50)) AS UserId,
+                   COALESCE(NULLIF(LTRIM(RTRIM(FullName)), ''), Username) AS Name,
+                   NULLIF(LTRIM(RTRIM(CAST(ISNULL(Email, '') AS NVARCHAR(256)))), '') AS Email,
+                   NULLIF(LTRIM(RTRIM(CAST(ISNULL(Department, '') AS NVARCHAR(100)))), '') AS Department
+            FROM {UserDb}.dbo.Ms_User
+            WHERE IsActive = 1
+              AND LTRIM(RTRIM(CAST(SalesOrganization AS NVARCHAR(50)))) = @salesOrg
+              AND LTRIM(RTRIM(CAST(ISNULL(Department, '') AS NVARCHAR(100)))) = 'Sales'
+              {extraWhere}
+            ORDER BY Name";
+
+    private static SalesUser ToSalesUser(object row)
+    {
+        var u = (IDictionary<string, object?>)row;
+        var email = Str(u, "Email");
+        var dept = Str(u, "Department");
+        return new SalesUser(Str(u, "UserId"), Str(u, "Name"),
+            string.IsNullOrWhiteSpace(email) ? null : email, string.IsNullOrWhiteSpace(dept) ? null : dept);
+    }
 
     // PersonID -> Ms_User.Division for every active user that has both. Used as the SAP Sales
     // Group of a GLC Sales Order: the header SalesGroup is the Division of the FIRST line's Sales

@@ -165,6 +165,37 @@ public class ZohoMaterialClient(ZohoClient zoho)
         return score;
     }
 
+    private readonly ConcurrentDictionary<string, string> _names = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Material Name (Product_Name) per Material Code, for lists that show many codes at once
+    /// (the Unit Conversion master, 12 Nov 2026). COQL "Product_Code in (...)", 50 codes per query;
+    /// names found are cached for the life of the process. Codes not found in Zoho are left out.</summary>
+    public async Task<Dictionary<string, string>> GetNamesByCodesAsync(IEnumerable<string> codes)
+    {
+        var wanted = codes.Select(c => (c ?? "").Trim()).Where(c => c.Length > 0 && !IsExcludedCode(c))
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var missing = new List<string>();
+        foreach (var c in wanted)
+            if (_names.TryGetValue(c, out var n)) result[c] = n; else missing.Add(c);
+        if (missing.Count == 0) return result;
+        var module = await ResolveModuleAsync();
+        foreach (var chunk in missing.Chunk(50))
+        {
+            var list = string.Join(",", chunk.Select(c => $"'{c.Replace("'", "''")}'"));
+            var rows = await zoho.QueryCoqlAsync(module, "id, Product_Code, Product_Name", $"Product_Code in ({list})", "Product_Code");
+            foreach (var r in rows)
+            {
+                var code = ZohoRecordFields.Str(r, "Product_Code")?.Trim();
+                var name = ZohoRecordFields.Str(r, "Product_Name")?.Trim();
+                if (string.IsNullOrEmpty(code) || string.IsNullOrEmpty(name) || result.ContainsKey(code)) continue;
+                result[code] = name;
+                _names[code] = name;
+            }
+        }
+        return result;
+    }
+
     /// <summary>The one Material whose Material Code is exactly <paramref name="code"/>; null when
     /// none or more than one matches. An inactive Material is used only when it is the only hit.
     /// Results (also misses) are cached for the life of the process.</summary>

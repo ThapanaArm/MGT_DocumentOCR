@@ -123,7 +123,8 @@ public class ZohoQuoteClient(ZohoClient zoho)
     }
 
     public async Task<ZohoUpsertResult> CreateAsync(JsonObject record) =>
-        await zoho.InsertAsync(await ResolveModuleAsync(), record);
+        // Enter Zoho's Blueprint (12 Nov 2026) so its transition buttons show on the Quote too.
+        await zoho.InsertAsync(await ResolveModuleAsync(), record, triggers: ZohoSalesOrderClient.InsertTriggers);
 
     // The Quoted Items subform, found structurally (the array-of-object field whose rows carry
     // Product_Name), like ZohoDealClient.ExtractDealItems.

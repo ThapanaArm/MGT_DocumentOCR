@@ -41,6 +41,8 @@ public class ZohoSalesOrderController(
     ZohoQuoteClient quoteClient,
     ZohoMaterialClient materialClient,
     ZohoLastPriceClient lastPriceClient,
+    ZohoClient zohoClient,
+    UserRepository userRepo,
     AppConfig config,
     ICurrentUserAccessor currentUser,
     FileArchiveRepository archive,
@@ -71,7 +73,11 @@ public class ZohoSalesOrderController(
         string? Remarks = null,
         // The person confirmed sending on a Deal whose Account isn't this document's customer
         // (a Deal picked through the manual name search). See the account check in BuildDefaultsAsync.
-        bool AcceptOtherAccount = false);
+        bool AcceptOtherAccount = false,
+        // Ms_User.UserID of the Sales person CS picked as Owner of a NEW Deal (12 Nov 2026), from the
+        // Sales Organization 1000 list. The Zoho user is found by Email, then English name. Blank =
+        // the customer's Account Owner, as before. Ignored when the document already has a Deal.
+        string? SalesUserId = null);
 
     private record MatchedLine(
         string ItemNo, string? Desc, string? ExtCode, string MaterialId, string? MaterialName,
@@ -464,7 +470,76 @@ public class ZohoSalesOrderController(
             HeaderDate(a.DeliveryDate, groups), a.CustomerRef is { Length: > 0 } cr && cr != "-" ? cr : null,
             a.PaymentTerms, a.PaymentCurrency, a.Incoterms,
             a.SoLines.Select(l => new ZohoNewDealLine(l.MaterialId, l.MaterialCode, l.Description, l.MaterialGroup,
-                l.Quantity, l.UnitPrice, l.Unit, l.LastPrice)).ToList());
+                l.Quantity, l.UnitPrice, l.Unit, l.LastPrice)).ToList(), a.OwnerId);
+
+    // Megachem (12 Nov 2026): Zoho rejects a new Deal whose Owner is not an active Zoho user (e.g. the
+    // customer's Account Owner has left), so check the owner before opening the Deal and tell CS to
+    // pick the Sales person on the page. If Zoho's user list can't be read (e.g. the refresh token
+    // lacks ZohoCRM.users.READ) the check is skipped and Zoho decides, as before.
+    // Megachem (12 Nov 2026): the Quote and Sales Orders belong to the same Sales as their Deal. The Deal
+    // Owner's Zoho user id: read off the Deal itself once it exists; for a Deal that Send will open,
+    // the Sales CS picked, else the customer's Account Owner (what BuildCreateRecordAsync uses).
+    // Null when it can't be read -- the record is then sent without an Owner, as before.
+    private async Task<string?> DealOwnerIdAsync(string? dealId, Assembled a)
+    {
+        static string? OwnerIdOf(JsonObject? rec) =>
+            rec?["Owner"] is JsonObject o && o["id"] is JsonValue v && v.TryGetValue<string>(out var id) && !string.IsNullOrWhiteSpace(id) ? id : null;
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(dealId)) return OwnerIdOf(await dealClient.GetRecordAsync(dealId));
+            return a.OwnerId ?? OwnerIdOf(await accountClient.GetRecordAsync(a.Deal.AccountId!));
+        }
+        catch (Exception e)
+        {
+            log.LogWarning(e, "Could not read the Deal Owner for Deal {DealId}", dealId);
+            return null;
+        }
+    }
+
+    // Zoho refused the Owner (e.g. that user was deactivated after the Deal was made).
+    private static bool OwnerRejected(ZohoUpsertResult r) =>
+        r.Status != "success" && (r.Message ?? "").Contains("field=Owner", StringComparison.OrdinalIgnoreCase);
+
+    // Ms_User Sales person (Sales Organization 1000) -> the Zoho user id for the new Deal's Owner.
+    private async Task<string> ResolveSalesOwnerAsync(string salesUserId)
+    {
+        var sales = await userRepo.FindSalesUserAsync(salesUserId, ZohoAccountController.MgtSalesOrg)
+            ?? throw new HttpApiException(400, "The selected Sales person is not an active user of Sales Organization 1000. Pick another Sales — nothing was sent.");
+        ZohoUser? zohoUser;
+        try { zohoUser = await zohoClient.FindActiveUserAsync(sales.Email, sales.Name); }
+        catch (Exception e)
+        {
+            throw new HttpApiException(502, $"Could not look up Sales \"{sales.Name}\" in Zoho CRM: {e.Message} — nothing was sent.");
+        }
+        return zohoUser?.Id ?? throw new HttpApiException(400,
+            $"Sales \"{sales.Name}\"{(sales.Email is null ? "" : $" ({sales.Email})")} was not found as an active user in Zoho CRM (checked by email, then English name). Check the email / name in Zoho or pick another Sales — nothing was sent.");
+    }
+
+    private async Task CheckNewDealOwnerAsync(Assembled a)
+    {
+        string? ownerId = a.OwnerId, ownerName = null;
+        if (ownerId is null)
+        {
+            var account = await accountClient.GetRecordAsync(a.Deal.AccountId!);
+            if (account?["Owner"] is JsonObject owner)
+            {
+                ownerId = owner["id"] is JsonValue idv && idv.TryGetValue<string>(out var id) ? id : null;
+                ownerName = owner["name"] is JsonValue nv && nv.TryGetValue<string>(out var name) ? name : null;
+            }
+        }
+        if (string.IsNullOrWhiteSpace(ownerId)) return; // BuildCreateRecordAsync reports a missing owner
+        List<ZohoUser> users;
+        try { users = await zohoClient.GetActiveUsersAsync(); }
+        catch (Exception e)
+        {
+            log.LogWarning(e, "Could not read the Zoho users to check the owner of the new Deal");
+            return;
+        }
+        if (users.Count == 0 || users.Any(u => u.Id == ownerId)) return;
+        throw new HttpApiException(400, a.OwnerId is null
+            ? $"The customer's Account Owner{(string.IsNullOrWhiteSpace(ownerName) ? "" : $" \"{ownerName}\"")} is not an active user in Zoho CRM, so Zoho cannot assign the new Deal to them. Pick the Sales person (Deal Owner) above, then send again — nothing was sent."
+            : "The selected Sales person is not an active user in Zoho CRM any more. Reload the Sales list, pick another, then send again — nothing was sent.");
+    }
 
     private Task<JsonObject> BuildNewQuoteRecordAsync(Assembled a, string? dealId, ZohoShipToInfo? shipTo, IEnumerable<SoGroup> groups) =>
         quoteClient.BuildRecordAsync(dealId, a.Deal.AccountId!, a.Subject, a.Deal.AccountCode, a.TaxId, a.CustomerRef,
@@ -496,6 +571,7 @@ public class ZohoSalesOrderController(
             }
         }
 
+        await CheckNewDealOwnerAsync(a);
         JsonObject record;
         try { record = await BuildNewDealRecordAsync(a, groups); }
         catch (TimeoutException)
@@ -525,7 +601,7 @@ public class ZohoSalesOrderController(
     // Step 2: the Deal's Quote for this document (PlanQuoteAsync), or a new one (Stage Open) with
     // every line of the document. One Quote per document; each Sales Order of the document links to it.
     private async Task<(string Id, string? No)> EnsureQuoteAsync(int docId, ZohoDeal deal, Assembled a,
-        ZohoShipToInfo? shipTo, List<SoGroup> groups, string actor)
+        ZohoShipToInfo? shipTo, List<SoGroup> groups, string actor, string? ownerId = null)
     {
         QuotePlan plan;
         try { plan = await PlanQuoteAsync(deal, a.CustomerRef, a.SoLines, a.QuoteRefs); }
@@ -542,9 +618,19 @@ public class ZohoSalesOrderController(
         }
 
         var record = await BuildNewQuoteRecordAsync(a, deal.Id, shipTo, groups);
+        if (!string.IsNullOrWhiteSpace(ownerId)) record["Owner"] = new JsonObject { ["id"] = ownerId };
         ZohoUpsertResult res;
         try { res = await quoteClient.CreateAsync(record); }
         catch (Exception e) { res = new ZohoUpsertResult { SapKey = "", ZohoId = "", Status = "error", Message = e.Message }; }
+        if (OwnerRejected(res))
+        {
+            // Deal Owner no longer usable in Zoho: create the Quote without it rather than fail.
+            await repo.LogAuditAsync(docId, "SO", "CREATE", actor, fileName: a.Doc.GetStr("fileName"),
+                detail: $"Zoho refused the Deal Owner as Quote owner ({res.Message}) — Quote created without it");
+            record.Remove("Owner");
+            try { res = await quoteClient.CreateAsync(record); }
+            catch (Exception e) { res = new ZohoUpsertResult { SapKey = "", ZohoId = "", Status = "error", Message = e.Message }; }
+        }
         if (res.Status != "success" || string.IsNullOrEmpty(res.ZohoId))
         {
             await repo.LogAuditAsync(docId, "SO", "CREATE", actor, fileName: a.Doc.GetStr("fileName"),
@@ -637,16 +723,33 @@ public class ZohoSalesOrderController(
             log.LogWarning(e, "Preview: could not read the Payment Terms / Currency picklists from Zoho CRM");
         }
 
-        string? dealOwnerName = null, dealOwnerError = null;
+        string? dealOwnerName = null, dealOwnerError = null, dealOwnerId = null;
+        bool? dealOwnerActive = null;
         try
         {
             var ownerRecord = d.NewDeal
                 ? await accountClient.GetRecordAsync(d.Deal.AccountId!)
                 : await dealClient.GetRecordAsync(d.Deal.Id);
             if (ownerRecord?["Owner"] is JsonObject owner)
+            {
                 dealOwnerName = owner["name"]?.GetValue<string>();
+                dealOwnerId = owner["id"] is JsonValue idv && idv.TryGetValue<string>(out var oid) ? oid : null;
+            }
             if (string.IsNullOrWhiteSpace(dealOwnerName))
                 dealOwnerError = "Responsible salesperson could not be determined.";
+            // A new Deal goes to the Account Owner: flag it when that user is not active in Zoho any
+            // more (Zoho would reject the Owner id), so CS picks the Sales person first (12 Nov 2026).
+            if (d.NewDeal && !string.IsNullOrWhiteSpace(dealOwnerId))
+            {
+                try
+                {
+                    var users = await zohoClient.GetActiveUsersAsync();
+                    if (users.Count > 0) dealOwnerActive = users.Any(u => u.Id == dealOwnerId);
+                }
+                catch (Exception e) { log.LogWarning(e, "Preview: could not read the Zoho users"); }
+                if (dealOwnerActive == false)
+                    dealOwnerError = $"Account Owner \"{dealOwnerName}\" is not an active user in Zoho CRM. Pick the Sales person for the new Deal.";
+            }
         }
         catch (Exception e)
         {
@@ -659,6 +762,8 @@ public class ZohoSalesOrderController(
             dealName = d.Deal.DealName,
             dealOwnerName,
             dealOwnerError,
+            dealOwnerId,
+            dealOwnerActive,
             accountCode = d.Deal.AccountCode,
             flow = new
             {
@@ -783,7 +888,8 @@ public class ZohoSalesOrderController(
             Doc: d.Doc,
             SoItemNos: resolvedLines.Select(l => l.ItemNo).ToList(),
             NewDeal: d.NewDeal,
-            QuoteRefs: d.QuoteRefs ?? []);
+            QuoteRefs: d.QuoteRefs ?? [],
+            OwnerId: d.NewDeal && !string.IsNullOrWhiteSpace(body.SalesUserId) ? await ResolveSalesOwnerAsync(body.SalesUserId.Trim()) : null);
     }
 
     private record Assembled(
@@ -795,7 +901,8 @@ public class ZohoSalesOrderController(
         Dictionary<string, object?> Doc,
         List<string> SoItemNos, // itemNo of each SoLines entry (same order) -- used to cut per-delivery-date groups
         bool NewDeal = false,
-        List<string>? QuoteRefs = null);
+        List<string>? QuoteRefs = null,
+        string? OwnerId = null);
 
     // POST /api/zoho/sales-order/create/{docId} { dealId, ...edited fields } — {docId} as a route
     // parameter (not buried inside the body) so DepartmentAccessFilter's docId-based module gate
@@ -866,7 +973,7 @@ public class ZohoSalesOrderController(
             // the document has none, and find the Deal's Quote for this document or create one. Every
             // Sales Order below links to that Quote. Skipped when every group is already in Zoho.
             var deal = a.Deal;
-            string? quoteId = null, quoteNo = null;
+            string? quoteId = null, quoteNo = null, dealOwnerId = null;
             if (groups.Any(g => !(states.TryGetValue(g.Key, out var st) && st.Posted)))
             {
                 if (a.NewDeal)
@@ -878,7 +985,8 @@ public class ZohoSalesOrderController(
                         a = a with { Subject = deal.DealName.Length > 50 ? deal.DealName[..50] : deal.DealName };
                 }
                 var quoteShipTo = a.ShipTo ?? groups.Select(g => GroupShipTo(existingHeader, g)).FirstOrDefault(x => x is not null);
-                (quoteId, quoteNo) = await EnsureQuoteAsync(docId, deal, a, quoteShipTo, groups, actor);
+                dealOwnerId = await DealOwnerIdAsync(deal.Id, a);
+                (quoteId, quoteNo) = await EnsureQuoteAsync(docId, deal, a, quoteShipTo, groups, actor, dealOwnerId);
             }
 
             for (var gi = 0; gi < groups.Count; gi++)
@@ -933,7 +1041,20 @@ public class ZohoSalesOrderController(
                         dealId: deal.Id, accountId: deal.AccountId!, subject: subject, accountCode: deal.AccountCode,
                         taxId: a.TaxId, customerRef: a.CustomerRef, deliveryDate: deliveryDate,
                         paymentTerms: a.PaymentTerms, paymentCurrency: a.PaymentCurrency, incoterms: a.Incoterms,
-                        shipTo: shipTo, items: items, remarks: a.Remarks, quoteId: quoteId, quoteNo: quoteNo);
+                        shipTo: shipTo, items: items, remarks: a.Remarks, quoteId: quoteId, quoteNo: quoteNo,
+                        ownerId: dealOwnerId);
+                    if (OwnerRejected(result))
+                    {
+                        // Deal Owner no longer usable in Zoho: send the Sales Order without it rather than fail.
+                        await repo.LogAuditAsync(docId, "SO", "CREATE", actor, fileName: a.Doc.GetStr("fileName"),
+                            detail: $"Zoho refused the Deal Owner as Sales Order owner ({result.Message}) — sent without it");
+                        dealOwnerId = null;
+                        result = await soClient.CreateAsync(
+                            dealId: deal.Id, accountId: deal.AccountId!, subject: subject, accountCode: deal.AccountCode,
+                            taxId: a.TaxId, customerRef: a.CustomerRef, deliveryDate: deliveryDate,
+                            paymentTerms: a.PaymentTerms, paymentCurrency: a.PaymentCurrency, incoterms: a.Incoterms,
+                            shipTo: shipTo, items: items, remarks: a.Remarks, quoteId: quoteId, quoteNo: quoteNo);
+                    }
                 }
                 catch (Exception e)
                 {
@@ -978,7 +1099,11 @@ public class ZohoSalesOrderController(
             if (newStatus == "POSTED" && !string.IsNullOrEmpty(firstZohoId))
             {
                 var folder = await ArchiveFolderAsync(docId, firstZohoId, deal.Id, deal.AccountCode);
-                try { await archive.EnqueueAsync(docId, DocumentTables.ForId(docId).Doc, "MGT", "SO", folder, deliveryDate: a.DeliveryDate); }
+                // File name PONUMBER_YYMMDD (SalesOrderFileName): the header delivery date, else the
+                // earliest line delivery date when the PO prints a date per line (12 Nov 2026).
+                var archiveDate = a.DeliveryDate is { Length: > 0 } hd ? hd
+                    : groups.Select(g => g.Date).Where(x => x.Length > 0).OrderBy(x => x).FirstOrDefault();
+                try { await archive.EnqueueAsync(docId, DocumentTables.ForId(docId).Doc, "MGT", "SO", folder, deliveryDate: archiveDate); }
                 catch (Exception e) { log.LogWarning(e, "Could not queue doc {DocId} for SharePoint (run sql/27 + sql/29?)", docId); }
             }
 
@@ -1139,6 +1264,8 @@ public class ZohoSalesOrderController(
         // Deal / Quote steps of the send (27 Oct 2026), shown the same way: the record that would be
         // created, or which existing one is used.
         const string createdOnSend = "(created on Send)";
+        // Quote / Sales Orders are owned by the Deal Owner (12 Nov 2026) -- shown in the payload too.
+        var payloadOwnerId = await DealOwnerIdAsync(a.NewDeal ? null : a.Deal.Id, a);
         var dealPart = new JsonObject();
         if (a.NewDeal)
         {
@@ -1168,7 +1295,9 @@ public class ZohoSalesOrderController(
         {
             quotePart["action"] = "create";
             var quoteShipTo = a.ShipTo ?? groups.Select(g => GroupShipTo(docHeader, g)).FirstOrDefault(x => x is not null);
-            quotePart["record"] = await BuildNewQuoteRecordAsync(a, a.NewDeal ? createdOnSend : a.Deal.Id, quoteShipTo, groups);
+            var quoteRecord = await BuildNewQuoteRecordAsync(a, a.NewDeal ? createdOnSend : a.Deal.Id, quoteShipTo, groups);
+            if (!string.IsNullOrWhiteSpace(payloadOwnerId)) quoteRecord["Owner"] = new JsonObject { ["id"] = payloadOwnerId };
+            quotePart["record"] = quoteRecord;
         }
 
         var records = new System.Text.Json.Nodes.JsonArray();
@@ -1184,7 +1313,7 @@ public class ZohoSalesOrderController(
                 deliveryDate: multi && g.Date.Length > 0 ? g.Date : a.DeliveryDate,
                 paymentTerms: a.PaymentTerms, paymentCurrency: a.PaymentCurrency, incoterms: a.Incoterms,
                 shipTo: GroupShipTo(docHeader, g) ?? a.ShipTo, items: items, remarks: a.Remarks,
-                quoteId: quoteIdForSo, quoteNo: quoteNoForSo);
+                quoteId: quoteIdForSo, quoteNo: quoteNoForSo, ownerId: payloadOwnerId);
             records.Add(record);
         }
 
@@ -1197,6 +1326,10 @@ public class ZohoSalesOrderController(
             ["_quote"] = quotePart,
             ["_salesOrders"] = records.Count,
             ["data"] = records,
+            // Sent next to "data" on each Quote / Sales Order insert (the Deal insert sends none, so
+            // Zoho runs its usual automation for a new Deal).
+            ["trigger"] = new System.Text.Json.Nodes.JsonArray(
+                ZohoSalesOrderClient.InsertTriggers.Select(t => (System.Text.Json.Nodes.JsonNode?)t).ToArray()),
         };
         return Ok(envelope);
     }

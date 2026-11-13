@@ -319,11 +319,13 @@ public class ZohoDealClient(ZohoClient zoho)
     /// </summary>
     public async Task<JsonObject> BuildCreateRecordAsync(string accountId, string? accountCode,
         string? deliveryDate, string? customerRef, string? paymentTerms, string? paymentCurrency, string? incoterms,
-        List<ZohoNewDealLine> lines)
+        List<ZohoNewDealLine> lines, string? ownerOverride = null)
     {
-        // Assign the Deal to the customer's responsible salesperson, rather than the API user.
+        // Assign the Deal to the customer's responsible salesperson, rather than the API user --
+        // or to the Sales person CS picked on the page (12 Nov 2026), e.g. when the Account Owner is
+        // no longer an active Zoho user and Zoho would reject the Owner id.
         var account = await zoho.GetByIdAsync("Accounts", accountId);
-        var ownerId = LookupId(account?["Owner"]);
+        var ownerId = string.IsNullOrWhiteSpace(ownerOverride) ? LookupId(account?["Owner"]) : ownerOverride.Trim();
         if (string.IsNullOrWhiteSpace(ownerId))
             throw new InvalidOperationException("Cannot create a Deal: the customer's Account Owner could not be determined.");
         var module = await ResolveModuleAsync();

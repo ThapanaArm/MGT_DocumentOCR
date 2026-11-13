@@ -161,6 +161,13 @@ public partial class DocumentRepository(Db db)
 
     // ext: {header, lines, provider, confidence, confidenceNote, tokensIn, tokensOut, cost, costIn,
     // costOut, costCurrency, rawText} — the same shape app/ocr_engine.py's extract() returns.
+    /// <summary>SET fragment for the UPDATE that makes a document POSTED (13 Nov 2026): JobTaskTimeMs =
+    /// milliseconds from JobStartedAt to now, stored as a plain int like OcrDurationMs. NULL without a
+    /// JobStartedAt, or past int (about 24.8 days). DATEDIFF_BIG so a long wait can never fail the post.</summary>
+    public const string JobTaskTimeMsSet =
+        "JobTaskTimeMs=CASE WHEN JobStartedAt IS NOT NULL AND DATEDIFF_BIG(millisecond, JobStartedAt, SYSDATETIME()) BETWEEN 0 AND 2147483647 " +
+        "THEN CAST(DATEDIFF_BIG(millisecond, JobStartedAt, SYSDATETIME()) AS int) END";
+
     public async Task<int> CreateDocumentAsync(string module, Dictionary<string, object?> ext, string fileName,
         string stored, int size, string user, string apDocCategory, int? durationMs = null,
         string? salesOrg = null, DateTime? jobStartedAt = null)
@@ -182,7 +189,7 @@ public partial class DocumentRepository(Db db)
 
         // Job Number / Job Tasktime (sql/34_job_tasktime.sql): a document created from an upload gets a
         // readable job number (JOB + upload date yyMMdd + running number) and the time its upload
-        // started; JobTaskTime (minutes to a successful SAP/Zoho post) is a computed column from that.
+        // started; JobTaskTimeMs (milliseconds to a successful SAP/Zoho post) is written when it becomes POSTED (JobTaskTimeMsSet).
         var docId = await db.InsertReturningIdAsync($"""
             DECLARE @jobSeq bigint = NULL, @jobNumber nvarchar(20) = NULL;
             IF @jobStartedAt IS NOT NULL
@@ -284,7 +291,7 @@ public partial class DocumentRepository(Db db)
             """, new { docId, module, extDocNo, endpoint, payloadJson, success = success ? 1 : 0, message, user,
                        salesOrg = string.IsNullOrWhiteSpace(salesOrg) ? null : salesOrg.Trim() }, tx);
         if (success)
-            await conn.ExecuteAsync($"UPDATE {docT} SET Status='POSTED', SapDocNo=@extDocNo, CompanyCode=@companyCode, PostedAt=SYSDATETIME(), PostedBy=@user, UpdatedAt=SYSDATETIME() WHERE DocId=@docId",
+            await conn.ExecuteAsync($"UPDATE {docT} SET Status='POSTED', SapDocNo=@extDocNo, CompanyCode=@companyCode, PostedAt=SYSDATETIME(), {JobTaskTimeMsSet}, PostedBy=@user, UpdatedAt=SYSDATETIME() WHERE DocId=@docId",
                 new { extDocNo, companyCode, user, docId }, tx);
         await tx.CommitAsync();
     }
