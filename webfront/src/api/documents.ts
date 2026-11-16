@@ -40,6 +40,8 @@ export interface DocModel {
   partnerCode?: string;
   sapDocNo?: string;
   sapDocNos?: string[];
+  /** Deferred VAT JVs posted from this document: one per tax invoice. */
+  deferredJvs?: { reference: string; journalEntry: string; postedAt?: string; postedBy?: string }[];
   postedAt?: string;
   createdAt?: string;
   createdBy?: string;
@@ -240,6 +242,21 @@ export interface PurchaseOrderReconciliationBatchResult {
 /** Capture reconciliation snapshots for every PO referenced by AP/II documents. */
 export const reconcileAllPurchaseOrders = () =>
   api.post<PurchaseOrderReconciliationBatchResult>('/api/reconcile/run');
+
+/** Fills the empty Assignment / Text of the posted supplier invoices' journal entries
+ *  (Journal Entry - Change). One result per SAP supplier invoice of the document. */
+export const fillJournalEntryTexts = (id: number) =>
+  api.post<{ results: { supplierInvoice: string; fiscalYear: string; ok: boolean; message: string }[] }>(
+    '/api/documents/' + id + '/fill-je-texts', {});
+
+/** Posts the deferred-VAT transfer journal entries (one per tax invoice) straight to SAP. */
+export const postDeferredVatJv = (id: number, postingDate: string, force = false) =>
+  api.post<{
+    ok: boolean;
+    postingDate: string;
+    results: { reference: string; ok: boolean; accountingDocument: string; message: string }[];
+    notSent: string[];
+  }>('/api/documents/' + id + '/post-deferred-vat-jv', { postingDate, force });
 
 export const reopenDeletedApInvoice = (id: number, sapDocNo: string) =>
   api.post<DocModel>('/api/documents/' + id + '/reopen-deleted-ap-invoice', { sapDocNo });

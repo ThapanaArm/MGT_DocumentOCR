@@ -237,8 +237,22 @@ public partial class DocumentRepository(Db db)
             {
                 if (l.Get("extra") is not Dictionary<string, object?> extra) continue;
                 var taxId = Regex.Replace(extra.GetStr("issuerTaxId"), @"\D", "");
-                if (taxId.Length != 13) continue;
                 var name = extra.GetStr("issuerName").Trim();
+                // The read missed the Tax ID but the issuer is one we already know by name: take
+                // its Tax ID from the table (the person still sees it, flagged as from the table).
+                if (taxId.Length != 13 && name.Length > 0)
+                {
+                    var known = await conn.QueryFirstOrDefaultAsync<string?>(
+                        "SELECT TOP (1) TaxId FROM ocr.SupplierTaxMap WHERE UPPER(LTRIM(RTRIM(SupplierName)))=UPPER(@name) ORDER BY IsVerified DESC",
+                        new { name }, tx);
+                    if (!string.IsNullOrWhiteSpace(known))
+                    {
+                        taxId = known.Trim();
+                        extra["issuerTaxId"] = taxId;
+                        extra["issuerTaxIdFrom"] = "SupplierTaxMap";
+                    }
+                }
+                if (taxId.Length != 13) continue;
                 var row = await conn.QueryFirstOrDefaultAsync(
                     "SELECT SupplierName, IsVerified FROM ocr.SupplierTaxMap WHERE TaxId=@taxId", new { taxId }, tx);
                 if (row == null)
@@ -246,7 +260,7 @@ public partial class DocumentRepository(Db db)
                     if (name.Length == 0) continue;
                     await conn.ExecuteAsync(
                         "INSERT ocr.SupplierTaxMap(TaxId,SupplierName,IsVerified,FirstDocId) VALUES(@taxId,@name,0,@docId)",
-                        new { taxId, name = name.Length > 200 ? name[..200] : name, docId }, tx);
+                        new { taxId, name = name.Length > 50 ? name[..50].TrimEnd() : name, docId }, tx);
                     extra["issuerMap"] = "NEW";
                     continue;
                 }

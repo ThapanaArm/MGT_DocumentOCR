@@ -35,7 +35,7 @@ public static class DeferredVatReversal
     }
 
     /// <summary>One entry per tax invoice whose VAT is still deferred: the text SAP's own documents
-    /// carry ("PROMPT,INV.PI-2608010"), that invoice's number, and its VAT amount.</summary>
+    /// carry (the issuer's name -- no invoice number since 2026-11-11), that invoice's number, and its VAT amount.</summary>
     public static List<(string Text, string Assignment, double Amount)> Pairs(
         Dictionary<string, object?> doc)
     {
@@ -49,13 +49,15 @@ public static class DeferredVatReversal
             var deferred = kind.Length > 0
                 ? string.Equals(kind, "DEFERRED", StringComparison.OrdinalIgnoreCase)
                 : code.StartsWith('D') || code.StartsWith('d');
-            if (!deferred) continue;
+            if (!deferred || !ClaimedNow(t)) continue;
 
-            var issuer = ShortName(t.GetStr("issuerName"));
+            // AP, 2026-11-11: Input tax text = the issuer's name only (Master 8 "Tax Invoice
+            // Issuer" name, max 50), no ",INV.<no>"; the tax invoice number stays the Assignment.
+            var issuer = MgtOcr.Ocr.VisionPrompt.EnglishIssuerName(t.GetStr("issuerName").Trim()).ToUpperInvariant();
+            if (issuer.Length > 50) issuer = issuer[..50].TrimEnd();
             var docNo = t.GetStr("taxDocNo").Trim();
-            var text = issuer.Length > 0 && docNo.Length > 0 ? $"{issuer},INV.{docNo}"
-                : issuer.Length > 0 ? issuer
-                : docNo;
+            var header = doc.Get("header") as Dictionary<string, object?> ?? doc;
+            var text = IssuerInvText(header, issuer, t.GetStr("issuerTaxId"), docNo);
             pairs.Add((text, docNo, amount));
         }
         return pairs;
@@ -68,6 +70,53 @@ public static class DeferredVatReversal
     /// the database once somebody saves the document. An export read the stored header, found no
     /// tax rows on a document nobody had saved yet, and answered "no deferred input tax" while the
     /// screen was showing three tax rows — which is exactly as confusing as it sounds.</summary>
+    /// <summary>
+    /// Tax rows that cannot go out because the issuer's Tax ID is missing or not 13 digits.
+    /// Required by Accounting (2026-11-12): every tax invoice on the input tax report carries its
+    /// issuer's Tax ID, and it is printed on every one of these papers. "PI-2608011 (PROMPT …)".
+    /// </summary>
+    public static List<string> MissingTaxIds(Dictionary<string, object?> doc)
+    {
+        var missing = new List<string>();
+        var header = doc.Get("header") as Dictionary<string, object?> ?? doc;
+        var invoiceNo = header.GetStr("invoiceNo").Trim();
+        static string First(string? n)
+        {
+            var v = (n ?? "").Trim();
+            var cut = v.IndexOfAny([' ', ',']);
+            return (cut > 0 ? v[..cut] : v).ToUpperInvariant();
+        }
+        var vendorWord = First(header.GetStr("vendorName"));
+        foreach (var t in TaxRows(doc))
+        {
+            if (Num(t.Get("docCurrencyAmt")) == 0) continue;
+            var code = t.GetStr("taxCode").Trim().ToUpperInvariant();
+            if (code is "VX" or "") continue;
+            // The Customs Department's import VAT has no Tax ID on its receipt and the input tax
+            // report leaves it blank (Accounting, 2026-11-12) — it is never asked for.
+            if (IsImportVat(t)) continue;
+            // The invoicing party's OWN tax invoice (a goods invoice like Namsiang NS00-ITD26091326,
+            // whose tax row is computed from the header and names no issuer): the supplier invoice
+            // posts against that supplier's Business Partner, which carries the Tax ID, so the
+            // report has it. Only tax invoices from somebody else need the ID on the row.
+            var rowNo = t.GetStr("taxDocNo").Trim();
+            var rowIssuer = First(t.GetStr("issuerName"));
+            if (rowNo.Length == 0 || rowIssuer.Length == 0
+                || string.Equals(rowNo, invoiceNo, StringComparison.OrdinalIgnoreCase)
+                || (vendorWord.Length > 0 && rowIssuer == vendorWord)) continue;
+            var digits = new string(t.GetStr("issuerTaxId").Where(char.IsDigit).ToArray());
+            if (digits.Length == 13) continue;
+            var doc_ = t.GetStr("taxDocNo").Trim();
+            var who = t.GetStr("issuerName").Trim();
+            missing.Add($"{(doc_.Length > 0 ? doc_ : "(no tax invoice no.)")}{(who.Length > 0 ? $" ({who})" : "")}");
+        }
+        return missing;
+    }
+
+    public static string MissingTaxIdMessage(List<string> missing) =>
+        "ยังไม่มีเลขประจำตัวผู้เสียภาษี (Tax ID 13 หลัก) ของผู้ออกใบกำกับภาษี: " + string.Join(", ", missing)
+        + " — ตรวจในเอกสารอีกครั้ง (มักพิมพ์ใต้ชื่อผู้ออกใบหรือมุมบน) แล้วกรอกในแท็บ Tax ให้ครบก่อนส่ง";
+
     public static List<Dictionary<string, object?>> TaxRows(Dictionary<string, object?> doc)
     {
         var header = doc.Get("header") as Dictionary<string, object?> ?? doc;
@@ -203,6 +252,30 @@ public static class DeferredVatReversal
 
     /// <summary>The voucher's own reference line: what this entry is and which invoice it belongs
     /// to, within the 25 characters SAP's header text allows.</summary>
+    /// <summary>Whether a posted-deferred tax row is moved to V1 by the Input VAT journal entry.
+    /// AP, 2026-11-12: only the rows the user chose as V1 on the Tax tab (posted D1 on the shipping
+    /// bundle, see <see cref="EffectiveTaxRows"/>, which keeps the choice in _readAs). A row the user
+    /// chose as D1 stays deferred — it is claimed later — so it gets no entry and must not show on
+    /// the input tax report (JV 100000762, PROMPT PI-2608011, should not exist).</summary>
+    public static bool ClaimedNow(Dictionary<string, object?> taxRow) =>
+        taxRow.GetStr("_readAs").Trim().StartsWith("V", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The text of both lines of the Input VAT journal entry: the issuer's full English
+    /// name ("PORT AUTHORITY OF THAILAND"), which the input tax report shows as the vendor.</summary>
+    public static string IssuerInvText(Dictionary<string, object?> header, string issuerName, string? taxId, string docNo)
+    {
+        // The JV is G/L only, so the input tax report prints this text in its VENDOR column
+        // (AP, 2026-11-16: "PORT,INV.2026-04-015694" should read just the vendor,
+        // "PORT AUTHORITY OF THAILAND"). The tax invoice number already has its own column
+        // (Reference), so the text is the issuer's full name alone. The abbreviation stands in only
+        // when no name was read, and the number only when there is neither.
+        var english = MgtOcr.Ocr.VisionPrompt.EnglishIssuerName((issuerName ?? "").Trim()).ToUpperInvariant();
+        var name = english.Length > 0 ? english : SupplierShortNames.Lookup(header, taxId);
+        var no = (docNo ?? "").Trim();
+        var text = name.Length > 0 ? name : no.Length > 0 ? $"INV.{no}" : "";
+        return text.Length > 50 ? text[..50].TrimEnd() : text;
+    }
+
     public static string Reference(Dictionary<string, object?> docOrHeader)
     {
         var header = docOrHeader.Get("header") as Dictionary<string, object?> ?? docOrHeader;

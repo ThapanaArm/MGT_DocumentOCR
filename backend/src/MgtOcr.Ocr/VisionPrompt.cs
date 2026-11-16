@@ -45,7 +45,7 @@ public static partial class VisionPrompt
         {
           "header": {
             "docType": "ประเภทเอกสาร เช่น ใบกำกับภาษี/ใบแจ้งหนี้",
-            "invoiceNo": "เลขที่ใบกำกับภาษี/ใบแจ้งหนี้", "invoiceDate": "วันที่เอกสาร YYYY-MM-DD",
+            "invoiceNo": "เลขที่ใบกำกับภาษี/ใบแจ้งหนี้ของผู้ขาย ห้ามตอบเลขใบสั่งซื้อ (PO เช่น 2230000565); ถ้าเป็นชุดเอกสารสินค้านำเข้า (MatDoc + ใบสั่งซื้อ + ใบขนสินค้า) ให้ใช้เลขใบแจ้งหนี้ของผู้ขายสินค้า ซึ่งพิมพ์ในใบขนสินค้า/กศก.99/1 ช่อง \"เลขที่บัญชีราคาสินค้า\" หลังคำว่า INVNO. (เช่น KCCCI260715-012) หรือในหน้า Commercial Invoice", "invoiceDate": "วันที่เอกสาร YYYY-MM-DD",
             "postingDate": "วันที่เดียวกับ invoiceDate ถ้าไม่มีระบุแยก",
             "vendorName": "ชื่อผู้ขาย/ผู้ออกใบกำกับภาษี (ไม่ใช่บริษัทผู้ซื้อ/ผู้รับเอกสาร)",
             "vendorTaxId": "เลขทะเบียนนิติบุคคล/ผู้เสียภาษี 13 หลักของผู้ขาย", "branch": "สาขาของผู้ขาย",
@@ -53,7 +53,8 @@ public static partial class VisionPrompt
             "refDocType": "ประเภทของรายการในเอกสารนี้ ตอบเป็น \"1\" \"2\" \"3\" หรือ \"\": 1 = มีแต่รายการสินค้า/บริการ (goods/service items), 2 = มีแต่ต้นทุนอื่นที่วางแผนไว้ เช่น ค่าขนส่ง ค่าประกัน ค่าพิธีการศุลกากร ค่าคลังสินค้า (planned delivery costs), 3 = มีทั้งสองอย่าง, ถ้าดูไม่ออกให้ใส่ \"\"",
             "currency": "รหัสสกุลเงิน 3 ตัวอักษร เช่น THB", "paymentTerms": "เงื่อนไขการชำระเงิน",
             "goodsSupplier": "ชื่อผู้ขายสินค้าในช่อง SUPPLIER ที่หัวฟอร์ม FORM SHIPPING EXPENSE (เช่น KIMEX) ไม่ใช่ผู้ให้บริการขนส่ง ถ้าไม่มีให้ใส่สตริงว่าง",
-            "goodsInvoiceNo": "เลขในช่อง INVOICE NO. ที่หัวฟอร์ม FORM SHIPPING EXPENSE (เช่น 2230000581) ถ้าไม่มีให้ใส่สตริงว่าง",
+            "goodsInvoiceNo": "เลขที่ใบแจ้งหนี้ (commercial invoice) ของผู้ขายสินค้า เช่น KCCCI260715-012 ให้อ่านจากใบขนสินค้าขาเข้า/ใบแสดงรายการภาษีอากร (กศก.99/1) ช่อง \"เลขที่บัญชีราคาสินค้า\" ที่พิมพ์ว่า INVNO.<เลข> <วันที่> (ตอบเฉพาะเลข ไม่ต้องมีคำว่า INVNO. และวันที่) หรือจากหน้า Commercial Invoice ของผู้ขายสินค้า; ห้ามตอบเลขใบสั่งซื้อ (PO เช่น 2230000565) ถ้าไม่มีให้ใส่สตริงว่าง",
+            "customsInvoiceNo": "เลขหลัง INVNO. ในช่อง \"เลขที่บัญชีราคาสินค้า\" ของใบขนสินค้าขาเข้า/กศก.99/1 (เช่น KCCCI260715-012) ถ้าไม่มีหน้านี้ให้ใส่สตริงว่าง",
             "exchangeRate": "อัตราแลกเปลี่ยนจากหน้าตารางอัตราแลกเปลี่ยนของธนาคารแห่งประเทศไทยที่แนบมาในชุดเอกสาร ให้เอาเฉพาะ \"อัตราขายถ่วงเฉลี่ย\" ของสกุลเงินในใบแจ้งหนี้ (เช่น USD = 33.5086) ตอบเป็นตัวเลขอย่างเดียว ถ้าในชุดไม่มีหน้านี้ให้ใส่สตริงว่าง ห้ามเดาหรือคำนวณเอง",
             "exchangeRateDate": "วันที่ของตารางอัตราแลกเปลี่ยนหน้านั้น YYYY-MM-DD ถ้าไม่มีให้ใส่สตริงว่าง",
             "poTotalAmount": 0,
@@ -61,7 +62,7 @@ public static partial class VisionPrompt
             "poLines": [{"extCode": "รหัส/ล็อตสินค้าตามใบสั่งซื้อ", "desc": "ชื่อสินค้า",
                          "qty": 0, "uom": "หน่วยนับ", "price": 0, "amount": 0}],
             "subTotal": 0, "vatRate": 7, "vatAmount": 0, "whtAmount": 0, "totalAmount": 0,
-            "sourceDocs": [{"docType": "Invoice / Tax Invoice / Receipt / Debit Note", "issuerName": "ชื่อผู้ออกเอกสาร", "docNo": "เลขที่เอกสาร", "docDate": "YYYY-MM-DD", "costType": "Local หรือ Insurance หรือ Fee หรือ Overseas", "currency": "THB", "nonVatAmount": 0, "amountBeforeVat": 0, "vatAmount": 0, "totalAmount": 0, "includedIn": "", "shipper": "", "blNo": "", "shipperInvoiceNo": ""}]
+            "sourceDocs": [{"docType": "Invoice / Tax Invoice / Receipt / Debit Note", "issuerName": "ชื่อผู้ออกเอกสารเป็นภาษาอังกฤษเท่านั้น (ใช้ชื่ออังกฤษที่พิมพ์ในใบ ถ้ามีแต่ภาษาไทยให้แปลเป็นชื่ออังกฤษทางการขององค์กร หรือถอดเสียงเป็นอักษรอังกฤษถ้าเป็นชื่อบุคคล เช่น วิเชียร ยอดแก้ว = WICHIAN YODKAEW)", "docNo": "เลขที่เอกสาร", "docDate": "YYYY-MM-DD", "costType": "Local หรือ Insurance หรือ Fee หรือ Overseas", "currency": "THB", "nonVatAmount": 0, "amountBeforeVat": 0, "vatAmount": 0, "totalAmount": 0, "includedIn": "", "shipper": "", "blNo": "", "shipperInvoiceNo": ""}]
           },
           "lines": [{"extCode": "รหัสสินค้า/บริการถ้ามี", "desc": "ชื่อ/รายละเอียดสินค้าหรือบริการ",
                      "qty": 0, "uom": "หน่วยนับ", "price": 0, "amount": 0,
@@ -72,7 +73,7 @@ public static partial class VisionPrompt
                      "taxKind": "เฉพาะแถว VAT: \"INPUT\" ถ้ามาจากใบกำกับภาษี/ใบเสร็จรับเงิน หรือ \"DEFERRED\" ถ้ามาจากใบแจ้งหนี้/ใบวางบิล แถวอื่นใส่สตริงว่าง",
                      "taxDocNo": "เฉพาะแถว VAT: เลขที่ใบกำกับภาษีของใบนั้น แถวอื่นใส่สตริงว่าง",
                      "taxDocDate": "เฉพาะแถว VAT: วันที่ของใบกำกับภาษีนั้น YYYY-MM-DD แถวอื่นใส่สตริงว่าง",
-                     "issuerName": "เฉพาะแถว VAT: ชื่อผู้ออกใบกำกับภาษีตามที่พิมพ์ในใบ แถวอื่นใส่สตริงว่าง",
+                     "issuerName": "เฉพาะแถว VAT: ชื่อผู้ออกใบกำกับภาษีเป็นภาษาอังกฤษเท่านั้น (ชื่ออังกฤษที่พิมพ์ในใบ ถ้ามีแต่ไทยให้แปลเป็นชื่ออังกฤษทางการ หรือถอดเสียงถ้าเป็นชื่อบุคคล) แถวอื่นใส่สตริงว่าง",
                      "issuerTaxId": "เฉพาะแถว VAT: เลขประจำตัวผู้เสียภาษี 13 หลักของผู้ออกใบ (ตัวเลขล้วน ไม่ต้องมีขีด) แถวอื่นใส่สตริงว่าง",
                      "issuerBranch": "เฉพาะแถว VAT: รหัสสาขาของผู้ออกใบ 4 หลัก สำนักงานใหญ่ = \"0000\" สาขาที่ 1 = \"0001\" ห้ามตอบ 5 หลัก แถวอื่นใส่สตริงว่าง",
                      "baseAmount": 0}]
@@ -182,6 +183,11 @@ public static partial class VisionPrompt
             d.TryGetValue(k, out var o) && o != null && double.TryParse(o.ToString(), System.Globalization.NumberStyles.Any,
                 System.Globalization.CultureInfo.InvariantCulture, out var n) ? n : 0;
         var src = docs.OfType<Dictionary<string, object?>>().ToList();
+        // English names only (AP, 2026-11-11): the Shipping Check list showed "การท่าเรือแห่งประเทศไทย"
+        // and "กรมศุลกากร" where the model kept the Thai.
+        foreach (var d in src)
+            if (d.TryGetValue("issuerName", out var nm) && nm?.ToString() is { Length: > 0 } name)
+                d["issuerName"] = NormIssuerName(name);
         foreach (var l in doc.Lines)
         {
             if (l.NonVatAmount != 0 || l.BeforeVatAmount != 0 || l.VatAmount != 0) continue;
@@ -308,7 +314,7 @@ public static partial class VisionPrompt
 
     private const string SupportingSchema = """
         {
-          "header": {"sourceDocs": [{"docType": "Invoice / Tax Invoice / Receipt / Debit Note", "issuerName": "ชื่อผู้ออกเอกสาร", "docNo": "เลขที่เอกสาร", "docDate": "YYYY-MM-DD", "costType": "Local หรือ Insurance หรือ Fee หรือ Overseas", "currency": "THB", "nonVatAmount": 0, "amountBeforeVat": 0, "vatAmount": 0, "totalAmount": 0, "includedIn": "", "shipper": "", "blNo": "", "shipperInvoiceNo": ""}]},
+          "header": {"sourceDocs": [{"docType": "Invoice / Tax Invoice / Receipt / Debit Note", "issuerName": "ชื่อผู้ออกเอกสารเป็นภาษาอังกฤษเท่านั้น (ใช้ชื่ออังกฤษที่พิมพ์ในใบ ถ้ามีแต่ภาษาไทยให้แปลเป็นชื่ออังกฤษทางการขององค์กร หรือถอดเสียงเป็นอักษรอังกฤษถ้าเป็นชื่อบุคคล เช่น วิเชียร ยอดแก้ว = WICHIAN YODKAEW)", "docNo": "เลขที่เอกสาร", "docDate": "YYYY-MM-DD", "costType": "Local หรือ Insurance หรือ Fee หรือ Overseas", "currency": "THB", "nonVatAmount": 0, "amountBeforeVat": 0, "vatAmount": 0, "totalAmount": 0, "includedIn": "", "shipper": "", "blNo": "", "shipperInvoiceNo": ""}]},
           "lines": [{"extCode": "VAT หรือ WHT หรือ DUTY เท่านั้น", "desc": "",
                      "qty": 1, "uom": "EA", "price": 0, "amount": 0, "vendorCode": "",
                      "taxKind": "", "taxDocNo": "", "taxDocDate": "",
@@ -331,7 +337,7 @@ public static partial class VisionPrompt
         "- ทุกแถว VAT ต้องกรอกข้อมูลของใบนั้นให้ครบ เพราะต้องนำไปออกรายงานภาษีซื้อ: "
             + "taxKind = \"INPUT\" ถ้าเป็นใบกำกับภาษี/ใบเสร็จรับเงิน หรือ \"DEFERRED\" ถ้าเป็นใบแจ้งหนี้/ใบวางบิล, "
             + "taxDocNo = เลขที่ใบ, taxDocDate = วันที่ของใบ, "
-            + "issuerName = ชื่อผู้ออกใบ (ผู้ขาย ไม่ใช่ MEGACHEM/GREEN LEAF ที่เป็นผู้ซื้อ) เป็นภาษาอังกฤษ, "
+            + "issuerName = ชื่อผู้ออกใบ (ผู้ขาย ไม่ใช่ MEGACHEM/GREEN LEAF ที่เป็นผู้ซื้อ) เป็นภาษาอังกฤษเท่านั้น ห้ามมีอักษรไทย ถ้าในใบมีแต่ชื่อไทยให้แปลเป็นชื่ออังกฤษทางการ หรือถอดเสียงถ้าเป็นชื่อบุคคล, "
             + "issuerTaxId = เลขผู้เสียภาษี 13 หลัก (ตัวเลขล้วน) ถ้าในใบไม่มีให้ใส่สตริงว่าง ห้ามเดา, "
             + "issuerBranch = รหัสสาขา 4 หลัก สำนักงานใหญ่ = \"0000\" (ห้าม 5 หลัก), baseAmount = มูลค่าก่อน VAT ของใบนั้น\n" +
         "- WHT: ภาษีหัก ณ ที่จ่ายที่พบในใบเหล่านี้ 1 แถวต่อ 1 รายการ extCode = \"WHT\", "
@@ -410,7 +416,8 @@ public static partial class VisionPrompt
         "desc = คอลัมน์ DESCRIPTION, amount = price = คอลัมน์ AMOUNT, qty = 1, extCode = \"COST\", " +
         "vendorCode = คอลัมน์ VENDOR ของแถวนั้น (ถ้าว่างหรือเป็น #N/A ให้ใส่ \"\"), " +
         "costType = คอลัมน์ COSTS ของแถวนั้น ซึ่งมีได้ 4 ค่า Local / Insurance / Fee / Overseas (ตอบตามที่พิมพ์ในฟอร์ม ห้ามเดา) " +
-        "โดยที่หัวฟอร์มให้อ่าน header.goodsSupplier = ช่อง SUPPLIER (ผู้ขายสินค้า เช่น KIMEX) และ header.goodsInvoiceNo = ช่อง INVOICE NO. " +
+        "โดยที่หัวฟอร์มให้อ่าน header.goodsSupplier = ช่อง SUPPLIER (ผู้ขายสินค้า เช่น KIMEX); ช่อง INVOICE NO. ของฟอร์มมักเป็นเลข PO จึงห้ามใช้เป็น header.goodsInvoiceNo " +
+        "— header.goodsInvoiceNo ต้องเป็นเลขใบแจ้งหนี้ของผู้ขายสินค้าจากใบขนสินค้า (เลขที่บัญชีราคาสินค้า INVNO.…) ตามที่อธิบายไว้ใน header " +
         "ข้ามแถวที่ AMOUNT เป็น \"-\" หรือ 0 และห้ามใส่แถว TOTAL/Cost variance/MEMO" +
         "\n- (เฉพาะกรณีที่มีหน้า FORM SHIPPING EXPENSE) extCode = \"COST\" ของแถวในฟอร์มมีไว้บอกว่าเป็นค่าขนส่ง/พิธีการ/ค่าธรรมเนียม ไม่ใช่สินค้า " +
         "จะได้ไม่ถูกนำไปจับคู่กับรหัสสินค้าใน SAP ยกเว้นแถวภาษีและอากรที่ใช้ extCode เฉพาะของมัน (WHT, VAT, DUTY) ตามกติกาด้านล่าง " +
@@ -469,7 +476,15 @@ public static partial class VisionPrompt
         "baseAmount = มูลค่าสินค้า/บริการก่อนภาษีของใบนั้น (ต้อง ≈ ยอด VAT หารด้วย 0.07) " +
         "ข้อมูลเหล่านี้ให้อ่านจากหัวของใบกำกับภาษีใบนั้นโดยตรง ห้ามคัดลอกของใบอื่นหรือของบริษัทผู้ซื้อ" +
         "ส่วนภาษีมูลค่าเพิ่มในใบเสร็จกรมศุลกากร (ภาษีซื้อขาเข้า) ให้ใส่เป็นแถว VAT ด้วย โดยใช้ vendorCode ของกรมศุลกากรตามที่ปรากฏในฟอร์ม " +
-        "(แถวเดียวกับ CUSTOMS FEE / EXCISE FEE) เพื่อให้ไปอยู่กับเอกสาร MIRO ของ vendor รายนั้น";
+        "(แถวเดียวกับ CUSTOMS FEE / EXCISE FEE) เพื่อให้ไปอยู่กับเอกสาร MIRO ของ vendor รายนั้น" +
+        // AP, 2026-11-13: the customs receipt (ใบเสร็จรับเงิน กศก.123) carries two numbers. The long
+        // one at the top left (6908045016610000108) is the payment reference; Accounting posts —
+        // and the input tax report shows — the "เลขที่ชำระอากร" (0152-090242, PRD 5100001208).
+        " ใบเสร็จรับเงินกรมศุลกากร (กศก.123): taxDocNo และ docNo ใน sourceDocs = เลขในช่อง \"เลขที่ชำระอากร/วันเดือนปี\" " +
+        "(รูปแบบ 0152-090242 คือตัวเลข 4 หลัก ขีด 6 หลัก ตอบเฉพาะเลข ไม่เอาวันที่ที่อยู่หลัง /) " +
+        "ห้ามใช้เลขยาวที่มุมซ้ายบนของใบ (เช่น 6908045016610000108) และห้ามใช้เลขที่ใบขนสินค้า (A004-…) " +
+        "taxDocDate = วันที่หลัง / ในช่องเดียวกัน (04-08-69 คือ พ.ศ. 2569 = 2026-08-04) " +
+        "แถว DUTY ของใบเสร็จเดียวกันใช้ taxDocNo เดียวกันนี้";
 
     // GLC is the default: everything written before MGT came into scope was GLC's rules, and a
     // document with no company stamped on it keeps reading exactly as it did before.
@@ -573,6 +588,15 @@ public static partial class VisionPrompt
     // Parses a model's raw text response (expected to contain one JSON object, possibly with
     // surrounding prose despite instructions not to) into a ParsedDocument, or null if no JSON
     // object could be found/parsed.
+    /// <summary>"INVNO.KCCCI260715-012 15/07/2026" -> "KCCCI260715-012".</summary>
+    private static string CleanInvNo(string v)
+    {
+        var s = (v ?? "").Trim();
+        s = Regex.Replace(s, @"^\s*INV(?:OICE)?\s*NO\.?\s*[:.]?\s*", "", RegexOptions.IgnoreCase);
+        var cut = s.IndexOf(' ');
+        return (cut > 0 ? s[..cut] : s).Trim().TrimEnd(',', '.');
+    }
+
     public static ParsedDocument? ParseResponse(string raw, string module, string provider, double confidence, string rawTextForRecord)
     {
         var m = Regex.Match(raw, @"\{.*\}", RegexOptions.Singleline);
@@ -587,6 +611,52 @@ public static partial class VisionPrompt
             foreach (var prop in hEl.EnumerateObject())
                 if (h.ContainsKey(prop.Name))
                     h[prop.Name] = JsonElementToObject(prop.Value);
+
+            // A bundle for several purchase orders: one entry per FORM SHIPPING EXPENSE, in the
+            // order the MEMO lists them ("CONSOLIDATED 3 Pos #2230000511, 2230000604, 2230000605"),
+            // with the goods supplier's invoice number printed on that form.
+            if (hEl.TryGetProperty("poList", out var pl) && pl.ValueKind == JsonValueKind.Array)
+            {
+                var list = new List<object?>();
+                foreach (var e in pl.EnumerateArray())
+                {
+                    var po = Regex.Match(GetStr(e, "po"), @"\d{10}").Value;
+                    if (po.Length == 0 || list.Any(x => ((Dictionary<string, object?>)x!)["po"]?.ToString() == po)) continue;
+                    list.Add(new Dictionary<string, object?>
+                    {
+                        ["po"] = po,
+                        ["goodsInvoiceNo"] = CleanInvNo(GetStr(e, "goodsInvoiceNo")),
+                        ["grDoc"] = Regex.Match(GetStr(e, "grDoc"), @"\d{10}").Value,
+                    });
+                }
+                if (list.Count > 1)
+                {
+                    h["poList"] = list;
+                    h["poRef"] = string.Join(", ", list.Select(x => ((Dictionary<string, object?>)x!)["po"]));
+                }
+            }
+
+            // The goods supplier's own invoice number is the one on the import declaration
+            // (กศก.99/1 "เลขที่บัญชีราคาสินค้า INVNO.KCCCI260715-012 15/07/2026"), not the FORM
+            // SHIPPING EXPENSE's INVOICE NO. box, which carries the PO (2230000565) — AP, 2026-11-12.
+            // It wins whenever the read found it; a goods invoice that is only the PO is dropped.
+            if (h.ContainsKey("goodsInvoiceNo"))
+            {
+                var customs = hEl.TryGetProperty("customsInvoiceNo", out var ci) ? CleanInvNo(ci.ToString()) : "";
+                var goods = CleanInvNo(Convert.ToString(h["goodsInvoiceNo"]) ?? "");
+                var po = (Convert.ToString(h.GetValueOrDefault("poRef")) ?? "").Trim();
+                if (customs.Length > 0) goods = customs;
+                else if (goods.Length > 0 && (goods == po || Regex.IsMatch(goods, @"^2230\d{6}$"))) goods = "";
+                h["goodsInvoiceNo"] = goods;
+
+                // An imported-goods bundle keyed against the PO (Goods/service items, document
+                // #929) was read with Invoice No. = the PO, 2230000565. The supplier's invoice is
+                // the one on the import declaration; it replaces a PO-looking invoice number, and
+                // only that — a shipping agent's own "PI-2608011" is left alone.
+                var inv = (Convert.ToString(h.GetValueOrDefault("invoiceNo")) ?? "").Trim();
+                if (goods.Length > 0 && (inv.Length == 0 || inv == po || Regex.IsMatch(inv, @"^2230\d{6}$")))
+                    h["invoiceNo"] = goods;
+            }
         }
 
         var lines = new List<LineItem>();
@@ -599,6 +669,7 @@ public static partial class VisionPrompt
                     ExtCode = GetStr(ln, "extCode"), Desc = GetStr(ln, "desc"),
                     PoItem = GetStr(ln, "poItem").Trim(),
                     CostType = GetStr(ln, "costType").Trim(),
+                    PoRef = Regex.Match(GetStr(ln, "poRef"), @"\d{10}").Value,
                     NonVatAmount = GetNum(ln, "nonVatAmount"),
                     BeforeVatAmount = GetNum(ln, "beforeVatAmount"),
                     VatAmount = GetNum(ln, "vatAmount"),
@@ -811,6 +882,14 @@ public static partial class VisionPrompt
         ("สถานกงสุล", "Consulate"),
         ("สถานเอกอัครราชทูต", "Embassy"),
     ];
+
+    /// <summary>True when the text holds any Thai letter -- names going to SAP (item text, the
+    /// input tax report) must be English only (AP, 2026-11-11).</summary>
+    public static bool HasThai(string? value) => (value ?? "").Any(ch => ch >= '\u0E00' && ch <= '\u0E7F');
+
+    /// <summary>An issuer name in English: a Thai agency name becomes its official English name;
+    /// anything else is returned as it is (a remaining Thai name is caught by HasThai).</summary>
+    public static string EnglishIssuerName(string? value) => NormIssuerName(value ?? "");
 
     private static string NormIssuerName(string value)
     {

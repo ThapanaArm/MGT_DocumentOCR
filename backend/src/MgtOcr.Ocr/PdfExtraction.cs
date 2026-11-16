@@ -91,6 +91,20 @@ public static class PdfExtraction
         return -1;
     }
 
+    /// <summary>The text layer of every page, one string per page ("" for a scanned page).</summary>
+    public static List<string> PageTexts(string path)
+    {
+        try
+        {
+            using var doc = PdfDocument.Open(path, PdfOpenOptions());
+            return doc.GetPages().Select(ReconstructPageText).ToList();
+        }
+        catch
+        {
+            return [];
+        }
+    }
+
     public static string PdfText(string path)
     {
         try

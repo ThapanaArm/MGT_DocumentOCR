@@ -21,7 +21,11 @@ export default function FieldGrid({
   return (
     <div className="grid">
       {fields.map((f) => {
-        const [k, label, type, opts] = f;
+        const [k, label, declared, opts] = f;
+        // Every date field picks from the calendar (AP, 2026-11-16): Invoice Date, Posting Date,
+        // Tax Reporting / Fulfill / Tax Date, Baseline Date, Due On … — any field whose key ends in
+        // "Date" and was not given another type.
+        const type = declared ?? (!numeric && /date$/i.test(k) ? 'date' : undefined);
         const raw = values[k];
         const isReq = required?.includes(k);
         return (

@@ -214,6 +214,9 @@ export const AP_H: FieldDef[] = [
   ['docType', 'Document Type'], ['invoiceNo', 'Invoice No.'], ['invoiceDate', 'Invoice Date'],
   ['postingDate', 'Posting Date'], ['vendorName', 'Vendor Name'], ['vendorTaxId', 'Tax ID'],
   ['branch', 'Branch'], ['poRef', 'PO Reference'], ['currency', 'Currency'], ['paymentTerms', 'Payment Terms'],
+  // Shipping bundle: the goods supplier and ITS invoice no. (import declaration "INVNO.KCCCI260715-012"),
+  // which the cost-line Text is built from ("KCC,INV.KCCCI260715-012"). Editable when the read missed it.
+  ['goodsSupplier', 'Goods Supplier'], ['goodsInvoiceNo', 'Goods Invoice No. (INVNO.)'],
 ];
 export const AP_TOTALS_H: FieldDef[] = [
   ['subTotal', 'Amount before Tax'], ['vatRate', 'Tax Rate (%)'], ['vatAmount', 'VAT'],
@@ -520,6 +523,7 @@ export const MASTER_DEF: Record<string, MasterDef> = {
     label: 'Vendor', mod: 'AP', key: 'VendorCode', cols: [
       { k: 'VendorCode', l: 'Vendor Code (Internal)' }, { k: 'SapVendorCode', l: 'SAP Code (Supplier)', sap: true },
       { k: 'VendorName', l: 'Vendor Name' },
+      { k: 'ShortName', l: 'Abbreviation (Text: <abbr>,INV.<no>)' },
       { k: 'TaxId', l: 'Tax ID' }, { k: 'Branch', l: 'Branch' }, { k: 'Currency', l: 'Currency' },
       { k: 'PaymentTerms', l: 'Payment Terms' }, { k: 'ReconAcct', l: 'Recon. Account' }, { k: 'WhtCode', l: 'Withholding Tax' }],
   },
@@ -578,7 +582,7 @@ export const MASTER_DEF: Record<string, MasterDef> = {
   suppliertaxmaps: {
     label: 'Tax Invoice Issuer', mod: 'AP', key: 'TaxId', cols: [
       { k: 'TaxId', l: 'Tax ID', required: true, maxLen: 13, help: '13-digit tax ID of whoever issued the tax invoice' },
-      { k: 'SupplierName', l: 'Supplier Name', required: true, help: 'The name every document will use for this Tax ID' },
+      { k: 'SupplierName', l: 'Supplier Name', required: true, maxLen: 50, help: 'The name every document will use for this Tax ID — ENGLISH ONLY (translate a Thai name), max 50 characters, the length of the item Text in SAP (used as the Text of the Input tax line)' },
       { k: 'IsVerified', l: 'Verified', help: '0 = added by the read, waiting for AP to check · 1 = checked' },
       { k: 'FirstDocId', l: 'First seen in document' },
       { k: 'Note', l: 'Note' }],

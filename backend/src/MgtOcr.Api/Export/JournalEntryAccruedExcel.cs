@@ -80,22 +80,73 @@ public static class JournalEntryAccruedExcel
         DateTime postingDate)
     {
         var header = (Dictionary<string, object?>)doc["header"]!;
-        var rows = DeferredRows(doc);
-        // Assignment and Item Text as the invoice's own D1 lines carry them (Accounting,
-        // 2026-11-08: "same as the AP"), so the JV clears against them on sight: the PO, and
-        // "PROMPT,INV.PI-2608011" — the invoicing party and ITS invoice — on every tax invoice of
-        // the bundle, the pass-through receipts included. Reference stays per tax invoice.
-        var poAssignment = header.GetStr("poRef").Trim();
-        var ownInvoice = header.GetStr("invoiceNo").Trim();
-        var party = ShortName(Or(rows.FirstOrDefault(r => string.Equals(r.DocNo, ownInvoice, StringComparison.OrdinalIgnoreCase))?.Text ?? "",
-            Or(header.GetStr("vendorName").Trim(), rows.FirstOrDefault()?.Text ?? "")));
-        var apText = party.Length > 0 && ownInvoice.Length > 0 ? $"{party},INV.{ownInvoice}" : "";
-        rows = rows.Select(r => r with
-        {
-            Text = Or(apText, r.Text),
-            Assignment = Or(poAssignment, r.Assignment),
-        }).ToList();
+        var rows = BatchRows(doc);
         if (rows.Count == 0) return null;
+        return BuildWorkbook(doc, header, rows, companyCode, postingDate);
+    }
+
+    /// <summary>One journal entry per deferred tax invoice: Reference = that invoice's number,
+    /// Text = its issuer, Assignment = the PO. Shared by the Excel upload file and the direct post
+    /// (DocumentsController.PostDeferredVatJv) so the two can never send different entries.</summary>
+    public static List<(string Reference, string Text, string Assignment, double Amount, double Base, DateTime? TaxDate, string TaxId,
+        string InputTaxAssignment)> Batches(
+        Dictionary<string, object?> doc)
+    {
+        var header = (Dictionary<string, object?>)doc["header"]!;
+        var reference = Or(header.GetStr("invoiceNo").Trim(), header.GetStr("poRef").Trim());
+        return BatchRows(doc)
+            .Select(r => (Cut(Or(r.DocNo, reference), 16), r.Text, r.Assignment, r.Amount, r.Base, r.TaxDate, r.TaxId,
+                r.InputTaxAssignment))
+            .ToList();
+    }
+
+    private static List<DeferredRow> BatchRows(Dictionary<string, object?> doc)
+    {
+        var header = (Dictionary<string, object?>)doc["header"]!;
+        var rows = DeferredRows(doc);
+        // Item Text = the name of whoever issued THAT tax invoice (AP, 2026-11-11). The Thai input
+        // tax report lists this JV, not the supplier invoice, and takes the vendor name per line from
+        // here and the tax invoice number from the batch's Reference: JV 100000737 carried PROMPT on
+        // all three lines (and one Reference) while two of the receipts were Cargoport's and the
+        // Port Authority's, so the report named the wrong vendor. The name is the one in Master 8
+        // "Tax Invoice Issuer" (ocr.SupplierTaxMap, swapped in at save), max 50 = SAP's item text.
+        // Assignment stays the PO, so the JV still clears against the invoice's D1 lines in
+        // 11730000. Reference stays per tax invoice (one batch each).
+        // A multi-PO bundle's lines carry "2230000511,604,605" (PRD 5100001207), so the D1 line
+        // here does too, or it would not clear against them in 11730000.
+        var bundlePos = SupplierInvoicePayload.PoNumbers(header);
+        var poAssignment = bundlePos.Count > 1
+            ? SupplierInvoicePayload.MultiPoAssignment(bundlePos)
+            : header.GetStr("poRef").Trim();
+        var invoiceNo = header.GetStr("invoiceNo").Trim();
+        static string Digits(string? v) => new((v ?? "").Where(char.IsDigit).ToArray());
+        var partyTaxId = Digits(header.GetStr("vendorTaxId"));
+        rows = rows.Select(r =>
+        {
+            // AP, 2026-11-12 (JV 100000765): Text = the ISSUER of this tax invoice + ",INV." + its
+            // own number — "CARGOPORT,INV.RC26070748" — not the invoicing party's.
+            var text = DeferredVatReversal.IssuerInvText(header, r.Text, r.TaxId, r.DocNo);
+            var po = Or(poAssignment, r.Assignment);
+            // A tax invoice issued by somebody other than the invoicing party (Cargoport, the Port
+            // Authority — VAT the agent paid on our behalf): the Input tax (V1) line's Assignment is
+            // that issuer's Tax ID. The party's own tax invoice and the Deferred (D1) line keep the
+            // PO, so the D1 line still clears against the supplier invoice in 11730000.
+            var taxId = Digits(r.TaxId);
+            var own = (taxId.Length == 13 && taxId == partyTaxId)
+                || (r.DocNo.Length > 0 && string.Equals(r.DocNo, invoiceNo, StringComparison.OrdinalIgnoreCase));
+            return r with
+            {
+                Text = Cut(text, 50),
+                Assignment = po,
+                InputTaxAssignment = !own && taxId.Length == 13 ? taxId : po,
+            };
+        }).ToList();
+        return rows;
+    }
+
+    private static byte[] BuildWorkbook(Dictionary<string, object?> doc, Dictionary<string, object?> header,
+        List<DeferredRow> rows, string companyCode, DateTime postingDate)
+    {
 
         var templatePath = FindTemplate()
             ?? throw new HttpApiException(500,
@@ -166,7 +217,7 @@ public static class JournalEntryAccruedExcel
 
             var line = start + (FirstLineRow - BlockFirstRow);
             var taxDate = r.TaxDate ?? postingDate;
-            Line(ws, line++, companyCode, DeferredVatReversal.GlInputTax, r.Text, r.Assignment, r.Amount,
+            Line(ws, line++, companyCode, DeferredVatReversal.GlInputTax, r.Text, Or(r.InputTaxAssignment, r.Assignment), r.Amount,
                 debit: true, DeferredVatReversal.InputTaxCode, postingDate, r.Base, taxDate);
             Line(ws, line++, companyCode, DeferredVatReversal.GlDeferredInputTax, r.Text, r.Assignment, r.Amount,
                 debit: false, DeferredVatReversal.DeferredTaxCode, postingDate, r.Base, taxDate);
@@ -198,7 +249,8 @@ public static class JournalEntryAccruedExcel
         }
     }
 
-    private sealed record DeferredRow(string Text, string Assignment, double Amount, double Base, DateTime? TaxDate, string DocNo);
+    private sealed record DeferredRow(string Text, string Assignment, double Amount, double Base, DateTime? TaxDate, string DocNo,
+        string TaxId = "", string InputTaxAssignment = "");
 
     /// <summary>The deferred (D-code) tax rows of the document, one per tax invoice.</summary>
     private static List<DeferredRow> DeferredRows(Dictionary<string, object?> doc)
@@ -213,7 +265,9 @@ public static class JournalEntryAccruedExcel
             var deferred = kind.Length > 0
                 ? string.Equals(kind, "DEFERRED", StringComparison.OrdinalIgnoreCase)
                 : code.StartsWith('D') || code.StartsWith('d');
-            if (!deferred) continue;
+            // Only the rows chosen as V1 (posted deferred, claimed now); a row chosen as D1 stays
+            // deferred and gets no entry (AP, 2026-11-12).
+            if (!deferred || !DeferredVatReversal.ClaimedNow(t)) continue;
             var issuer = t.GetStr("issuerName").Trim().ToUpperInvariant();
             var docNo = t.GetStr("taxDocNo").Trim();
             var taxId = t.GetStr("issuerTaxId").Trim();
@@ -224,7 +278,7 @@ public static class JournalEntryAccruedExcel
             list.Add(new DeferredRow(
                 Text: Or(issuer, docNo),
                 Assignment: Or(taxId, docNo),
-                Amount: amount, Base: baseAmt, TaxDate: taxDate, DocNo: docNo));
+                Amount: amount, Base: baseAmt, TaxDate: taxDate, DocNo: docNo, TaxId: taxId));
         }
         return list;
     }

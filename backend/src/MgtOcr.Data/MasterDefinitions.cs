@@ -31,7 +31,7 @@ public static class MasterDefinitions
 
         ["vendors"] = new("ocr.Vendor", "VendorCode", false,
             ["VendorCode", "SapVendorCode", "VendorName", "TaxId", "Branch", "Currency",
-             "PaymentTerms", "ReconAcct", "WhtCode"],
+             "PaymentTerms", "ReconAcct", "WhtCode", "ShortName"],
             "VendorCode"),
 
         ["venmaterials"] = new("ocr.VendorMaterial", "Id", true,
