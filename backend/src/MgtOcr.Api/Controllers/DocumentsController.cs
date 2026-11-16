@@ -470,7 +470,12 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     /// tax. Body: { postingDate: "yyyy-MM-dd" (default today -- the day the VAT may be claimed,
     /// i.e. when the forwarder was paid), force: bool }.</summary>
     [HttpPost("api/documents/{docId:int}/post-deferred-vat-jv")]
-    public async Task<IActionResult> PostDeferredVatJv(int docId, [FromBody] Dictionary<string, object?>? rawBody)
+    public Task<IActionResult> PostDeferredVatJv(int docId, [FromBody] Dictionary<string, object?>? rawBody) =>
+        WithDocLockAsync("JV", docId,
+            "JV ภาษีของเอกสารนี้กำลังส่งอยู่ — รอให้เสร็จแล้วรีเฟรชหน้า ห้ามกดส่งซ้ำ",
+            () => PostDeferredVatJvCore(docId, rawBody));
+
+    private async Task<IActionResult> PostDeferredVatJvCore(int docId, Dictionary<string, object?>? rawBody)
     {
         var body = rawBody is null ? new Dictionary<string, object?>() : JsonBodyHelpers.Unwrap(rawBody);
         var doc = await repo.GetDocumentAsync(docId);
@@ -517,6 +522,40 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             throw new HttpApiException(400, "The issuer name must be in English before it goes to SAP: "
                 + string.Join(", ", thai) + " — correct it in Master Mapping → 8. Tax Invoice Issuer (or the Tax tab) and save the document");
 
+        // The same tax invoice reversed from ANOTHER document (AP, 2026-11-16): the bundle was
+        // imported twice (doc 936 and 938) and each one posted its own JV for 2026-04-015694
+        // (100000767, 100000768), so the input tax report listed it twice. The check above only
+        // looks at this document; SAP itself has no duplicate check on a journal entry.
+        if (!force)
+        {
+            await using var dupConn = await GetDbAsync();
+            var others = (await dupConn.QueryAsync<(int DocId, string Detail)>("""
+                SELECT DocId, ISNULL(Detail,'') FROM ocr.AuditLog
+                 WHERE Action='POST_DEFERRED_JV' AND DocId<>@docId AND ISNULL(Detail,'')<>''
+                """, new { docId })).ToList();
+            var hits = new List<string>();
+            foreach (var b in batches)
+            {
+                var reference = b.Reference.Trim();
+                if (reference.Length == 0) continue;
+                foreach (var o in others)
+                    foreach (var pair in o.Detail.Split(';', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
+                    {
+                        var eq = pair.LastIndexOf('=');
+                        if (eq <= 0) continue;
+                        var jv = pair[(eq + 1)..].Trim();
+                        if (jv.Length == 0 || jv.Equals("FAILED", StringComparison.OrdinalIgnoreCase)
+                            || jv.Equals("ROLLEDBACK", StringComparison.OrdinalIgnoreCase)) continue;
+                        if (string.Equals(pair[..eq].Trim(), reference, StringComparison.OrdinalIgnoreCase))
+                            hits.Add($"{reference} → JV {jv} (เอกสาร #{o.DocId})");
+                    }
+            }
+            if (hits.Count > 0)
+                throw new HttpApiException(409,
+                    "ใบกำกับภาษีนี้ถูกกลับค่าภาษีไปแล้วจากเอกสารอื่น: " + string.Join(", ", hits.Distinct())
+                    + " — ถ้าเป็นเอกสารที่อัปโหลดซ้ำ ไม่ต้องส่ง JV อีก; ถ้าต้องส่งจริง ให้กลับรายการ JV เดิมใน SAP ก่อนแล้วยืนยันส่ง");
+        }
+
         var company = await ExportCompanyAsync(docId);
         var header = (Dictionary<string, object?>)doc["header"]!;
         // The issuer of each tax invoice as a SAP Business Partner, by its Tax ID, so the input tax
@@ -546,7 +585,52 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             postingDate, Export.DeferredVatReversal.Reference(header),
             header.GetStr("currency").Trim() is { Length: > 0 } c ? c : "THB");
 
-        var posted = results.Where(r => r.Ok).Select(r => r.AccountingDocument).ToList();
+        // Rollback (AP, 2026-11-16): the JVs of one document go in whole or not at all. When one
+        // tax invoice's entry is refused, every entry THIS send posted gets a counter-entry (same
+        // lines, sides swapped, same posting date), so V1 and D1 net back to zero in that period
+        // and the input tax report is left as it was. results[i] belongs to entries[i]: the post
+        // runs in order and stops at the first refusal.
+        var rolledJv = new HashSet<int>();
+        var jvRollbackNotes = new List<string>();
+        if (results.Any(r => !r.Ok) && results.Any(r => r.Ok))
+        {
+            var okIdx = Enumerable.Range(0, results.Count).Where(i => results[i].Ok).ToList();
+            var counters = okIdx.Select(i => entries[i] with { Counter = true }).ToList();
+            var back = await sap.PostDeferredVatJournalEntriesAsync(counters, company?.CompanyCode ?? "2000",
+                postingDate, "ROLLBACK DEFERRED VAT",
+                header.GetStr("currency").Trim() is { Length: > 0 } rc ? rc : "THB");
+            for (var k = 0; k < okIdx.Count; k++)
+            {
+                var i = okIdx[k];
+                var orig = results[i];
+                if (k < back.Count && back[k].Ok)
+                {
+                    rolledJv.Add(i);
+                    jvRollbackNotes.Add($"{orig.AccountingDocument}→{back[k].AccountingDocument}");
+                    results[i] = (orig.Reference, true, orig.AccountingDocument,
+                        $"{orig.Message} · ROLLED BACK by counter-entry {back[k].AccountingDocument}");
+                }
+                else
+                {
+                    var why = k < back.Count ? back[k].Message : "not sent (an earlier counter-entry was refused)";
+                    jvRollbackNotes.Add($"{orig.AccountingDocument}→FAILED");
+                    results[i] = (orig.Reference, true, orig.AccountingDocument,
+                        $"{orig.Message} · ROLLBACK FAILED — กลับรายการเองใน SAP: {why}");
+                }
+            }
+            try
+            {
+                var rbDetail = string.Join("; ", jvRollbackNotes);
+                await repo.LogAuditAsync(docId, module, "ROLLBACK_DEFERRED_JV", await ActorAsync(),
+                    detail: rbDetail.Length > 500 ? rbDetail[..500] : rbDetail);
+            }
+            catch (Exception e)
+            {
+                logger.LogWarning(e, "[AP] Could not write the ROLLBACK_DEFERRED_JV audit row for document {DocId}", docId);
+            }
+        }
+
+        var posted = results.Where((r, i) => r.Ok && !rolledJv.Contains(i)).Select(r => r.AccountingDocument).ToList();
         foreach (var r in results)
             logger.LogInformation("[AP] Deferred VAT JV for document {DocId}, {Ref}: {Ok} {Msg}", docId, r.Reference, r.Ok, r.Message);
         try
@@ -554,7 +638,9 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             // Compact on purpose -- "PI-2608012=100000755; RC26070747=100000756" -- so every pair fits
             // the 500-character Detail and the document page can list them (ReadDocument); the full
             // SAP messages are in the API log above.
-            var detail = string.Join("; ", results.Select(r => r.Ok ? $"{r.Reference}={r.AccountingDocument}" : $"{r.Reference}=FAILED"));
+            // A rolled-back entry is written as "=ROLLEDBACK", so neither duplicate check counts it.
+            var detail = string.Join("; ", results.Select((r, i) => rolledJv.Contains(i) ? $"{r.Reference}=ROLLEDBACK"
+                : r.Ok ? $"{r.Reference}={r.AccountingDocument}" : $"{r.Reference}=FAILED"));
             var nos = string.Join(",", posted);
             await repo.LogAuditAsync(docId, module, "POST_DEFERRED_JV", await ActorAsync(),
                 detail: detail.Length > 500 ? detail[..500] : detail,
@@ -2416,8 +2502,17 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     public async Task<IActionResult> PostQueueList([FromQuery] int top = 50) =>
         Ok(await postQueue.ListAsync(Math.Clamp(top, 1, 500)));
 
+    // One send per document at a time (AP, 2026-11-16): a second press while the first is still
+    // running — a double click, or pressing again after the proxy answered 504 while the API kept
+    // working — is refused instead of creating the invoices twice. SQL Server application lock,
+    // so it holds across requests and is released by itself if the API process dies.
     [HttpPost("api/documents/{docId:int}/post")]
-    public async Task<IActionResult> PostDocument(int docId, [FromBody] Dictionary<string, object?>? rawBody)
+    public Task<IActionResult> PostDocument(int docId, [FromBody] Dictionary<string, object?>? rawBody) =>
+        WithDocLockAsync("POST", docId,
+            "เอกสารนี้กำลังส่งเข้า SAP อยู่ — รอให้เสร็จ (2–5 นาที) แล้วรีเฟรชหน้า ห้ามกดส่งซ้ำ",
+            () => PostDocumentCore(docId, rawBody));
+
+    private async Task<IActionResult> PostDocumentCore(int docId, Dictionary<string, object?>? rawBody)
     {
         var body = JsonBodyHelpers.Unwrap(rawBody ?? new());
         var doc = await repo.GetDocumentAsync(docId);
@@ -2527,12 +2622,53 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             results.Add((p, one));
             if (!one.Success) break;
         }
-        var r = results[^1].Result;
+        // Rollback (AP, 2026-11-16): a bundle goes in whole or not at all. When one supplier's
+        // invoice is refused, the ones THIS send created are cancelled again (posted: Cancel on the
+        // original posting date; parked: deleted), last first. Invoices left from an earlier send
+        // are not touched. What could not be undone is named in the message and the document stays
+        // PARTIAL so nobody misses it.
+        var rolledBack = new HashSet<Dictionary<string, object?>>();
+        var rollbackNotes = new List<string>();
+        if (module is "AP" or "II" && results.Any(x => !x.Result.Success))
+        {
+            for (var i = results.Count - 1; i >= 0; i--)
+            {
+                var (rp, ro) = results[i];
+                if (!ro.Success || ro.Simulated || skipped.Contains(rp) || ro.SapDocNo.Length == 0) continue;
+                var fiscalYear = "";
+                var parked = rp.GetStr("SupplierInvoiceStatus") == "A";
+                if (ro.Raw is JsonElement raw && raw.ValueKind == JsonValueKind.Object)
+                {
+                    if (raw.TryGetProperty("FiscalYear", out var fy) && fy.ValueKind == JsonValueKind.String) fiscalYear = fy.GetString() ?? "";
+                    if (raw.TryGetProperty("SupplierInvoiceStatus", out var st) && st.ValueKind == JsonValueKind.String)
+                        parked = st.GetString() == "A";
+                }
+                var postingDate = DateTime.Today;
+                if (System.Text.RegularExpressions.Regex.Match(rp.GetStr("PostingDate"), @"-?\d+") is { Success: true } pm
+                    && long.TryParse(pm.Value, out var pms))
+                    postingDate = DateTimeOffset.FromUnixTimeMilliseconds(pms).UtcDateTime.Date;
+                if (fiscalYear.Length == 0) fiscalYear = postingDate.Year.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                var rb = await sap.RollbackSupplierInvoiceAsync(ro.SapDocNo, fiscalYear, postingDate, parked);
+                logger.LogInformation("[AP] Rollback of {Inv}/{Year} (document {DocId}): {Ok} {Msg}", ro.SapDocNo, fiscalYear, docId, rb.Ok, rb.Message);
+                if (rb.Ok)
+                {
+                    rolledBack.Add(rp);
+                    rollbackNotes.Add($"{ro.SapDocNo} {rb.Message}");
+                    results[i] = (rp, ro with { Message = $"{ro.Message} · ROLLED BACK: {rb.Message}" });
+                }
+                else
+                {
+                    rollbackNotes.Add($"{ro.SapDocNo} ยกเลิกไม่สำเร็จ ({rb.Message}) — ต้องยกเลิกเองใน SAP");
+                    results[i] = (rp, ro with { Message = $"{ro.Message} · ROLLBACK FAILED: {rb.Message}" });
+                }
+            }
+        }
+        var r = results.LastOrDefault(x => !x.Result.Success).Result ?? results[^1].Result;
         var heldBack = res.GetValueOrDefault("heldBack") as List<Dictionary<string, object?>> ?? [];
         // Held-back suppliers keep the document open (not POSTED) even when everything sent went in.
         var sentOk = results.Count == payloads.Count && results.All(x => x.Result.Success);
         var allOk = sentOk && heldBack.Count == 0;
-        var sapDocNos = string.Join(", ", results.Where(x => x.Result.Success)
+        var sapDocNos = string.Join(", ", results.Where(x => x.Result.Success && !rolledBack.Contains(x.Payload))
             .Select(x => x.Result.SapDocNo).Where(n => !string.IsNullOrWhiteSpace(n)));
         var ownCompany = await OwnCompanyAsync() is { Length: > 0 } own ? own : null;
         // Closed before the database work below: what is being timed is the round trip to SAP, not
@@ -2612,8 +2748,8 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             vendor = x.Payload.GetStr("InvoicingParty"),
             invoiceNo = x.Payload.GetStr("SupplierInvoiceIDByInvcgParty"),
             amount = x.Payload.GetStr("InvoiceGrossAmount"),
-            success = x.Result.Success,
-            sapDocNo = x.Result.SapDocNo,
+            success = x.Result.Success && !rolledBack.Contains(x.Payload),
+            sapDocNo = rolledBack.Contains(x.Payload) ? "" : x.Result.SapDocNo,
             message = x.Result.Message,
             heldBack = false,
         }).Concat(heldBack.Select(h => new
@@ -2636,6 +2772,8 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             .Distinct()
             .ToList();
         if (accrualNotes.Count > 0) summary += " · ⚠ " + string.Join(" · ", accrualNotes);
+        if (rollbackNotes.Count > 0)
+            summary += " · ยกเลิกใบที่สร้างไปแล้วในรอบนี้ (Rollback): " + string.Join(", ", rollbackNotes);
         if (heldBack.Count > 0)
             summary = (sentOk && sapDocNos.Length > 0 ? $"ส่งเข้า SAP แล้ว: {sapDocNos}" : summary)
                 + " · ยังไม่ส่ง (ข้ามไว้ก่อน): "
@@ -2647,7 +2785,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
 
         var resultDocument = await repo.GetDocumentAsync(docId);
         if (module is "AP" or "II")
-            resultDocument["sapDocNos"] = results.Where(x => x.Result.Success)
+            resultDocument["sapDocNos"] = results.Where(x => x.Result.Success && !rolledBack.Contains(x.Payload))
                 .Select(x => x.Result.SapDocNo).Where(n => !string.IsNullOrWhiteSpace(n))
                 .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         return Ok(new
@@ -2926,6 +3064,35 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     // ---- small local helpers (avoid threading Db through every method signature) ----
     private Db GetDbInstance() => HttpContext.RequestServices.GetRequiredService<Db>();
     private Task<Microsoft.Data.SqlClient.SqlConnection> GetDbAsync() => GetDbInstance().OpenAsync();
+
+    /// <summary>Runs <paramref name="run"/> holding an exclusive SQL Server application lock for this
+    /// document and kind ("POST", "JV"); a second caller while it is held gets 409 at once.</summary>
+    private async Task<IActionResult> WithDocLockAsync(string kind, int docId, string busyMessage, Func<Task<IActionResult>> run)
+    {
+        var resource = $"MgtOcr:{kind}:{docId}";
+        await using var lockConn = await GetDbAsync();
+        var rc = await lockConn.ExecuteScalarAsync<int>("""
+            DECLARE @r int;
+            EXEC @r = sp_getapplock @Resource=@resource, @LockMode='Exclusive', @LockOwner='Session', @LockTimeout=0;
+            SELECT @r;
+            """, new { resource });
+        if (rc < 0) throw new HttpApiException(409, busyMessage);
+        try
+        {
+            return await run();
+        }
+        finally
+        {
+            try
+            {
+                await lockConn.ExecuteAsync("EXEC sp_releaseapplock @Resource=@resource, @LockOwner='Session'", new { resource });
+            }
+            catch (Exception e)
+            {
+                logger.LogWarning(e, "[Lock] Could not release {Resource}; it goes with the connection", resource);
+            }
+        }
+    }
 
     private static bool DictEquals(Dictionary<string, object?> a, Dictionary<string, object?> b) =>
         JsonSerializer.Serialize(a) == JsonSerializer.Serialize(b);

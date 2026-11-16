@@ -67,6 +67,8 @@ public static class SupplierInvoicePayload
         }
         var glRows = SapImportSupplierInvoiceExcel.GlRowsFor(doc).Where(Mine).ToList();
         var taxRows = DeferredVatReversal.EffectiveTaxRows(doc).Where(Mine).ToList();
+        // This document is the Customs Department's (its tax rows are all import VAT receipts).
+        var customsParty = taxRows.Count > 0 && taxRows.All(DeferredVatReversal.IsImportVat);
         var isPoKeyed = SapImportSupplierInvoiceExcel.IsPoKeyed(doc);
 
         // Goods-receipt reference. A PO item flagged for GR-based invoice verification (the
@@ -600,7 +602,9 @@ public static class SupplierInvoicePayload
         // The invoicing party's own invoice number (its tax invoice), else the document's, else
         // the PO. Reference of the SAP invoice, and the payables line's Assignment on a shipping
         // document.
-        var supplierRef = isPoKeyed && poRef.Length > 0 ? poRef : Or(vendor.Length > 0 ? DocNoKey(InvoiceNoOf(taxRows)) : "",
+        // Goods keyed against the PO: the goods supplier's own invoice number (KCCCI260715-012 on
+        // the commercial invoice / import declaration), the PO only when none was read (AP, 2026-11-13).
+        var supplierRef = isPoKeyed && poRef.Length > 0 ? GoodsReference(header, poRef) : Or(vendor.Length > 0 ? DocNoKey(InvoiceNoOf(taxRows)) : "",
             Or(header.GetStr("invoiceNo").Trim(),
                Or(header.GetStr("goodsInvoiceNo").Trim(), poRef)));
         var payload = new Dictionary<string, object?>
@@ -645,7 +649,10 @@ public static class SupplierInvoicePayload
             // Assignment = PI-2608011, while every G/L line carries the PO. Sending the PO here put
             // 2230000084 on the vendor line of DEV 5100000133. A goods (PO-keyed) invoice keeps
             // its own rule (assignment = the supplier's invoice number already).
-            ["AssignmentReference"] = Cut(isPoKeyed ? assignment : Or(supplierRef, assignment), 18),
+            // The Customs Department's document is the exception (AP, 2026-11-16, DEV 5100000162):
+            // its vendor line carries the PURCHASE ORDER like every other line, not the receipt
+            // number 0152-091128 — the receipt stays the Reference and the import VAT line's Assignment.
+            ["AssignmentReference"] = Cut(isPoKeyed || (customsParty && poRef.Length > 0) ? assignment : Or(supplierRef, assignment), 18),
             // What the G/L lines of this invoice carry as Assignment (the PO on a shipping
             // document) -- used after posting to fill the lines SAP leaves empty. Not sent to SAP.
             ["_lineAssignment"] = Cut(assignment, 18),
@@ -1781,6 +1788,18 @@ public static class SupplierInvoicePayload
     /// the supplier's own invoice number comes first and the shipping form's INVOICE NO. and the
     /// purchase order stand in behind it; the Text and the Reference then always name the same
     /// document, which they did not when the purchase order was corrected after the read.</summary>
+    /// <summary>Reference of a PO-keyed goods invoice: the supplier's invoice number (Invoice No.,
+    /// else the goods invoice read off the import declaration); a value that is only a PO number
+    /// does not count. The PO stands in when neither was read.</summary>
+    internal static string GoodsReference(Dictionary<string, object?> header, string poRef)
+    {
+        static bool IsPo(string v, string po) =>
+            v == po || System.Text.RegularExpressions.Regex.IsMatch(v, @"^2[12]30\d{6}$");
+        foreach (var key in new[] { "invoiceNo", "goodsInvoiceNo" })
+            if (header.GetStr(key).Trim() is { Length: > 0 } v && !IsPo(v, poRef)) return v;
+        return poRef;
+    }
+
     private static string ReferenceText(Dictionary<string, object?> header, bool poKeyed = false)
     {
         // The supplier's abbreviation typed on the Vendor card (ocr.Vendor.ShortName) leads. On a

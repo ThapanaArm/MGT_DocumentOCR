@@ -43,6 +43,55 @@ public class SapClient(AppConfig config, HttpClient httpClient)
         }
     }
 
+    /// <summary>Rollback of a supplier invoice this app just created (AP, 2026-11-16: a bundle is
+    /// all or nothing). A posted invoice is cancelled with the service's Cancel function on the
+    /// original posting date (reversal reason 01, same period); a parked draft (status A) is
+    /// deleted. Never throws: (false, why) when SAP refuses, so the caller can say what is left.</summary>
+    public async Task<(bool Ok, string Message)> RollbackSupplierInvoiceAsync(
+        string supplierInvoice, string fiscalYear, DateTime postingDate, bool parked)
+    {
+        var baseUrl = config.SapSupplierInvoiceBaseUrl;
+        if (string.IsNullOrWhiteSpace(baseUrl)) return (false, "Sap:SupplierInvoice base URL is not configured");
+        static string Esc(string v) => (v ?? "").Trim().Replace("'", "''");
+        var root = baseUrl.TrimEnd('/');
+        void Auth(HttpRequestMessage r)
+        {
+            if (!string.IsNullOrWhiteSpace(config.SapSupplierInvoiceAuthHeader))
+                r.Headers.TryAddWithoutValidation("Authorization", config.SapSupplierInvoiceAuthHeader);
+        }
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+            using var fetch = new HttpRequestMessage(HttpMethod.Get, $"{root}/?sap-client={config.SapClient}");
+            Auth(fetch);
+            fetch.Headers.TryAddWithoutValidation("X-CSRF-Token", "Fetch");
+            fetch.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+            using var fetchResp = await httpClient.SendAsync(fetch, cts.Token);
+            var token = fetchResp.Headers.TryGetValues("x-csrf-token", out var tv) ? tv.FirstOrDefault() : null;
+            if (string.IsNullOrWhiteSpace(token)) return (false, $"no CSRF token ({(int)fetchResp.StatusCode})");
+
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            var url = parked
+                ? $"{root}/A_SupplierInvoice(SupplierInvoice='{Esc(supplierInvoice)}',FiscalYear='{Esc(fiscalYear)}')?sap-client={config.SapClient}"
+                : $"{root}/Cancel?PostingDate=datetime'{postingDate.ToString("yyyy-MM-dd", inv)}T00:00:00'"
+                  + $"&ReversalReason='01'&SupplierInvoice='{Esc(supplierInvoice)}'&FiscalYear='{Esc(fiscalYear)}'&sap-client={config.SapClient}";
+            using var req = new HttpRequestMessage(parked ? HttpMethod.Delete : HttpMethod.Post, url);
+            Auth(req);
+            req.Headers.TryAddWithoutValidation("X-CSRF-Token", token);
+            req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+            using var resp = await httpClient.SendAsync(req, cts.Token);
+            var text = await resp.Content.ReadAsStringAsync(cts.Token);
+            if (!resp.IsSuccessStatusCode)
+                return (false, $"{(parked ? "delete" : "cancel")} refused ({(int)resp.StatusCode}): {text[..Math.Min(400, text.Length)]}");
+            var rev = System.Text.RegularExpressions.Regex.Match(text, "\"ReverseDocument\"\\s*:\\s*\"(\\d+)\"").Groups[1].Value;
+            return (true, parked ? "parked draft deleted" : rev.Length > 0 ? $"cancelled by {rev}" : "cancelled");
+        }
+        catch (Exception e)
+        {
+            return (false, e.Message);
+        }
+    }
+
     /// <summary>Reads a supplier invoice back from API_SUPPLIERINVOICE_PROCESS_SRV with its PO lines,
     /// so what SAP holds can be set against what was sent. Never throws: (false, message) on any
     /// failure, because a reconciliation that cannot read one invoice should still report the rest.</summary>
@@ -413,7 +462,7 @@ public class SapClient(AppConfig config, HttpClient httpClient)
     /// what its line carries as Assignment: a third party's Tax ID (AP, 2026-11-12). Every other
     /// line gets <paramref name="Assignment"/> (the PO).</param>
     public record DeferredVatJv(string Reference, string Text, string Assignment, decimal Amount, decimal Base, DateTime? TaxDate,
-        string TaxPartner = "", string InputTaxAccount = "", string InputTaxAssignment = "");
+        string TaxPartner = "", string InputTaxAccount = "", string InputTaxAssignment = "", bool Counter = false);
 
     /// <summary>Posts each entry with Journal Entry - Post (Synchronous), SAP_COM_0002
     /// (journalentrycreaterequestconfi), the same entry the "Journal Entry (Deferred VAT)" Excel
@@ -500,8 +549,18 @@ public class SapClient(AppConfig config, HttpClient httpClient)
                 sb.Append($"<TaxBaseAmountInTransCrcy currencyCode=\"{cur}\">{Amt(taxBase)}</TaxBaseAmountInTransCrcy>");
                 sb.Append("</ProductTaxItem>");
             }
-            TaxItem("V1", e.Amount, e.Base, "S");     // Dr 11720000 input tax
-            TaxItem("D1", -e.Amount, -e.Base, "H");   // Cr 11730000 deferred input tax
+            if (!e.Counter)
+            {
+                TaxItem("V1", e.Amount, e.Base, "S");     // Dr 11720000 input tax
+                TaxItem("D1", -e.Amount, -e.Base, "H");   // Cr 11730000 deferred input tax
+            }
+            else
+            {
+                // Rollback of an entry this app just posted (AP, 2026-11-16): the same lines with
+                // the sides swapped, same posting date, so V1 and D1 net back to zero in that period.
+                TaxItem("V1", -e.Amount, -e.Base, "H");   // Cr 11720000 input tax
+                TaxItem("D1", e.Amount, e.Base, "S");     // Dr 11730000 deferred input tax
+            }
             sb.Append("</JournalEntry></JournalEntryCreateRequest></sfin:JournalEntryBulkCreateRequest></soapenv:Body></soapenv:Envelope>");
 
             string body;

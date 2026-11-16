@@ -56,7 +56,6 @@ import TaxDataTable from '../components/document/TaxDataTable';
 import WhtTable from '../components/document/WhtTable';
 import IncomingInvoiceCard from '../components/document/IncomingInvoiceCard';
 import MappingCards from '../components/document/MappingCards';
-import SapDocsPreview from '../components/document/SapDocsPreview';
 import ChatFixCard from '../components/document/ChatFixCard';
 import SoMappingIssues from '../components/document/SoMappingIssues';
 import LineExtraModal from '../components/document/LineExtraModal';
@@ -1169,6 +1168,8 @@ export default function DocumentPage() {
   // SAP's own words when it refused the document, shown inside the confirmation dialog.
   const [postError, setPostError] = useState<string | null>(null);
   const [posting, setPosting] = useState(false);
+  // The deferred VAT JV is being sent: the button stays disabled until SAP answers (AP, 2026-11-16).
+  const [jvPosting, setJvPosting] = useState(false);
   const [reconciling, setReconciling] = useState(false);
   const sapStepRef = useRef<SalesOrderStepHandle | null>(null);
   const zohoStepRef = useRef<SalesOrderStepHandle | null>(null);
@@ -1331,6 +1332,36 @@ export default function DocumentPage() {
     setDoc({ ...doc, header });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [doc?.docId, vendorAbbr, map?.header.vendor?.code]);
+
+  /* Goods keyed against the PO: the G/L row's Item Text and the Basic Data Text were generated
+     while Invoice No. still held the PO ("KCC,INV.2230000565"); the supplier's real invoice
+     (KCCCI260715-012, from the import declaration) came afterwards and the texts kept the PO.
+     A text that is exactly "<abbr>,INV.<this document's PO>" is moved to the invoice number;
+     anything somebody typed is left alone. Shipping bundles are not touched: there Invoice No. is
+     the forwarder's, not the goods supplier's. */
+  useEffect(() => {
+    if (!doc || (doc.module !== 'AP' && doc.module !== 'II') || !isInventoryPoDoc(doc)) return;
+    if (['POSTED', 'SPLIT', 'PARTIAL', 'POSTING'].includes(String(doc.status))) return;
+    const hh = doc.header as Record<string, any>;
+    const inv = String(hh.invoiceNo ?? '').trim();
+    const pos = new Set([hh.poRef, hh.PurchasingOrder].flatMap((v) => String(v ?? '').match(/\d{10}/g) ?? []));
+    if (!inv || pos.size === 0 || pos.has(inv) || /^2[12]30\d{6}$/.test(inv)) return;
+    let changed = false;
+    const fix = (t: unknown, max: number) => {
+      const v = String(t ?? '');
+      const m = /^(.+,INV\.)(\d{10})$/i.exec(v.trim());
+      if (!m || !pos.has(m[2])) return v;
+      changed = true;
+      return (m[1] + inv).slice(0, max);
+    };
+    const header: Record<string, any> = { ...hh };
+    if (hh.headerText) header.headerText = fix(hh.headerText, 25);
+    if (Array.isArray(hh.glItems))
+      header.glItems = (hh.glItems as Array<Record<string, any>>).map((g) =>
+        g.itemText ? { ...g, itemText: fix(g.itemText, 50) } : g);
+    if (changed) setDoc({ ...doc, header });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doc?.docId, doc?.header.invoiceNo, doc?.header.glItems, doc?.header.headerText]);
 
   if (failed)
     return (
@@ -1699,13 +1730,17 @@ export default function DocumentPage() {
         iso,
       )?.trim();
       if (!postingDate) return;
+      if (jvPosting) return;
       if (!window.confirm(`Post the deferred VAT transfer (Dr Input tax V1 / Cr Deferred input tax D1, one journal entry per tax invoice) to SAP on ${postingDate}?`)) return;
       let r;
+      setJvPosting(true);
+      try {
       try {
         r = await postDeferredVatJv(doc.docId, postingDate);
       } catch (e: any) {
         // Already posted once: SAP would book the input tax twice, so it asks before going again.
-        if (String(e?.message || '').includes('already posted')
+        // Also when the same tax invoice was reversed from another (re-uploaded) document.
+        if (/already posted|ถูกกลับค่าภาษีไปแล้ว/.test(String(e?.message || ''))
           && window.confirm(`${e.message}\n\nPost anyway?`)) {
           r = await postDeferredVatJv(doc.docId, postingDate, true);
         } else throw e;
@@ -1715,6 +1750,9 @@ export default function DocumentPage() {
       showToast(`Deferred VAT JV — ${lines.join(' · ')}`, r.ok ? 'success' : 'error');
       // Reload so the JV numbers appear in the "Sent to SAP" box for whoever looks next.
       try { setDoc(await getDocument(doc.docId)); } catch { /* the toast already has them */ }
+      } finally {
+        setJvPosting(false);
+      }
     });
 
   const refreshApReconciliation = () =>
@@ -3187,8 +3225,8 @@ export default function DocumentPage() {
                   <button className="btn" onClick={fillJeTexts}>
                     <i className="fa-solid fa-pen-to-square" /> Fill Assignment/Text in SAP
                   </button>
-                  <button className="btn" onClick={postDeferredJv}>
-                    <i className="fa-solid fa-file-invoice" /> Post Deferred VAT JV to SAP
+                  <button className="btn" onClick={postDeferredJv} disabled={jvPosting}>
+                    <i className="fa-solid fa-file-invoice" /> {jvPosting ? 'Sending JV…' : 'Post Deferred VAT JV to SAP'}
                   </button>
                   <span className="hint">
                     Fills the empty Assignment and Text on the posted journal entry (Local Hand&amp;Fr, Fee,
@@ -3554,9 +3592,6 @@ export default function DocumentPage() {
                       </span>
                     );
                   })()}
-                  {/* Every SAP document this bundle becomes, with its own Reference — the box above
-                      shows only the document's. AP / II with a supplier split only. */}
-                  {(doc.module === 'AP' || doc.module === 'II') && <SapDocsPreview docId={doc.docId} />}
                 </>
               ),
               'PO Reference': (

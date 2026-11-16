@@ -260,17 +260,20 @@ public static class DeferredVatReversal
     public static bool ClaimedNow(Dictionary<string, object?> taxRow) =>
         taxRow.GetStr("_readAs").Trim().StartsWith("V", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>"CARGOPORT,INV.RC26070748": the issuer's abbreviation (Vendor master ShortName,
-    /// found by Tax ID; otherwise the first word of its English name) + ",INV." + its tax invoice
-    /// number. The text of both lines of the Input VAT journal entry (AP, 2026-11-12).</summary>
+    /// <summary>The text of both lines of the Input VAT journal entry: the issuer's full English
+    /// name ("PORT AUTHORITY OF THAILAND"), which the input tax report shows as the vendor.</summary>
     public static string IssuerInvText(Dictionary<string, object?> header, string issuerName, string? taxId, string docNo)
     {
+        // The JV is G/L only, so the input tax report prints this text in its VENDOR column
+        // (AP, 2026-11-16: "PORT,INV.2026-04-015694" should read just the vendor,
+        // "PORT AUTHORITY OF THAILAND"). The tax invoice number already has its own column
+        // (Reference), so the text is the issuer's full name alone. The abbreviation stands in only
+        // when no name was read, and the number only when there is neither.
         var english = MgtOcr.Ocr.VisionPrompt.EnglishIssuerName((issuerName ?? "").Trim()).ToUpperInvariant();
-        var abbr = SupplierShortNames.Lookup(header, taxId);
-        if (abbr.Length == 0) abbr = SupplierShortNames.FirstWord(english);
+        var name = english.Length > 0 ? english : SupplierShortNames.Lookup(header, taxId);
         var no = (docNo ?? "").Trim();
-        var text = abbr.Length > 0 && no.Length > 0 ? $"{abbr},INV.{no}" : english.Length > 0 ? english : no;
-        return text.Length > 50 ? text[..50] : text;
+        var text = name.Length > 0 ? name : no.Length > 0 ? $"INV.{no}" : "";
+        return text.Length > 50 ? text[..50].TrimEnd() : text;
     }
 
     public static string Reference(Dictionary<string, object?> docOrHeader)

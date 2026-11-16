@@ -243,10 +243,11 @@ public static class SapImportSupplierInvoiceExcel
                 // 1 = Invoice, 2 = Credit Memo.
                 Code(ws.Cell(row, C_Transaction), IsCreditMemo(header) ? "2" : "1");
                 Code(ws.Cell(row, C_Party), Cut(party, 10));
-                // Goods keyed against the PO: Reference = the purchase order (AP, 2026-11-12,
-                // PRD 5100001086). Everything else keeps the supplier's invoice number.
+                // Goods keyed against the PO: Reference = the goods supplier's invoice number
+                // (KCCCI260715-012), the PO only when none was read (AP, 2026-11-13).
                 Text(ws.Cell(row, C_Reference), Cut(IsPoKeyed(doc) && header.GetStr("poRef").Trim().Length > 0
-                    ? header.GetStr("poRef").Trim() : header.GetStr("invoiceNo"), 16));
+                    ? SupplierInvoicePayload.GoodsReference(header, header.GetStr("poRef").Trim())
+                    : header.GetStr("invoiceNo"), 16));
                 Date(ws.Cell(row, C_DocDate), header.GetStr("invoiceDate"));
                 Date(ws.Cell(row, C_PostingDate), header.GetStr("postingDate"));
                 Text(ws.Cell(row, C_DocType), Cut(Or(header.GetStr("sapDocType"), "RE"), 2));
