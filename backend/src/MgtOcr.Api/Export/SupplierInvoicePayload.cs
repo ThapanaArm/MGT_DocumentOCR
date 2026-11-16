@@ -70,6 +70,11 @@ public static class SupplierInvoicePayload
         // This document is the Customs Department's (its tax rows are all import VAT receipts).
         var customsParty = taxRows.Count > 0 && taxRows.All(DeferredVatReversal.IsImportVat);
         var isPoKeyed = SapImportSupplierInvoiceExcel.IsPoKeyed(doc);
+        // MGT shipping (MGT accounting, 2026-11-16): the 51 document is VX throughout — no VAT
+        // line for the forwarder's or the insurer's tax invoice (PRD 5100000595-597, and the MIRO
+        // guide: Tax code "VX (Input VAT Exempt Purchases)"). Only customs import VAT stays.
+        var mgtVx = !isPoKeyed;
+        if (mgtVx) taxRows = taxRows.Where(DeferredVatReversal.IsImportVat).ToList();
 
         // Goods-receipt reference. A PO item flagged for GR-based invoice verification (the
         // default on a stock PO) can only be invoiced against the material document the goods
@@ -126,6 +131,21 @@ public static class SupplierInvoicePayload
         // reference. Composed here when there is no row to take it from.
         var headerText = Or(header.GetStr("headerText").Trim(),
             Or(firstGl?.GetStr("itemText").Trim() ?? "", ReferenceText(header, isPoKeyed)));
+
+        // MGT shipping (planned delivery costs), AP 2026-11-16, PRD 5100000596: every line's Text
+        // is the GOODS supplier + " Inv. " + the goods invoice number — "GOOD EARTH Inv. INV-0498" —
+        // not GLC's "<abbr>,INV.<no>" and not the cost's own name. The Basic Data text follows
+        // unless somebody typed their own (anything other than a cost name or a generated text).
+        if (!isPoKeyed && !multiPo && MgtShippingText(header) is { Length: > 0 } mgtText)
+        {
+            itemText = mgtText;
+            var lineNames = ((doc.Get("lines") as IEnumerable<Dictionary<string, object?>>) ?? [])
+                .Select(l => l.GetStr("desc").Trim()).Where(d => d.Length > 0)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var typed = header.GetStr("headerText").Trim();
+            if (typed.Length == 0 || lineNames.Contains(typed) || typed.Contains(",INV.", StringComparison.OrdinalIgnoreCase))
+                headerText = mgtText;
+        }
 
         // MIRO's Reference Document Category, the same choice the PO Reference tab shows:
         // 1 = goods, 2 = planned delivery costs, 3 = both.
@@ -604,7 +624,22 @@ public static class SupplierInvoicePayload
         // document.
         // Goods keyed against the PO: the goods supplier's own invoice number (KCCCI260715-012 on
         // the commercial invoice / import declaration), the PO only when none was read (AP, 2026-11-13).
-        var supplierRef = isPoKeyed && poRef.Length > 0 ? GoodsReference(header, poRef) : Or(vendor.Length > 0 ? DocNoKey(InvoiceNoOf(taxRows)) : "",
+        // MGT insurance (AP, 2026-11-16, PRD 5100000597 Felix): Reference and the vendor line's
+        // Assignment are the PURCHASE ORDER, not the insurer's own number.
+        var insuranceOnly = !isPoKeyed && poRef.Length > 0 && vendor.Length > 0
+            && ((doc.Get("lines") as IEnumerable<Dictionary<string, object?>>) ?? [])
+                .Where(l => l.Get("extra") is Dictionary<string, object?> ex && Mine(ex)
+                    && l.GetStr("extCode").Trim().ToUpperInvariant() is not ("VAT" or "WHT" or "DUTY")
+                    && Num(l.Get("amount")) != 0)
+                .ToList() is { Count: > 0 } myCosts
+            && myCosts.All(l => System.Text.RegularExpressions.Regex.IsMatch(l.GetStr("desc"), "INSURANCE|ประกัน", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+                || (l.Get("extra") as Dictionary<string, object?>).GetStr("deliveryCondType").Trim().Equals("ZINS", StringComparison.OrdinalIgnoreCase));
+        // MGT: the supplier invoice the cost lines name (DocsPerInvoice) is the Reference — FLS's
+        // LOG101185LCH, not the receipt / tax invoice RE2512206 both were paid on.
+        var invoiceRef = header.GetStr("_invoiceRef").Trim();
+        var supplierRef = insuranceOnly ? poRef
+            : invoiceRef.Length > 0 && !isPoKeyed ? invoiceRef
+            : isPoKeyed && poRef.Length > 0 ? GoodsReference(header, poRef) : Or(vendor.Length > 0 ? DocNoKey(InvoiceNoOf(taxRows)) : "",
             Or(header.GetStr("invoiceNo").Trim(),
                Or(header.GetStr("goodsInvoiceNo").Trim(), poRef)));
         var payload = new Dictionary<string, object?>
@@ -652,7 +687,8 @@ public static class SupplierInvoicePayload
             // The Customs Department's document is the exception (AP, 2026-11-16, DEV 5100000162):
             // its vendor line carries the PURCHASE ORDER like every other line, not the receipt
             // number 0152-091128 — the receipt stays the Reference and the import VAT line's Assignment.
-            ["AssignmentReference"] = Cut(isPoKeyed || (customsParty && poRef.Length > 0) ? assignment : Or(supplierRef, assignment), 18),
+            ["AssignmentReference"] = Cut(isPoKeyed || (customsParty && poRef.Length > 0) ? assignment
+                : insuranceOnly ? poRef : Or(supplierRef, assignment), 18),
             // What the G/L lines of this invoice carry as Assignment (the PO on a shipping
             // document) -- used after posting to fill the lines SAP leaves empty. Not sent to SAP.
             ["_lineAssignment"] = Cut(assignment, 18),
@@ -1166,6 +1202,67 @@ public static class SupplierInvoicePayload
         return new Dictionary<string, object?>(doc) { ["header"] = header, ["lines"] = lines };
     }
 
+    /// <summary>MGT (AP, 2026-11-16, PRD 5100000595 / 596): one SAP document per supplier
+    /// INVOICE, not per supplier — FLS billed Freight on LOG101185LCH and Local Handling on
+    /// LOG101202LCH, and each is its own document with its own Reference. Returns the bundle
+    /// narrowed to each of <paramref name="vendor"/>'s invoice numbers (extra.invoiceNo on its cost
+    /// lines), with that number as the document's invoiceNo and only that invoice's tax rows; other
+    /// suppliers' rows are left alone (Build's vendor filter drops them). A supplier whose lines
+    /// name one invoice or none comes back as the bundle itself.</summary>
+    public static List<Dictionary<string, object?>> DocsPerInvoice(Dictionary<string, object?> doc, string vendor,
+        Func<string, string>? sameParty = null)
+    {
+        var header = doc.Get("header") as Dictionary<string, object?> ?? new Dictionary<string, object?>();
+        var main = Or(doc.GetStr("partnerCode").Trim(), header.GetStr("vendorCode").Trim());
+        string Party(string v) { var c = Or(v.Trim(), main); return sameParty != null && c.Length > 0 ? sameParty(c) : c; }
+        bool OfVendor(Dictionary<string, object?> ex) =>
+            string.Equals(Party(ex.GetStr("vendorCode")), Party(vendor), StringComparison.OrdinalIgnoreCase);
+        static string Key(string v) => new string((v ?? "").Where(char.IsLetterOrDigit).ToArray()).ToUpperInvariant();
+        static bool IsTaxLine(Dictionary<string, object?> l) =>
+            l.GetStr("extCode").Trim().ToUpperInvariant() is "VAT" or "WHT";
+        var allLines = (doc.Get("lines") as System.Collections.IEnumerable)?.OfType<Dictionary<string, object?>>().ToList() ?? [];
+        var invoices = allLines
+            .Where(l => !IsTaxLine(l) && l.Get("extra") is Dictionary<string, object?> ex && OfVendor(ex))
+            .Select(l => ((Dictionary<string, object?>)l["extra"]!).GetStr("invoiceNo").Trim())
+            .Where(n => n.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (invoices.Count == 0) return [doc];
+        // One invoice: the same bundle, but its Reference is that invoice (LOG101202LCH), not the
+        // receipt / tax invoice it was paid on (RE2512206).
+        if (invoices.Count == 1)
+            return [new Dictionary<string, object?>(doc)
+            {
+                ["header"] = new Dictionary<string, object?>(header) { ["_invoiceRef"] = invoices[0] },
+            }];
+        var first = invoices[0];
+        bool Belongs(string lineInv, string inv) =>
+            Key(lineInv) == Key(inv) || (lineInv.Trim().Length == 0 && inv == first);
+        // A tax row of this supplier goes with the invoice whose number it carries; one that names
+        // none of them stays with the first.
+        string TaxInvoiceOf(string taxDocNo) =>
+            invoices.FirstOrDefault(i => Key(taxDocNo).Length > 0 && (Key(taxDocNo) == Key(i) || Key(taxDocNo).Contains(Key(i)) || Key(i).Contains(Key(taxDocNo)))) ?? first;
+        var result = new List<Dictionary<string, object?>>();
+        foreach (var inv in invoices)
+        {
+            var lines = new List<object?>();
+            foreach (var l in allLines)
+            {
+                if (l.Get("extra") is not Dictionary<string, object?> ex || !OfVendor(ex)) { lines.Add(l); continue; }
+                var lineInv = IsTaxLine(l) ? TaxInvoiceOf(Or(ex.GetStr("taxDocNo"), ex.GetStr("invoiceNo"))) : ex.GetStr("invoiceNo");
+                if (Belongs(lineInv, inv)) lines.Add(l);
+            }
+            var h = new Dictionary<string, object?>(header) { ["invoiceNo"] = inv, ["_invoiceRef"] = inv };
+            h.Remove("headerText");
+            if (header.Get("taxItems") is System.Collections.IEnumerable taxItems)
+                h["taxItems"] = taxItems.OfType<Dictionary<string, object?>>()
+                    .Where(t => !string.Equals(Party(t.GetStr("vendorCode")), Party(vendor), StringComparison.OrdinalIgnoreCase)
+                        || TaxInvoiceOf(t.GetStr("taxDocNo")) == inv)
+                    .Cast<object?>().ToList();
+            result.Add(new Dictionary<string, object?>(doc) { ["header"] = h, ["lines"] = lines });
+        }
+        return result;
+    }
+
     /// <summary>The PO a cost row belongs to (extra.poRef, the PO of the FORM it was read from).</summary>
     public static string LinePo(Dictionary<string, object?> extra) =>
         System.Text.RegularExpressions.Regex.Match(extra.GetStr("poRef"), @"\d{10}").Value;
@@ -1353,7 +1450,7 @@ public static class SupplierInvoicePayload
                 // ZOVS) — used only when the PO holds it, or the PO could not be read.
                 var byHeading = extra.GetStr("costType").Trim().ToUpperInvariant() switch
                 {
-                    "LOCAL" => "ZLH1", "FEE" => "ZFE2", "INSURANCE" => "ZINS", "OVERSEAS" => "ZOVS", _ => "",
+                    "LOCAL" => "ZLH1", "FEE" => "ZFE2", "INSURANCE" => "ZINS", "OVERSEAS" => "ZOVS", "FREIGHT" => "ZFRE", _ => "",
                 };
                 if (byHeading.Length > 0 && (poConds.Count == 0
                     || poConds.Any(x => string.Equals(x.Cond.ConditionType.Trim(), byHeading, StringComparison.OrdinalIgnoreCase))))
@@ -1371,7 +1468,7 @@ public static class SupplierInvoicePayload
                 && !string.Equals(ai, "false", StringComparison.OrdinalIgnoreCase) && ai != "0";
             charges.Add((cndnType.ToUpperInvariant(), autoItem ? "" : extra.GetStr("sapPoItem").Trim(),
                 extra.GetStr("deliveryCondStep").Trim(), extra.GetStr("deliveryCondCount").Trim(),
-                extra.GetStr("vendorCode").Trim(), Or(extra.GetStr("taxCode").Trim(), headerTaxCode),
+                extra.GetStr("vendorCode").Trim(), "VX",   // MGT shipping: VX on every cost line
                 l.GetStr("desc").Trim(), amount));
         }
 
@@ -1813,6 +1910,20 @@ public static class SupplierInvoicePayload
         foreach (var key in new[] { "invoiceNo", "goodsInvoiceNo" })
             if (header.GetStr(key).Trim() is { Length: > 0 } v && !IsPo(v, poRef)) return v;
         return poRef;
+    }
+
+    /// <summary>MGT shipping text: "GOOD EARTH Inv. INV-0498" — the first two words of the goods
+    /// supplier (the form's SUPPLIER box, "GOOD EARTH OILS PTY LTD"), " Inv. ", the goods supplier's
+    /// invoice number (the form's INVOICE NO.), the PO only when that was not read.</summary>
+    internal static string MgtShippingText(Dictionary<string, object?> header)
+    {
+        var supplier = Or(header.GetStr("goodsSupplier").Trim(), header.GetStr("vendorName").Trim());
+        var words = System.Text.RegularExpressions.Regex.Split(supplier.ToUpperInvariant(), @"[\s,]+")
+            .Where(w => w.Length > 0).Take(2).ToList();
+        var name = string.Join(" ", words);
+        var no = Or(header.GetStr("goodsInvoiceNo").Trim(), PoNumber(header));
+        var text = name.Length > 0 && no.Length > 0 ? $"{name} Inv. {no}" : name.Length > 0 ? name : no;
+        return text.Length > 50 ? text[..50] : text;
     }
 
     private static string ReferenceText(Dictionary<string, object?> header, bool poKeyed = false)

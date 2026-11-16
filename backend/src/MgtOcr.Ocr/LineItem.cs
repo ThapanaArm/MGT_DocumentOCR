@@ -40,6 +40,10 @@ public class LineItem
     // keeps it (extra.poRef). Empty on a single-form bundle.
     public string PoRef { get; set; } = "";
 
+    // MGT (AP, 2026-11-16): the supplier's own invoice that bills this cost row (FLS LOG101185LCH
+    // for Freight, LOG101202LCH for Local Handling) — one SAP document per invoice (extra.invoiceNo).
+    public string InvoiceNo { get; set; } = "";
+
     // How a form cost row splits on the document behind it — Cargoport's D/O receipt under the
     // 12,386.00 "DO" row: 1,752.50 NON VAT + 10,633.50 SALES 7% + VAT 744.35. NonVat + BeforeVat is
     // the cost (what Amount holds); + Vat is what the supplier is paid. All 0 when not known.

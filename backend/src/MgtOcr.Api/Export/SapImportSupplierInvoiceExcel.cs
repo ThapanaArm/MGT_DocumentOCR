@@ -221,7 +221,7 @@ public static class SapImportSupplierInvoiceExcel
                     ["amount"] = gross,
                     ["taxCode"] = ExemptTaxCode,
                     ["assignment"] = Or(header.GetStr("invoiceNo").Trim(), header.GetStr("poRef").Trim()),
-                    ["itemText"] = GoodsText(header),
+                    ["itemText"] = GoodsText(header, IsPoKeyed(doc)),
                     ["costCenter"] = "",
                     ["vendorCode"] = party,
                 }, .. items];
@@ -230,7 +230,7 @@ public static class SapImportSupplierInvoiceExcel
             // writes the goods supplier and its invoice number on the payables, cost and variance
             // rows alike ("KIMEX,INV.2230000581"); only the tax rows name the agent who issued
             // them ("PROMPT,INV.PI-2608010"), and those carry their own text.
-            var groupText = GoodsText(header);
+            var groupText = GoodsText(header, IsPoKeyed(doc));
 
             foreach (var g in rows)
             {
@@ -367,8 +367,10 @@ public static class SapImportSupplierInvoiceExcel
     /// <summary>"KIMEX,INV.2230000581" — the supplier of the goods and that supplier's invoice
     /// number, from the form's SUPPLIER / INVOICE NO. header when the read captured them, and
     /// otherwise from the document's own supplier (which is who they are on a PO-keyed read).</summary>
-    private static string GoodsText(Dictionary<string, object?> header)
+    private static string GoodsText(Dictionary<string, object?> header, bool poKeyed = false)
     {
+        // MGT shipping (AP, 2026-11-16, PRD 5100000596): "GOOD EARTH Inv. INV-0498".
+        if (!poKeyed && SupplierInvoicePayload.MgtShippingText(header) is { Length: > 0 } mgt) return mgt;
         // The form's SUPPLIER box is taken exactly as printed: that is the name Accounting writes
         // in the item text, and it is not always one word — "CLARIANT (AG)" on document 5100001373,
         // "KS PEARL" and "BIO ACTIVES" on the RPA vouchers. Only a name that had to come from the
@@ -410,7 +412,7 @@ public static class SapImportSupplierInvoiceExcel
         // What the cost rows, the payables row and the variance row all carry: the supplier of the
         // GOODS and that supplier's invoice number, printed in the form's own SUPPLIER / INVOICE NO.
         // header. On a PO-keyed document the document's own supplier IS that supplier.
-        var goodsText = GoodsText(header);
+        var goodsText = GoodsText(header, IsPoKeyed(doc));
         var itemText = "";
         // Every (supplier, amount) a cost row already carries. The customs fee and the excise fee
         // are on the form AND on the Tax tab as duty rows, and taking both put 108,721.60 into the

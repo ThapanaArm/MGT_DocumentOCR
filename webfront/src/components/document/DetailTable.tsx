@@ -255,7 +255,7 @@ export default function DetailTable({
   const showVendor = doc.module === 'AP' || doc.module === 'II';
   const showPoExtra = doc.module === 'AP';
   const showSoExtra = doc.module === 'SO';
-  const extraCols = (showPoExtra ? 1 : 0) + (showSoExtra ? 3 : 0) + (showVendor ? 1 : 0);
+  const extraCols = (showPoExtra ? 1 : 0) + (showSoExtra ? 3 : 0) + (showVendor ? 2 : 0);
   // Withholding tax is not part of what is billed — it is deducted at payment — so the footer
   // total leaves those rows out (they stay in the table as a record). The total also follows the
   // vendor lookup, so filtering by a vendor shows exactly what that vendor's MIRO run is worth.
@@ -328,6 +328,8 @@ export default function DetailTable({
                 <th style={{ width: 54 }}>Item</th>
                 <th style={{ width: 150 }}>Item Code (Partner)</th>
                 {showVendor && <th style={{ width: 110 }}>Vendor</th>}
+                {/* MGT: the supplier invoice that bills the row — one SAP document per invoice. */}
+                {showVendor && <th style={{ width: 150 }}>Supplier Inv. No.</th>}
                 <th style={{ minWidth: 260 }}>Item Description (per Document)</th>
                 <th style={{ minWidth: 110 }}>Quantity</th>
                 <th style={{ width: 74 }}>Unit</th>
@@ -377,6 +379,16 @@ export default function DetailTable({
                             readOnly={posted}
                             onChange={(e) => onEditLineExtra(i, 'vendorCode', e.target.value)}
                             style={{ width: 96 }}
+                          />
+                        </td>
+                      )}
+                      {showVendor && (
+                        <td>
+                          <input
+                            value={(l.extra?.invoiceNo as string) ?? ''}
+                            readOnly={posted}
+                            onChange={(e) => onEditLineExtra(i, 'invoiceNo', e.target.value)}
+                            style={{ width: 136 }}
                           />
                         </td>
                       )}
@@ -538,7 +550,7 @@ export default function DetailTable({
             </tbody>
             <tfoot>
               <tr className="totrow">
-                <td colSpan={5 + (showVendor ? 1 : 0)} style={{ textAlign: 'right' }}>
+                <td colSpan={5 + (showVendor ? 2 : 0)} style={{ textAlign: 'right' }}>
                   Total{' '}
                   <span className="hint" style={{ fontWeight: 400 }}>
                     {vendorFilter
@@ -547,7 +559,7 @@ export default function DetailTable({
                   </span>
                 </td>
                 <td style={{ textAlign: 'right' }}>{fmtAmt(sum)}</td>
-                <td colSpan={4 + extraCols - (showVendor ? 1 : 0)} />
+                <td colSpan={4 + extraCols - (showVendor ? 2 : 0)} />
               </tr>
             </tfoot>
           </table>

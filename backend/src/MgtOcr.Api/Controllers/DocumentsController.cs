@@ -1836,14 +1836,10 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         }
         if (module is "AP" or "II")
         {
-            // The supplier's abbreviation (Vendor card, ocr.Vendor.ShortName) leads every
-            // "<abbr>,INV.<no>" text. The user types it; a supplier without one cannot be sent
-            // (AP, 2026-11-12).
-            var abbr = Export.SupplierShortNames.Apply(header, masterData.Vendors, pm);
-            if (forPost && pm != null && abbr.Length == 0)
-                throw new HttpApiException(400,
-                    $"ผู้ขาย {pm.GetStr("VendorCode")} {pm.GetStr("VendorName")} ยังไม่มีอักษรย่อ — "
-                    + "เพิ่มอักษรย่อที่การ์ด Vendor / Supplier ใน Step 2 ก่อนส่งเข้า SAP");
+            // MGT (AP, 2026-11-16): the supplier abbreviation is not required — MGT's vendor
+            // mapping differs from GLC's. A ShortName already on the vendor is still used; without
+            // one the text starts with the first word of the vendor's name, as before.
+            Export.SupplierShortNames.Apply(header, masterData.Vendors, pm);
             Export.SupplierShortNames.RewriteGeneratedTexts(header);
         }
         var source = new Dictionary<string, object?>
@@ -1987,10 +1983,21 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             string SameParty(string code) =>
                 config.SapSupplierInvoiceVendorMap.TryGetValue(code.Trim(), out var to) ? to : code.Trim();
             var vendors = Export.SupplierInvoicePayload.VendorsOf(doc, SameParty);
+            // MGT (AP, 2026-11-16): one document per supplier INVOICE — FLS's Freight and Local
+            // Handling invoices go as two documents (PRD 5100000595 / 596).
+            if (vendors.Count <= 1 && Export.SupplierInvoicePayload.DocsPerInvoice(doc, party, SameParty) is { Count: > 1 } perInvoice)
+            {
+                var docs = new List<Dictionary<string, object?>>();
+                foreach (var vd in perInvoice)
+                    docs.AddRange(Export.SupplierInvoicePayload.SplitByTaxCode(Export.SupplierInvoicePayload.Build(
+                        vd, apCompany, party, poItems, source, apTerms, party, goodsReceiptItems,
+                        config.SapSupplierInvoiceTaxBaseClearingAccount, SameParty, perPo)).Select(MapVendors));
+                return (TestReference(docs, doc), res);
+            }
             if (vendors.Count <= 1)
             {
                 var only = Export.SupplierInvoicePayload.Build(
-                    doc, apCompany, party, poItems, source, apTerms, goodsReceiptItems: goodsReceiptItems,
+                    Export.SupplierInvoicePayload.DocsPerInvoice(doc, party, SameParty)[0], apCompany, party, poItems, source, apTerms, goodsReceiptItems: goodsReceiptItems,
                     taxBaseClearingAccount: config.SapSupplierInvoiceTaxBaseClearingAccount, sameParty: SameParty,
                     perPo: perPo);
                 // One condition billed under two tax codes on a PO with one item for it cannot be one
@@ -2025,9 +2032,10 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
                         }
                         continue;
                     }
-                    split.AddRange(Export.SupplierInvoicePayload.SplitByTaxCode(Export.SupplierInvoicePayload.Build(
-                        doc, apCompany, v, poItems, source, apTerms, v, goodsReceiptItems,
-                        config.SapSupplierInvoiceTaxBaseClearingAccount, SameParty, perPo)).Select(MapVendors));
+                    foreach (var vd in Export.SupplierInvoicePayload.DocsPerInvoice(doc, v, SameParty))
+                        split.AddRange(Export.SupplierInvoicePayload.SplitByTaxCode(Export.SupplierInvoicePayload.Build(
+                            vd, apCompany, v, poItems, source, apTerms, v, goodsReceiptItems,
+                            config.SapSupplierInvoiceTaxBaseClearingAccount, SameParty, perPo)).Select(MapVendors));
                 }
                 catch (Export.TaxOverBaseException ex)
                 {

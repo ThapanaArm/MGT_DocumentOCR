@@ -55,6 +55,7 @@ import GlItemsTable from '../components/document/GlItemsTable';
 import TaxDataTable from '../components/document/TaxDataTable';
 import WhtTable from '../components/document/WhtTable';
 import IncomingInvoiceCard from '../components/document/IncomingInvoiceCard';
+import SapDocTabs, { screenTabs } from '../components/document/SapDocTabs';
 import MappingCards from '../components/document/MappingCards';
 import ChatFixCard from '../components/document/ChatFixCard';
 import LineExtraModal from '../components/document/LineExtraModal';
@@ -444,6 +445,16 @@ function firstWordOf(name: unknown): string {
 /** The supplier's abbreviation, typed by the user on the Vendor card (ocr.Vendor.ShortName) and
  *  kept on the header as vendorShortName; the first word of the name only until one is added
  *  (AP, 2026-11-12: "KCC,INV.KCCCI260715-012" — abbreviation, INV., the supplier's invoice no). */
+/** MGT shipping text: the first two words of the goods supplier ("GOOD EARTH" out of "GOOD EARTH
+ *  OILS PTY LTD"), " Inv. ", the goods supplier's invoice number (INV-0498), the PO only when that
+ *  was not read. Mirrors SupplierInvoicePayload.MgtShippingText. */
+function mgtShippingText(h: Record<string, any>): string {
+  const supplier = String(h.goodsSupplier ?? '').trim() || String(h.vendorName ?? '').trim();
+  const name = supplier.toUpperCase().split(/[\s,]+/).filter(Boolean).slice(0, 2).join(' ');
+  const no = String(h.goodsInvoiceNo ?? '').trim() || String(h.poRef ?? '').split(/[,\s]+/)[0] || '';
+  return name && no ? `${name} Inv. ${no}` : name || no;
+}
+
 function itemTextFor(h: Record<string, any>): string {
   const vendor = String(h.vendorShortName ?? '').trim().toUpperCase() || firstWordOf(h.vendorName);
   const invoiceNo = String(h.invoiceNo ?? '').trim() || String(h.poRef ?? '').trim();
@@ -568,8 +579,12 @@ function isInventoryPoDoc(d: DocModel): boolean {
   return String(d.apDocCategory ?? '').trim().toUpperCase() === INVENTORY_PO_CATEGORY;
 }
 
-function refDocumentFor(d: DocModel): string {
-  return isInventoryPoDoc(d) ? 'PO' : 'DELIVERY_NOTE';
+/* MIRO's Reference Document is the PURCHASE ORDER for goods and for planned delivery costs alike;
+   which of the two is billed is the Reference Document Category / Layout ("Planned delivery
+   costs"). It used to default to "Delivery Note (Goods Only)" on a delivery-cost document, which
+   read as if the document had turned into a goods invoice (AP, 2026-11-16, document #963). */
+function refDocumentFor(_d: DocModel): string {
+  return 'PO';
 }
 
 /* Fills the PO item on every goods line that has none, as position x 10 (10, 20, 30 ...) — the
@@ -640,7 +655,9 @@ function seedHeaderText(d: DocModel): DocModel {
     .filter((g) => !taxAccounts.includes(String(g.glAccount ?? '').trim()))
     .map((g) => String(g.itemText ?? '').trim())
     .find((t) => t.length > 0 && t.toUpperCase() !== 'WHT');
-  const text = (fromGl || itemTextFor(h)).slice(0, 25);
+  // MGT shipping: "GOOD EARTH Inv. INV-0498" (goods supplier + Inv. + its invoice no), the text
+  // the API posts on every line (PRD 5100000596). Goods documents keep the old rule.
+  const text = (isInventoryPoDoc(d) ? (fromGl || itemTextFor(h)) : (mgtShippingText(h) || fromGl || itemTextFor(h))).slice(0, 25);
   if (!text) return d;
   return { ...d, header: { ...h, headerText: text } };
 }
@@ -652,7 +669,7 @@ function seedHeaderText(d: DocModel): DocModel {
    row itself (EXCISE → ZED1 Excise Duty, import duty → ZIM1), so the description is checked first.
    Tax and withholding rows settle no condition. Empty when nothing on the line says. */
 const COST_TYPE_CONDITION: Record<string, string> = {
-  LOCAL: 'ZLH1', FEE: 'ZFE2', INSURANCE: 'ZINS', OVERSEAS: 'ZOVS',
+  LOCAL: 'ZLH1', FEE: 'ZFE2', INSURANCE: 'ZINS', OVERSEAS: 'ZOVS', FREIGHT: 'ZFRE',
 };
 function conditionFromDocument(l: DocLine): string {
   const ext = String(l.extCode ?? '').trim().toUpperCase();
@@ -663,6 +680,9 @@ function conditionFromDocument(l: DocLine): string {
   if (/EXCISE|สรรพสามิต/.test(desc)) return 'ZED1';
   if (ext === 'DUTY' || /IMPORT\s*DUTY|อากรขาเข้า/.test(desc)) return 'ZIM1';
   if (/INSURANCE|ประกัน/.test(desc)) return 'ZINS';
+  // Freight is its own PO condition (ZFRE Freight (Val), PO 2130000164: 695.06 AUD); the MGT form
+  // lists it on its own row of the VENDOR CODE block. It used to fall through to ZLH1 below.
+  if (/FREIGHT|ค่าระวาง/.test(desc)) return 'ZFRE';
   const byHeading = COST_TYPE_CONDITION[String(extra.costType ?? '').trim().toUpperCase()];
   if (byHeading) return byHeading;
   if (/OVERSEA/.test(desc)) return 'ZOVS';
@@ -698,6 +718,9 @@ function seedRefDocument(d: DocModel): DocModel {
   const poRef = String(h.poRef ?? '').trim();
   const next: Record<string, any> = {};
   if (!String(h.refDocument ?? '').trim()) next.refDocument = refDocumentFor(d);
+  // Documents seeded with the old default are moved over (nothing reads this value but the screen).
+  else if (String(h.refDocument).trim() === 'DELIVERY_NOTE' && !isInventoryPoDoc(d)
+    && !['POSTED', 'PARTIAL', 'POSTING', 'SPLIT'].includes(String(d.status))) next.refDocument = 'PO';
   // MIRO's Reference Document Category is the same choice the person already made on import, so it
   // follows it: against the purchase order = the goods ("1"), by the delivery = the delivery costs
   // ("2"). Only seeded when the read left it blank.
@@ -795,7 +818,11 @@ function poReferenceCheck(h: Record<string, any>): { ok: boolean; lines: string[
   const lines: string[] = [];
   if (!poNo) lines.push('ยังไม่มีเลขใบสั่งซื้อในช่อง Purchasing Order');
   if (!invNo) lines.push('ยังไม่มีเลขที่ใบแจ้งหนี้ของผู้ขาย (Invoice No.)');
-  if (poAmt > 0 && docAmt > 0 && Math.abs(poAmt - docAmt) > 0.005) {
+  // Planned delivery costs bill the PO's freight / handling / insurance conditions, not its goods:
+  // 40,300 of import costs against PO 2130000164 is right while the PO's goods are 40,000 AUD
+  // (AP, 2026-11-16). Only a goods invoice is held to the PO total.
+  const deliveryCosts = String(h.refDocType ?? '').trim() === '2';
+  if (!deliveryCosts && poAmt > 0 && docAmt > 0 && Math.abs(poAmt - docAmt) > 0.005) {
     lines.push(`ยอดในเอกสาร ${docAmt.toLocaleString()} ไม่ตรงกับยอดตามใบสั่งซื้อ ${poAmt.toLocaleString()}`);
   }
   // No complaint when the PO's own total is not known: it is only known once the purchase order
@@ -1321,6 +1348,22 @@ export default function DocumentPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [doc?.docId, vendorAbbr, map?.header.vendor?.code]);
 
+  /* MGT shipping (AP, 2026-11-16): the Basic Data Text is "GOOD EARTH Inv. INV-0498". A text the
+     screen generated the old way ("FLS,INV.RE2512206") or a cost's own name is replaced; one
+     somebody typed is kept. */
+  useEffect(() => {
+    if (!doc || (doc.module !== 'AP' && doc.module !== 'II') || isInventoryPoDoc(doc)) return;
+    if (['POSTED', 'SPLIT', 'PARTIAL', 'POSTING'].includes(String(doc.status))) return;
+    const hh = doc.header as Record<string, any>;
+    const want = mgtShippingText(hh).slice(0, 25);
+    const cur = String(hh.headerText ?? '').trim();
+    if (!want || cur === want) return;
+    const names = new Set((doc.lines || []).map((l) => String(l.desc ?? '').trim().toUpperCase()).filter(Boolean));
+    if (cur && !/,INV\./i.test(cur) && !names.has(cur.toUpperCase())) return;
+    setDoc({ ...doc, header: { ...hh, headerText: want } });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doc?.docId, doc?.header.headerText, doc?.header.goodsSupplier, doc?.header.goodsInvoiceNo]);
+
   /* Goods keyed against the PO: the G/L row's Item Text and the Basic Data Text were generated
      while Invoice No. still held the PO ("KCC,INV.2230000565"); the supplier's real invoice
      (KCCCI260715-012, from the import declaration) came afterwards and the texts kept the PO.
@@ -1659,9 +1702,9 @@ export default function DocumentPage() {
     }
     if (!String(map?.header.vendor.code ?? '').trim()) {
       out.push('ยังไม่ได้จับคู่ผู้ขาย (Vendor) ใน Step 2');
-    } else if (!vendorAbbr) {
-      out.push('ผู้ขายยังไม่มีอักษรย่อ — เพิ่มที่การ์ด Vendor / Supplier ใน Step 2 (ใช้ขึ้นต้น Text เช่น KCC,INV.<เลขที่ invoice>)');
     }
+    // MGT (AP, 2026-11-16): no supplier abbreviation — MGT's vendor mapping differs from GLC's,
+    // so sending is not held for one and the Vendor card has no "Add abbreviation" button.
     // Issuer names go to SAP as the Input tax line's Text and to the input tax report: English
     // only (AP, 2026-11-11). The read is asked for English and Thai agency names are mapped, so a
     // Thai name left here is one the read kept — corrected once in Master 8, it stays English.
@@ -1942,17 +1985,6 @@ export default function DocumentPage() {
       await loadMasters(true);
       setManualHeader('vendor', code);
       showToast(already ? 'Vendor refreshed from SAP and matched' : 'Vendor added from SAP and matched');
-    });
-
-  // The supplier's abbreviation, typed on the Vendor card (Step 2). Saved on the vendor master so
-  // every later document of this supplier has it; the effect above moves the texts over.
-  const saveVendorShortName = (code: string, abbr: string) =>
-    guard(async () => {
-      const v = abbr.trim().toUpperCase().slice(0, 20);
-      if (!code || !v) { showToast('กรอกอักษรย่อของผู้ขายก่อน'); return; }
-      await updateMaster('vendors', code, { ShortName: v });
-      await loadMasters(true);
-      showToast(`บันทึกอักษรย่อ ${v} ให้ผู้ขาย ${code} แล้ว`, 'success');
     });
 
   // MGT uses the real Zoho Account Code stored in Customer.ComcompyCodeSAP.
@@ -2697,7 +2729,10 @@ export default function DocumentPage() {
      what gets posted, so the grid must stay editable even when the read also left a poLines
      copy behind. It did on the KIMEX bundle, which is why every row sat on "Not assigned" with
      no way to assign it. */
-  const usePoCopy = !isInventoryPoDoc(doc) && poGoodsLines.length > 0;
+  // AP, 2026-11-16: on Planned delivery costs the grid shows the COST lines this document bills
+  // (Freight / Local Handling / Insurance with their condition), never the PO's goods.
+  const usePoCopy = !isInventoryPoDoc(doc) && poGoodsLines.length > 0
+    && String(h.refDocType ?? '').trim() !== '2';
 
   /* The rows the PO Reference grid shows, narrowed to the supplier picked in "Vendor in this
      document". A shipping bundle carries several suppliers on one form and becomes one SAP
@@ -3365,7 +3400,6 @@ export default function DocumentPage() {
           onUseSapCustomer={useSapCustomer}
           onUseSapVendor={useSapVendor}
           vendorShortName={vendorAbbr}
-          onSaveVendorShortName={saveVendorShortName}
           onUseZohoAccount={useZohoCustomer}
           onUseSapShipTo={useSapShipTo}
           isMgt={isMgt}
@@ -3444,6 +3478,55 @@ export default function DocumentPage() {
               // dollars or half a million baht. Shown rather than left to be discovered in SAP.
               'Basic Data': (
                 <>
+                  {/* What SAP will carry (AP, 2026-11-16): Reference, the Assignment of the vendor
+                      line and of the cost / GR-IR lines, and the Text — shown so they can be checked
+                      before sending (PRD 5100000596: LOG101202LCH / LOG101202LCH / 2130000164 /
+                      "GOOD EARTH Inv. INV-0498"). Read-only: change Invoice No. / Text above. */}
+                  {(() => {
+                    const poKeyed = isInventoryPoDoc(doc);
+                    const po = String(h.PurchasingOrder ?? h.poRef ?? '').split(/[,\s]+/)[0] || '';
+                    const looksPo = (v: string) => !!v && (v === po || /^2[12]30\d{6}$/.test(v));
+                    const inv = String(h.invoiceNo ?? '').trim();
+                    const goodsInv = String(h.goodsInvoiceNo ?? '').trim();
+                    const reference = poKeyed
+                      ? (!looksPo(inv) && inv) || (!looksPo(goodsInv) && goodsInv) || po
+                      : inv || goodsInv || po;
+                    const vendorAsg = poKeyed ? po : reference;
+                    const text = String(h.headerText ?? '').trim() || (poKeyed ? itemTextFor(h) : mgtShippingText(h));
+                    const box = (label: string, value: string) => (
+                      <div className="f" key={label}>
+                        <label>{label}</label>
+                        <input type="text" value={value} readOnly style={{ background: 'var(--bg-subtle, #f5f5f5)' }} />
+                      </div>
+                    );
+                    // A shipping bundle is several SAP documents — one tab each (AP, 2026-11-16).
+                    if (!poKeyed) {
+                      return (
+                        <SapDocTabs
+                          key={doc.docId}
+                          docId={doc.docId}
+                          fromScreen={screenTabs({
+                            lines: doc.lines || [],
+                            mainVendor: String((doc as Record<string, any>).partnerCode ?? h.vendorCode ?? '').trim(),
+                            po,
+                            invoiceNo: inv,
+                            text,
+                          })}
+                        />
+                      );
+                    }
+                    return (
+                      <div style={{ marginTop: 12 }}>
+                        <span className="hint">ค่าที่จะขึ้นใน SAP (ตรวจก่อนส่ง)</span>
+                        <div className="grid" style={{ marginTop: 6 }}>
+                          {box('Reference → SAP', reference)}
+                          {box('Assignment — บรรทัดผู้ขาย', vendorAsg)}
+                          {box(poKeyed ? 'Assignment — บรรทัด GR/IR' : 'Assignment — บรรทัดค่าใช้จ่าย', po)}
+                          {box('Text — ทุกบรรทัด', text.slice(0, 50))}
+                        </div>
+                      </div>
+                    );
+                  })()}
                   {(() => {
                     const cur = String(h.currency ?? '').trim().toUpperCase();
                     const rate = Number(h.exchangeRate) || 0;

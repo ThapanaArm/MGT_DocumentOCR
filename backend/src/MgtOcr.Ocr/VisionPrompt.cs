@@ -495,50 +495,44 @@ public static partial class VisionPrompt
     // per-row VENDOR column at all — the vendor codes sit in a small mapping block at the foot of
     // the sheet, which is why MGT's local handling lands on ONE vendor while GLC's splits per row.
     // Everything here was read off the form shown in the MGT OCR workshop (30-Sep-2026).
+    // AP, 2026-11-16 (document #963, PO 2130000164): MGT's sheet is titled "FORM SHIPPING EXPENSE"
+    // too, and on a scanned bundle its ACTUAL INVOICE column is often crossed out or unreadable.
+    // What is posted is the small block at the FOOT of the sheet — one row per kind of cost with
+    // its amount in THB and the vendor it goes to (FREIGHT 15,874.05 and LOCAL HANDLING 23,664.95 to
+    // FLS 1993 4000208, INSURANCE 761.00 to Felix 4000197). So the lines are read from that block,
+    // one per row, each with its OWN vendor code; the big table is not used for amounts any more.
+    // Without this rule the read took the goods supplier's tax invoice (GOOD EARTH, INV-0498,
+    // 40,000 AUD) as the document.
     private const string MgtFormRules =
-        "\n- ฟอร์มสรุปค่าใช้จ่ายนำเข้าของ MGT คือหน้าที่มีตารางหัวคอลัมน์ DESCRIPTION, MGT'S PURCHASE EST. HANDLING, " +
-        "SHIPPING BROKER HANDLING, MGT'S GR EST. HANDLING, ACTUAL INVOICE, DIFF ถ้ามีหน้านี้ ให้ lines มาจากตารางนั้นเท่านั้น" +
-        // The posting column, confirmed by MGT accounting: the amount that goes to SAP is the
-        // ACTUAL INVOICE figure (22,094.33 on the sample form) — what the agent actually
-        // billed. The three estimate columns are never posted, and ROUNDUP is only the other
-        // half of the DIFF calculation.
-        "\n- (ฟอร์ม MGT) ยอดเงินของทุก line ให้ใช้คอลัมน์ ACTUAL INVOICE เท่านั้น (ยอดที่ผู้ขายเรียกเก็บจริง) " +
-        "ห้ามใช้ยอดจากคอลัมน์ MGT'S PURCHASE EST. HANDLING, SHIPPING BROKER HANDLING, MGT'S GR EST. HANDLING หรือแถว ROUNDUP " +
-        "เพราะสามคอลัมน์แรกเป็นยอดประมาณการ ส่วน ROUNDUP ใช้แค่คำนวณ DIFF " +
-        "ข้ามรายการที่คอลัมน์ ACTUAL INVOICE ว่าง เป็น \"-\" หรือ 0 (ประมาณการไว้แต่ยังไม่มีใบเรียกเก็บ ยังไม่ต้องตั้งหนี้)" +
-        // Confirmed by MGT accounting (Rattana, 30-Sep-2026): "Handling costs will be grouped
-        // together on one line, but if there are insurance costs, an additional line will be
-        // added." So MGT does NOT get a line per DESCRIPTION row the way GLC does — the whole
-        // handling block collapses into one, and the items billed by another party stand alone.
-        "\n- (ฟอร์ม MGT) สำคัญ: ห้ามแตกเป็น 1 แถวต่อ 1 บรรทัดใน DESCRIPTION เหมือนฟอร์มของอีกบริษัท " +
-        "ค่าใช้จ่าย handling ทั้งหมดของ MGT ต้องรวมเป็น line เดียว: desc = \"Local Handling\", extCode = \"COST\", qty = 1, " +
-        "amount = price = ยอดแถว TOTAL LOCAL HANDLING ของคอลัมน์ ACTUAL INVOICE (เช่น 22,094.33) " +
-        "ถ้าแถว TOTAL LOCAL HANDLING ไม่มียอดในคอลัมน์นั้น ให้บวกยอดในคอลัมน์เดียวกันของทุกบรรทัดตั้งแต่ต้นตารางจนถึงก่อนแถวนั้นเอง " +
-        "(DO, CONTAINER IMBALANCE CHARGE, OT CHARGE, CUSTOMS FEE, STORAGE CHARGE, SHIPPING SERVICE, TRUCKING, LABOUR, GATE CHARGE, LIFT OFF CHARGE, CLEANING CHARGE, OTHER ฯลฯ) " +
-        "แล้วห้ามใส่บรรทัดย่อยเหล่านั้นเป็น line แยกอีก เพราะรวมไปแล้ว" +
-        "\n- (ฟอร์ม MGT) จากนั้นให้เพิ่ม line แยกออกมาอีก 1 แถวต่อ 1 รายการ เฉพาะรายการที่อยู่ใต้แถว TOTAL LOCAL HANDLING และมียอดจริงในคอลัมน์ ACTUAL INVOICE ได้แก่ " +
-        "INSURANCE (desc = \"Insurance\"), PALLET CHARGE (desc = \"Pallet Charge\"), INTERTEK SERVICE CHARGE (desc = \"Intertek Service Charge\") " +
-        "และ FREIGHT ถ้ามียอดแยกต่างหาก (desc = \"Freight\") ทุกแถวใช้ extCode = \"COST\", qty = 1 " +
-        "รายการใดไม่มียอดจริงในคอลัมน์ ACTUAL INVOICE ก็ไม่ต้องใส่ เช่น ชุดที่ไม่มีค่าประกันก็จะมีแต่ line \"Local Handling\" ใบเดียว" +
-        "\n- (ฟอร์ม MGT) ห้ามใส่แถวสรุป TOTAL AMOUNT และ ROUNDUP เป็น line " +
-        // DIFF confirmed by MGT accounting (Rattana, 03-Oct-2026) with the worked figure on the
-        // form: 22,700.00 (ROUNDUP) - 22,094.33 (TOTAL AMOUNT, actual) = 605.67. It is the
-        // rounding difference, not the estimate-vs-actual variance.
-        "ส่วนคอลัมน์ DIFF คือผลต่างระหว่างแถว ROUNDUP กับแถว TOTAL AMOUNT ของคอลัมน์ ACTUAL INVOICE "
-        + "(DIFF = ROUNDUP \u2212 TOTAL AMOUNT เช่น 22,700.00 \u2212 22,094.33 = 605.67) ไม่ใช่ผลต่างของยอดประมาณการ "
-        + "เป็นตัวเลขไว้ให้บัญชีตรวจสอบ ห้ามใส่เป็น line และห้ามนำไปรวมในยอดใด ๆ " +
-        "และ header.totalAmount ให้ใช้ยอดแถว TOTAL AMOUNT ของคอลัมน์ ACTUAL INVOICE (ยอดเดียวกับผลรวมของ lines) ไม่ใช่แถว ROUNDUP และไม่ใช่ยอดประมาณการ" +
-        // Confirmed by MGT accounting: one vendor number for the whole document. The separate
-        // lines above exist because accounting wants insurance (and the like) shown apart, NOT
-        // because a second vendor is involved — so every line carries the same code. This is the
-        // meeting's rule 1 ("the MGT Shipping Form will contain only one Vendor Number").
-        "\n- (ฟอร์ม MGT) ฟอร์มนี้ไม่มีคอลัมน์ VENDOR รายแถว และชุดเอกสารของ MGT มีรหัสผู้ขายเพียงรหัสเดียวต่อ 1 ชุด " +
-        "ให้อ่านรหัสนั้นจากตารางเล็กท้ายฟอร์มที่จับคู่ประเภทค่าใช้จ่ายกับ VENDOR CODE " +
-        "(บรรทัด IMPORT TAX, FREIGHT, LOCAL HANDLING, INSURANCE, PALLET CHARGE, LOCAL HANDLING (INTERTEK)) " +
-        "โดยปกติจะมีรหัสเขียนไว้บรรทัดเดียวคือ LOCAL HANDLING แล้วใส่รหัสนั้นเป็น vendorCode ของ \"ทุก line\" ในชุดนี้ให้เหมือนกันหมด " +
-        "ทั้ง Local Handling, Insurance, Pallet Charge, Intertek Service Charge และ Freight " +
-        "ที่แยกเป็นคนละ line ก็เพราะบัญชีต้องการให้แสดงแยกบรรทัด ไม่ใช่เพราะเป็นผู้ขายคนละราย ห้ามแยก vendor " +
-        "ยกเว้นกรณีเดียว: ถ้าในตารางท้ายฟอร์มมีรหัสผู้ขายเขียนไว้ที่บรรทัดอื่นต่างหากจริง ๆ ให้ใช้รหัสของบรรทัดนั้นกับรายการประเภทนั้น" +
+        "\n- ฟอร์มค่าใช้จ่ายนำเข้าของ MGT คือหน้าที่หัวกระดาษเขียน FORM SHIPPING EXPENSE และมีตารางหัวคอลัมน์ DESCRIPTION, MGT'S PURCHASE EST. HANDLING, " +
+        "SHIPPING BROKER HANDLING, MGT'S GR EST. HANDLING, ACTUAL INVOICE, DIFF และที่มุมล่างขวามีตารางเล็กหัวข้อ VENDOR CODE " +
+        "ไฟล์มักเป็นภาพสแกน ให้หาหน้านี้จากภาพเองทุกภาพ (มักอยู่ต้น ๆ ไฟล์ ถัดจากใบสำคัญจ่าย ใบกำกับภาษีสินค้า และ PURCHASE ORDER) " +
+        "ถ้ามีหน้านี้ lines ต้องมาจาก \"ตารางเล็กท้ายฟอร์ม\" เท่านั้น ห้ามใช้รายการจากใบกำกับภาษี/Commercial Invoice ของผู้ขายสินค้า (เช่น GOOD EARTH OILS 16 x IBC 40,000 AUD) " +
+        "ห้ามใช้หน้า PURCHASE ORDER และห้ามใช้ยอดจากตารางใหญ่ด้านบน (คอลัมน์ ACTUAL INVOICE มักถูกขีดหรือดำจนอ่านไม่ได้)" +
+        "\n- (ฟอร์ม MGT) ตารางเล็กท้ายฟอร์มมีบรรทัด IMPORT TAX, FREIGHT, LOCAL HANDLING, INSURANCE, PALLET CHARGE, LOCAL HANDLING (INTERTEK) " +
+        "แต่ละบรรทัดมียอดเงิน (THB) และทางขวาเขียนชื่อผู้ขาย + รหัสผู้ขาย 7 หลัก เช่น \"FLS 1993 (THAIL 4000208\", \"Felix Insurance B 4000197\" " +
+        "ให้สร้าง 1 line ต่อ 1 บรรทัดที่มียอดจริง (ข้ามบรรทัดที่เป็น \"-\" ว่าง หรือ 0): " +
+        "FREIGHT \u2192 desc = \"Freight\", LOCAL HANDLING \u2192 desc = \"Local Handling\", INSURANCE \u2192 desc = \"Insurance\", " +
+        "PALLET CHARGE \u2192 desc = \"Pallet Charge\", LOCAL HANDLING (INTERTEK) \u2192 desc = \"Intertek Service Charge\" " +
+        "ทุก line: extCode = \"COST\", qty = 1, amount = price = ยอดของบรรทัดนั้นตามที่เขียน (เช่น 15,874.05 / 23,664.95 / 761.00) " +
+        "และ vendorCode = รหัส 7 หลักที่เขียนไว้ทางขวาของบรรทัดนั้นเอง (แต่ละบรรทัดอาจเป็นผู้ขายคนละราย เช่น ค่าประกันเป็นของบริษัทประกัน) " +
+        "ถ้าบรรทัดใดไม่มีรหัสเขียนไว้ ให้ใช้รหัสของบรรทัด LOCAL HANDLING " +
+        // AP, 2026-11-16: one SAP document per supplier invoice (PRD 5100000595 / 596).
+        "และใส่ lines[].invoiceNo = เลขที่ใบแจ้งหนี้/ใบกำกับภาษีของผู้ขายรายนั้นที่เรียกเก็บรายการนี้ ซึ่งแนบอยู่ในไฟล์ " +
+        "(ผู้ขายรายเดียวอาจออกหลายใบ: ใบเสร็จรับเงิน/ใบกำกับภาษีของ FLS เลขที่ RE2512206 มีตารางคอลัมน์ \"Invoice Number / เลขที่ใบแจ้งหนี้\" " +
+        "แถว OCEAN FREIGHT CHARGE = LOG101185LCH และแถว TRANSPORTATION CHARGE = LOG101202LCH " +
+        "ให้ใช้เลขในคอลัมน์นั้นจับคู่กับ line ตามประเภทค่าใช้จ่าย: ค่าระวางเรือ/OCEAN FREIGHT \u2192 line Freight, " +
+        "ค่าขนส่ง/TRANSPORTATION/DO/ค่าบริการในประเทศ \u2192 line Local Handling ห้ามใช้เลขที่เอกสารของใบเสร็จ (RE2512206) เป็น invoiceNo ของ line " +
+        "เลข RE... คือเลขที่ใบกำกับภาษี ใช้เป็น taxDocNo ของแถว VAT เท่านั้น) " +
+        "ถ้าหาใบที่ตรงไม่ได้ให้ใส่สตริงว่าง" +
+        "\n- (ฟอร์ม MGT) บรรทัด IMPORT TAX ไม่ต้องสร้างเป็น line ค่าใช้จ่าย อากรและภาษีนำเข้าอ่านจากใบเสร็จกรมศุลกากรตามกฎภาษีด้านล่าง " +
+        "ห้ามใส่แถว TOTAL LOCAL HANDLING, TOTAL AMOUNT, ROUNDUP และ Diff เป็น line " +
+        "header.totalAmount = ผลรวมของ lines จากตารางเล็กนี้ (ไม่รวม IMPORT TAX) ซึ่งต้องเท่ากับยอดแถว ROUNDUP ของฟอร์ม " +
+        "(เช่น 15,874.05 + 23,664.95 + 761.00 = 40,300.00) ถ้าไม่เท่าให้อ่านยอดในตารางเล็กใหม่อีกครั้ง " +
+        "ห้ามใช้ยอด Total Amount ของ PURCHASE ORDER หรือของใบกำกับภาษีสินค้า (เช่น 40,000.00 AUD) เพราะนั่นคือราคาสินค้า ไม่ใช่ค่าใช้จ่ายนำเข้า" +
+        "\n- (ฟอร์ม MGT) หัวฟอร์ม: PO. NO. คือ poRef, SUPPLIER คือ goodsSupplier, INVOICE NO. คือเลข invoice ของผู้ขายสินค้า ให้ใส่ที่ goodsInvoiceNo " +
+        "ห้ามใส่เป็น invoiceNo ของเอกสาร ส่วน invoiceNo, vendorName, vendorTaxId ของเอกสารให้มาจากใบแจ้งหนี้/ใบกำกับภาษีของผู้ขายในบรรทัด LOCAL HANDLING " +
+        "(เช่น FLS 1993 (THAILAND) CO., LTD.) ที่แนบอยู่ในไฟล์" +
         "\n- (ฟอร์ม MGT) ถ้ามีรายการสกุลเงินต่างประเทศ ให้แปลงเป็นเงินบาทก่อนนำไปรวมหรือใส่ใน amount/price โดยใช้อัตราในช่อง EX-RATE BASED ON THE ARRIVAL DATE " +
         "ที่หัวฟอร์ม (บรรทัด 1 USD / 100 JPY / 1 EUR / 1 GBP) แล้วเขียนอัตราที่ใช้ต่อท้าย desc เช่น \"Local Handling (incl. USD 188.00 x 33.4416)\" เพื่อให้ตรวจสอบย้อนกลับได้ " +
         "ถ้าหาอัตราในไฟล์ไม่เจอ ให้คงยอดเดิมไว้และเขียน desc ว่า \"... (USD, no FX rate found)\"";
@@ -547,9 +541,11 @@ public static partial class VisionPrompt
     // does not, so this restates the vendor question for the tax rows and nothing else.
     private const string MgtTaxVendorRules =
         "\n- (ฟอร์ม MGT) ข้อความข้างบนที่พูดถึง \"คอลัมน์ VENDOR ของฟอร์ม\" ใช้กับฟอร์มของอีกบริษัท ฟอร์มของ MGT ไม่มีคอลัมน์นั้น " +
-        "สำหรับชุดเอกสารของ MGT ให้ใส่ vendorCode ของแถว VAT และ WHT เป็นรหัสผู้ขายรหัสเดียวกับที่ใช้กับแถวค่าใช้จ่าย (รหัสเดียวทั้งชุด) " +
-        "ยกเว้นแถว DUTY และภาษีจากใบเสร็จกรมศุลกากร ถ้าตารางท้ายฟอร์มมีรหัสที่บรรทัด IMPORT TAX เขียนไว้ต่างหาก ให้ใช้รหัสนั้น " +
-        "ถ้าไม่มีเขียนไว้ ให้ใช้รหัสเดียวกับแถวค่าใช้จ่ายเช่นกัน ห้ามเว้นว่างและห้ามแต่งรหัสขึ้นเอง";
+        "สำหรับชุดเอกสารของ MGT ให้ใส่ vendorCode ของแถว VAT และ WHT เป็นรหัสจากตารางเล็กท้ายฟอร์มของผู้ขายที่ออกใบนั้น " +
+        "(ใบของบริษัทขนส่ง/ตัวแทน ใช้รหัสบรรทัด LOCAL HANDLING หรือ FREIGHT, ใบของบริษัทประกัน ใช้รหัสบรรทัด INSURANCE) " +
+        "ถ้าจับคู่ไม่ได้ให้ใช้รหัสบรรทัด LOCAL HANDLING " +
+        "ส่วนแถว DUTY และภาษีจากใบเสร็จกรมศุลกากร ถ้าบรรทัด IMPORT TAX มีรหัสเขียนไว้ ให้ใช้รหัสนั้น " +
+        "ถ้าไม่มีเขียนไว้ ให้ใช้รหัสบรรทัด LOCAL HANDLING ห้ามเว้นว่างและห้ามแต่งรหัสขึ้นเอง";
 
     private const string MgtBundleRules = BundleHeaderRules + MgtFormRules + BundleTaxRules + MgtTaxVendorRules + "\n" + SourceDocsRule;
 
@@ -670,6 +666,7 @@ public static partial class VisionPrompt
                     PoItem = GetStr(ln, "poItem").Trim(),
                     CostType = GetStr(ln, "costType").Trim(),
                     PoRef = Regex.Match(GetStr(ln, "poRef"), @"\d{10}").Value,
+                    InvoiceNo = GetStr(ln, "invoiceNo").Trim(),
                     NonVatAmount = GetNum(ln, "nonVatAmount"),
                     BeforeVatAmount = GetNum(ln, "beforeVatAmount"),
                     VatAmount = GetNum(ln, "vatAmount"),
