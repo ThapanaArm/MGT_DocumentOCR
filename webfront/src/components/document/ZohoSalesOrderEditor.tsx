@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState } from 'react';
+import { Fragment, useEffect, useState, type ReactNode } from 'react';
 import { getMgtSales, getZohoAccountFullByCode } from '../../api/zoho';
 import type { DocLine } from '../../api/documents';
 import type { OcrProvider } from '../../api/masters';
@@ -46,8 +46,8 @@ function DealOwnerPicker({ preview, salesUserId, onChange, posted }: {
   // Compact (12 Nov 2026): the Responsible Sales box with just a labelled dropdown, plus one short
   // red line when the Account Owner can't own the new Deal.
   return (
-    <div className="notice" style={{ margin: '10px 0', padding: 12 }}>
-      <div className="row" style={{ gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+    <div className="notice" style={{ margin: '12px 0', padding: 12 }}>
+      <div className="row" style={{ gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
         <b>Responsible Sales / Deal Owner:</b>
         <div style={{ flex: '1 1 420px', maxWidth: 560 }}>
           <MaterialSearchSelect
@@ -103,7 +103,7 @@ function DealOwnerPreview({ preview }: { preview: ZohoSalesOrderPreview }) {
   }, [preview.dealOwnerName, preview.flow?.newDeal, preview.accountCode]);
   const name = preview.dealOwnerName || accountOwner;
   return (
-    <div className="notice" style={{ margin: '10px 0', padding: 12 }}>
+    <div className="notice" style={{ margin: '12px 0', padding: 12 }}>
       <b>Responsible Sales / Deal Owner: </b>
       {name ? <strong>{name}</strong> : <span>{loading ? 'Reading Customer Account…' : error || preview.dealOwnerError || 'Could not determine the Deal owner. Please reload the preview.'}</span>}
       {preview.flow?.newDeal && name && <div className="hint">Sales Employee from Customer Account — assigned as owner of the new Deal</div>}
@@ -127,7 +127,9 @@ export default function ZohoSalesOrderEditor({
   error,
   selectedDealId,
   docLines,
-  resolvedDeal,
+  dealOfItem,
+  dealLabel,
+  dealByKey,
   providers,
   header,
   onHeaderChange,
@@ -142,6 +144,9 @@ export default function ZohoSalesOrderEditor({
   dateGroups = [],
   posts = [],
   shipToMissing = false,
+  newDealForecast = {},
+  onNewDealForecast,
+  forecastMissing = false,
   groupShipTo,
   salesUserId = '',
   onOwnerChange,
@@ -154,9 +159,13 @@ export default function ZohoSalesOrderEditor({
   error: string | null;
   selectedDealId: string;
   docLines: DocLine[];
-  /** The full resolved Deal (with its Deal Items) -- the candidate pool for the AI-suggest tool
-   *  on a line the automatic match skipped. */
-  resolvedDeal: ZohoDeal | null;
+  /** The Deal of a line (by itemNo; null = a new Deal) -- its Deal Items are the candidate pool for the
+   *  AI-suggest tool on a line the automatic match skipped. One PO may hold several Deals (16 Nov 2026). */
+  dealOfItem: (itemNo: string) => ZohoDeal | null;
+  /** Display name of a Deal key ("New Deal 2" for a new one). */
+  dealLabel: (key: string) => string;
+  /** The open Deal behind a key (null = a new Deal) -- its Deal Number / delivery date tell twin Deals apart. */
+  dealByKey?: (key: string) => ZohoDeal | null;
   providers: OcrProvider[];
   header: { subject: string; customerRef: string; deliveryDate: string; paymentTerms: string; paymentCurrency: string; incoterms: string; taxId: string; remarks: string };
   onHeaderChange: (patch: Partial<ZohoSalesOrderEditorHeader>) => void;
@@ -176,6 +185,11 @@ export default function ZohoSalesOrderEditor({
   posts?: SoGroupState[];
   /** No Ship-to selected/mapped yet -- Send stays disabled until one is set. */
   shipToMissing?: boolean;
+  /** New Deal key -> Forecast Status CS chose ("Yes" / "No"); a new Deal has no default (16 Nov 2026). */
+  newDealForecast?: Record<string, 'Yes' | 'No'>;
+  onNewDealForecast?: (key: string, value: 'Yes' | 'No') => void;
+  /** A new Deal still has no Forecast Status chosen -- Send stays disabled. */
+  forecastMissing?: boolean;
   /** Per-SO-Group ship-to picker (Zoho ship-tos of the matched Account). */
   groupShipTo?: GroupShipToControl;
   /** New Deal: Ms_User.UserID of the Sales person picked as Deal Owner ('' = Account Owner). */
@@ -192,7 +206,9 @@ export default function ZohoSalesOrderEditor({
   // Which skipped line (by itemNo) currently has the "Ask AI to suggest a match" popup open.
   const [aiMatchItemNo, setAiMatchItemNo] = useState<string | null>(null);
 
-  const dealHasMaterials = !!resolvedDeal && resolvedDeal.items.some((it) => it.materialId);
+  const dealHasMaterials = (itemNo: string) => !!dealOfItem(itemNo)?.items.some((it) => it.materialId);
+  const dealParts = preview?.deals ?? [];
+  const multiDeal = dealParts.length > 1;
 
   // Document fields shown to the AI when suggesting a match for a skipped line -- the same info a
   // person reads off the card (partner code + material name), enriched with qty/unit/price from
@@ -209,7 +225,7 @@ export default function ZohoSalesOrderEditor({
     ];
   };
 
-  const aiCandidates: CompareCandidateItem<ZohoDealItem>[] = (resolvedDeal?.items || [])
+  const aiCandidates: CompareCandidateItem<ZohoDealItem>[] = ((aiMatchItemNo ? dealOfItem(aiMatchItemNo)?.items : null) || [])
     .filter((it): it is ZohoDealItem & { materialId: string } => !!it.materialId)
     .map((it) => ({
       id: it.materialId,
@@ -253,7 +269,7 @@ export default function ZohoSalesOrderEditor({
                                 {l.lastPrice.toLocaleString('en-US', { maximumFractionDigits: 2 })}
                               </b>
                               {differs && <i className="fa-solid fa-triangle-exclamation" style={{ color: 'var(--orange)', marginLeft: 4 }} title="Unit Price differs from the last price" />}
-                              {l.lastPriceDate && <div className="hint" style={{ fontSize: 11 }}>{formatDate(l.lastPriceDate)}</div>}
+                              {l.lastPriceDate && <div className="hint" style={{ fontSize: 14 }}>{formatDate(l.lastPriceDate)}</div>}
                             </span>
                           );
                         })() : <span className="hint">—</span>}
@@ -279,7 +295,7 @@ export default function ZohoSalesOrderEditor({
       lines.forEach((l) => used.add(String(l.itemNo)));
       return {
         key: g.key,
-        title: `Sales Order ${i + 1} of ${dateGroups.length} · Delivery ${g.date}${dateGroups.some((x) => x.soGroup !== '1') ? ` · SO ${g.soGroup}` : ''} · ${lines.length} item${lines.length === 1 ? '' : 's'}`,
+        title: `Sales Order ${i + 1} of ${dateGroups.length}${multiDeal && g.deal ? ` · Deal ${dealLabel(g.deal)}` : ''} · Delivery ${g.date}${dateGroups.some((x) => x.soGroup !== '1') ? ` · SO ${g.soGroup}` : ''} · ${lines.length} item${lines.length === 1 ? '' : 's'}`,
         lines,
       };
     }).filter((g) => g.lines.length > 0);
@@ -289,36 +305,49 @@ export default function ZohoSalesOrderEditor({
   })();
 
   const body = () => {
-    if (!selectedDealId) return <p className="hint">Pick a Deal on the Deal (Zoho) card above — the Sales Order to send will appear here.</p>;
+    if (!selectedDealId) return <p className="hint">Group the items into Deals on the Deal (Zoho) card in Step 2 — the Sales Orders to send will appear here.</p>;
     if (loading) return <p className="hint">Reading the Sales Order from Zoho CRM…</p>;
     if (error) return <p className="hint" style={{ color: 'var(--red, #c0392b)' }}>Could not build the Sales Order: {error}</p>;
     if (!preview) return <p className="hint">No Sales Order data yet.</p>;
 
     return (
       <>
-        <p className="hint">
-          This will be created in Zoho CRM as a <b>Sales Order</b>, linked to{' '}
-          {preview.flow?.newDeal ? <>a new Deal <b>{preview.dealName || 'Name will be calculated from the matched Materials'}</b></> : <>Deal <b>{preview.dealName}</b></>}.
-        </p>
+        {multiDeal ? null : (
+          <p className="hint">
+            This will be created in Zoho CRM as a <b>Sales Order</b>, linked to{' '}
+            {preview.flow?.newDeal ? <>a new Deal <b>{preview.dealName || 'Name will be calculated from the matched Materials'}</b></> : <>Deal <b>{preview.dealName}</b></>}.
+          </p>
+        )}
 
         {/* New Deal: pick the Sales (Deal Owner) here; an existing Deal shows its own Owner. */}
         {preview.flow?.newDeal && onOwnerChange
           ? <DealOwnerPicker preview={preview} salesUserId={salesUserId} onChange={onOwnerChange} posted={posted} />
           : <DealOwnerPreview preview={preview} />}
-        {preview.flow && (
+        {multiDeal ? (
+          // One PO, several Deals (16 Nov 2026): one compact row per Deal instead of three cards each.
+          <DealFlowTable parts={dealParts} dealByKey={dealByKey} dealLabel={dealLabel} dateGroups={dateGroups}
+            forecast={newDealForecast} onForecast={onNewDealForecast} disabled={posted} />
+        ) : preview.flow && (
           // Zoho chain Deal -> Quote -> Sales Order (27 Oct 2026): what Send does, one step per card.
-          <ZohoFlowSteps flow={preview.flow} dealName={preview.dealName} salesOrders={Math.max(1, dateGroups.length)} />
+          <ZohoFlowSteps flow={preview.flow} dealName={preview.dealName} salesOrders={Math.max(1, dateGroups.length)}
+            forecast={newDealForecast[dealParts[0]?.key ?? '']} disabled={posted}
+            onForecast={onNewDealForecast && dealParts[0] ? (v) => onNewDealForecast(dealParts[0].key, v) : undefined} />
         )}
 
 
-        <p className="hint" style={{ margin: '4px 0 10px' }}>
+        <p className="hint" style={{ margin: '4px 0 12px' }}>
           Fields left blank fall back to the linked Deal&apos;s saved value — they are not sent empty.
           The greyed text in a field is what will be sent to Zoho if you leave it blank.
         </p>
         <div className="grid">
           <div className="f">
             <label>Subject</label>
-            <input type="text" value={header.subject} placeholder={preview.subject || ''} disabled={posted} maxLength={50} onChange={(e) => onHeaderChange({ subject: e.target.value })} />
+            {multiDeal ? (
+              // Several Deals: each Quote / Sales Order is named after its own Deal.
+              <input type="text" value="Each Deal's own name" disabled readOnly />
+            ) : (
+              <input type="text" value={header.subject} placeholder={preview.subject || ''} disabled={posted} maxLength={50} onChange={(e) => onHeaderChange({ subject: e.target.value })} />
+            )}
           </div>
           <div className="f">
             <label>Customer PO / Customer Ref.</label>
@@ -381,7 +410,7 @@ export default function ZohoSalesOrderEditor({
           )}
         </div>
 
-        <p className="sec-title" style={{ marginTop: 20 }}>
+        <p className="sec-title" style={{ marginTop: 24 }}>
           ORDERED ITEMS ({preview.lines.length})
         </p>
         {preview.lastPriceError && (
@@ -449,7 +478,7 @@ export default function ZohoSalesOrderEditor({
                         <td>{sk.desc || '—'}</td>
                         <td className="hint">{sk.reason}</td>
                         <td>
-                          {dealHasMaterials && !posted && (
+                          {dealHasMaterials(key) && !posted && (
                             <button className="btn sm" onClick={() => setAiMatchItemNo(key)}>
                               <i className="fa-solid fa-wand-magic-sparkles" /> Ask AI to match
                             </button>
@@ -465,12 +494,12 @@ export default function ZohoSalesOrderEditor({
         )}
 
         {result && !result.success && (
-          <div className="hint" style={{ color: 'var(--red, #c0392b)', marginTop: 14 }}>
+          <div className="hint" style={{ color: 'var(--red, #c0392b)', marginTop: 16 }}>
             Zoho did not accept the record: {result.message || 'Unknown error'}
           </div>
         )}
         {result && result.success && (
-          <div className="badge b-ok" style={{ marginTop: 14 }}>
+          <div className="badge b-ok" style={{ marginTop: 16 }}>
             <i className="fa-solid fa-check" /> Sent — {result.groups && result.groups.length > 1 ? `${result.groups.length} Sales Orders` : 'Sales Order'} created in Zoho CRM ({result.linesSent} line(s))
           </div>
         )}
@@ -485,11 +514,11 @@ export default function ZohoSalesOrderEditor({
           }} />
 
         <div className="so-send">
-          <div className="row" style={{ gap: 10 }}>
+          <div className="row" style={{ gap: 12 }}>
             <button
               className="btn success"
               onClick={onSend}
-              disabled={SEND_DISABLED || sending || posted || shipToMissing || ownerMissing || preview.lines.length === 0 || !!result?.success || remaining === 0}
+              disabled={SEND_DISABLED || sending || posted || shipToMissing || ownerMissing || forecastMissing || preview.lines.length === 0 || !!result?.success || remaining === 0}
             >
               {sending
                 ? 'Sending…'
@@ -503,7 +532,7 @@ export default function ZohoSalesOrderEditor({
               {'{}'} View payload
             </button>
           </div>
-          {(result?.success || shipToMissing || ownerMissing || multiDate || preview.lines.length === 0 || preview.skipped.length > 0 || allSent || SEND_DISABLED) && (
+          {(result?.success || shipToMissing || ownerMissing || forecastMissing || multiDate || preview.lines.length === 0 || preview.skipped.length > 0 || allSent || SEND_DISABLED) && (
           <div className="so-send-status">
             <b>
               {result?.success
@@ -516,6 +545,8 @@ export default function ZohoSalesOrderEditor({
                 ? 'Ship-to required'
                 : ownerMissing
                 ? 'Sales person required'
+                : forecastMissing
+                ? 'Forecast required for the new Deal'
                 : preview.lines.length === 0
                   ? 'Nothing to send yet'
                   : multiDate
@@ -533,6 +564,8 @@ export default function ZohoSalesOrderEditor({
                   : 'Select a Ship-to in the mapping cards above before sending'
                 : ownerMissing && !result?.success
                 ? 'Select a Sales above'
+                : forecastMissing && !result?.success
+                ? 'Choose Forecast Yes or No for each new Deal (Deal step above)'
                 : multiDate
                 ? `${dateGroups.length} Sales Orders (by SO Group and delivery date) — same Customer PO, each with its own Delivery Date and Ship-to`
                 : preview.lines.length === 0
@@ -590,8 +623,97 @@ export type ZohoSalesOrderEditorHeader = {
 
 /* Deal -> Quote -> Sales Order as three numbered steps: for each, whether Send uses an existing
    record or creates a new one, which record, and why. */
-function ZohoFlowSteps({ flow, dealName, salesOrders }: { flow: ZohoSalesOrderFlow; dealName: string; salesOrders: number }) {
-  type Step = { title: string; action: string; kind: 'use' | 'create' | 'unknown'; main: string; sub: string };
+/* What Send does when the PO holds several Deals (16 Nov 2026, Megachem: "too much text"): one row per Deal
+   -- Deal (Deal Number · delivery date; the name is the tooltip), Owner, Forecast (Yes / No to pick for a new
+   Deal), Quote (use / new; the reason is the tooltip), Sales Orders. */
+function DealFlowTable({ parts, dealByKey, dealLabel, dateGroups, forecast, onForecast, disabled }: {
+  parts: NonNullable<ZohoSalesOrderPreview['deals']>;
+  dealByKey?: (key: string) => ZohoDeal | null;
+  dealLabel: (key: string) => string;
+  dateGroups: DeliveryDateGroup[];
+  forecast: Record<string, 'Yes' | 'No'>;
+  onForecast?: (key: string, value: 'Yes' | 'No') => void;
+  disabled?: boolean;
+}) {
+  // Same colours as the step cards (ZohoFlowSteps): use = green, create = blue, unknown = orange.
+  const tag = (text: string, kind: 'use' | 'create' | 'unknown') => {
+    const c = kind === 'use' ? { bg: 'var(--brand-soft)', fg: 'var(--brand)' }
+      : kind === 'create' ? { bg: 'var(--info-bg)', fg: 'var(--info)' }
+      : { bg: 'var(--orange-bg)', fg: 'var(--orange)' };
+    return (
+      <span style={{ display: 'inline-block', padding: '1px 8px', borderRadius: 999, fontSize: 14, fontWeight: 700,
+        background: c.bg, color: c.fg, marginRight: 8 }}>{text}</span>
+    );
+  };
+  return (
+    <div style={{ overflowX: 'auto', margin: '8px 0 16px' }}>
+      <table style={{ minWidth: 640 }}>
+        <thead>
+          <tr><th>Deal</th><th>Owner</th><th>Forecast</th><th>Quote</th><th style={{ textAlign: 'right' }}>Sales Orders</th></tr>
+        </thead>
+        <tbody>
+          {parts.map((p) => {
+            const deal = dealByKey?.(p.key) ?? null;
+            const title = deal
+              ? [deal.dealNumber, deal.deliveryDate && formatDate(deal.deliveryDate)].filter(Boolean).join(' · ') || p.dealName
+              : dealLabel(p.key);
+            const picked = forecast[p.key];
+            const sos = Math.max(1, dateGroups.filter((g) => g.deal === p.key).length);
+            return (
+              <tr key={p.key}>
+                <td title={p.dealName}>
+                  {tag(p.flow.newDeal ? 'New' : 'Existing', p.flow.newDeal ? 'create' : 'use')}
+                  <b>{title}</b>
+                </td>
+                <td className="hint">{p.ownerName || '—'}</td>
+                <td>
+                  {p.flow.newDeal && onForecast ? (
+                    <span role="radiogroup" aria-label={`Forecast of ${title}`} style={{ display: 'inline-flex', gap: 4 }}>
+                      {(['Yes', 'No'] as const).map((v) => (
+                        <button key={v} type="button" role="radio" aria-checked={picked === v} disabled={disabled}
+                          className={'btn sm' + (picked === v ? ' primary' : '')}
+                          style={!picked ? { borderColor: '#b91c1c' } : undefined}
+                          onClick={() => onForecast(p.key, v)}>{v}</button>
+                      ))}
+                    </span>
+                  ) : p.flow.wcd ? <span className="badge b-ok">WCD</span> : <span className="hint">No</span>}
+                </td>
+                <td title={p.flow.quoteReason}>
+                  {p.flow.quoteAction === 'use'
+                    ? <>{tag('Use', 'use')}{p.flow.quoteNo}</>
+                    : p.flow.quoteAction === 'create' ? tag('New', 'create') : tag('Check', 'unknown')}
+                </td>
+                <td style={{ textAlign: 'right' }}>{sos}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function ZohoFlowSteps({ flow, dealName, salesOrders, forecast, onForecast, disabled }: {
+  flow: ZohoSalesOrderFlow; dealName: string; salesOrders: number;
+  /** New Deal: the Forecast Status CS chose ('' / undefined = not chosen yet). */
+  forecast?: 'Yes' | 'No';
+  onForecast?: (value: 'Yes' | 'No') => void;
+  disabled?: boolean;
+}) {
+  type Step = { title: string; action: string; kind: 'use' | 'create' | 'unknown'; main: string; sub: string; extra?: ReactNode };
+  // New Deal: CS picks Forecast Yes (WCD) or No before Send -- no default (16 Nov 2026).
+  const forecastPicker = flow.newDeal && onForecast ? (
+    <div role="radiogroup" aria-label="Forecast Status of the new Deal" style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+      {(['Yes', 'No'] as const).map((v) => (
+        <button key={v} type="button" role="radio" aria-checked={forecast === v} disabled={disabled}
+          className={'btn sm' + (forecast === v ? ' primary' : '')} onClick={() => onForecast(v)}>
+          <i className={forecast === v ? 'fa-solid fa-circle-dot' : 'fa-regular fa-circle'} />{' '}
+          {v === 'Yes' ? 'Forecast (WCD) — Yes' : 'No forecast — No'}
+        </button>
+      ))}
+      {!forecast && <span style={{ color: '#b91c1c', fontWeight: 700, fontSize: 14 }}>Choose Forecast before sending</span>}
+    </div>
+  ) : undefined;
   const steps: Step[] = [
     {
       title: 'Deal',
@@ -599,8 +721,11 @@ function ZohoFlowSteps({ flow, dealName, salesOrders }: { flow: ZohoSalesOrderFl
       kind: flow.newDeal ? 'create' : 'use',
       main: dealName || 'New Deal for this customer',
       sub: flow.newDeal
-        ? 'No forecast · Forecast Status No · Stage “Sales Order Created”'
+        ? forecast
+          ? `${forecast === 'Yes' ? 'Forecast (WCD)' : 'No forecast'} · Forecast Status ${forecast} · Stage “Draft/Qualification”`
+          : 'Stage “Draft/Qualification” · choose the Forecast Status'
         : flow.wcd ? 'Forecast (WCD) · Forecast Status Yes' : `No forecast · Forecast Status ${flow.forecastStatus || 'blank'}`,
+      extra: forecastPicker,
     },
     {
       title: 'Quote',
@@ -625,32 +750,33 @@ function ZohoFlowSteps({ flow, dealName, salesOrders }: { flow: ZohoSalesOrderFl
     : { bg: 'var(--orange-bg)', fg: 'var(--orange)', icon: 'fa-triangle-exclamation' };
   return (
     <ol aria-label="What Send does in Zoho CRM" style={{
-      listStyle: 'none', margin: '6px 0 14px', padding: 0, display: 'grid', gap: 10,
+      listStyle: 'none', margin: '8px 0 16px', padding: 0, display: 'grid', gap: 12,
       gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
     }}>
       {steps.map((st, i) => {
         const t = tone(st.kind);
         return (
           <li key={st.title} style={{
-            border: '1px solid var(--g300)', borderRadius: 12, padding: '12px 14px', background: 'var(--card)',
+            border: '1px solid var(--g300)', borderRadius: 12, padding: '12px 16px', background: 'var(--card)',
             display: 'flex', flexDirection: 'column', gap: 8, minWidth: 0, position: 'relative',
           }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <span style={{
-                width: 24, height: 24, borderRadius: '50%', display: 'grid', placeItems: 'center', fontWeight: 700, fontSize: 12,
+                width: 24, height: 24, borderRadius: '50%', display: 'grid', placeItems: 'center', fontWeight: 700, fontSize: 14,
                 background: 'var(--g200)', color: 'var(--g1600, inherit)',
               }}>{i + 1}</span>
-              <b style={{ fontSize: 15 }}>{st.title}</b>
+              <b style={{ fontSize: 16 }}>{st.title}</b>
               <div className="sp" style={{ flex: 1 }} />
               <span style={{
-                display: 'inline-flex', alignItems: 'center', gap: 6, padding: '3px 10px', borderRadius: 999,
-                fontSize: 12, fontWeight: 700, background: t.bg, color: t.fg,
+                display: 'inline-flex', alignItems: 'center', gap: 8, padding: '3px 12px', borderRadius: 999,
+                fontSize: 14, fontWeight: 700, background: t.bg, color: t.fg,
               }}>
                 <i className={'fa-solid ' + t.icon} /> {st.action}
               </span>
             </div>
             <div style={{ fontWeight: 600, overflowWrap: 'anywhere' }}>{st.main}</div>
             <div className="hint">{st.sub}</div>
+            {st.extra}
             {i < steps.length - 1 && (
               <span aria-hidden="true" className="hint" style={{ position: 'absolute', right: -9, top: 14, fontSize: 14 }}>›</span>
             )}

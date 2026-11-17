@@ -249,7 +249,7 @@ export default function MasterPage() {
               <i className="fa-solid fa-plus" /> Add Record
             </button>
             {selected.size > 0 && (
-              <button className="btn sm ghost" style={{ color: 'var(--red)' }} onClick={delSelected}>
+              <button className="btn sm danger" onClick={delSelected}>
                 <i className="fa-solid fa-trash" /> Delete selected ({selected.size})
               </button>
             )}

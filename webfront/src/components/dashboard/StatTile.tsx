@@ -19,7 +19,7 @@ export default function StatTile({
   const up = (pct || 0) >= 0;
   return (
     <div className="card overview-stat-tile" style={{ marginBottom: 0 }}>
-      <div className="card-b" style={{ padding: 18 }}>
+      <div className="card-b" style={{ padding: 16 }}>
         <div
           style={{
             width: 38,
@@ -39,10 +39,10 @@ export default function StatTile({
         <div className="hint overview-stat-label" style={{ marginBottom: 2 }}>
           {label}
         </div>
-        <div style={{ fontSize: 26, fontWeight: 700, lineHeight: '34px', marginBottom: 6 }}>
+        <div style={{ fontSize: 24, fontWeight: 700, lineHeight: '34px', marginBottom: 8 }}>
           {intFmt(value)}
         </div>
-        <div style={{ fontSize: 12, color: up ? 'var(--green)' : 'var(--red)' }}>
+        <div style={{ fontSize: 14, color: up ? 'var(--green)' : 'var(--red)' }}>
           <i className={up ? 'fa-solid fa-caret-up' : 'fa-solid fa-caret-down'} /> {Math.abs(pct || 0)}% from last week
         </div>
       </div>

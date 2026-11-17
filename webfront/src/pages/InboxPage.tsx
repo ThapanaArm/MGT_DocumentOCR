@@ -413,7 +413,7 @@ export default function InboxPage() {
         message={
           <>
           {(confirmRows ?? []).some(isPostedRow) && (
-            <div className="so-group-notice" role="alert" style={{ marginBottom: 10 }}>
+            <div className="so-group-notice" role="alert" style={{ marginBottom: 12 }}>
               <i className="fa-solid fa-triangle-exclamation" aria-hidden="true" />
               <span>
                 {(confirmRows ?? []).filter(isPostedRow).length === 1 ? 'This document has' : 'Some of these documents have'} already

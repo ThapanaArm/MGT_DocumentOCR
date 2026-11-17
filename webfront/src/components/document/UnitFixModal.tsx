@@ -96,8 +96,8 @@ export default function UnitFixModal({
               {u.unit}
               {/* Same colour as the button text (white on the selected green button, dark on the
                   others) -- the grey .hint style was unreadable on the selected button. */}
-              {u.isBase && <span style={{ marginLeft: 6, fontWeight: 500, opacity: 0.9 }}>(base)</span>}
-              {u.hint && <span style={{ marginLeft: 6, fontWeight: 500, opacity: 0.9 }}>{u.hint}</span>}
+              {u.isBase && <span style={{ marginLeft: 8, fontWeight: 500, opacity: 0.9 }}>(base)</span>}
+              {u.hint && <span style={{ marginLeft: 8, fontWeight: 500, opacity: 0.9 }}>{u.hint}</span>}
             </button>
           ))}
         </div>
@@ -117,7 +117,7 @@ export default function UnitFixModal({
             <i className="fa-solid fa-right-left" aria-hidden="true" /> Swap
           </button>
         </div>
-        <div className="hint" style={{ marginTop: 6 }}>
+        <div className="hint" style={{ marginTop: 8 }}>
           Quantity and unit price are converted together, so the line amount stays the same.
           Use 1 if only the unit name differs.
         </div>

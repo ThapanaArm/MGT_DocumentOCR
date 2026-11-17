@@ -61,13 +61,13 @@ export default function OcrProviderSelect(props: {
       style={{
         display: 'inline-flex',
         alignItems: 'center',
-        gap: 6,
-        padding: '4px 10px',
+        gap: 8,
+        padding: '4px 12px',
         borderRadius: 999,
         background: 'var(--chip-bg, #eef2ff)',
         color: 'var(--chip-fg, #3730a3)',
         border: '1px solid var(--chip-bd, #c7d2fe)',
-        fontSize: 13,
+        fontSize: 14,
         fontWeight: 600,
         whiteSpace: 'nowrap',
       }}

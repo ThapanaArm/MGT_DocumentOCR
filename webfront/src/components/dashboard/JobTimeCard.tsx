@@ -41,7 +41,7 @@ export default function JobTimeCard({ days }: { days: number }) {
   const maxBucket = Math.max(1, ...(data?.buckets ?? []).map((b) => b.count));
 
   return (
-    <div className="card jt-card" style={{ marginTop: 20 }}>
+    <div className="card jt-card" style={{ marginTop: 24 }}>
       <div className="card-h jt-head">
         <div>
           <h2>Document Processing Time</h2>

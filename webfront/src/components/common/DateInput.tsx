@@ -169,17 +169,17 @@ export default function DateInput({
           aria-label="Calendar"
           onKeyDown={(e) => { if (e.key === 'Escape') setOpen(false); }}
           style={{
-            position: 'fixed', top: pos.top, left: pos.left, zIndex: 2000, padding: 10, width: POP_W, boxSizing: 'border-box',
+            position: 'fixed', top: pos.top, left: pos.left, zIndex: 2000, padding: 12, width: POP_W, boxSizing: 'border-box',
             background: 'var(--card, #fff)', border: '1px solid var(--line, #d9dfdb)', borderRadius: 10,
             boxShadow: '0 8px 24px rgba(0,0,0,.12)',
           }}
         >
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
             <button type="button" className="btn sm" aria-label="Previous month" onClick={() => shift(-1)}>‹</button>
-            <b style={{ fontSize: 13 }}>{MONTHS[view.m]} {view.y}</b>
+            <b style={{ fontSize: 14 }}>{MONTHS[view.m]} {view.y}</b>
             <button type="button" className="btn sm" aria-label="Next month" onClick={() => shift(1)}>›</button>
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 2, textAlign: 'center', fontSize: 12 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 2, textAlign: 'center', fontSize: 14 }}>
             {WEEKDAYS.map((w) => <div key={w} style={{ color: 'var(--muted, #6b7a70)', padding: '2px 0' }}>{w}</div>)}
             {cells.map((d, i) => d == null ? <div key={i} /> : (
               <button
@@ -187,7 +187,7 @@ export default function DateInput({
                 type="button"
                 onClick={() => pick(view.y, view.m, d)}
                 style={{
-                  padding: '5px 0', borderRadius: 6, cursor: 'pointer', fontSize: 12,
+                  padding: '4px 0', borderRadius: 6, cursor: 'pointer', fontSize: 14,
                   border: isToday(d) ? '1px solid var(--brand, #00994d)' : '1px solid transparent',
                   background: isSel(d) ? 'var(--brand, #00994d)' : 'transparent',
                   color: isSel(d) ? '#fff' : 'inherit',

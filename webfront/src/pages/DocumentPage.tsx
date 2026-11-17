@@ -76,7 +76,9 @@ import SapSalesOrderStep, {
 } from '../components/document/steps/SapSalesOrderStep';
 import ZohoSalesOrderStep from '../components/document/steps/ZohoSalesOrderStep';
 import SoSplitBoard from '../components/document/SoSplitBoard';
+import { dealOfKey, distinctKeys, lineDealKey } from '../utils/zohoDealGroups';
 import { useSoShipToOptions } from '../components/document/useSoShipToOptions';
+import ReadingRulesModal from '../components/document/ReadingRulesModal';
 
 // Deprecated. The backend no longer reads any "user" value sent by the client — it stamps the
 // identity from the validated Entra ID token instead, so whatever is passed here is discarded.
@@ -669,6 +671,8 @@ export default function DocumentPage() {
 
   // modals
   const [reviewOpen, setReviewOpen] = useState(false);
+  // Sales Order reading rules per customer (sql/39): where each field is printed on this customer's PO.
+  const [rulesOpen, setRulesOpen] = useState(false);
   // The original file lives behind the same Bearer-token auth as every other endpoint, and a plain
   // <iframe src="/api/..."> cannot send that header — the request came back 401 and the viewer was
   // simply blank. Fetch it with the token instead and hand the iframe/img a blob URL.
@@ -729,8 +733,14 @@ export default function DocumentPage() {
   const zohoStepRef = useRef<SalesOrderStepHandle | null>(null);
   // Mapping owns the selected Deal/Ship-to seam; the Zoho Step owns preview, editable payload,
   // posting state, result, and its payload modal.
-  const [selectedDealId, setSelectedDealId] = useState('');
-  const [resolvedDeal, setResolvedDeal] = useState<ZohoDeal | null>(null);
+  // MGT/Zoho: the open Deals the Deal card read, and the Deal of every line (line.extra.zohoDeal) --
+  // one PO may hold items of several Deals, and items without a Deal go to a new one (16 Nov 2026).
+  const [zohoDeals, setZohoDeals] = useState<ZohoDeal[]>([]);
+  const dealAssignment = (doc?.lines || []).map(lineDealKey);
+  const lineDealOf = (i: number) => dealOfKey(dealAssignment[i] || '', zohoDeals);
+  // Every Deal Item of the document's Deals (for the chat's material picks).
+  const assignedDealItems = distinctKeys(dealAssignment)
+    .flatMap((k) => dealOfKey(k, zohoDeals)?.items ?? []);
   const [selectedZohoShipTo, setSelectedZohoShipTo] = useState<ZohoShipToInfo | null>(null);
 
   const [masterEdit, setMasterEdit] = useState<MasterEditState | null>(null);
@@ -943,6 +953,26 @@ export default function DocumentPage() {
     const next = { ...doc, header: { ...doc.header, vatMode: mode } };
     setDoc(next);
     void runMap(true, next);
+  };
+  // Deal of every line (Deal card: the system's grouping, or CS's from the "Group items into Deals"
+  // board), stored on the lines with the same silent re-map. byUser keeps CS's grouping from being
+  // replaced by the automatic one (header.zohoDealsByUser).
+  const saveDealAssignment = (assignment: string[], byUser: boolean) => {
+    if (locked || !doc) return;
+    const same = doc.lines.every((l, i) => lineDealKey(l) === (assignment[i] || ''))
+      && !!doc.header.zohoDealsByUser === byUser;
+    if (same) return;
+    const lines = doc.lines.map((l, i) => ({ ...l, extra: { ...(l.extra || {}), zohoDeal: assignment[i] || '' } }));
+    const header = { ...doc.header };
+    if (byUser) header.zohoDealsByUser = true;
+    else delete header.zohoDealsByUser;
+    const next = { ...doc, lines, header };
+    setDoc(next);
+    void runMap(true, next);
+    if (byUser) {
+      const n = distinctKeys(assignment).length;
+      showToast(n > 1 ? `Items grouped into ${n} Deals — each gets its own Quote and Sales Order` : 'All items are on one Deal', 'success');
+    }
   };
   // Save from the Split Sales Order board: each line's SO Group + each Sales Order's ship-to, in one
   // silent re-map (which stores them). Group "1" is stored blank, like a line never split.
@@ -1684,8 +1714,8 @@ export default function DocumentPage() {
           // Give the chat the current Deal's own Ordered Items so it can also pick a Material for
           // the Zoho Sales Order editor's lines (matched separately from Step 2 Data Mapping) --
           // backend has no visibility into which Deal is picked, that's pure page state.
-          dealItems: isMgt && resolvedDeal
-            ? resolvedDeal.items.map((it) => ({
+          dealItems: isMgt && assignedDealItems.length
+            ? assignedDealItems.map((it) => ({
                 materialId: it.materialId,
                 materialCode: it.materialCode,
                 materialName: it.materialName,
@@ -1729,7 +1759,7 @@ export default function DocumentPage() {
             // that Deal Item the same (non-saving) way the "Ask AI to suggest a match" popup does
             // (see useAiMaterialMatch) -- this is what the Zoho Sales Order editor's own line items
             // (and so the actual Zoho POST) read from, unlike Step 2's map.lines[i].code below.
-            const dealItem = isMgt && dl ? resolvedDeal?.items.find((it) => it.materialCode === code) : undefined;
+            const dealItem = isMgt && dl ? lineDealOf(idx)?.items.find((it) => it.materialCode === code) : undefined;
             if (dealItem && dl) {
               zohoStepRef.current?.stageMaterialMatch?.(idx, dealItem);
               continue;
@@ -1960,7 +1990,7 @@ export default function DocumentPage() {
                 </li>
               ))}
             </ul>
-            <div className="row" style={{ marginTop: 14 }}>
+            <div className="row" style={{ marginTop: 16 }}>
               <button className="btn" onClick={() => navigate('/master')}>
                 <i className="fa-solid fa-gear" /> Go to Mapping data
               </button>
@@ -2044,7 +2074,7 @@ export default function DocumentPage() {
                     {cno ? ` · ${cno}` : ''}
                     {cTotal != null ? ` · ${fmt(cTotal)}` : ''}
                     {cStatus ? (
-                      <span className={'badge ' + statusBadge(String(cStatus)).cls} style={{ marginLeft: 6 }}>
+                      <span className={'badge ' + statusBadge(String(cStatus)).cls} style={{ marginLeft: 8 }}>
                         {cStatus}
                       </span>
                     ) : null}
@@ -2114,6 +2144,11 @@ export default function DocumentPage() {
           <button className="btn sm ghost" onClick={openRaw}>
             <i className="fa-solid fa-file-lines" /> Extracted Text
           </button>
+          {doc.module === 'SO' && (
+            <button className="btn sm ghost" onClick={() => setRulesOpen(true)} title="Where each field is printed on this customer's PO">
+              <i className="fa-solid fa-crosshairs" /> Reading rules
+            </button>
+          )}
           {(doc.module === 'AP' || doc.module === 'II') && (
             <div className="btnmenu" ref={exportMenuRef}>
               <button
@@ -2159,7 +2194,7 @@ export default function DocumentPage() {
               matched against materials) to II (FB60, posted to G/L accounts), so the dropdown has
               to stay reachable afterwards to move it back. */}
           {(doc.module === 'AP' || doc.module === 'II') && (
-            <div className="f" style={{ maxWidth: 320, marginBottom: 14 }}>
+            <div className="f" style={{ maxWidth: 320, marginBottom: 16 }}>
               <label>Document Type</label>
               <select
                 disabled={posted}
@@ -2178,7 +2213,7 @@ export default function DocumentPage() {
           {doc.sourceDocId && (
             <div
               className="hint"
-              style={{ margin: '-6px 0 14px', padding: '8px 12px', background: 'var(--line-soft)', borderRadius: 'var(--r2)' }}
+              style={{ margin: '-6px 0 16px', padding: '8px 12px', background: 'var(--line-soft)', borderRadius: 'var(--r2)' }}
             >
               <i className="fa-solid fa-reply" /> Split from document{' '}
               <a href="#" onClick={(e) => { e.preventDefault(); navigate('/doc/' + doc.sourceDocId); }}>
@@ -2189,7 +2224,7 @@ export default function DocumentPage() {
           {doc.confidenceNote && (
             <div
               className="hint"
-              style={{ margin: '-6px 0 14px', padding: '8px 12px', background: 'var(--line-soft)', borderRadius: 'var(--r2)' }}
+              style={{ margin: '-6px 0 16px', padding: '8px 12px', background: 'var(--line-soft)', borderRadius: 'var(--r2)' }}
             >
               <i className="fa-solid fa-triangle-exclamation" /> Reason accuracy is below 100%: {doc.confidenceNote}
             </div>
@@ -2248,11 +2283,11 @@ export default function DocumentPage() {
           onProposeMatch={proposeCustomerMatch}
           onClearMatch={clearCustomerMatch}
           onUseZohoShipTo={useZohoShipTo}
-          selectedDealId={selectedDealId}
-          onSelectDeal={setSelectedDealId}
-          onDealResolved={setResolvedDeal}
-          dealItems={resolvedDeal?.items ?? []}
-          dealIsWcd={!!resolvedDeal?.isWcd}
+          dealAssignment={dealAssignment}
+          dealsByUser={!!doc.header.zohoDealsByUser}
+          onAssignDeals={saveDealAssignment}
+          onDealsChange={setZohoDeals}
+          lineDealOf={lineDealOf}
           onUseZohoMaterial={saveZohoMaterial}
           onPickZohoMaterialForDoc={pickZohoMaterialForDoc}
           detailContent={isMgt && showDetail ? <DetailTable {...detailProps} bare isMgt /> : undefined}
@@ -2354,8 +2389,8 @@ export default function DocumentPage() {
           ref={zohoStepRef}
           doc={doc}
           map={map}
-          selectedDealId={selectedDealId}
-          resolvedDeal={resolvedDeal}
+          dealAssignment={dealAssignment}
+          deals={zohoDeals}
           selectedShipTo={selectedZohoShipTo}
           providers={providers}
           uomRules={masters?.uoms || []}
@@ -2406,14 +2441,16 @@ export default function DocumentPage() {
       {/* Action bar */}
       <div className="card">
         <div className="card-b row">
-          <button className="btn primary" onClick={() => runMap(false)} disabled={posted || isSplit}>
+          {/* One filled (main) button per page (UI rules, 16 Nov 2026): Step 2 until the document is
+              mapped, then Step 3. */}
+          <button className={'btn' + (!map || mapStale ? ' primary' : '')} onClick={() => runMap(false)} disabled={posted || isSplit}>
             <i className="fa-solid fa-magnifying-glass" /> Step 2 — Data Mapping
           </button>
           {/* MGT/Zoho Step 3: reveal the Sales Order editor above (mirrors how Step 2 reveals the
               mapping results). The actual Send lives inside that editor; this only opens it. */}
           {isMgt && (
             <button
-              className="btn success"
+              className={'btn' + (map && !mapStale ? ' success' : '')}
               onClick={() => zohoStepRef.current?.open()}
               disabled={!(map && !mapStale && !posted && !isSplit)}
             >
@@ -2425,7 +2462,7 @@ export default function DocumentPage() {
               equivalent to match against). */}
           {!isMgt && doc.module === 'SO' && (
             <button
-              className="btn success"
+              className={'btn' + (map && !mapStale ? ' success' : '')}
               onClick={() => sapStepRef.current?.open()}
               disabled={!(map && !mapStale && map.pass && !posted && !isSplit)}
             >
@@ -2434,7 +2471,7 @@ export default function DocumentPage() {
           )}
           {!isMgt && doc.module !== 'SO' && (
             <button
-              className="btn success"
+              className={'btn' + (map && !mapStale ? ' success' : '')}
               onClick={() => setPostOpen(true)}
               disabled={!(map && !mapStale && map.pass && !posted && !isSplit)}
             >
@@ -2458,10 +2495,8 @@ export default function DocumentPage() {
                   : 'This document has been sent to SAP'
                 : isMgt
                   ? map
-                    ? selectedDealId
-                      ? 'Press Step 3 to review and send the Sales Order'
-                      : 'Match the customer and pick a Deal, then press Step 3'
-                    : 'Click Mapping first (Step 2), then pick a Deal and press Step 3'
+                    ? 'Map every material, check the Deals, then press Step 3'
+                    : 'Click Mapping first (Step 2), then press Step 3'
                   : map
                     ? map.pass
                       ? doc.module === 'SO'
@@ -2474,6 +2509,9 @@ export default function DocumentPage() {
       </div>
 
       {/* ---- Modals ---- */}
+      {doc.module === 'SO' && (
+        <ReadingRulesModal docId={doc.docId} open={rulesOpen} onClose={() => setRulesOpen(false)} onToast={showToast} />
+      )}
       <Modal open={reviewOpen} onClose={() => setReviewOpen(false)} wide>
         <ModalHeader
           title={<><i className="fa-solid fa-eye" /> View document — {doc.fileName}</>}
@@ -2576,7 +2614,7 @@ export default function DocumentPage() {
                   </tbody>
                 </table>
               </div>
-              <div className="row" style={{ marginTop: 18 }}>
+              <div className="row" style={{ marginTop: 16 }}>
                 <button className="btn success" onClick={confirmPost} disabled={SEND_DISABLED || posting}>
                   {posting ? 'Sending…' : 'Confirm send to SAP'}
                 </button>

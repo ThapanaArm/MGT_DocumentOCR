@@ -11,6 +11,8 @@ public class ParsedDocument
     public string RawText { get; set; } = "";
     public string? Note { get; set; } // mirrors Python's "_note" — non-null means a fallback/failure happened
     public string? SampleName { get; set; }
+    /// <summary>Reading rules (ReadHints): the "_positions" the AI reported on this read, compact JSON; null when not asked / none.</summary>
+    public string? PositionsJson { get; set; }
     public string ConfidenceNote { get; set; } = "";
 
     // Token usage / estimated cost — only set by AI/LLM-based providers (Claude, Gemini, OpenAI);

@@ -2,14 +2,15 @@ namespace MgtOcr.Zoho;
 
 public static class ZohoDealStage
 {
-    // Deal search (Megachem, 10 Nov 2026): only Deals in Stage Draft/Qualification, Meeting/Memo or
-    // Sample & Result are candidates for a PO. Spaces are ignored ("Sample & Result" = "Sample&Result").
-    // Keep an explicit allow-list so unrelated pipeline stages do not become eligible.
+    // The only Deal Stage the OCR flow works with (Megachem, 16 Nov 2026): a PO's Deal must be at
+    // Draft/Qualification -- an existing Deal (even one that already has Sales Orders) and a Deal the
+    // flow opens itself. Was Draft/Qualification, Meeting/Memo or Sample & Result (10 Nov 2026).
+    public const string Draft = "Draft/Qualification";
+
+    // Spaces are ignored ("Draft / Qualification" = "Draft/Qualification").
     public static bool IsOpenOrDraft(string? stage)
     {
         var value = string.Concat((stage ?? "").Where(c => !char.IsWhiteSpace(c)));
-        return value.Equals("Draft/Qualification", StringComparison.OrdinalIgnoreCase)
-            || value.Equals("Meeting/Memo", StringComparison.OrdinalIgnoreCase)
-            || value.Equals("Sample&Result", StringComparison.OrdinalIgnoreCase);
+        return value.Equals(Draft, StringComparison.OrdinalIgnoreCase);
     }
 }

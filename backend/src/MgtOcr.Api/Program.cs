@@ -16,7 +16,7 @@ builder.Configuration.AddEnvironmentVariables();
 // Configuration now comes from appsettings.json (+ appsettings.{Environment}.json and
 // environment variables, merged by the .NET config system — env vars use "__" for nesting,
 // e.g. Database__Password, and override the JSON for production/secret injection).
-// repoRoot is still used for the uploads folder, the bundled tessdata, and webfront/dist.
+// repoRoot is still used for the uploads folder and webfront/dist.
 var cfg = builder.Configuration;
 var repoRoot = Path.GetFullPath(Path.Combine(builder.Environment.ContentRootPath, "..", "..", ".."));
 
@@ -36,11 +36,6 @@ var startupLog = startupLoggerFactory.CreateLogger("MgtOcr.Startup");
 // filtering, so appsettings.json can carry a placeholder row for the company that is not live yet.
 var authTenants = cfg.GetSection("AzureAd:Tenants").Get<AuthTenant[]>() ?? [];
 
-// Auto-detection: if Ocr:TesseractCmd / Ocr:TessdataPrefix aren't set explicitly, fall back to
-// the well-known local install path this project already ships with.
-var defaultTesseractCmd = @"C:\Program Files\Tesseract-OCR\tesseract.exe";
-var tesseractCmd = Get("Ocr:TesseractCmd");
-if (tesseractCmd == "" && File.Exists(defaultTesseractCmd)) tesseractCmd = defaultTesseractCmd;
 // Where uploaded documents are kept. On a developer machine this is the repo's own uploads
 // folder, which is why it was hard-coded — but a deployment publishes the app somewhere else
 // entirely and that folder does not travel with it, so a published site would quietly write the
@@ -49,10 +44,6 @@ if (tesseractCmd == "" && File.Exists(defaultTesseractCmd)) tesseractCmd = defau
 // the server; the repo folder stays the fallback so nothing changes for local work.
 var uploadDir = Get("Storage:UploadDir");
 uploadDir = uploadDir.Length > 0 ? Path.GetFullPath(uploadDir) : Path.Combine(repoRoot, "uploads");
-
-var defaultTessdata = Path.Combine(repoRoot, "tessdata");
-var tessdataPrefix = Get("Ocr:TessdataPrefix");
-if (tessdataPrefix == "" && Directory.Exists(defaultTessdata)) tessdataPrefix = defaultTessdata;
 
 // Sap:BusinessPartner, Sap:SalesOrder, Sap:Product and ZohoConfig each carry a "dev"/"prod"
 // (Sap) or "sandbox"/"prod" (Zoho) pair of value sets plus their own switch key, so flipping ONE
@@ -91,24 +82,14 @@ var appConfig = new AppConfig
     AppPort = int.TryParse(Get("App:Port", "8091"), out var p) ? p : 8091,
     OwnCompanyKeywords = Get("App:OwnCompanyKeywords", "MEGACHEM").Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries),
     OwnTaxId = Get("App:OwnTaxId"),
-    OcrProvider = Get("Ocr:Provider", "auto"),
-    TesseractCmd = tesseractCmd,
-    TessdataPrefix = tessdataPrefix,
-    AzureDiEndpoint = Get("Ocr:AzureDiEndpoint"),
-    AzureDiKey = Get("Ocr:AzureDiKey"),
+    OcrProvider = "gemini", // the only reading engine (17 Nov 2026)
     AnthropicApiKey = Get("Ocr:AnthropicApiKey"),
     AnthropicModel = Get("Ocr:AnthropicModel", "claude-sonnet-5"),
-    TyphoonApiKey = Get("Ocr:TyphoonApiKey"),
-    TyphoonModel = Get("Ocr:TyphoonModel", "typhoon-ocr"),
     GeminiApiKey = Get("Ocr:GeminiApiKey"),
     GeminiModel = Get("Ocr:GeminiModel", "gemini-2.5-flash"),
     OpenAiApiKey = Get("Ocr:OpenAiApiKey"),
     OpenAiModel = Get("Ocr:OpenAiModel", "gpt-4o"),
-    PaddleOcrCmd = Get("Ocr:PaddleOcrCmd"),
-    PaddleOcrLang = Get("Ocr:PaddleOcrLang", "th"),
-    PaddleOcrDevice = Get("Ocr:PaddleOcrDevice"),
-    PaddleOcrMaxPages = int.TryParse(Get("Ocr:PaddleOcrMaxPages", "10"), out var pdMax) ? pdMax : 10,
-    PaddleOcrTimeoutSec = int.TryParse(Get("Ocr:PaddleOcrTimeoutSec", "300"), out var pdTo) ? pdTo : 300,
+    ReadHintsEnabled = !string.Equals(Get("Ocr:ReadHints:Enabled", "true"), "false", StringComparison.OrdinalIgnoreCase),
     SapBaseUrl = Get("Sap:BaseUrl"),
     SapUser = Get("Sap:User"),
     SapPassword = cfg["Sap:Password"] ?? "",
@@ -205,6 +186,7 @@ builder.Services.AddSingleton<MgtOcr.Api.Auth.SingleSessionService>();
 // Batch OCR queue: a job table + background worker that reads uploaded files off the main request
 // thread (many files at once would otherwise time out the upload request and hit the OCR rate limit).
 builder.Services.AddSingleton<OcrJobRepository>();
+builder.Services.AddSingleton<MgtOcr.Api.Services.ReadHintService>();
 builder.Services.AddSingleton<MgtOcr.Api.Services.DocumentIngestService>();
 builder.Services.AddHostedService<MgtOcr.Api.Services.OcrQueueWorker>();
 // Upload lifecycle: archive posted documents' files to SharePoint, then remove the local copy.

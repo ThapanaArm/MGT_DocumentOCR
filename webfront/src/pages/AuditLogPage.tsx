@@ -47,7 +47,7 @@ export default function AuditLogPage() {
         </button>
       </div>
       <div className="card-b">
-        <div className="row" style={{ gap: 6, marginBottom: 16, flexWrap: 'wrap' }}>
+        <div className="row" style={{ gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
           {MODULE_FILTERS.map(([v, l]) => (
             <button
               key={v}

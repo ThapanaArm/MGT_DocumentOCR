@@ -118,7 +118,7 @@ export default function HomePage() {
           display: 'grid',
           gridTemplateColumns: 'repeat(auto-fit,minmax(190px,1fr))',
           gap: 16,
-          marginBottom: 20,
+          marginBottom: 24,
         }}
       >
         {tiles.map((t) => (
@@ -128,7 +128,7 @@ export default function HomePage() {
 
       {/* Trend + status donut */}
       <div
-        style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1.6fr) minmax(0,1fr)', gap: 20 }}
+        style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1.6fr) minmax(0,1fr)', gap: 24 }}
         className="dash-row overview-card-grid"
       >
         <div className="card" style={{ marginBottom: 0 }}>
@@ -138,7 +138,7 @@ export default function HomePage() {
             {daySelect}
           </div>
           <div className="card-b">
-            <div className="row" style={{ gap: 18, marginBottom: 8, fontSize: 13 }}>
+            <div className="row" style={{ gap: 16, marginBottom: 8, fontSize: 14 }}>
               <span>
                 <span
                   style={{
@@ -147,7 +147,7 @@ export default function HomePage() {
                     height: 3,
                     background: 'var(--brand)',
                     verticalAlign: 'middle',
-                    marginRight: 6,
+                    marginRight: 8,
                   }}
                 />
                 Documents
@@ -160,7 +160,7 @@ export default function HomePage() {
                     height: 0,
                     borderTop: '3px dashed var(--info)',
                     verticalAlign: 'middle',
-                    marginRight: 6,
+                    marginRight: 8,
                   }}
                 />
                 OCR Successful
@@ -180,7 +180,7 @@ export default function HomePage() {
               centerValue={intFmt(total)}
               centerLabel="Total Documents"
             />
-            <div style={{ marginTop: 14 }}>
+            <div style={{ marginTop: 16 }}>
               {donutWithPct.map((s) => (
                 <div
                   key={s.label}
@@ -215,8 +215,8 @@ export default function HomePage() {
         style={{
           display: 'grid',
           gridTemplateColumns: 'repeat(3,minmax(0,1fr))',
-          gap: 20,
-          marginTop: 20,
+          gap: 24,
+          marginTop: 24,
         }}
         className="dash-row overview-card-grid"
       >
@@ -232,7 +232,7 @@ export default function HomePage() {
             ) : (
               <div className="empty">No data yet</div>
             )}
-            <p className="sec-title" style={{ marginTop: 20 }}>
+            <p className="sec-title" style={{ marginTop: 24 }}>
               OCR Cost by Module
             </p>
             {data.costByModule.length ? (
@@ -292,7 +292,7 @@ export default function HomePage() {
           <div className="card-b">
             <OcrGauge pct={data.ocrPerf.avgConfidencePct ?? 0} label="OCR Accuracy" />
             <div style={{ marginTop: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
-              <div className="row" style={{ gap: 10 }}>
+              <div className="row" style={{ gap: 12 }}>
                 <span><i className="fa-solid fa-clock" /></span>
                 <div>
                   <div className="hint">Average per Document</div>
@@ -303,14 +303,14 @@ export default function HomePage() {
                   </b>
                 </div>
               </div>
-              <div className="row" style={{ gap: 10 }}>
+              <div className="row" style={{ gap: 12 }}>
                 <span><i className="fa-solid fa-user" /></span>
                 <div>
                   <div className="hint">Edited by User</div>
                   <b>{data.ocrPerf.pctEditedByUser}%</b>
                 </div>
               </div>
-              <div className="row" style={{ gap: 10 }}>
+              <div className="row" style={{ gap: 12 }}>
                 <span><i className="fa-solid fa-clipboard-list" /></span>
                 <div>
                   <div className="hint">Tokens Today</div>
@@ -332,13 +332,13 @@ export default function HomePage() {
                 className="row"
                 style={{
                   justifyContent: 'space-between',
-                  padding: '10px 0',
+                  padding: '12px 0',
                   borderBottom: '1px solid var(--line)',
                   cursor: 'pointer',
                 }}
                 onClick={viewAllInbox}
               >
-                <div className="row" style={{ gap: 10 }}>
+                <div className="row" style={{ gap: 12 }}>
                   <span style={{ fontSize: 18 }}><i className={t.icon} /></span>
                   <div>
                     <div style={{ fontWeight: 600 }}>{t.title}</div>
@@ -351,7 +351,7 @@ export default function HomePage() {
                 </div>
               </div>
             ))}
-            <div style={{ textAlign: 'right', marginTop: 10 }}>
+            <div style={{ textAlign: 'right', marginTop: 12 }}>
               <a
                 href="#"
                 onClick={(e) => {
@@ -369,7 +369,7 @@ export default function HomePage() {
       {isAdmin && <JobTimeCard days={days} />}
 
       {/* Recent documents */}
-      <div className="card" style={{ marginTop: 20 }}>
+      <div className="card" style={{ marginTop: 24 }}>
         <div className="card-h">
           <h2>Recent Documents</h2>
           <div className="sp" />

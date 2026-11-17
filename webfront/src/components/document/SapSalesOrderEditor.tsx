@@ -41,6 +41,9 @@ export interface DeliveryDateGroup {
   date: string;
   itemNos: number[];
   count: number;
+  /** MGT/Zoho: the Deal key of the group's lines (line.extra.zohoDeal), '' when none. With more than
+   *  one Deal on the document it is the third part of the key: "{soGroup}|{date}|{deal}" (16 Nov 2026). */
+  deal: string;
 }
 
 /** The line's SO Group as a canonical string; blank/invalid = "1" (same as the backend). */
@@ -55,14 +58,20 @@ export function lineSoGroup(line: DocLine): string {
 export function deliveryDateGroups(doc: DocModel, headerDate: string, skipCharges = false): DeliveryDateGroup[] {
   const order: string[] = [];
   const byKey = new Map<string, DeliveryDateGroup>();
+  const lines = (doc.lines || []).filter((l) => !(skipCharges && isFreightLine(l)));
+  // MGT/Zoho: a Zoho Sales Order links to one Deal, so lines of different Deals never share one
+  // (same rule as SoDeliveryGroups.Build).
+  const dealOf = (l: DocLine) => String((l.extra as Record<string, unknown> | undefined)?.zohoDeal ?? '').trim();
+  const splitByDeal = new Set(lines.map(dealOf)).size > 1;
   (doc.lines || []).forEach((l, i) => {
     if (skipCharges && isFreightLine(l)) return;
     const soGroup = lineSoGroup(l);
     const rawDate = ((l.extra as Record<string, string> | undefined)?.deliveryDate || '').trim() || (headerDate || '').trim();
-    const key = `${soGroup}|${rawDate}`;
+    const deal = dealOf(l);
+    const key = splitByDeal ? `${soGroup}|${rawDate}|${deal}` : `${soGroup}|${rawDate}`;
     let g = byKey.get(key);
     if (!g) {
-      g = { key, soGroup, rawDate, date: rawDate ? formatDate(rawDate) : 'Delivery date not specified', itemNos: [], count: 0 };
+      g = { key, soGroup, rawDate, date: rawDate ? formatDate(rawDate) : 'Delivery date not specified', itemNos: [], count: 0, deal };
       byKey.set(key, g);
       order.push(key);
     }
@@ -323,7 +332,7 @@ export default function SapSalesOrderEditor({
           </div>
         </div>
 
-        <p className="sec-title" style={{ marginTop: 20 }}>
+        <p className="sec-title" style={{ marginTop: 24 }}>
           ORDERED ITEMS ({lines.length})
         </p>
         <div className="tw" style={{ overflowX: 'auto' }}>
@@ -473,7 +482,7 @@ export default function SapSalesOrderEditor({
           </div>
         )}
         {notMatchedCount > 0 && (
-          <p className="hint" style={{ marginTop: 10, color: 'var(--red, #c0392b)' }}>
+          <p className="hint" style={{ marginTop: 12, color: 'var(--red, #c0392b)' }}>
             {notMatchedCount} line(s) above are not matched — see the Failed panel higher on this page, fix them, then
             re-run Step 2.
           </p>
@@ -521,7 +530,7 @@ export default function SapSalesOrderEditor({
               </tbody>
             </table>
             {Math.abs(freightSplitSum - freightTotal) > 0.009 && (
-              <div style={{ marginTop: 6, color: 'var(--red, #c0392b)' }}>
+              <div style={{ marginTop: 8, color: 'var(--red, #c0392b)' }}>
                 The Sales Orders carry {fmt(freightSplitSum)} but the document's freight is {fmt(freightTotal)} — the customer
                 would be billed {freightSplitSum > freightTotal ? 'more' : 'less'} than the PO.
               </div>
@@ -532,7 +541,7 @@ export default function SapSalesOrderEditor({
         <SoGroupPanel groups={dateGroups} posts={posts} target="SAP" shipTo={groupShipTo} />
 
         <div className="so-send" style={{ justifyContent: 'flex-end' }}>
-          <div className="row" style={{ gap: 10 }}>
+          <div className="row" style={{ gap: 12 }}>
             <button
               className="btn success"
               onClick={onSend}

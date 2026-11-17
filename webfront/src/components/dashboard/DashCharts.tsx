@@ -38,18 +38,18 @@ export function DocTrendChart({ data }: { data: OcrDailyRow[] }) {
         <XAxis
           dataKey="date"
           tickFormatter={(d: string) => (d || '').slice(5)}
-          tick={{ fontSize: 10, fill: c.muted }}
+          tick={{ fontSize: 14, fill: c.muted }}
           stroke={c.line}
           interval="preserveStartEnd"
           minTickGap={24}
         />
-        <YAxis tick={{ fontSize: 10, fill: c.muted }} stroke={c.line} allowDecimals={false} width={34} />
+        <YAxis tick={{ fontSize: 14, fill: c.muted }} stroke={c.line} allowDecimals={false} width={34} />
         <Tooltip
           contentStyle={{
             background: c.card,
             border: `1px solid ${c.line}`,
             borderRadius: 8,
-            fontSize: 12,
+            fontSize: 14,
           }}
         />
         <Line
@@ -110,7 +110,7 @@ export function StatusDonut({
               background: c.card,
               border: `1px solid ${c.line}`,
               borderRadius: 8,
-              fontSize: 12,
+              fontSize: 14,
             }}
           />
         </PieChart>
@@ -126,8 +126,8 @@ export function StatusDonut({
           pointerEvents: 'none',
         }}
       >
-        <div style={{ fontSize: 22, fontWeight: 700, color: c.text }}>{centerValue}</div>
-        <div style={{ fontSize: 11, color: c.muted }}>{centerLabel}</div>
+        <div style={{ fontSize: 24, fontWeight: 700, color: c.text }}>{centerValue}</div>
+        <div style={{ fontSize: 14, color: c.muted }}>{centerLabel}</div>
       </div>
     </div>
   );
@@ -144,7 +144,7 @@ export function ModuleBarChart({ data }: { data: ByModuleRow[] }) {
           type="category"
           dataKey="label"
           width={110}
-          tick={{ fontSize: 13, fill: c.text }}
+          tick={{ fontSize: 14, fill: c.text }}
           stroke={c.line}
         />
         <Tooltip
@@ -153,7 +153,7 @@ export function ModuleBarChart({ data }: { data: ByModuleRow[] }) {
             background: c.card,
             border: `1px solid ${c.line}`,
             borderRadius: 8,
-            fontSize: 12,
+            fontSize: 14,
           }}
         />
         <Bar dataKey="value" name="Documents" fill={c.brand} radius={[0, 100, 100, 0]} barSize={18} />
@@ -193,7 +193,7 @@ export function OcrGauge({ pct, label }: { pct: number; label: string }) {
         }}
       >
         <div style={{ fontSize: 24, fontWeight: 700, color: c.text }}>{pct}%</div>
-        <div style={{ fontSize: 10, color: c.muted }}>{label}</div>
+        <div style={{ fontSize: 14, color: c.muted }}>{label}</div>
       </div>
     </div>
   );

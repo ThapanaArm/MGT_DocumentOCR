@@ -2,8 +2,8 @@ import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import Modal, { ModalHeader } from '../Modal';
 import { MASTER_DEF, M_LABEL } from '../../constants/fields';
 import { createMaster, deleteMaster, updateMaster, type MasterRow, type MastersData } from '../../api/masters';
-import { searchSapBusinessPartner, type SapBusinessPartner, type SapLastPrice } from '../../api/sap';
-import { getZohoMaterialNames, searchZohoAccount, type ZohoAccount } from '../../api/zoho';
+import { getSapMaterialDetail, searchSapBusinessPartner, type SapBusinessPartner, type SapLastPrice, type SapMaterialDetail } from '../../api/sap';
+import { getZohoMaterialNames, searchZohoAccount, searchZohoMaterials, type ZohoAccount, type ZohoMaterialHit } from '../../api/zoho';
 import { useAppState } from '../../state/AppState';
 import type { Dupe } from '../../utils/dupes';
 import { useSapUnits, type SapUnitChoice } from '../../hooks/useSapUnits';
@@ -44,6 +44,73 @@ const shortLabel = (v: unknown, max = 60) => {
   const t = String(v ?? '').replace(/\s+/g, ' ').trim();
   return t.length > max ? t.slice(0, max - 1).trimEnd() + '…' : t;
 };
+
+/* Details of the material picked in "Material code from SAP" (CustomerMaterial popup, 16 Nov 2026):
+   besides the code, show what that material is so the person can check it before saving. Read-only --
+   nothing here is saved. MGT (Sales Org 1000): the Zoho Material with that exact code (name, description,
+   group, unit and sub-unit ratio). GLC: the local Material master row plus SAP's base unit / group /
+   alternative units. Best effort: a failed lookup just says so. */
+function MaterialDetails({ code, mgt, masters }: { code: string; mgt: boolean; masters: MastersData }) {
+  const [zoho, setZoho] = useState<ZohoMaterialHit | null>(null);
+  const [sap, setSap] = useState<SapMaterialDetail | null>(null);
+  const [state, setState] = useState<'idle' | 'loading' | 'done' | 'error'>('idle');
+  const key = code.trim();
+  useEffect(() => {
+    setZoho(null); setSap(null);
+    if (!key) { setState('idle'); return; }
+    let cancelled = false;
+    setState('loading');
+    const t = setTimeout(() => {
+      (mgt
+        ? searchZohoMaterials(key, 10).then((r) => {
+            if (!cancelled) setZoho(r.materials.find((m) => (m.code || '').trim().toUpperCase() === key.toUpperCase()) ?? null);
+          })
+        : getSapMaterialDetail(key).then((r) => { if (!cancelled) setSap(r.detail); }))
+        .then(() => { if (!cancelled) setState('done'); })
+        .catch(() => { if (!cancelled) setState('error'); });
+    }, 400);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [key, mgt]);
+  if (!key) return null;
+  const local = (masters.materials || []).find((m) => String(m.MaterialCode ?? '').trim().toUpperCase() === key.toUpperCase()
+    || String(m.SapMaterialCode ?? '').trim().toUpperCase() === key.toUpperCase());
+  const rows: [string, string | null | undefined][] = mgt
+    ? [
+        ['Material Name', zoho?.name],
+        ['Description', zoho?.description],
+        ['Material Group', zoho?.materialGroup],
+        ['Unit', zoho?.unit],
+        ['Sub Unit', zoho?.conversionRatio && zoho?.subUnit ? `1 ${zoho.unit || 'unit'} = ${zoho.conversionRatio} ${zoho.subUnit}` : zoho?.subUnit],
+      ]
+    : [
+        ['Description', local?.Description as string | undefined],
+        ['Material Group', sap?.materialGroup || (local?.MatGroup as string | undefined)],
+        ['Base Unit', sap?.baseUnit || (local?.Uom as string | undefined)],
+        ['Other Units', sap?.altUnits?.filter((u) => u.unit !== sap.baseUnit)
+          .map((u) => `1 ${u.unit} = ${+(u.numerator / (u.denominator || 1)).toFixed(3)} ${sap.baseUnit}`).join(', ')],
+      ];
+  const shown = rows.filter(([, v]) => v != null && String(v).trim() !== '');
+  return (
+    <div style={{ border: '1px solid var(--line)', borderRadius: 10, padding: '12px 12px', background: 'var(--line-soft, #f6f7f9)' }}>
+      <div className="hint" style={{ fontSize: 14, fontWeight: 700, marginBottom: 8 }}>
+        {mgt ? 'Material in Zoho' : 'Material in SAP'}
+      </div>
+      {state === 'loading' ? <span className="hint">Reading…</span>
+        : state === 'error' && shown.length === 0 ? <span className="hint">Could not read the material details</span>
+        : shown.length === 0 ? <span className="hint">{mgt ? 'No Zoho Material with this code' : 'No details for this code'}</span>
+        : (
+          <dl style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '4px 12px', margin: 0 }}>
+            {shown.map(([k, v]) => (
+              <Fragment key={k}>
+                <dt className="hint" style={{ fontSize: 14 }}>{k}</dt>
+                <dd style={{ margin: 0, fontWeight: 600, overflowWrap: 'anywhere' }}>{v}</dd>
+              </Fragment>
+            ))}
+          </dl>
+        )}
+    </div>
+  );
+}
 
 export default function MasterEditModal({
   state,
@@ -382,7 +449,7 @@ export default function MasterEditModal({
             const perOrder = factorMode === 'order' || (factorMode === 'auto' && f > 0 && f < 1);
             const perOrderValue = f > 0 ? String(Number((1 / f).toFixed(6))) : '';
             return (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                 <span className="hint">1 {perOrder ? ord : ext} =</span>
                 {perOrder ? (
                   <input id={'master-' + c.k} style={{ width: 110 }} inputMode="decimal"
@@ -572,17 +639,17 @@ export default function MasterEditModal({
         {state.tab === 'customers' && state.rowKey == null && !isMgt && (
           <div className="result" style={{ marginBottom: 16 }}>
             <h3><i className="fa-solid fa-building-columns" /> Found in SAP</h3>
-            {sapLoading && <p className="hint" style={{ margin: '0 0 10px' }}>Searching SAP…</p>}
+            {sapLoading && <p className="hint" style={{ margin: '0 0 12px' }}>Searching SAP…</p>}
             {sapError && (
-              <p className="hint" style={{ margin: '0 0 10px' }}>Could not search SAP: {sapError}</p>
+              <p className="hint" style={{ margin: '0 0 12px' }}>Could not search SAP: {sapError}</p>
             )}
             {!sapLoading && !sapError && sapResults.length === 0 && (
-              <p className="hint" style={{ margin: '0 0 10px' }}>
+              <p className="hint" style={{ margin: '0 0 12px' }}>
                 No match found in SAP yet — fill in the fields below manually.
               </p>
             )}
             {sapResults.length > 1 && (
-              <p className="hint" style={{ margin: '0 0 10px' }}>
+              <p className="hint" style={{ margin: '0 0 12px' }}>
                 Found {sapResults.length} matches in SAP — this Tax ID may cover more than one
                 branch/record. Check each Business Partner code in SAP if unsure which is correct.
               </p>
@@ -598,7 +665,7 @@ export default function MasterEditModal({
                           <td>
                             <b>{bp.businessPartnerId}</b> — {bp.businessPartnerFullName || bp.businessPartnerName}
                             {bp.businessPartnerIsBlocked && (
-                              <span className="badge b-fail" style={{ marginLeft: 6 }}>Blocked in SAP</span>
+                              <span className="badge b-fail" style={{ marginLeft: 8 }}>Blocked in SAP</span>
                             )}
                             {(bp.addressCity || bp.addressStreet) && (
                               <div className="hint">
@@ -622,17 +689,17 @@ export default function MasterEditModal({
         {state.tab === 'customers' && state.rowKey == null && isMgt && (
           <div className="result" style={{ marginBottom: 16 }}>
             <h3><i className="fa-solid fa-building-columns" /> Found in Zoho CRM</h3>
-            {zohoLoading && <p className="hint" style={{ margin: '0 0 10px' }}>Searching Zoho CRM…</p>}
+            {zohoLoading && <p className="hint" style={{ margin: '0 0 12px' }}>Searching Zoho CRM…</p>}
             {zohoError && (
-              <p className="hint" style={{ margin: '0 0 10px' }}>Could not search Zoho CRM: {zohoError}</p>
+              <p className="hint" style={{ margin: '0 0 12px' }}>Could not search Zoho CRM: {zohoError}</p>
             )}
             {!zohoLoading && !zohoError && zohoResults.length === 0 && (
-              <p className="hint" style={{ margin: '0 0 10px' }}>
+              <p className="hint" style={{ margin: '0 0 12px' }}>
                 No match found in Zoho CRM yet — fill in the fields below manually.
               </p>
             )}
             {zohoResults.length > 1 && (
-              <p className="hint" style={{ margin: '0 0 10px' }}>
+              <p className="hint" style={{ margin: '0 0 12px' }}>
                 Found {zohoResults.length} matches in Zoho CRM — this Tax ID may cover more than
                 one branch/record. Check the Branch below if unsure which is correct.
               </p>
@@ -646,7 +713,7 @@ export default function MasterEditModal({
                         <td>
                           <b>{acc.accountCode || acc.accountId}</b> — {acc.accountName}
                           {acc.branchName && (
-                            <span className="badge b-idle" style={{ marginLeft: 6 }}>{acc.branchName}</span>
+                            <span className="badge b-idle" style={{ marginLeft: 8 }}>{acc.branchName}</span>
                           )}
                           {acc.taxId && <div className="hint">Tax ID: {acc.taxId}</div>}
                         </td>
@@ -666,7 +733,7 @@ export default function MasterEditModal({
         {hasDupes && (
           <div className="result bad" style={{ marginBottom: 16 }}>
             <h3><i className="fa-solid fa-triangle-exclamation" /> Found {state.dupes!.length} possibly duplicate records</h3>
-            <p className="hint" style={{ margin: '0 0 10px' }}>
+            <p className="hint" style={{ margin: '0 0 12px' }}>
               Please review before adding a new record — if it is the same record, click "Use this record instead" rather than creating a duplicate
             </p>
             <div className="tw">
@@ -723,6 +790,12 @@ export default function MasterEditModal({
               <section>
                 <h3>SAP / Zoho data</h3>
                 <div className="grid">{extKeyCols.map(renderField)}</div>
+                {state.tab === 'custmaterials' && (
+                  <div style={{ marginTop: 12 }}>
+                    <MaterialDetails code={String(form.MaterialCodeSAP ?? '')}
+                      mgt={String(form.SalesOrg ?? '') === '1000'} masters={masters} />
+                  </div>
+                )}
                 {extDerivedCols.length > 0 && (
                   <details className="master-derived">
                     <summary>SAP details (auto-filled — rarely edited)</summary>
@@ -778,10 +851,10 @@ export default function MasterEditModal({
               {state.tab === 'uoms' && (
                 <div className="result" style={{ marginTop: 12 }}>
                   <b><i className="fa-solid fa-calculator" /> Preview</b>
-                  <p className="hint" style={{ margin: '6px 0 0' }}>{uomPreview}</p>
+                  <p className="hint" style={{ margin: '8px 0 0' }}>{uomPreview}</p>
                 </div>
               )}
-              {editing && <div className="hint" style={{ marginTop: 10 }}>{def.key}: {existing[def.key]} · CreatedAt: {existing.CreatedAt || '—'} · UpdatedAt: {existing.UpdatedAt || '—'}</div>}
+              {editing && <div className="hint" style={{ marginTop: 12 }}>{def.key}: {existing[def.key]} · CreatedAt: {existing.CreatedAt || '—'} · UpdatedAt: {existing.UpdatedAt || '—'}</div>}
             </section>
           </div>
         )}
@@ -797,7 +870,7 @@ export default function MasterEditModal({
             </div>
           </section>
         )}
-        <div className="row" style={{ marginTop: 18 }}>
+        <div className="row" style={{ marginTop: 16 }}>
           <button className="btn primary" disabled={saving} onClick={save}>
             {saving ? 'Saving…' : hasDupes ? 'Confirm — Save as New Record' : 'Save'}
           </button>
@@ -805,7 +878,7 @@ export default function MasterEditModal({
             Cancel
           </button>
           {editing && !state.onSaved && !confirmingDel && (
-            <button className="btn ghost master-edit-delete" disabled={saving} onClick={() => setConfirmingDel(true)}>
+            <button className="btn sm danger master-edit-delete" disabled={saving} onClick={() => setConfirmingDel(true)}>
               <i className="fa-solid fa-trash-can" /> Delete
             </button>
           )}

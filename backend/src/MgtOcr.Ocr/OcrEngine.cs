@@ -1,5 +1,4 @@
-﻿using System.Text.RegularExpressions;
-using MgtOcr.Core.Config;
+﻿using MgtOcr.Core.Config;
 
 using MgtOcr.Ocr.Providers;
 
@@ -7,65 +6,29 @@ namespace MgtOcr.Ocr;
 
 public record OcrProviderInfo(string Id, string Label, string Desc, bool Ready);
 
-// extract(): main entry point — dispatches to whichever OCR/extraction provider was requested.
+// extract(): main entry point. Gemini is the only reading engine (Megachem, 7 Oct 2026; the other
+// engines — Tesseract, Typhoon, Azure, Claude, OpenAI, PaddleOCR, text-layer rules, demo — were
+// removed from the code on 17 Nov 2026).
 public class OcrEngine(AppConfig config)
 {
-    public static readonly HashSet<string> ImageExt = TesseractOcr.ImageExt;
+    public const string Gemini = "gemini";
 
-    // The selectable engine list shown in the UI — id must match a branch in ExtractAsync().
+    /// <summary>Image files Gemini can be given directly (everything else must be a PDF).</summary>
+    public static readonly HashSet<string> ImageExt = new(StringComparer.OrdinalIgnoreCase)
+        { ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp" };
+
+    // The engine list shown in the UI (read-only label) — Gemini only.
     public List<OcrProviderInfo> Providers =>
     [
-        new("auto", "Automatic (recommended)",
-            "Reads the file's text layer first; for scanned files it falls back to Tesseract OCR automatically — no cost.", true),
-        new("text", "File text only", "Fastest, but does not work with scanned files / images.", true),
-        new("tesseract", "Tesseract OCR (local)",
-            "Forces OCR even when the file already has a text layer — no cost.", !string.IsNullOrEmpty(config.TesseractCmd)),
-        new("typhoon", "Typhoon OCR (Thai-specialized)",
-            "SCB 10X's Thai/English OCR model — far more accurate than Tesseract for Thai documents, handwriting and complex tables — " +
-            "requires TYPHOON_API_KEY in .env (billed per page, see pricing at opentyphoon.ai)",
-            !string.IsNullOrEmpty(config.TyphoonApiKey)),
-        new("azure", "Azure Document Intelligence",
-            "Much more accurate for forms / tables — requires AZURE_DI_ENDPOINT/AZURE_DI_KEY in .env (billed per page)",
-            !string.IsNullOrEmpty(config.AzureDiEndpoint) && !string.IsNullOrEmpty(config.AzureDiKey)),
-        new("claude_text", "OCR + Claude structuring (economical)",
-            "Reads text with Tesseract/pdfplumber first (free) then sends the text to Claude to structure as JSON — " +
-            "much cheaper than Claude Vision, good for repetitive documents (PO/Invoice) whose characters OCR can read reasonably well — " +
-            "requires ANTHROPIC_API_KEY in .env (billed per call, but cheaper than Claude Vision)",
-            !string.IsNullOrEmpty(config.AnthropicApiKey)),
-        new("claude", "Claude Vision (AI)",
-            "Most accurate for messy documents / complex tables, understands context — requires ANTHROPIC_API_KEY in .env (billed per call)",
-            !string.IsNullOrEmpty(config.AnthropicApiKey)),
-        new("gemini", "Gemini Vision (AI)",
-            "Google's Vision model reads the document image directly and understands context — requires GEMINI_API_KEY in .env (billed per call)",
+        new(Gemini, "Gemini Vision (AI)",
+            "Google's Vision model reads the document image directly and understands context — requires Ocr:GeminiApiKey (billed per call)",
             !string.IsNullOrEmpty(config.GeminiApiKey)),
-        new("paddle_gemini", "PaddleOCR + Gemini (economical)",
-            "PaddleOCR reads the characters on this server (free, Thai model), then only the text is sent to Gemini to structure as JSON — " +
-            "much cheaper than Gemini Vision; accuracy depends on how well PaddleOCR reads the scan",
-            PaddleOcr.IsReady(config) && !string.IsNullOrEmpty(config.GeminiApiKey)),
-        new("paddle", "PaddleOCR only (free, local)",
-            "PaddleOCR reads the characters on this server and the built-in rules pick out the fields — no AI cost, " +
-            "but fields/lines are found by pattern matching, so expect more manual correction",
-            PaddleOcr.IsReady(config)),
-        new("openai", "ChatGPT Vision (AI)",
-            "OpenAI's GPT-4o/GPT-5 reads the document image directly and understands context — requires OPENAI_API_KEY in .env (billed per call)",
-            !string.IsNullOrEmpty(config.OpenAiApiKey)),
-        new("demo", "Sample data (test)", "Does not read a real file; for testing the Mapping / SAP submission steps only.", true),
     ];
 
-    private ParsedDocument DemoFallback(string path, string module, string note)
-    {
-        var d = DemoData.DemoDoc(module, Math.Abs(Path.GetFileName(path).GetHashCode()) % DemoData.Demo[module].Count);
-        d.Provider = "demo";
-        d.Note = note;
-        return d;
-    }
-
-    // A real read was attempted with a chosen engine but it could not be used — no connection, a bad
-    // API key, an HTTP error from the provider, an unreadable/scanned file, etc. Unlike DemoFallback
-    // this returns NO fabricated data: an empty document marked Provider="failed" that carries the
-    // real reason in Note. The UI then shows the problem plainly (e.g. "Gemini ใช้ไม่ได้ …") instead
-    // of silently substituting sample (demo) data the user could mistake for the real document. Per
-    // Megachem: on any read failure, surface the error — never quietly fall back to demo.
+    // A read was attempted but could not be used — no connection, a bad API key, an HTTP error from
+    // Gemini, an unreadable file, etc. Returns NO fabricated data: an empty document marked
+    // Provider="failed" that carries the real reason in Note, so the UI shows the problem plainly.
+    // Per Megachem: on any read failure, surface the error — never quietly fall back to demo data.
     private static ParsedDocument FailedResult(string module, string note) => new()
     {
         Provider = "failed",
@@ -75,18 +38,7 @@ public class OcrEngine(AppConfig config)
         Confidence = 0,
     };
 
-    private static readonly Dictionary<string, string> ProviderCaveat = new()
-    {
-        ["ocr"] = "Read with Tesseract OCR from a scanned file, which is less accurate than reading the text layer directly from the source file",
-        ["typhoon"] = "Read with Typhoon OCR from the document image; may contain errors from image quality / handwriting",
-        ["azure"] = "Read with Azure Document Intelligence from the document image",
-        ["claude"] = "Read with Claude Vision from the document image; may misinterpret in some places",
-        ["claude_text"] = "OCR reads the text first then Claude structures it; accuracy depends on the text quality from the first OCR pass",
-        ["gemini"] = "Read with Gemini Vision from the document image; may misinterpret in some places",
-        ["openai"] = "Read with ChatGPT Vision from the document image; may misinterpret in some places",
-        ["paddle_gemini"] = "PaddleOCR reads the text first then Gemini structures it; accuracy depends on the text quality from PaddleOCR",
-        ["paddle"] = "Read with PaddleOCR and rule-based field extraction (no AI); check fields and line items carefully",
-    };
+    private const string GeminiCaveat = "Read with Gemini Vision from the document image; may misinterpret in some places";
 
     private static readonly Dictionary<string, string> ApImportant = new()
     {
@@ -111,141 +63,39 @@ public class OcrEngine(AppConfig config)
         var reasons = new List<string>();
         if (missing.Count > 0) reasons.Add("Missing data: " + string.Join(", ", missing));
         if (lines.Count == 0) reasons.Add("No line items found (Item Detail)");
-        if (ProviderCaveat.TryGetValue(provider, out var caveat)) reasons.Add(caveat);
+        if (provider == Gemini) reasons.Add(GeminiCaveat);
         return string.Join(" / ", reasons);
     }
 
-    // Token price per 1M tokens (USD), only for AI/LLM providers that bill per token.
-    private static readonly Dictionary<string, (decimal In, decimal Out)> TokenPrice = new()
-    {
-        ["claude"] = (2.00m, 10.00m), ["claude_text"] = (2.00m, 10.00m),
-        ["gemini"] = (0.75m, 3.75m), ["paddle_gemini"] = (0.75m, 3.75m), ["openai"] = (2.50m, 10.00m),
-    };
+    // Gemini token price per 1M tokens (USD).
+    private const decimal GeminiPriceIn = 0.75m, GeminiPriceOut = 3.75m;
 
-    // extract(): wraps ExtractDispatchAsync to add confidenceNote + estimated cost uniformly for
-    // every provider, mirroring ocr_engine.py's extract() (lines 1627-1644) without duplicating
-    // this logic into every dispatch branch's return statement.
+    /// <param name="providerOverride">Kept for the callers' signature only — every read uses Gemini.</param>
     /// <param name="salesOrg">Which company's accounting rules to read by — "1000" MGT, "2000" GLC.
     /// Empty reads as GLC (see CompanyRules), so nothing changes for a document with no company.</param>
-    public async Task<ParsedDocument> ExtractAsync(string path, string module, string? providerOverride = null, string? password = null, string? salesOrg = null)
+    /// <param name="readHints">Sales Order reading rules (ReadHints) for the Gemini read; null = none.</param>
+    public async Task<ParsedDocument> ExtractAsync(string path, string module, string? providerOverride = null, string? password = null, string? salesOrg = null,
+        ReadHintRequest? readHints = null)
     {
         PdfPassword.Current = password;
-        var doc = await ExtractDispatchAsync(path, module, providerOverride, salesOrg ?? "");
-        doc.Note = doc.Provider switch
-        {
-            "demo" => string.IsNullOrEmpty(doc.Note) ? "Using sample data (demo) — did not read a real file" : doc.Note,
-            "failed" => string.IsNullOrEmpty(doc.Note) ? "Failed to read the document" : doc.Note,
-            _ => doc.Note,
-        };
-        // confidenceNote is distinct from Note ("_note" — a fallback/failure explanation): it
-        // explains why a normal-but-imperfect read isn't 100% confident.
-        doc.ConfidenceNote = doc.Provider is "demo" or "failed" ? (doc.Note ?? "") : ConfidenceNote(module, doc.Header, doc.Lines, doc.Provider);
+        var doc = await ReadWithGeminiAsync(path, module, salesOrg ?? "", readHints);
+        if (doc.Provider == "failed" && string.IsNullOrEmpty(doc.Note)) doc.Note = "Failed to read the document";
+        // confidenceNote is distinct from Note ("_note" — a failure explanation): it explains why a
+        // normal-but-imperfect read isn't 100% confident.
+        doc.ConfidenceNote = doc.Provider == "failed" ? (doc.Note ?? "") : ConfidenceNote(module, doc.Header, doc.Lines, doc.Provider);
 
-        if (TokenPrice.TryGetValue(doc.Provider, out var price) && doc.TokensIn is { } tin && doc.TokensOut is { } tout)
+        if (doc.Provider == Gemini && doc.TokensIn is { } tin && doc.TokensOut is { } tout)
         {
-            var costIn = Math.Round(tin / 1_000_000m * price.In, 4);
-            var costOut = Math.Round(tout / 1_000_000m * price.Out, 4);
+            var costIn = Math.Round(tin / 1_000_000m * GeminiPriceIn, 4);
+            var costOut = Math.Round(tout / 1_000_000m * GeminiPriceOut, 4);
             doc.CostIn = costIn; doc.CostOut = costOut; doc.Cost = Math.Round(costIn + costOut, 4); doc.CostCurrency = "USD";
         }
         return doc;
     }
 
-    // provider_override: the engine id chosen in the UI — if given, "forces" that provider with
-    // no silent fallback to another one. Empty/"auto" uses the normal text->local-OCR chain (does
-    // NOT call Azure/Claude/Gemini/OpenAI automatically, since those cost money — must be chosen explicitly).
-    private async Task<ParsedDocument> ExtractDispatchAsync(string path, string module, string? providerOverride = null, string salesOrg = "")
+    private async Task<ParsedDocument> ReadWithGeminiAsync(string path, string module, string salesOrg, ReadHintRequest? readHints)
     {
-        var provider = (providerOverride ?? config.OcrProvider ?? "auto").ToLowerInvariant();
-        if (provider == "") provider = "auto";
-        var ext = Path.GetExtension(path).ToLowerInvariant();
-
-        if (provider == "azure")
-        {
-            var data = await AzureOcr.ExtractAsync(path, config);
-            if (data != null) return AzureOcr.FromAzure(data, module);
-            return FailedResult(module, "Could not connect to Azure Document Intelligence, or AZURE_DI_ENDPOINT/AZURE_DI_KEY is not set in .env");
-        }
-        if (provider == "claude")
-        {
-            var outDoc = await ClaudeOcr.VisionExtractAsync(path, module, config, salesOrg);
-            if (outDoc != null) return outDoc;
-            return FailedResult(module, "Could not connect to Claude Vision, or ANTHROPIC_API_KEY is not set in .env");
-        }
-        if (provider == "gemini")
-        {
-            var (outDoc, gErr) = await GeminiOcr.VisionExtractAsync(path, module, config, salesOrg);
-            if (outDoc != null) return outDoc;
-            return FailedResult(module, gErr ?? "Could not connect to Google Gemini Vision");
-        }
-        if (provider == "openai")
-        {
-            var (outDoc, oErr) = await OpenAiOcr.VisionExtractAsync(path, module, config, salesOrg);
-            if (outDoc != null) return outDoc;
-            return FailedResult(module, oErr ?? "Could not connect to OpenAI Vision");
-        }
-        if (provider == "claude_text")
-        {
-            var preText = ext == ".pdf" ? PdfExtraction.PdfText(path) : "";
-            if (string.IsNullOrWhiteSpace(preText) && (ImageExt.Contains(ext) || ext == ".pdf"))
-                preText = await TesseractOcr.ExtractTextAsync(path, config);
-            if (string.IsNullOrWhiteSpace(preText))
-                return FailedResult(module, "OCR could not read text from the file, so it could not be sent to Claude for structuring (try Claude Vision instead)");
-            var outDoc = await ClaudeOcr.TextExtractAsync(module, preText, config, salesOrg);
-            if (outDoc != null) return outDoc;
-            return FailedResult(module, "Could not connect to Claude (structuring from text), or ANTHROPIC_API_KEY is not set in .env");
-        }
-        if (provider is "paddle" or "paddle_gemini")
-        {
-            var (pText, pErr) = await PaddleOcr.ExtractTextAsync(path, config);
-            if (string.IsNullOrWhiteSpace(pText))
-                return FailedResult(module, pErr != "" ? pErr : "PaddleOCR returned no text");
-            if (provider == "paddle_gemini")
-            {
-                var (gDoc, gErr) = await GeminiOcr.TextExtractAsync(module, pText, config, salesOrg, "paddle_gemini");
-                if (gDoc != null) return gDoc;
-                return FailedResult(module, "PaddleOCR read the text, but Gemini could not structure it: " + (gErr ?? "unknown error"));
-            }
-            var blocks = ext == ".pdf" ? PdfExtraction.PdfBlocks(path) : null;
-            var pDoc = HeaderParser.ParseText(pText, module, blocks, "paddle", config.OwnCompanyKeywords, config.OwnTaxId);
-            if (!(pDoc.Lines.Count > 0 || HasValue(pDoc.Header, "vendorTaxId") || HasValue(pDoc.Header, "customerTaxId")))
-                pDoc.Confidence = 0.3;
-            return pDoc;
-        }
-        if (provider == "typhoon")
-        {
-            var (text, err) = await TyphoonOcr.ExtractTextAsync(path, config);
-            if (string.IsNullOrWhiteSpace(text))
-                return FailedResult(module, err != "" ? err : "Typhoon OCR returned no text");
-            var blocks = ext == ".pdf" ? PdfExtraction.PdfBlocks(path) : null;
-            var outDoc = HeaderParser.ParseText(text, module, blocks, "typhoon", config.OwnCompanyKeywords, config.OwnTaxId);
-            if (outDoc.Lines.Count > 0 || HasValue(outDoc.Header, "vendorTaxId") || HasValue(outDoc.Header, "customerTaxId"))
-                return outDoc;
-            outDoc.Confidence = 0.3;
-            return outDoc;
-        }
-        if (provider == "demo") return DemoFallback(path, module, "");
-
-        string mainText = ""; var src = "text";
-        if ((provider == "auto" || provider == "text") && ext == ".pdf")
-            mainText = PdfExtraction.PdfText(path);
-        if (string.IsNullOrWhiteSpace(mainText) && (provider == "auto" || provider == "tesseract") && (ImageExt.Contains(ext) || ext == ".pdf"))
-        {
-            mainText = await TesseractOcr.ExtractTextAsync(path, config);
-            src = "ocr";
-        }
-        if (!string.IsNullOrWhiteSpace(mainText) && Regex.Replace(mainText, @"\s", "").Length > 40)
-        {
-            var blocks = ext == ".pdf" ? PdfExtraction.PdfBlocks(path) : null;
-            var outDoc = HeaderParser.ParseText(mainText, module, blocks, src, config.OwnCompanyKeywords, config.OwnTaxId);
-            if (outDoc.Lines.Count > 0 || HasValue(outDoc.Header, "vendorTaxId") || HasValue(outDoc.Header, "customerTaxId"))
-                return outDoc;
-            outDoc.Confidence = 0.3;
-            return outDoc;
-        }
-
-        return FailedResult(module, "Could not read text from the file (scanned file / no OCR engine configured). Choose an AI engine (e.g. Gemini/Claude Vision) or Typhoon/Azure to read a scanned document.");
+        var (outDoc, gErr) = await GeminiOcr.VisionExtractAsync(path, module, config, salesOrg, readHints);
+        return outDoc ?? FailedResult(module, gErr ?? "Could not connect to Google Gemini Vision");
     }
-
-    private static bool HasValue(Dictionary<string, object?> header, string key) =>
-        header.TryGetValue(key, out var v) && !string.IsNullOrEmpty(Convert.ToString(v));
 }

@@ -37,7 +37,7 @@ function UomCell({
       <>
         <span className="badge b-fail"><i className="fa-solid fa-xmark" /> No unit conversion rule</span>
         {!posted && (
-          <div style={{ marginTop: 6 }}>
+          <div style={{ marginTop: 8 }}>
             <button className="btn sm" onClick={() => onAddUomRule(i)}>
               + Add Rule
             </button>
@@ -322,7 +322,7 @@ export default function DetailTable({
         {showVendor && (
           <div
             className="row"
-            style={{ alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 12 }}
+            style={{ alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}
           >
             <span className="hint">Vendor in this document:</span>
             <select

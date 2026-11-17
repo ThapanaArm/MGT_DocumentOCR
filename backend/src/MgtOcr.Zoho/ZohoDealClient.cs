@@ -36,7 +36,10 @@ public record ZohoDeal(
     // Megachem rule (27 Oct 2026): "Yes" = a WCD Deal; "No" or blank = not WCD.
     string? ForecastStatus = null,
     // Created_Time of the Deal record -- the page picks the newest of several matching Deals.
-    string? CreatedTime = null)
+    string? CreatedTime = null,
+    // "Deal Number" (auto-number, e.g. DL-000305) -- tells apart Deals that share a name (16 Nov 2026:
+    // two Deals of the same material, different delivery dates).
+    string? DealNumber = null)
 {
     public bool IsWcd => string.Equals(ForecastStatus?.Trim(), "Yes", StringComparison.OrdinalIgnoreCase);
 }
@@ -162,7 +165,8 @@ public class ZohoDealClient(ZohoClient zoho)
                 // Read from the full record (not selected in COQL, so an unexpected field name can
                 // never break the Deal lookup itself).
                 ForecastStatus: full is null ? null : PicklistStr(full, "Forecast_Status"),
-                CreatedTime: full?["Created_Time"]?.ToString()));
+                CreatedTime: full?["Created_Time"]?.ToString(),
+                DealNumber: full is null ? null : Str(full, "Deal_Number")));
         }
         return result;
     }
@@ -193,7 +197,8 @@ public class ZohoDealClient(ZohoClient zoho)
             ClosingDate: Str(full, "Closing_Date"),
             Items: ExtractDealItems(full),
             ForecastStatus: PicklistStr(full, "Forecast_Status"),
-            CreatedTime: full["Created_Time"]?.ToString());
+            CreatedTime: full["Created_Time"]?.ToString(),
+            DealNumber: Str(full, "Deal_Number"));
     }
 
     // ── Deal detail popup (29 Oct 2026): every filled field of one Deal, labelled as in Zoho ──────
@@ -289,9 +294,9 @@ public class ZohoDealClient(ZohoClient zoho)
         _ => null,
     };
 
-    // Stage of a Deal the OCR flow opens itself (Megachem, 27 Oct 2026): the Sales Order is created
-    // right after it, so it starts at "Sales Order Created" (manual 5.6.4.4).
-    public const string NewDealStage = "Sales Order Created";
+    // Stage of a Deal the OCR flow opens itself: Draft/Qualification (Megachem, 16 Nov 2026 -- every Deal of
+    // a PO is at Draft/Qualification, new or existing). Was "Sales Order Created" (27 Oct 2026).
+    public const string NewDealStage = ZohoDealStage.Draft;
 
     private string? _itemsField;
 
@@ -310,8 +315,9 @@ public class ZohoDealClient(ZohoClient zoho)
 
     /// <summary>
     /// The Deal record the OCR flow creates when a document has no Deal at all (Megachem rule,
-    /// 27 Oct 2026: no Deal = not WCD, so open one, then Quote, then Sales Order). Forecast_Status
-    /// = "No" (the manual's own instruction for a normal, non-forecast Deal, 5.6.3 step 6), Stage =
+    /// 27 Oct 2026: open one, then Quote, then Sales Order). Forecast_Status = what CS chose on Send
+    /// (16 Nov 2026: most Deals are forecast, so CS picks Yes or No for every new Deal; it used to be
+    /// always "No", the manual's instruction for a normal Deal, 5.6.3 step 6), Stage =
     /// NewDealStage, Closing_Date = Delivery_Date = the document's delivery date (both mandatory).
     /// Deal_Name follows AccountName_MaterialCode_MMYY, or AccountName_APPLICATION_MMYY for multiple lines.
     /// The Deal Items subform's Quantity is "Number - 9" (whole numbers), so it is rounded here --
@@ -319,7 +325,7 @@ public class ZohoDealClient(ZohoClient zoho)
     /// </summary>
     public async Task<JsonObject> BuildCreateRecordAsync(string accountId, string? accountCode,
         string? deliveryDate, string? customerRef, string? paymentTerms, string? paymentCurrency, string? incoterms,
-        List<ZohoNewDealLine> lines, string? ownerOverride = null)
+        List<ZohoNewDealLine> lines, string? ownerOverride = null, string forecastStatus = "No")
     {
         // Assign the Deal to the customer's responsible salesperson, rather than the API user --
         // or to the Sales person CS picked on the page (12 Nov 2026), e.g. when the Account Owner is
@@ -338,7 +344,7 @@ public class ZohoDealClient(ZohoClient zoho)
             ["Account_Name"] = new JsonObject { ["id"] = accountId },
             ["Owner"] = new JsonObject { ["id"] = ownerId },
             ["Stage"] = NewDealStage,
-            ["Forecast_Status"] = "No",
+            ["Forecast_Status"] = forecastStatus,
         };
         ZohoRecordFields.Put(record, "Account_Code", accountCode);
         ZohoRecordFields.Put(record, "Customer_Ref", customerRef);
@@ -425,7 +431,8 @@ public class ZohoDealClient(ZohoClient zoho)
                 // Read from the full record (not selected in COQL, so an unexpected field name can
                 // never break the Deal lookup itself).
                 ForecastStatus: full is null ? null : PicklistStr(full, "Forecast_Status"),
-                CreatedTime: full?["Created_Time"]?.ToString()));
+                CreatedTime: full?["Created_Time"]?.ToString(),
+                DealNumber: full is null ? null : Str(full, "Deal_Number")));
         }
         return result;
     }

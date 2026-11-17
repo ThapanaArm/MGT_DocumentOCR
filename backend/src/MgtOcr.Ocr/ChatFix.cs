@@ -440,7 +440,7 @@ public static partial class ChatFix
 
         // Newer models in this family (e.g. gpt-5.6-luna) reject the old 'max_tokens' name
         // outright ("Unsupported parameter: 'max_tokens' is not supported with this model. Use
-        // 'max_completion_tokens' instead.") — matches the fix already applied to OpenAiOcr.cs.
+        // 'max_completion_tokens' instead.") — (the same fix the old OpenAI reading engine had).
         // 8192 (was 3000): same reason as the other providers — the full document JSON echo overran the
         // small cap → truncated → parse failed → edits dropped and original values kept.
         var body = new { model = config.OpenAiModel, max_completion_tokens = 8192, response_format = new { type = "json_object" }, messages };

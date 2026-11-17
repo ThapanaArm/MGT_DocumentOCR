@@ -23,7 +23,8 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     SapClient sap, SapBusinessPartnerClient sapBp, AppConfig config, ICurrentUserAccessor currentUser,
     OcrJobRepository jobs, MgtOcr.Api.Services.DocumentIngestService ingest,
     SapProductClient sapProduct, FileArchiveRepository archive, MgtOcr.Api.Services.GraphArchiveClient graph,
-    SalesOrderPostRepository soPosts, UserRepository users, ILogger<DocumentsController> logger) : ControllerBase
+    SalesOrderPostRepository soPosts, UserRepository users, MgtOcr.Api.Services.ReadHintService readHints,
+    ILogger<DocumentsController> logger) : ControllerBase
 {
     // Who to stamp on CreatedBy / PerformedBy / PostedBy.
     //
@@ -492,7 +493,10 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         // Re-reading follows the company the document is already filed under, so a second read
         // never silently swaps MGT's rules for GLC's (CompanyRules treats an empty value as GLC).
         var docCompany = await repo.GetCompanyAsync(docId);
-        var pd = await ocr.ExtractAsync(storedPath, module, reocrEngine, reocrPw, docCompany);
+        var hints = await readHints.PrepareAsync(module, storedPath, docCompany);
+        var pd = await ocr.ExtractAsync(storedPath, module, reocrEngine, reocrPw, docCompany, hints);
+        if (MgtOcr.Api.Services.ReadHintService.NoteFor(hints) is { Length: > 0 } hintNote && pd.Provider == "gemini")
+            pd.ConfidenceNote = pd.ConfidenceNote.Length > 0 ? $"{pd.ConfidenceNote} / {hintNote}" : hintNote;
         var durationMs = (int)(DateTime.UtcNow - t0).TotalMilliseconds;
         var filled = await repo.ApplyVendorMemoryAsync(module, pd.Header);
         if (filled.Count > 0)
@@ -534,6 +538,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         }
         var ocrItemNote = ExtConversion.OcrPrefillsItemNote(module, config, docCompany);
         await repo.SaveLinesAsync(module, docId, pd.Lines.Select(l => ExtConversion.ToLineDict(l, pd.Header.GetValueOrDefault("deliveryDate") as string, ocrItemNote)).ToList());
+        if (pd.Provider == "gemini") await readHints.SaveDocAsync(docId, module, hints, pd.PositionsJson);
         var outDoc = await repo.GetDocumentAsync(docId);
         outDoc["fileName"] = await SyncSoFileNameAsync(docId, module, outDoc);
         await repo.LogAuditAsync(docId, module, "REOCR", await ActorAsync(),
@@ -1799,6 +1804,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         copy.Remove("deliveryDate");
         copy.Remove("poDate");
         copy.Remove("soGroupFreight"); // Step 3 freight split per Sales Order
+        copy.Remove("zohoDealsByUser"); // MGT: CS grouped the items into Deals themselves (16 Nov 2026)
         return copy;
     }
     private static bool ListEquals(List<object?> a, List<Dictionary<string, object?>> b) =>

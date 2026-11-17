@@ -487,6 +487,8 @@ public class ZohoSalesOrderClient(ZohoClient zoho)
         }
         record[itemsField] = rows;
         if (!string.IsNullOrWhiteSpace(ownerId)) record["Owner"] = new JsonObject { ["id"] = ownerId.Trim() };
+        // Fields Zoho's screen fills from the Account (e.g. the tax fields) -- the API doesn't, so copy them.
+        await ZohoRecordFields.ApplyAccountDefaultsAsync(zoho, await ResolveModuleAsync(), record, accountId);
         return record;
     }
 

@@ -54,6 +54,21 @@ public class ZohoAccountClient(ZohoClient zoho)
         return rows.Take(top).Select(ToAccount).ToList();
     }
 
+    // Ship-to search by code (Megachem, 16 Nov 2026): an Account whose own Ship-to Code (Accounts'
+    // inline Ship_to_Code field) contains the text. Best effort -- if that field is not filterable in
+    // COQL, Zoho rejects the query and nothing is returned (the Account_Code / name search still ran).
+    public async Task<List<ZohoAccount>> FindByShipToCodeContainsAsync(string codeContains, int top = 20)
+    {
+        var clean = (codeContains ?? "").Trim();
+        if (clean.Length == 0) return [];
+        try
+        {
+            var rows = await zoho.QueryCoqlAsync(Module, SelectFields, $"Ship_to_Code like '%{Escape(clean)}%'", "Account_Code");
+            return rows.Take(top).Select(ToAccount).ToList();
+        }
+        catch { return []; }
+    }
+
     public async Task<List<ZohoAccount>> FindByTaxIdAsync(string taxId, int top = 20)
     {
         if (string.IsNullOrWhiteSpace(taxId)) return [];

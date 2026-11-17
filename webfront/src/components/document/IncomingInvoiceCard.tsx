@@ -40,7 +40,7 @@ export default function IncomingInvoiceCard({ values: h, posted, onEdit, glItems
       {/* Transaction + Balance strip (SAP top row) */}
       <div
         className="card-b"
-        style={{ display: 'flex', alignItems: 'center', gap: 20, flexWrap: 'wrap', paddingBottom: 14, borderBottom: '1px solid var(--line-soft)' }}
+        style={{ display: 'flex', alignItems: 'center', gap: 24, flexWrap: 'wrap', paddingBottom: 16, borderBottom: '1px solid var(--line-soft)' }}
       >
         <div className="f" style={{ maxWidth: 260, flex: '0 0 auto' }}>
           <label>Transaction</label>
@@ -50,7 +50,7 @@ export default function IncomingInvoiceCard({ values: h, posted, onEdit, glItems
             ))}
           </select>
         </div>
-        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10 }}>
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 12 }}>
           <span
             style={{
               width: 12, height: 12, borderRadius: 3,
@@ -62,7 +62,7 @@ export default function IncomingInvoiceCard({ values: h, posted, onEdit, glItems
           <span
             style={{
               fontVariantNumeric: 'tabular-nums', fontWeight: 600,
-              padding: '7px 14px', border: '1px solid var(--line)', borderRadius: 'var(--r2, 8px)',
+              padding: '8px 16px', border: '1px solid var(--line)', borderRadius: 'var(--r2, 8px)',
               background: 'var(--line-soft)',
               color: balanced ? 'inherit' : 'var(--warn, #d97706)',
             }}
@@ -92,22 +92,22 @@ export default function IncomingInvoiceCard({ values: h, posted, onEdit, glItems
         {/* <aside
           style={{
             border: '1px solid var(--line)', borderRadius: 'var(--r2, 10px)',
-            background: 'var(--line-soft)', padding: 16, margin: '16px 20px 20px 0',
+            background: 'var(--line-soft)', padding: 16, margin: '16px 24px 24px 0',
           }}
         >
-          <div className="hint" style={{ textTransform: 'uppercase', letterSpacing: '.04em', fontSize: 11 }}>
+          <div className="hint" style={{ textTransform: 'uppercase', letterSpacing: '.04em', fontSize: 14 }}>
             Vendor{h.vendorCode || h.partnerCode ? ' · ' + (h.vendorCode || h.partnerCode) : ''}
           </div>
-          <div style={{ fontWeight: 700, fontSize: 15, margin: '4px 0 2px' }}>{h.vendorName || '—'}</div>
+          <div style={{ fontWeight: 700, fontSize: 16, margin: '4px 0 2px' }}>{h.vendorName || '—'}</div>
           {h.vendorTaxId && <div className="hint">Tax ID {h.vendorTaxId}</div>}
           {(h.addressCity || h.addressStreet) && (
-            <div className="hint" style={{ marginTop: 6 }}>{[h.addressStreet, h.addressCity].filter(Boolean).join(' · ')}</div>
+            <div className="hint" style={{ marginTop: 8 }}>{[h.addressStreet, h.addressCity].filter(Boolean).join(' · ')}</div>
           )}
-          {h.vendorEmail && <div className="hint" style={{ marginTop: 6 }}><i className="fa-solid fa-envelope" /> {h.vendorEmail}</div>}
+          {h.vendorEmail && <div className="hint" style={{ marginTop: 8 }}><i className="fa-solid fa-envelope" /> {h.vendorEmail}</div>}
           {h.bankAccountNo && (
             <>
               <hr style={{ border: 0, borderTop: '1px solid var(--line)', margin: '12px 0' }} />
-              <div className="hint" style={{ textTransform: 'uppercase', letterSpacing: '.04em', fontSize: 11 }}>Bank Account</div>
+              <div className="hint" style={{ textTransform: 'uppercase', letterSpacing: '.04em', fontSize: 14 }}>Bank Account</div>
               <div style={{ fontFamily: 'monospace', marginTop: 4 }}>{h.bankAccountNo}</div>
             </>
           )}

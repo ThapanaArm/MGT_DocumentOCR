@@ -100,8 +100,13 @@ export default function SoSplitBoard({
   const cardLines = (id: string) =>
     lines.map((_, i) => i).filter((i) => assign[i] === id && !(skipCharges && isFreightLine(lines[i])));
   const cardDates = (id: string) => Array.from(new Set(cardLines(id).map(dateOf)));
+  // MGT/Zoho: a Sales Order links to one Deal, so a card holding items of several Deals is sent as one
+  // Sales Order per Deal too (16 Nov 2026, see SoDeliveryGroups.Build).
+  const dealOf = (i: number) => String((lines[i].extra as Record<string, unknown> | undefined)?.zohoDeal ?? '').trim();
+  const cardDeals = (id: string) => Array.from(new Set(cardLines(id).map(dealOf)));
+  const cardOrders = (id: string) => new Set(cardLines(id).map((i) => dateOf(i) + '|' + dealOf(i))).size;
   const usedCards = cards.filter((id) => cardLines(id).length > 0);
-  const totalOrders = usedCards.reduce((n, id) => n + cardDates(id).length, 0);
+  const totalOrders = usedCards.reduce((n, id) => n + cardOrders(id), 0);
   const changed =
     assign.some((g, i) => g !== lineSoGroup(lines[i])) ||
     JSON.stringify(shipTos) !== JSON.stringify((doc.header.soGroupShipTos as ShipTos) || {});
@@ -196,6 +201,11 @@ export default function SoSplitBoard({
                     <i className="fa-solid fa-calendar-days" /> {dates.length} delivery dates — will be sent as {dates.length} Sales Orders
                   </div>
                 )}
+                {cardDeals(id).length > 1 && (
+                  <div className="badge b-warn" style={{ whiteSpace: 'normal' }}>
+                    <i className="fa-solid fa-layer-group" /> Items of {cardDeals(id).length} Deals — one Sales Order per Deal
+                  </div>
+                )}
                 {idx.length === 0 && (
                   <div className="hint" style={{ border: '1px dashed var(--line, #d8dde6)', borderRadius: 8, padding: 16, textAlign: 'center' }}>
                     Drag items here
@@ -212,13 +222,13 @@ export default function SoSplitBoard({
                       style={{
                         border: '1px solid var(--line, #d8dde6)',
                         borderRadius: 8,
-                        padding: '8px 10px',
+                        padding: '8px 12px',
                         background: 'var(--bg, #fafbfc)',
                         cursor: 'grab',
                         opacity: dragIdx === i ? 0.5 : 1,
                       }}
                     >
-                      <div className="row" style={{ gap: 6, alignItems: 'flex-start' }}>
+                      <div className="row" style={{ gap: 8, alignItems: 'flex-start' }}>
                         <i className="fa-solid fa-grip-vertical hint" aria-hidden="true" style={{ marginTop: 3 }} />
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div style={{ fontWeight: 600, overflowWrap: 'anywhere' }}>
@@ -233,7 +243,7 @@ export default function SoSplitBoard({
                         value=""
                         onChange={(e) => { if (e.target.value) moveLine(i, e.target.value); }}
                         aria-label={`Move item ${l.itemNo} to another Sales Order`}
-                        style={{ marginTop: 6, width: '100%', fontSize: 12, padding: '4px 8px', minHeight: 0, height: 30 }}
+                        style={{ marginTop: 8, width: '100%', fontSize: 14, padding: '4px 8px', minHeight: 0, height: 30 }}
                       >
                         <option value="">Move to…</option>
                         {cards.filter((c) => c !== id).map((c) => (
@@ -276,10 +286,10 @@ export default function SoSplitBoard({
           </div>
         </div>
 
-        <div className="row" style={{ marginTop: 8, alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        <div className="row" style={{ marginTop: 8, alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
           <span>
             Will create <b>{totalOrders}</b> Sales Order{totalOrders === 1 ? '' : 's'}
-            {totalOrders !== usedCards.length && <span className="hint"> (some cards have more than one delivery date)</span>}
+            {totalOrders !== usedCards.length && <span className="hint"> (some cards have more than one delivery date or Deal)</span>}
           </span>
           <div className="sp" style={{ flex: 1 }} />
           <button className="btn" onClick={onClose}>Cancel</button>

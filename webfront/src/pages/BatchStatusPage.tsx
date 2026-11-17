@@ -62,7 +62,7 @@ export default function BatchStatusPage() {
           </span>
         </div>
         <div className="card-b">
-          {error && <div className="result bad" style={{ marginBottom: 14 }}>{error}</div>}
+          {error && <div className="result bad" style={{ marginBottom: 16 }}>{error}</div>}
           {!allFinished && (
             <p className="hint" style={{ marginTop: 0 }}>
               <i className="fa-solid fa-spinner fa-spin" /> Reading in the background — you can wait here or come back later. Finished documents can be reviewed right away.
@@ -99,8 +99,8 @@ export default function BatchStatusPage() {
                       </td>
                       <td>
                         <span style={{
-                          display: 'inline-flex', alignItems: 'center', gap: 6, padding: '3px 10px',
-                          borderRadius: 'var(--pill)', fontSize: 13, fontWeight: 600,
+                          display: 'inline-flex', alignItems: 'center', gap: 8, padding: '3px 12px',
+                          borderRadius: 'var(--pill)', fontSize: 14, fontWeight: 600,
                           color: st.color, background: st.bg,
                         }}>
                           {j.status === 'PROCESSING' && <i className="fa-solid fa-spinner fa-spin" />}
@@ -121,7 +121,7 @@ export default function BatchStatusPage() {
             </table>
           </div>
 
-          <div className="row" style={{ marginTop: 18 }}>
+          <div className="row" style={{ marginTop: 16 }}>
             <button className="btn" onClick={() => navigate('/import/' + mod)}>
               <i className="fa-solid fa-plus" /> Import more
             </button>

@@ -35,8 +35,9 @@ export default function ConfirmModal({
           <div>{message}</div>
         </div>
         <div className="confirm-actions">
-          <button className="btn sm" onClick={close} disabled={busy}>{cancelLabel}</button>
-          <button className={'btn sm ' + (danger ? 'danger' : 'primary')} onClick={onConfirm} disabled={busy}>
+          <button className="btn" onClick={close} disabled={busy}>{cancelLabel}</button>
+          {/* The dialog's one main action: filled (red when it deletes / can't be undone). */}
+          <button className={'btn ' + (danger ? 'danger' : 'primary')} onClick={onConfirm} disabled={busy}>
             {busy ? <><i className="fa-solid fa-spinner fa-spin" /> Working…</> : confirmLabel}
           </button>
         </div>

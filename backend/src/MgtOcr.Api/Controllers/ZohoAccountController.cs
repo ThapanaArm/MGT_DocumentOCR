@@ -61,6 +61,9 @@ public class ZohoAccountController(ZohoAccountClient client, ZohoClient zoho, Zo
             results = await client.FindByTaxIdAsync(taxId, top);
         if (results.Count == 0 && !string.IsNullOrWhiteSpace(code))
             results = await client.FindByAccountCodeContainsAsync(code, top);
+        // A Ship-to code typed in the Ship-to search (16 Nov 2026): the Account carrying that Ship-to Code.
+        if (results.Count == 0 && !string.IsNullOrWhiteSpace(code))
+            results = await client.FindByShipToCodeContainsAsync(code, top);
         if (results.Count == 0 && !string.IsNullOrWhiteSpace(name))
             results = await client.FindByNameAsync(name, top);
 

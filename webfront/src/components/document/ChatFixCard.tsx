@@ -159,7 +159,7 @@ export default function ChatFixCard({
             </button>
           </div>
         )}
-        <div className="row" style={{ marginTop: 10 }}>
+        <div className="row" style={{ marginTop: 12 }}>
           <input
             ref={fileRef}
             type="file"

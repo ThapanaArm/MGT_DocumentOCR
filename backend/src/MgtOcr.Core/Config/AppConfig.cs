@@ -16,28 +16,18 @@ public class AppConfig
     public string[] OwnCompanyKeywords { get; init; } = ["MEGACHEM"];
     public string OwnTaxId { get; init; } = "";
 
-    public string OcrProvider { get; init; } = "auto";
-    public string TesseractCmd { get; init; } = "";
-    public string TessdataPrefix { get; init; } = "";
-    public string AzureDiEndpoint { get; init; } = "";
-    public string AzureDiKey { get; init; } = "";
+    // Gemini is the only reading engine (OcrEngine). Kept for the health check only.
+    public string OcrProvider { get; init; } = "gemini";
     public string AnthropicApiKey { get; init; } = "";
     public string AnthropicModel { get; init; } = "claude-sonnet-5";
-    public string TyphoonApiKey { get; init; } = "";
-    public string TyphoonModel { get; init; } = "typhoon-ocr";
-    // New in the .NET port (no Python equivalent) — same raw-HTTP, no-SDK pattern as the
-    // existing Claude/Azure/Typhoon clients.
+    // Anthropic / OpenAI keys are for the AI chat and "Compare with AI" helpers only, not for reading.
     public string GeminiApiKey { get; init; } = "";
     public string GeminiModel { get; init; } = "gemini-2.5-flash";
     public string OpenAiApiKey { get; init; } = "";
     public string OpenAiModel { get; init; } = "gpt-4o";
-    // PaddleOCR-Standalone (local exe). Blank Cmd = look in C:\Program Files\PaddleOCR-CPU|GPU.
-    // Lang "th" = PP-OCRv5 Thai model (also reads English/digits). Device blank = exe default ("cpu" / "gpu:0").
-    public string PaddleOcrCmd { get; init; } = "";
-    public string PaddleOcrLang { get; init; } = "th";
-    public string PaddleOcrDevice { get; init; } = "";
-    public int PaddleOcrMaxPages { get; init; } = 10;
-    public int PaddleOcrTimeoutSec { get; init; } = 300;
+    // Sales Order reading rules per customer (sql/39, Ocr:ReadHints:Enabled, default on): where each field
+    // is printed on a customer's PO, sent with the same Gemini request. false = no rules sent, nothing recorded.
+    public bool ReadHintsEnabled { get; init; } = true;
 
     public string SapBaseUrl { get; init; } = "";
     public string SapUser { get; init; } = "";

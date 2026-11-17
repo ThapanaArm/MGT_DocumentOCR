@@ -47,6 +47,7 @@ public class ZohoSalesOrderController(
     ICurrentUserAccessor currentUser,
     FileArchiveRepository archive,
     SalesOrderPostRepository soPosts,
+    MgtOcr.Api.Services.ReadHintService readHints,
     ILogger<ZohoSalesOrderController> log) : ControllerBase
 {
     // MaterialId, when present, is a person confirming (via the AI-assisted "suggest a match"
@@ -56,6 +57,62 @@ public class ZohoSalesOrderController(
     // Deal id the page sends when the document has no Deal (Megachem rule, 27 Oct 2026: no Deal =
     // not WCD -> the send opens a new Deal first, then a Quote, then the Sales Order).
     public const string NewDealId = "__new__";
+
+    // One PO may hold items of several Deals, and some items may have no Deal yet (Megachem, 16 Nov 2026).
+    // Each line carries its Deal key -- the page's lineDeals, else the line's saved extra.zohoDeal, else the
+    // request's dealId: a Zoho Deal id, or "__new__", "__new__2" ... for a new Deal Send opens (CS groups
+    // the items into Deals on the page, like the Split Sales Order board). A Zoho Sales Order links to one
+    // Deal, so every Deal gets its own Deal -> Quote -> Sales Order(s) chain.
+    private static bool IsNewDealKey(string? key) =>
+        !string.IsNullOrEmpty(key) && key.StartsWith(NewDealId, StringComparison.Ordinal);
+
+    // itemNo -> Deal key of every line, in line order.
+    private static Dictionary<string, string> LineDealKeys(List<Dictionary<string, object?>> lines, string? defaultDealId,
+        IReadOnlyDictionary<string, string>? requested)
+    {
+        var map = new Dictionary<string, string>(StringComparer.Ordinal);
+        for (var i = 0; i < lines.Count; i++)
+        {
+            var itemNo = SoDeliveryGroups.ItemNoOf(lines[i], i);
+            var key = requested is not null && requested.TryGetValue(itemNo, out var r) ? (r ?? "").Trim() : "";
+            if (key.Length == 0) key = SoDeliveryGroups.LineDeal(lines[i]);
+            if (key.Length == 0) key = (defaultDealId ?? "").Trim();
+            map[itemNo] = key;
+        }
+        return map;
+    }
+
+    private static void RequireDeals(Dictionary<string, string> keys)
+    {
+        var missing = keys.Where(kv => kv.Value.Length == 0).Select(kv => kv.Key).ToList();
+        if (keys.Count == 0 || missing.Count == keys.Count) throw new HttpApiException(400, "A Deal must be selected first");
+        if (missing.Count > 0)
+            throw new HttpApiException(400, $"Item {string.Join(", ", missing)} has no Deal — put it in a Deal on the Deal (Zoho) card first");
+    }
+
+    // The Deals of the document in first-seen line order, each with its lines' itemNos.
+    private static List<(string Key, HashSet<string> ItemNos)> DealParts(Dictionary<string, string> keys)
+    {
+        var parts = new List<(string Key, HashSet<string> ItemNos)>();
+        foreach (var (itemNo, key) in keys)
+        {
+            var i = parts.FindIndex(p => p.Key == key);
+            if (i < 0) parts.Add((key, new HashSet<string>(StringComparer.Ordinal) { itemNo }));
+            else parts[i].ItemNos.Add(itemNo);
+        }
+        return parts;
+    }
+
+    private static HashSet<string> ItemNosOf(Dictionary<string, string> keys, string dealKey) =>
+        keys.Where(kv => kv.Value == dealKey).Select(kv => kv.Key).ToHashSet(StringComparer.Ordinal);
+
+    // Preview's ?lineDeals= (JSON object itemNo -> Deal key); null when absent or unreadable.
+    private static Dictionary<string, string>? ParseLineDeals(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return null;
+        try { return JsonSerializer.Deserialize<Dictionary<string, string>>(json); }
+        catch (JsonException) { return null; }
+    }
 
     public record LineOverride(string ItemNo, decimal? Quantity, decimal? UnitPrice, string? Unit, string? Description, string? MaterialId);
 
@@ -77,7 +134,23 @@ public class ZohoSalesOrderController(
         // Ms_User.UserID of the Sales person CS picked as Owner of a NEW Deal (12 Nov 2026), from the
         // Sales Organization 1000 list. The Zoho user is found by Email, then English name. Blank =
         // the customer's Account Owner, as before. Ignored when the document already has a Deal.
-        string? SalesUserId = null);
+        // With several new Deals on one PO, the same Sales owns each of them.
+        string? SalesUserId = null,
+        // itemNo -> Deal key per line (16 Nov 2026): a Zoho Deal id, or "__new__", "__new__2" ... Lines not
+        // listed use their saved extra.zohoDeal, else DealId.
+        Dictionary<string, string>? LineDeals = null,
+        // New Deal key ("__new__", "__new__2" ...) -> Forecast Status "Yes" / "No" that CS chose for it on
+        // Send (16 Nov 2026). Required for every new Deal -- there is no default.
+        Dictionary<string, string>? NewDealForecast = null);
+
+    // CS's Forecast Status for a new Deal: "Yes" / "No", or null when not chosen (Send then refuses).
+    private static string? NewDealForecastOf(CreateSalesOrderRequest body, string dealKey)
+    {
+        if (body.NewDealForecast is null || !body.NewDealForecast.TryGetValue(dealKey, out var v)) return null;
+        v = (v ?? "").Trim();
+        return v.Equals("Yes", StringComparison.OrdinalIgnoreCase) ? "Yes"
+            : v.Equals("No", StringComparison.OrdinalIgnoreCase) ? "No" : null;
+    }
 
     private record MatchedLine(
         string ItemNo, string? Desc, string? ExtCode, string MaterialId, string? MaterialName,
@@ -171,8 +244,9 @@ public class ZohoSalesOrderController(
     // document-line-to-Deal-Item matching (unaffected by anything the person edits in the
     // preview — a line's MaterialId/MaterialCode/etc always comes from a real matched Deal Item,
     // never from typed-in text, since Product_Name is a required Lookup with no Material search).
+    // onlyItemNos: one PO, several Deals (16 Nov 2026) -- only the lines of this Deal are matched and sent.
     private async Task<Defaults> BuildDefaultsAsync(int docId, string dealId, bool requireUomConversion = false,
-        bool enforceDealAccount = false)
+        bool enforceDealAccount = false, ISet<string>? onlyItemNos = null)
     {
         var doc = await repo.GetDocumentAsync(docId);
         if (doc.GetStr("module") != "SO")
@@ -181,7 +255,7 @@ public class ZohoSalesOrderController(
         // Zoho chain Deal -> Quote -> Sales Order (27 Oct 2026). No Deal at all = not WCD: a new Deal
         // is opened on the document's customer when the person sends (see EnsureDealAsync). Until
         // then it is a stand-in record with no id, no items and Forecast Status "No".
-        var newDeal = dealId == NewDealId;
+        var newDeal = IsNewDealKey(dealId);
         string? newDealAccountName = null;
         ZohoDeal? deal;
         if (newDeal)
@@ -237,8 +311,10 @@ public class ZohoSalesOrderController(
         var lines = (List<Dictionary<string, object?>>)doc["lines"]!;
         var matched = new List<MatchedLine>();
         var skipped = new List<SkippedLine>();
-        foreach (var l in lines)
+        for (var li = 0; li < lines.Count; li++)
         {
+            var l = lines[li];
+            if (onlyItemNos is not null && !onlyItemNos.Contains(SoDeliveryGroups.ItemNoOf(l, li))) continue;
             var itemNo = l.Get("itemNo")?.ToString() ?? "";
             var desc = l.GetStr("desc");
             var extCode = l.GetStr("extCode");
@@ -264,7 +340,9 @@ public class ZohoSalesOrderController(
             // Items is looked up in Zoho Materials by its mapped material code, else the PO code
             // (Megachem, 27 Oct 2026). A WCD Deal (Forecast Status Yes) still only takes its own items.
             string? notFound = null;
-            if ((item is null || string.IsNullOrEmpty(item.MaterialId)) && !deal.IsWcd)
+            // A new Deal has no items yet: its lines always come from Zoho Materials, whatever Forecast
+            // Status CS picks for it (16 Nov 2026).
+            if ((item is null || string.IsNullOrEmpty(item.MaterialId)) && (!deal.IsWcd || newDeal))
             {
                 if (codes.Count == 0)
                     notFound = "Not a Deal Item, and no material code is mapped on this line to look up in Zoho";
@@ -317,7 +395,8 @@ public class ZohoSalesOrderController(
         // Delivery_Date: same rule as SapPayloadBuilder's RequestedDeliveryDate -- when every line
         // ships on one date (always true for a child of "split by delivery date"), that line date
         // wins over the header's, because a split child keeps the PARENT's header deliveryDate.
-        var lineDates = LineDeliveryDates(lines);
+        var lineDates = LineDeliveryDates(onlyItemNos is null ? lines
+            : lines.Where((x, i) => onlyItemNos.Contains(SoDeliveryGroups.ItemNoOf(x, i))).ToList());
         var deliveryDate = lineDates.Count == 1 ? lineDates[0]
             : header.GetStr("deliveryDate") is { Length: > 0 } dd ? dd : deal.DeliveryDate;
 
@@ -470,7 +549,8 @@ public class ZohoSalesOrderController(
             HeaderDate(a.DeliveryDate, groups), a.CustomerRef is { Length: > 0 } cr && cr != "-" ? cr : null,
             a.PaymentTerms, a.PaymentCurrency, a.Incoterms,
             a.SoLines.Select(l => new ZohoNewDealLine(l.MaterialId, l.MaterialCode, l.Description, l.MaterialGroup,
-                l.Quantity, l.UnitPrice, l.Unit, l.LastPrice)).ToList(), a.OwnerId);
+                l.Quantity, l.UnitPrice, l.Unit, l.LastPrice)).ToList(), a.OwnerId,
+            forecastStatus: a.Deal.IsWcd ? "Yes" : "No");
 
     // Megachem (12 Nov 2026): Zoho rejects a new Deal whose Owner is not an active Zoho user (e.g. the
     // customer's Account Owner has left), so check the owner before opening the Deal and tell CS to
@@ -548,7 +628,10 @@ public class ZohoSalesOrderController(
     // Step 1 of a send without a Deal: open the (non-WCD) Deal. A retry after a failed later step
     // reuses the Deal an earlier attempt opened (same customer, same Customer Ref, not WCD, stage
     // NewDealStage) instead of opening a second one.
-    private async Task<ZohoDeal> EnsureDealAsync(int docId, Assembled a, List<SoGroup> groups, string actor)
+    // usedDealIds: Deals already used by this send (16 Nov 2026: several new Deals of one PO share the
+    // Customer Ref, so an earlier attempt's Deal is reused only when it holds the same materials).
+    private async Task<ZohoDeal> EnsureDealAsync(int docId, Assembled a, List<SoGroup> groups, string actor,
+        ISet<string>? usedDealIds = null)
     {
         var po = (a.CustomerRef ?? "").Trim();
         if (po.Length > 0 && po != "-" && !string.IsNullOrWhiteSpace(a.Deal.AccountCode))
@@ -556,12 +639,19 @@ public class ZohoSalesOrderController(
             try
             {
                 var open = await dealClient.FindOpenDealsByAccountCodeAsync(a.Deal.AccountCode!);
-                var earlier = open.FirstOrDefault(d => !d.IsWcd && d.Stage == ZohoDealClient.NewDealStage
-                    && string.Equals((d.CustomerRef ?? "").Trim(), po, StringComparison.OrdinalIgnoreCase));
+                var candidates = open.Where(d => d.IsWcd == a.Deal.IsWcd && ZohoDealStage.IsOpenOrDraft(d.Stage)
+                    && string.Equals((d.CustomerRef ?? "").Trim(), po, StringComparison.OrdinalIgnoreCase)
+                    && !(usedDealIds?.Contains(d.Id) ?? false)).ToList();
+                static string Code(string? c) => (c ?? "").Trim().ToUpperInvariant();
+                var wanted = a.SoLines.Select(l => Code(l.MaterialCode)).Where(c => c.Length > 0).ToHashSet();
+                // New Deals now open at Draft/Qualification like any other Deal (16 Nov 2026), so an earlier
+                // attempt's Deal is recognised by its materials too, never by Customer Ref alone.
+                var earlier = candidates.FirstOrDefault(d =>
+                        d.Items.Select(it => Code(it.MaterialCode)).Where(c => c.Length > 0).ToHashSet().SetEquals(wanted));
                 if (earlier is not null && !string.IsNullOrEmpty(earlier.AccountId))
                 {
                     await repo.LogAuditAsync(docId, "SO", "CREATE", actor, fileName: a.Doc.GetStr("fileName"),
-                        detail: $"Using Zoho Deal \"{earlier.DealName}\" (Customer Ref {po}, no forecast) opened earlier instead of opening another");
+                        detail: $"Using Zoho Deal \"{earlier.DealName}\" (Customer Ref {po}, Forecast Status {(a.Deal.IsWcd ? "Yes" : "No")}) opened earlier instead of opening another");
                     return earlier;
                 }
             }
@@ -594,7 +684,7 @@ public class ZohoSalesOrderController(
             ? a.Deal with { Id = res.ZohoId }
             : created;
         await repo.LogAuditAsync(docId, "SO", "CREATE", actor, fileName: a.Doc.GetStr("fileName"),
-            detail: $"Opened Zoho Deal \"{deal.DealName}\" (record {res.ZohoId}, Forecast Status No, Stage {ZohoDealClient.NewDealStage}) — the document had no Deal");
+            detail: $"Opened Zoho Deal \"{deal.DealName}\" (record {res.ZohoId}, Forecast Status {(a.Deal.IsWcd ? "Yes" : "No")}, Stage {ZohoDealClient.NewDealStage}) — chosen by CS on Send");
         return deal;
     }
 
@@ -685,16 +775,17 @@ public class ZohoSalesOrderController(
             ItemNote1: lineExtra?.GetStr("itemNote1"));
     }
 
-    // GET /api/zoho/sales-order/preview/{docId}?dealId=... — every value Create would send,
-    // laid out for the person to review/edit first (see class comment). Never writes anything.
-    [HttpGet("sales-order/preview/{docId:int}")]
-    public async Task<IActionResult> Preview(int docId, [FromQuery] string dealId)
-    {
-        if (string.IsNullOrWhiteSpace(dealId))
-            throw new HttpApiException(400, "A Deal must be selected first");
+    // What the send does for one Deal of the document (Deal -> Quote -> Sales Order, 27 Oct 2026).
+    private record FlowView(bool Wcd, string? ForecastStatus, bool NewDeal, string? DealStage,
+        string QuoteAction, string? QuoteNo, string? QuoteStage, string QuoteReason, List<string> QuoteRefs);
 
-        var d = await BuildDefaultsAsync(docId, dealId);
-        // Deal -> Quote -> Sales Order plan shown above the editor (27 Oct 2026).
+    // One Deal's part of the preview: its defaults (lines of this Deal only), the Quote plan and the owner.
+    private record PartPreview(string Key, Defaults D, FlowView Flow, string Label,
+        string? OwnerName, string? OwnerError, string? OwnerId, bool? OwnerActive);
+
+    private async Task<PartPreview> PreviewPartAsync(int docId, string dealKey, ISet<string> itemNos)
+    {
+        var d = await BuildDefaultsAsync(docId, dealKey, onlyItemNos: itemNos);
         string quoteAction, quoteReason; string? quoteNo = null, quoteStage = null;
         try
         {
@@ -706,21 +797,6 @@ public class ZohoSalesOrderController(
         {
             log.LogWarning(e, "Preview: could not read the Quotes of Deal {DealId}", d.Deal.Id);
             quoteAction = "unknown"; quoteReason = "Could not read the Deal's Quotes from Zoho CRM: " + e.Message;
-        }
-        var (previewLastPrices, lastPriceError) = await LastPricesWithErrorAsync(d.Deal.AccountCode, d.Lines.Select(l => l.MaterialCode), docId);
-        // The dropdown options only decorate the editor (blank = "use Deal default"), so a slow or
-        // failing Zoho settings/fields call must not fail the whole preview: give it 20 s, then
-        // carry on with empty lists. The second lookup reads the cached field list.
-        List<string> paymentTermsOptions = [], paymentCurrencyOptions = [];
-        try
-        {
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
-            paymentTermsOptions = await soClient.GetPicklistOptionsAsync("Payment_Terms", cts.Token);
-            paymentCurrencyOptions = await soClient.GetPicklistOptionsAsync("Payment_Currency", cts.Token);
-        }
-        catch (Exception e)
-        {
-            log.LogWarning(e, "Preview: could not read the Payment Terms / Currency picklists from Zoho CRM");
         }
 
         string? dealOwnerName = null, dealOwnerError = null, dealOwnerId = null;
@@ -757,26 +833,68 @@ public class ZohoSalesOrderController(
             dealOwnerError = "Responsible salesperson is temporarily unavailable. Please reload the preview.";
         }
 
+        var flow = new FlowView(d.Deal.IsWcd, d.Deal.ForecastStatus, d.NewDeal, d.Deal.Stage,
+            quoteAction, quoteNo, quoteStage, quoteReason, d.QuoteRefs ?? []);
+        var label = d.Deal.DealName is { Length: > 0 } n ? n : "New Deal";
+        return new PartPreview(dealKey, d, flow, label, dealOwnerName, dealOwnerError, dealOwnerId, dealOwnerActive);
+    }
+
+    // GET /api/zoho/sales-order/preview/{docId}?dealId=...&lineDeals={"10":"<deal id>","20":"__new__"} —
+    // every value Create would send, laid out for the person to review/edit first (see class comment).
+    // Never writes anything. One PO, several Deals (16 Nov 2026): deals[] has one entry per Deal; the
+    // top-level Deal / flow / owner fields are the first Deal's (the owner: the first NEW Deal's, since CS
+    // picks one Sales for every new Deal), and lines / skipped cover every Deal, each with its dealKey.
+    [HttpGet("sales-order/preview/{docId:int}")]
+    public async Task<IActionResult> Preview(int docId, [FromQuery] string? dealId, [FromQuery] string? lineDeals = null)
+    {
+        var doc = await repo.GetDocumentAsync(docId);
+        var keys = LineDealKeys((List<Dictionary<string, object?>>)doc["lines"]!, dealId, ParseLineDeals(lineDeals));
+        RequireDeals(keys);
+
+        var views = new List<PartPreview>();
+        foreach (var p in DealParts(keys)) views.Add(await PreviewPartAsync(docId, p.Key, p.ItemNos));
+        var first = views[0];
+        var d = first.D;
+        var allLines = views.SelectMany(v => v.D.Lines.Select(l => (v.Key, Line: l))).ToList();
+
+        var (previewLastPrices, lastPriceError) = await LastPricesWithErrorAsync(d.Deal.AccountCode, allLines.Select(x => x.Line.MaterialCode), docId);
+        // The dropdown options only decorate the editor (blank = "use Deal default"), so a slow or
+        // failing Zoho settings/fields call must not fail the whole preview: give it 20 s, then
+        // carry on with empty lists. The second lookup reads the cached field list.
+        List<string> paymentTermsOptions = [], paymentCurrencyOptions = [];
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            paymentTermsOptions = await soClient.GetPicklistOptionsAsync("Payment_Terms", cts.Token);
+            paymentCurrencyOptions = await soClient.GetPicklistOptionsAsync("Payment_Currency", cts.Token);
+        }
+        catch (Exception e)
+        {
+            log.LogWarning(e, "Preview: could not read the Payment Terms / Currency picklists from Zoho CRM");
+        }
+
+        var ownerView = views.FirstOrDefault(v => v.D.NewDeal) ?? first;
         return Ok(new
         {
-            dealName = d.Deal.DealName,
-            dealOwnerName,
-            dealOwnerError,
-            dealOwnerId,
-            dealOwnerActive,
+            dealName = views.Count == 1 ? d.Deal.DealName : string.Join(" + ", views.Select(v => v.Label)),
+            dealOwnerName = ownerView.OwnerName,
+            dealOwnerError = ownerView.OwnerError,
+            dealOwnerId = ownerView.OwnerId,
+            dealOwnerActive = ownerView.OwnerActive,
             accountCode = d.Deal.AccountCode,
-            flow = new
+            // newDeal = any Deal of the document is opened on Send (drives the Sales / Deal Owner picker).
+            flow = first.Flow with { NewDeal = views.Any(v => v.D.NewDeal) },
+            deals = views.Select(v => new
             {
-                wcd = d.Deal.IsWcd,
-                forecastStatus = d.Deal.ForecastStatus,
-                newDeal = d.NewDeal,
-                dealStage = d.Deal.Stage,
-                quoteAction,
-                quoteNo,
-                quoteStage,
-                quoteReason,
-                quoteRefs = d.QuoteRefs ?? [],
-            },
+                key = v.Key,
+                dealName = v.Label,
+                dealId = v.D.NewDeal ? null : v.D.Deal.Id,
+                flow = v.Flow,
+                subject = v.D.Subject,
+                itemNos = v.D.Lines.Select(l => l.ItemNo).Concat(v.D.Skipped.Select(s => s.ItemNo)).ToList(),
+                ownerName = v.OwnerName,
+                ownerError = v.OwnerError,
+            }),
             subject = d.Subject,
             customerRef = d.CustomerRef,
             deliveryDate = d.DeliveryDate,
@@ -788,23 +906,24 @@ public class ZohoSalesOrderController(
             paymentTermsOptions,
             paymentCurrencyOptions,
             lastPriceError,
-            lines = d.Lines.Select(l => new
+            lines = allLines.Select(x => new
             {
-                itemNo = l.ItemNo,
-                desc = l.Desc,
-                extCode = l.ExtCode,
-                materialName = l.MaterialName,
-                materialCode = l.MaterialCode,
-                quantity = l.Quantity,
-                unitPrice = l.UnitPrice,
-                unit = l.Unit,
-                conversionRatio = l.ConversionRatio,
-                subUnit = l.SubUnit,
-                lastPrice = previewLastPrices.TryGetValue(l.MaterialCode ?? "", out var lp) ? lp.Price : (decimal?)null,
-                lastPriceDate = previewLastPrices.TryGetValue(l.MaterialCode ?? "", out var lpd) ? lpd.UpdateDate : null,
-                lastPriceSo = previewLastPrices.TryGetValue(l.MaterialCode ?? "", out var lps) ? lps.SalesOrderName : null,
+                dealKey = x.Key,
+                itemNo = x.Line.ItemNo,
+                desc = x.Line.Desc,
+                extCode = x.Line.ExtCode,
+                materialName = x.Line.MaterialName,
+                materialCode = x.Line.MaterialCode,
+                quantity = x.Line.Quantity,
+                unitPrice = x.Line.UnitPrice,
+                unit = x.Line.Unit,
+                conversionRatio = x.Line.ConversionRatio,
+                subUnit = x.Line.SubUnit,
+                lastPrice = previewLastPrices.TryGetValue(x.Line.MaterialCode ?? "", out var lp) ? lp.Price : (decimal?)null,
+                lastPriceDate = previewLastPrices.TryGetValue(x.Line.MaterialCode ?? "", out var lpd) ? lpd.UpdateDate : null,
+                lastPriceSo = previewLastPrices.TryGetValue(x.Line.MaterialCode ?? "", out var lps) ? lps.SalesOrderName : null,
             }),
-            skipped = d.Skipped,
+            skipped = views.SelectMany(v => v.D.Skipped.Select(s => new { itemNo = s.ItemNo, desc = s.Desc, extCode = s.ExtCode, reason = s.Reason, dealKey = v.Key })),
         });
     }
 
@@ -812,10 +931,27 @@ public class ZohoSalesOrderController(
     // fold in the caller's edits + any AI-confirmed material matches, and assemble the exact line
     // list + resolved header values that both endpoints hand to the ZohoSalesOrderClient. Material
     // identity per line always comes from the server-side Deal Item match, never the request.
-    private async Task<Assembled> AssembleAsync(int docId, CreateSalesOrderRequest body, bool forCreate = false)
+    // dealKey / itemNos: one Deal of the document and its lines (16 Nov 2026). single = the document has
+    // only this Deal -- only then does a typed Subject apply (otherwise each Deal's own name is used).
+    private async Task<Assembled> AssembleAsync(int docId, CreateSalesOrderRequest body, string dealKey, ISet<string>? itemNos,
+        bool single, bool forCreate = false)
     {
-        var d = await BuildDefaultsAsync(docId, body.DealId, requireUomConversion: true,
-            enforceDealAccount: forCreate && !body.AcceptOtherAccount);
+        var d = await BuildDefaultsAsync(docId, dealKey, requireUomConversion: true,
+            enforceDealAccount: forCreate && !body.AcceptOtherAccount, onlyItemNos: itemNos);
+        // Only Draft/Qualification Deals are used (Megachem, 16 Nov 2026) -- also one picked through the
+        // manual Deal search, or the Deal of a Quote No. on the PO.
+        if (!d.NewDeal && !ZohoDealStage.IsOpenOrDraft(d.Deal.Stage))
+            throw new HttpApiException(400,
+                $"Deal \"{d.Deal.DealName}\" is at Stage {d.Deal.Stage} — only {ZohoDealStage.Draft} Deals can be used. Move its items to another Deal — nothing was sent");
+        if (d.NewDeal)
+        {
+            // Forecast Status of the new Deal: CS chooses Yes or No on Send (16 Nov 2026), no default.
+            var forecast = NewDealForecastOf(body, dealKey)
+                ?? throw new HttpApiException(400, "Choose Forecast Yes or No for the new Deal"
+                    + (IsNewDealKey(dealKey) && dealKey.Length > NewDealId.Length ? $" {dealKey[NewDealId.Length..]}" : "")
+                    + " before sending — nothing was sent");
+            d = d with { Deal = d.Deal with { ForecastStatus = forecast } };
+        }
 
         var overrides = (body.Lines ?? []).Where(x => !string.IsNullOrEmpty(x.ItemNo))
             .ToDictionary(x => x.ItemNo, x => x);
@@ -844,7 +980,9 @@ public class ZohoSalesOrderController(
         }
 
         if (resolvedLines.Count == 0)
-            throw new HttpApiException(400, "No document line could be matched to a Deal Item in \"" + d.Deal.DealName + "\" — nothing to send to Zoho");
+            throw new HttpApiException(400, (d.NewDeal
+                ? "No item of the new Deal could be matched to a Zoho Material"
+                : "No document line could be matched to a Deal Item in \"" + d.Deal.DealName + "\"") + " — nothing to send to Zoho");
 
         // Zoho's Last Prices module (customer + material) -- copied into each item's Last_Price.
         var lastPrices = await LastPricesAsync(d.Deal.AccountCode, resolvedLines.Select(l => l.MaterialCode), docId);
@@ -868,7 +1006,7 @@ public class ZohoSalesOrderController(
                 LastPrice: lastPrices.TryGetValue(l.MaterialCode ?? "", out var lp) ? lp.Price : null);
         }).ToList();
 
-        var subject = body.Subject is { Length: > 0 } ? body.Subject : d.Subject;
+        var subject = single && body.Subject is { Length: > 0 } ? body.Subject : d.Subject;
         if (subject.Length > 50) subject = subject[..50];
 
         return new Assembled(
@@ -910,7 +1048,7 @@ public class ZohoSalesOrderController(
     [HttpPost("sales-order/create/{docId:int}")]
     public async Task<IActionResult> Create(int docId, [FromBody] CreateSalesOrderRequest body)
     {
-        if (body is null || string.IsNullOrWhiteSpace(body.DealId))
+        if (body is null)
             throw new HttpApiException(400, "A Deal must be selected first");
 
         // F09: block a re-send. Once a document is POSTED (SAP or Zoho) it must not be sent again,
@@ -934,7 +1072,13 @@ public class ZohoSalesOrderController(
         // are skipped (no duplicates on a retry); each result is stamped on the group's lines
         // (PostedSoNo / PostError) + ocr.PostLog.
         var existingHeader = (Dictionary<string, object?>)existing["header"]!;
-        var groups = SoDeliveryGroups.Build(existingHeader, (List<Dictionary<string, object?>>)existing["lines"]!);
+        var existingLines = (List<Dictionary<string, object?>>)existing["lines"]!;
+        // One PO, several Deals (16 Nov 2026): the Deal is part of the group key, so every Sales Order
+        // belongs to exactly one Deal.
+        var dealKeys = LineDealKeys(existingLines, body.DealId, body.LineDeals);
+        RequireDeals(dealKeys);
+        var groups = SoDeliveryGroups.Build(existingHeader, existingLines,
+            dealOf: (l, i) => dealKeys[SoDeliveryGroups.ItemNoOf(l, i)]);
         var multi = groups.Count > 1;
         var states = (await soPosts.GroupStatesAsync(docId, groups)).ToDictionary(x => x.Key);
 
@@ -949,7 +1093,14 @@ public class ZohoSalesOrderController(
                 ? $"Select a Ship-to for SO Group {string.Join(", ", missingShipTo)} before sending the Sales Orders to Zoho CRM"
                 : "Select a Ship-to before sending the Sales Order to Zoho CRM");
 
-        var a = await AssembleAsync(docId, body, forCreate: true);
+        // Every Deal of the document (and each new Deal) is assembled -- and checked -- before anything
+        // is sent: one Deal -> Quote -> Sales Order(s) chain per Deal (16 Nov 2026).
+        var dealOrder = groups.Select(g => g.Deal).Distinct(StringComparer.Ordinal).ToList();
+        var single = dealOrder.Count == 1;
+        var parts = new List<(Assembled A, List<SoGroup> Groups)>();
+        foreach (var k in dealOrder)
+            parts.Add((await AssembleAsync(docId, body, k, ItemNosOf(dealKeys, k), single, forCreate: true),
+                groups.Where(g => g.Deal == k).ToList()));
 
         // One send at a time per document (double click, second tab, SAP and Zoho at once): see
         // SalesOrderPostRepository.TryClaimAsync. States are read again under the claim.
@@ -961,132 +1112,169 @@ public class ZohoSalesOrderController(
             var alreadyRecorded = states.Values.Where(s => s.Posted && !string.IsNullOrEmpty(s.DocNo)).Select(s => s.DocNo!).ToHashSet();
             var actor = await ActorAsync();
             var results = new List<object>();
-            // Zoho record id of a Sales Order created in THIS call -- used to read it back for the
-            // SharePoint folder. (The stored DocNo is now Zoho's Sales Order No., not the record id; and
+            // Zoho record id (and its Deal) of a Sales Order created in THIS call -- used to read it back
+            // for the SharePoint folder. (The stored DocNo is Zoho's Sales Order No., not the record id; and
             // a document only reaches POSTED here when this call created at least one order.)
-            string? firstZohoId = null;
+            string? firstZohoId = null, firstZohoDealId = null, firstZohoAccountCode = null;
             string? firstError = null;
             var linesSent = 0;
+            var dealNames = new List<string>();
+            var quoteNos = new List<string>();
+            var stillSkipped = new List<SkippedLine>();
+            var usedDealIds = new HashSet<string>(StringComparer.Ordinal);
+            var gi = 0;
 
-            // Zoho chain Deal -> Quote -> Sales Order (Megachem, 27 Oct 2026): before the first Sales
-            // Order of this send, make sure the Deal and its Quote exist -- open a (non-WCD) Deal when
-            // the document has none, and find the Deal's Quote for this document or create one. Every
-            // Sales Order below links to that Quote. Skipped when every group is already in Zoho.
-            var deal = a.Deal;
-            string? quoteId = null, quoteNo = null, dealOwnerId = null;
-            if (groups.Any(g => !(states.TryGetValue(g.Key, out var st) && st.Posted)))
+            foreach (var part in parts)
             {
-                if (a.NewDeal)
-                {
-                    deal = await EnsureDealAsync(docId, a, groups, actor);
-                    // Zoho may rename a new Deal by its own naming format: the Quote / Sales Order Subject
-                    // follows the Deal's real name unless the person typed a Subject themselves.
-                    if (string.IsNullOrWhiteSpace(body.Subject) && !string.IsNullOrWhiteSpace(deal.DealName))
-                        a = a with { Subject = deal.DealName.Length > 50 ? deal.DealName[..50] : deal.DealName };
-                }
-                var quoteShipTo = a.ShipTo ?? groups.Select(g => GroupShipTo(existingHeader, g)).FirstOrDefault(x => x is not null);
-                dealOwnerId = await DealOwnerIdAsync(deal.Id, a);
-                (quoteId, quoteNo) = await EnsureQuoteAsync(docId, deal, a, quoteShipTo, groups, actor, dealOwnerId);
-            }
+                var a = part.A;
+                var partGroups = part.Groups;
+                stillSkipped.AddRange(a.StillSkipped);
 
-            for (var gi = 0; gi < groups.Count; gi++)
-            {
-                var g = groups[gi];
-                var hasState = states.TryGetValue(g.Key, out var done);
-                if (hasState && done!.Posted)
+                // Zoho chain Deal -> Quote -> Sales Order (Megachem, 27 Oct 2026): before the first Sales
+                // Order of this Deal, make sure the Deal and its Quote exist -- open a (non-WCD) Deal for a
+                // new-Deal group, and find the Deal's Quote for these lines or create one. Every Sales Order
+                // of this Deal links to that Quote. Skipped when all of this Deal's orders are in Zoho.
+                var deal = a.Deal;
+                string? quoteId = null, quoteNo = null, dealOwnerId = null;
+                if (partGroups.Any(g => !(states.TryGetValue(g.Key, out var st) && st.Posted)))
                 {
-                    results.Add(new { key = g.Key, itemNos = g.ItemNos, success = true, skipped = true, zohoId = done.DocNo, message = "Already created" });
-                    continue;
-                }
-                var idx = Enumerable.Range(0, a.SoLines.Count).Where(i => g.ItemNos.Contains(a.SoItemNos[i])).ToList();
-                // Every line of the group must go out together: the group's lines are all stamped with
-                // the created Sales Order below, so sending only the matched ones used to mark an
-                // unmatched line as sent (and lock the document) although Zoho never received it.
-                var unmatched = g.ItemNos.Where(n => !idx.Any(i => a.SoItemNos[i] == n)).ToList();
-                if (idx.Count == 0 || unmatched.Count > 0)
-                {
-                    var msg = idx.Count == 0
-                        ? "No line of this Sales Order is matched to a Deal Item — match it first"
-                        : $"Item {string.Join(", ", unmatched)} is not matched to a Deal Item — match it first (nothing in this Sales Order was sent)";
-                    firstError ??= msg;
-                    await soPosts.RecordAsync(docId, "SO", g.ItemNos, false, null, msg, "Zoho:Sales_Orders", "{}", actor, salesOrg: null);
-                    results.Add(new { key = g.Key, itemNos = g.ItemNos, success = false, skipped = false, zohoId = (string?)null, message = msg });
-                    continue;
-                }
-                var items = idx.Select(i => a.SoLines[i]).ToList();
-                var deliveryDate = multi && g.Date.Length > 0 ? g.Date : a.DeliveryDate;
-                var shipTo = GroupShipTo(existingHeader, g) ?? a.ShipTo;
-                var subject = a.Subject;
-
-                // The previous attempt of this group failed. A timeout can fail AFTER Zoho created the
-                // order, so look for it before sending again (same Deal, Customer Ref, Subject and
-                // delivery date, created in the last 7 days, not recorded on this document yet).
-                (string Id, string? SoNo)? earlierOrder = null;
-                if (hasState && !string.IsNullOrEmpty(done!.Error) && !string.IsNullOrWhiteSpace(a.CustomerRef))
-                    earlierOrder = await soClient.FindExistingAsync(deal.Id, a.CustomerRef!, subject, deliveryDate,
-                        DateTime.UtcNow.AddDays(-7), alreadyRecorded);
-
-                ZohoUpsertResult result;
-                if (earlierOrder is { } found)
-                {
-                    result = new ZohoUpsertResult
+                    try
                     {
-                        SapKey = "", ZohoId = found.Id, Status = "success",
-                        Message = $"Already in Zoho as {found.SoNo ?? found.Id} (created by an earlier attempt that reported an error) — not sent again",
-                    };
-                }
-                else try
-                {
-                    result = await soClient.CreateAsync(
-                        dealId: deal.Id, accountId: deal.AccountId!, subject: subject, accountCode: deal.AccountCode,
-                        taxId: a.TaxId, customerRef: a.CustomerRef, deliveryDate: deliveryDate,
-                        paymentTerms: a.PaymentTerms, paymentCurrency: a.PaymentCurrency, incoterms: a.Incoterms,
-                        shipTo: shipTo, items: items, remarks: a.Remarks, quoteId: quoteId, quoteNo: quoteNo,
-                        ownerId: dealOwnerId);
-                    if (OwnerRejected(result))
+                        if (a.NewDeal)
+                        {
+                            deal = await EnsureDealAsync(docId, a, partGroups, actor, usedDealIds);
+                            // Zoho may rename a new Deal by its own naming format: the Quote / Sales Order Subject
+                            // follows the Deal's real name unless the person typed a Subject themselves.
+                            if ((!single || string.IsNullOrWhiteSpace(body.Subject)) && !string.IsNullOrWhiteSpace(deal.DealName))
+                                a = a with { Subject = deal.DealName.Length > 50 ? deal.DealName[..50] : deal.DealName };
+                        }
+                        usedDealIds.Add(deal.Id);
+                        var quoteShipTo = a.ShipTo ?? partGroups.Select(g => GroupShipTo(existingHeader, g)).FirstOrDefault(x => x is not null);
+                        dealOwnerId = await DealOwnerIdAsync(deal.Id, a);
+                        (quoteId, quoteNo) = await EnsureQuoteAsync(docId, deal, a, quoteShipTo, partGroups, actor, dealOwnerId);
+                    }
+                    catch (HttpApiException e) when (!single)
                     {
-                        // Deal Owner no longer usable in Zoho: send the Sales Order without it rather than fail.
-                        await repo.LogAuditAsync(docId, "SO", "CREATE", actor, fileName: a.Doc.GetStr("fileName"),
-                            detail: $"Zoho refused the Deal Owner as Sales Order owner ({result.Message}) — sent without it");
-                        dealOwnerId = null;
+                        // This Deal's Deal / Quote step failed: none of its Sales Orders is sent; the other
+                        // Deals of the document still go (a later Send retries only what is missing).
+                        firstError ??= e.Message;
+                        foreach (var g in partGroups)
+                        {
+                            gi++;
+                            if (states.TryGetValue(g.Key, out var st) && st.Posted) continue;
+                            await soPosts.RecordAsync(docId, "SO", g.ItemNos, false, null, e.Message, "Zoho:Sales_Orders", "{}", actor, salesOrg: null);
+                            results.Add(new { key = g.Key, itemNos = g.ItemNos, success = false, skipped = false, zohoId = (string?)null, message = e.Message });
+                        }
+                        continue;
+                    }
+                }
+                if (!string.IsNullOrWhiteSpace(deal.DealName)) dealNames.Add(deal.DealName);
+                if (!string.IsNullOrWhiteSpace(quoteNo)) quoteNos.Add(quoteNo);
+
+                foreach (var g in partGroups)
+                {
+                    gi++;
+                    var hasState = states.TryGetValue(g.Key, out var done);
+                    if (hasState && done!.Posted)
+                    {
+                        results.Add(new { key = g.Key, itemNos = g.ItemNos, success = true, skipped = true, zohoId = done.DocNo, message = "Already created" });
+                        continue;
+                    }
+                    var idx = Enumerable.Range(0, a.SoLines.Count).Where(i => g.ItemNos.Contains(a.SoItemNos[i])).ToList();
+                    // Every line of the group must go out together: the group's lines are all stamped with
+                    // the created Sales Order below, so sending only the matched ones used to mark an
+                    // unmatched line as sent (and lock the document) although Zoho never received it.
+                    var unmatched = g.ItemNos.Where(n => !idx.Any(i => a.SoItemNos[i] == n)).ToList();
+                    if (idx.Count == 0 || unmatched.Count > 0)
+                    {
+                        var msg = idx.Count == 0
+                            ? "No line of this Sales Order is matched to a Deal Item — match it first"
+                            : $"Item {string.Join(", ", unmatched)} is not matched to a Deal Item — match it first (nothing in this Sales Order was sent)";
+                        firstError ??= msg;
+                        await soPosts.RecordAsync(docId, "SO", g.ItemNos, false, null, msg, "Zoho:Sales_Orders", "{}", actor, salesOrg: null);
+                        results.Add(new { key = g.Key, itemNos = g.ItemNos, success = false, skipped = false, zohoId = (string?)null, message = msg });
+                        continue;
+                    }
+                    var items = idx.Select(i => a.SoLines[i]).ToList();
+                    var deliveryDate = multi && g.Date.Length > 0 ? g.Date : a.DeliveryDate;
+                    var shipTo = GroupShipTo(existingHeader, g) ?? a.ShipTo;
+                    var subject = a.Subject;
+
+                    // The previous attempt of this group failed. A timeout can fail AFTER Zoho created the
+                    // order, so look for it before sending again (same Deal, Customer Ref, Subject and
+                    // delivery date, created in the last 7 days, not recorded on this document yet).
+                    (string Id, string? SoNo)? earlierOrder = null;
+                    if (hasState && !string.IsNullOrEmpty(done!.Error) && !string.IsNullOrWhiteSpace(a.CustomerRef))
+                        earlierOrder = await soClient.FindExistingAsync(deal.Id, a.CustomerRef!, subject, deliveryDate,
+                            DateTime.UtcNow.AddDays(-7), alreadyRecorded);
+
+                    ZohoUpsertResult result;
+                    if (earlierOrder is { } found)
+                    {
+                        result = new ZohoUpsertResult
+                        {
+                            SapKey = "", ZohoId = found.Id, Status = "success",
+                            Message = $"Already in Zoho as {found.SoNo ?? found.Id} (created by an earlier attempt that reported an error) — not sent again",
+                        };
+                    }
+                    else try
+                    {
                         result = await soClient.CreateAsync(
                             dealId: deal.Id, accountId: deal.AccountId!, subject: subject, accountCode: deal.AccountCode,
                             taxId: a.TaxId, customerRef: a.CustomerRef, deliveryDate: deliveryDate,
                             paymentTerms: a.PaymentTerms, paymentCurrency: a.PaymentCurrency, incoterms: a.Incoterms,
-                            shipTo: shipTo, items: items, remarks: a.Remarks, quoteId: quoteId, quoteNo: quoteNo);
+                            shipTo: shipTo, items: items, remarks: a.Remarks, quoteId: quoteId, quoteNo: quoteNo,
+                            ownerId: dealOwnerId);
+                        if (OwnerRejected(result))
+                        {
+                            // Deal Owner no longer usable in Zoho: send the Sales Order without it rather than fail.
+                            await repo.LogAuditAsync(docId, "SO", "CREATE", actor, fileName: a.Doc.GetStr("fileName"),
+                                detail: $"Zoho refused the Deal Owner as Sales Order owner ({result.Message}) — sent without it");
+                            dealOwnerId = null;
+                            result = await soClient.CreateAsync(
+                                dealId: deal.Id, accountId: deal.AccountId!, subject: subject, accountCode: deal.AccountCode,
+                                taxId: a.TaxId, customerRef: a.CustomerRef, deliveryDate: deliveryDate,
+                                paymentTerms: a.PaymentTerms, paymentCurrency: a.PaymentCurrency, incoterms: a.Incoterms,
+                                shipTo: shipTo, items: items, remarks: a.Remarks, quoteId: quoteId, quoteNo: quoteNo);
+                        }
                     }
-                }
-                catch (Exception e)
-                {
-                    log.LogError(e,
-                        "Zoho Sales Order creation failed for document {DocId}, delivery-date group {DeliveryDate}, items {ItemNos}",
-                        docId, g.Key, string.Join(",", g.ItemNos));
-                    result = new ZohoUpsertResult { SapKey = "", ZohoId = "", Status = "error", Message = e.Message };
-                }
-                var ok = result.Status == "success";
-                if (ok) { linesSent += items.Count; firstZohoId ??= result.ZohoId; } else firstError ??= result.Message;
-                // What people see and search for in Zoho is the "Sales Order No." (auto-number, API
-                // name Quote_No, e.g. 1OR0000310) -- stored as the posted number instead of the long
-                // record id. The record id is kept in the PostLog payload (zohoRecordId).
-                var soNo = ok ? await SalesOrderNoAsync(result.ZohoId) : null;
-                if (soNo is not null) alreadyRecorded.Add(soNo);
+                    catch (Exception e)
+                    {
+                        log.LogError(e,
+                            "Zoho Sales Order creation failed for document {DocId}, delivery-date group {DeliveryDate}, items {ItemNos}",
+                            docId, g.Key, string.Join(",", g.ItemNos));
+                        result = new ZohoUpsertResult { SapKey = "", ZohoId = "", Status = "error", Message = e.Message };
+                    }
+                    var ok = result.Status == "success";
+                    if (ok)
+                    {
+                        linesSent += items.Count;
+                        if (firstZohoId is null) { firstZohoId = result.ZohoId; firstZohoDealId = deal.Id; firstZohoAccountCode = deal.AccountCode; }
+                    }
+                    else firstError ??= result.Message;
+                    // What people see and search for in Zoho is the "Sales Order No." (auto-number, API
+                    // name Quote_No, e.g. 1OR0000310) -- stored as the posted number instead of the long
+                    // record id. The record id is kept in the PostLog payload (zohoRecordId).
+                    var soNo = ok ? await SalesOrderNoAsync(result.ZohoId) : null;
+                    if (soNo is not null) alreadyRecorded.Add(soNo);
 
-                var label = multi ? $" (Sales Order {gi + 1}/{groups.Count}, SO Group {g.SoGroupNo}, delivery {(g.Date.Length > 0 ? g.Date : "-")})" : "";
-                await repo.LogAuditAsync(docId, "SO", "CREATE", actor, fileName: a.Doc.GetStr("fileName"), detail: ok
-                    ? $"Created Zoho Sales Order from Deal \"{deal.DealName}\"{label} -> {soNo} (record {result.ZohoId})"
-                    : $"Zoho Sales Order creation failed from Deal \"{deal.DealName}\"{label}: {result.Message}");
+                    var label = multi ? $" (Sales Order {gi}/{groups.Count}, SO Group {g.SoGroupNo}, delivery {(g.Date.Length > 0 ? g.Date : "-")})" : "";
+                    await repo.LogAuditAsync(docId, "SO", "CREATE", actor, fileName: a.Doc.GetStr("fileName"), detail: ok
+                        ? $"Created Zoho Sales Order from Deal \"{deal.DealName}\"{label} -> {soNo} (record {result.ZohoId})"
+                        : $"Zoho Sales Order creation failed from Deal \"{deal.DealName}\"{label}: {result.Message}");
 
-                var payloadJson = JsonSerializer.Serialize(new
-                {
-                    dealId = deal.Id, dealName = deal.DealName, accountId = deal.AccountId, quoteId, quoteNo,
-                    subject, customerRef = a.CustomerRef, deliveryDate,
-                    paymentTerms = a.PaymentTerms, paymentCurrency = a.PaymentCurrency, incoterms = a.Incoterms,
-                    taxId = a.TaxId, remarks = a.Remarks, shipTo, lines = items, group = g.Key,
-                    zohoRecordId = ok ? result.ZohoId : null, salesOrderNo = soNo,
-                }, PyJson.Options);
-                await soPosts.RecordAsync(docId, "SO", g.ItemNos, ok, soNo,
-                    result.Message, "Zoho:Sales_Orders", payloadJson, actor, salesOrg: null);
-                results.Add(new { key = g.Key, itemNos = g.ItemNos, success = ok, skipped = false, zohoId = ok ? result.ZohoId : null, soNo, message = result.Message });
+                    var payloadJson = JsonSerializer.Serialize(new
+                    {
+                        dealId = deal.Id, dealName = deal.DealName, accountId = deal.AccountId, quoteId, quoteNo,
+                        subject, customerRef = a.CustomerRef, deliveryDate,
+                        paymentTerms = a.PaymentTerms, paymentCurrency = a.PaymentCurrency, incoterms = a.Incoterms,
+                        taxId = a.TaxId, remarks = a.Remarks, shipTo, lines = items, group = g.Key,
+                        zohoRecordId = ok ? result.ZohoId : null, salesOrderNo = soNo,
+                    }, PyJson.Options);
+                    await soPosts.RecordAsync(docId, "SO", g.ItemNos, ok, soNo,
+                        result.Message, "Zoho:Sales_Orders", payloadJson, actor, salesOrg: null);
+                    results.Add(new { key = g.Key, itemNos = g.ItemNos, success = ok, skipped = false, zohoId = ok ? result.ZohoId : null, soNo, message = result.Message });
+                }
             }
 
             // companyCode "MGT" literal: this controller only ever creates Zoho Sales Orders (MGT).
@@ -1098,13 +1286,15 @@ public class ZohoSalesOrderController(
             // reading one created Sales Order back (its Account's sales person + customer). Best effort.
             if (newStatus == "POSTED" && !string.IsNullOrEmpty(firstZohoId))
             {
-                var folder = await ArchiveFolderAsync(docId, firstZohoId, deal.Id, deal.AccountCode);
+                var folder = await ArchiveFolderAsync(docId, firstZohoId, firstZohoDealId ?? "", firstZohoAccountCode);
                 // File name PONUMBER_YYMMDD (SalesOrderFileName): the header delivery date, else the
                 // earliest line delivery date when the PO prints a date per line (12 Nov 2026).
-                var archiveDate = a.DeliveryDate is { Length: > 0 } hd ? hd
+                var archiveDate = parts[0].A.DeliveryDate is { Length: > 0 } hd ? hd
                     : groups.Select(g => g.Date).Where(x => x.Length > 0).OrderBy(x => x).FirstOrDefault();
                 try { await archive.EnqueueAsync(docId, DocumentTables.ForId(docId).Doc, "MGT", "SO", folder, deliveryDate: archiveDate); }
                 catch (Exception e) { log.LogWarning(e, "Could not queue doc {DocId} for SharePoint (run sql/27 + sql/29?)", docId); }
+                // Reading rules (sql/39): the positions of this checked, posted PO become the customer's AUTO rules. Best effort.
+                await readHints.LearnFromPostedAsync(docId, repo);
             }
 
             var after = await repo.GetDocumentAsync(docId);
@@ -1114,10 +1304,10 @@ public class ZohoSalesOrderController(
                 status = newStatus,
                 zohoId = after.GetStr("sapDocNo"),
                 message = firstError,
-                dealName = deal.DealName,
-                quoteNo,
+                dealName = string.Join(" + ", dealNames.Distinct()),
+                quoteNo = quoteNos.Count == 0 ? null : string.Join(", ", quoteNos.Distinct()),
                 linesSent,
-                skipped = a.StillSkipped,
+                skipped = stillSkipped,
                 groups = results,
                 document = after,
             });
@@ -1252,85 +1442,116 @@ public class ZohoSalesOrderController(
     [HttpPost("sales-order/payload/{docId:int}")]
     public async Task<IActionResult> Payload(int docId, [FromBody] CreateSalesOrderRequest body)
     {
-        if (body is null || string.IsNullOrWhiteSpace(body.DealId))
+        if (body is null)
             throw new HttpApiException(400, "A Deal must be selected first");
 
         var doc = await repo.GetDocumentAsync(docId);
         var docHeader = (Dictionary<string, object?>)doc["header"]!;
-        var groups = SoDeliveryGroups.Build(docHeader, (List<Dictionary<string, object?>>)doc["lines"]!);
+        var docLines = (List<Dictionary<string, object?>>)doc["lines"]!;
+        var keys = LineDealKeys(docLines, body.DealId, body.LineDeals);
+        RequireDeals(keys);
+        var groups = SoDeliveryGroups.Build(docHeader, docLines, dealOf: (l, i) => keys[SoDeliveryGroups.ItemNoOf(l, i)]);
         var multi = groups.Count > 1;
-        var a = await AssembleAsync(docId, body);
+        var dealOrder = groups.Select(g => g.Deal).Distinct(StringComparer.Ordinal).ToList();
+        var single = dealOrder.Count == 1;
 
         // Deal / Quote steps of the send (27 Oct 2026), shown the same way: the record that would be
-        // created, or which existing one is used.
+        // created, or which existing one is used -- one Deal -> Quote -> Sales Orders part per Deal.
         const string createdOnSend = "(created on Send)";
-        // Quote / Sales Orders are owned by the Deal Owner (12 Nov 2026) -- shown in the payload too.
-        var payloadOwnerId = await DealOwnerIdAsync(a.NewDeal ? null : a.Deal.Id, a);
-        var dealPart = new JsonObject();
-        if (a.NewDeal)
+        var parts = new System.Text.Json.Nodes.JsonArray();
+        var salesOrderCount = 0;
+        foreach (var k in dealOrder)
         {
-            dealPart["action"] = "create";
-            dealPart["record"] = await BuildNewDealRecordAsync(a, groups);
-        }
-        else
-        {
-            dealPart["action"] = "use";
-            dealPart["id"] = a.Deal.Id;
-            dealPart["dealName"] = a.Deal.DealName;
-            dealPart["forecastStatus"] = a.Deal.ForecastStatus;
-            dealPart["wcd"] = a.Deal.IsWcd;
-        }
-        var quotePart = new JsonObject();
-        string quoteIdForSo = createdOnSend; string? quoteNoForSo = createdOnSend;
-        var plan = await PlanQuoteAsync(a.Deal, a.CustomerRef, a.SoLines, a.QuoteRefs);
-        quotePart["reason"] = plan.Reason;
-        if (plan.Quote is { } pq)
-        {
-            quotePart["action"] = "use";
-            quotePart["id"] = pq.Id;
-            quotePart["quoteNo"] = pq.QuoteNo;
-            quoteIdForSo = pq.Id; quoteNoForSo = pq.QuoteNo;
-        }
-        else
-        {
-            quotePart["action"] = "create";
-            var quoteShipTo = a.ShipTo ?? groups.Select(g => GroupShipTo(docHeader, g)).FirstOrDefault(x => x is not null);
-            var quoteRecord = await BuildNewQuoteRecordAsync(a, a.NewDeal ? createdOnSend : a.Deal.Id, quoteShipTo, groups);
-            if (!string.IsNullOrWhiteSpace(payloadOwnerId)) quoteRecord["Owner"] = new JsonObject { ["id"] = payloadOwnerId };
-            quotePart["record"] = quoteRecord;
+            var partGroups = groups.Where(g => g.Deal == k).ToList();
+            var a = await AssembleAsync(docId, body, k, ItemNosOf(keys, k), single);
+
+            // Quote / Sales Orders are owned by the Deal Owner (12 Nov 2026) -- shown in the payload too.
+            var payloadOwnerId = await DealOwnerIdAsync(a.NewDeal ? null : a.Deal.Id, a);
+            var dealPart = new JsonObject();
+            if (a.NewDeal)
+            {
+                dealPart["action"] = "create";
+                dealPart["record"] = await BuildNewDealRecordAsync(a, partGroups);
+            }
+            else
+            {
+                dealPart["action"] = "use";
+                dealPart["id"] = a.Deal.Id;
+                dealPart["dealName"] = a.Deal.DealName;
+                dealPart["forecastStatus"] = a.Deal.ForecastStatus;
+                dealPart["wcd"] = a.Deal.IsWcd;
+            }
+            var quotePart = new JsonObject();
+            string quoteIdForSo = createdOnSend; string? quoteNoForSo = createdOnSend;
+            var plan = await PlanQuoteAsync(a.Deal, a.CustomerRef, a.SoLines, a.QuoteRefs);
+            quotePart["reason"] = plan.Reason;
+            if (plan.Quote is { } pq)
+            {
+                quotePart["action"] = "use";
+                quotePart["id"] = pq.Id;
+                quotePart["quoteNo"] = pq.QuoteNo;
+                quoteIdForSo = pq.Id; quoteNoForSo = pq.QuoteNo;
+            }
+            else
+            {
+                quotePart["action"] = "create";
+                var quoteShipTo = a.ShipTo ?? partGroups.Select(g => GroupShipTo(docHeader, g)).FirstOrDefault(x => x is not null);
+                var quoteRecord = await BuildNewQuoteRecordAsync(a, a.NewDeal ? createdOnSend : a.Deal.Id, quoteShipTo, partGroups);
+                if (!string.IsNullOrWhiteSpace(payloadOwnerId)) quoteRecord["Owner"] = new JsonObject { ["id"] = payloadOwnerId };
+                quotePart["record"] = quoteRecord;
+            }
+
+            var records = new System.Text.Json.Nodes.JsonArray();
+            foreach (var g in partGroups)
+            {
+                var items = Enumerable.Range(0, a.SoLines.Count).Where(i => g.ItemNos.Contains(a.SoItemNos[i])).Select(i => a.SoLines[i]).ToList();
+                if (items.Count == 0) continue;
+                var record = await soClient.BuildRecordAsync(
+                    dealId: a.NewDeal ? createdOnSend : a.Deal.Id, accountId: a.Deal.AccountId!,
+                    subject: a.Subject,
+                    accountCode: a.Deal.AccountCode, taxId: a.TaxId, customerRef: a.CustomerRef,
+                    deliveryDate: multi && g.Date.Length > 0 ? g.Date : a.DeliveryDate,
+                    paymentTerms: a.PaymentTerms, paymentCurrency: a.PaymentCurrency, incoterms: a.Incoterms,
+                    shipTo: GroupShipTo(docHeader, g) ?? a.ShipTo, items: items, remarks: a.Remarks,
+                    quoteId: quoteIdForSo, quoteNo: quoteNoForSo, ownerId: payloadOwnerId);
+                records.Add(record);
+            }
+            salesOrderCount += records.Count;
+            parts.Add(new JsonObject
+            {
+                ["_dealKey"] = k,
+                ["_deal"] = dealPart,
+                ["_quote"] = quotePart,
+                ["_salesOrders"] = records.Count,
+                ["data"] = records,
+            });
         }
 
-        var records = new System.Text.Json.Nodes.JsonArray();
-        for (var gi = 0; gi < groups.Count; gi++)
+        // Sent next to "data" on each Quote / Sales Order insert (the Deal insert sends none, so Zoho
+        // runs its usual automation for a new Deal).
+        var trigger = new System.Text.Json.Nodes.JsonArray(
+            ZohoSalesOrderClient.InsertTriggers.Select(t => (System.Text.Json.Nodes.JsonNode?)t).ToArray());
+        if (single)
         {
-            var g = groups[gi];
-            var items = Enumerable.Range(0, a.SoLines.Count).Where(i => g.ItemNos.Contains(a.SoItemNos[i])).Select(i => a.SoLines[i]).ToList();
-            if (items.Count == 0) continue;
-            var record = await soClient.BuildRecordAsync(
-                dealId: a.NewDeal ? createdOnSend : a.Deal.Id, accountId: a.Deal.AccountId!,
-                subject: a.Subject,
-                accountCode: a.Deal.AccountCode, taxId: a.TaxId, customerRef: a.CustomerRef,
-                deliveryDate: multi && g.Date.Length > 0 ? g.Date : a.DeliveryDate,
-                paymentTerms: a.PaymentTerms, paymentCurrency: a.PaymentCurrency, incoterms: a.Incoterms,
-                shipTo: GroupShipTo(docHeader, g) ?? a.ShipTo, items: items, remarks: a.Remarks,
-                quoteId: quoteIdForSo, quoteNo: quoteNoForSo, ownerId: payloadOwnerId);
-            records.Add(record);
+            // One Deal: the same envelope as before -- one Zoho insert per Sales Order, each shown the way
+            // it goes on the wire ("data" array of one record per call).
+            var only = (JsonObject)parts[0]!;
+            return Ok(new JsonObject
+            {
+                ["_target"] = "Zoho CRM — Deal -> Quote -> Sales Orders (POST /crm/v8/{module})",
+                ["_deal"] = only["_deal"]!.DeepClone(),
+                ["_quote"] = only["_quote"]!.DeepClone(),
+                ["_salesOrders"] = salesOrderCount,
+                ["data"] = only["data"]!.DeepClone(),
+                ["trigger"] = trigger,
+            });
         }
-
-        // One Zoho insert per delivery-date group; each is shown the way it goes on the wire
-        // ("data" array of one record per call).
-        var envelope = new System.Text.Json.Nodes.JsonObject
+        return Ok(new JsonObject
         {
-            ["_target"] = "Zoho CRM — Deal -> Quote -> Sales Orders (POST /crm/v8/{module})",
-            ["_deal"] = dealPart,
-            ["_quote"] = quotePart,
-            ["_salesOrders"] = records.Count,
-            ["data"] = records,
-            // Sent next to "data" on each Quote / Sales Order insert (the Deal insert sends none, so
-            // Zoho runs its usual automation for a new Deal).
-            ["trigger"] = new System.Text.Json.Nodes.JsonArray(
-                ZohoSalesOrderClient.InsertTriggers.Select(t => (System.Text.Json.Nodes.JsonNode?)t).ToArray()),
-        };
-        return Ok(envelope);
+            ["_target"] = $"Zoho CRM — {dealOrder.Count} Deals, each Deal -> Quote -> Sales Orders (POST /crm/v8/{{module}})",
+            ["_salesOrders"] = salesOrderCount,
+            ["_deals"] = parts,
+            ["trigger"] = trigger,
+        });
     }
 }

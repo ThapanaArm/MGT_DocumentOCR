@@ -1,4 +1,4 @@
-import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
+import { Fragment, forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import { getSoPosts, type DocModel, type MapResult, type SoGroupState } from '../../../api/documents';
 import type { OcrProvider } from '../../../api/masters';
 import {
@@ -21,6 +21,7 @@ import { deliveryDateGroups } from '../SapSalesOrderEditor';
 import { groupStatus, type GroupShipToControl } from '../SoGroupPanel';
 import { useSoShipToOptions } from '../useSoShipToOptions';
 import type { SalesOrderStepHandle } from './SapSalesOrderStep';
+import { dealKeyLabel, dealOfKey, distinctKeys, isNewDealKey } from '../../../utils/zohoDealGroups';
 
 type LineEdit = {
   quantity: string;
@@ -33,8 +34,10 @@ type LineEdit = {
 interface Props {
   doc: DocModel;
   map: MapResult;
-  selectedDealId: string;
-  resolvedDeal: ZohoDeal | null;
+  /** Deal key of every line (line.extra.zohoDeal) -- one PO may hold items of several Deals (16 Nov 2026). */
+  dealAssignment: string[];
+  /** The open Deals the Deal card read from Zoho (each line's Deal Items). */
+  deals: ZohoDeal[];
   selectedShipTo: ZohoShipToInfo | null;
   providers: OcrProvider[];
   uomRules: Record<string, any>[];
@@ -122,9 +125,24 @@ const EMPTY_HEADER: ZohoSalesOrderEditorHeader = {
 };
 
 const ZohoSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function ZohoSalesOrderStep(
-  { doc, map, selectedDealId, resolvedDeal, selectedShipTo, providers, uomRules, shipTos, salesOrg, posted, onUseMaterial, onPosted, onGroupShipTo },
+  { doc, map, dealAssignment, deals, selectedShipTo, providers, uomRules, shipTos, salesOrg, posted, onUseMaterial, onPosted, onGroupShipTo },
   ref,
 ) {
+  // itemNo -> Deal key of every line, sent with the preview / payload / send (the backend groups the
+  // Sales Orders per Deal). Ready once every line has a Deal; dealId = the first line's (fallback only).
+  const lineDeals = useMemo(
+    () => Object.fromEntries(doc.lines.map((l, i) => [String(l.itemNo ?? (i + 1) * 10), dealAssignment[i] || ''])),
+    [doc.lines, dealAssignment],
+  );
+  const lineDealsKey = JSON.stringify(lineDeals);
+  const dealsReady = doc.lines.length > 0 && doc.lines.every((_, i) => !!dealAssignment[i]);
+  const selectedDealId = dealsReady ? dealAssignment[0] : '';
+  const dealKeys = distinctKeys(dealAssignment);
+  const dealOfItem = (itemNo: string) => {
+    const i = doc.lines.findIndex((l, j) => String(l.itemNo ?? (j + 1) * 10) === itemNo);
+    return i < 0 ? null : dealOfKey(dealAssignment[i] || '', deals);
+  };
+  const dealLabel = (key: string) => dealKeyLabel(key, deals, dealKeys);
   const { guard, showToast } = useAppState();
   const [visible, setVisible] = useState(false);
   const [preview, setPreview] = useState<ZohoSalesOrderPreview | null>(null);
@@ -134,6 +152,10 @@ const ZohoSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function Zoho
   const [header, setHeader] = useState<ZohoSalesOrderEditorHeader>(EMPTY_HEADER);
   // New Deal: Sales person picked as Deal Owner ('' = the customer's Account Owner), 12 Nov 2026.
   const [salesUserId, setSalesUserId] = useState('');
+  // Forecast Status of each new Deal ("__new__", "__new__2" ...): CS chooses Yes or No before Send,
+  // there is no default (16 Nov 2026 -- most Deals are forecast, but not all).
+  const [newDealForecast, setNewDealForecast] = useState<Record<string, 'Yes' | 'No'>>({});
+  useEffect(() => { setNewDealForecast({}); }, [doc.docId]);
   const [lineEdits, setLineEdits] = useState<Record<string, LineEdit>>({});
   const [sending, setSending] = useState(false);
   const [result, setResult] = useState<ZohoSalesOrderResult | null>(null);
@@ -179,7 +201,7 @@ const ZohoSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function Zoho
     setSalesUserId('');
     dirtyHeader.current = new Set();
     dirtyLines.current = {};
-  }, [doc.docId, selectedDealId]);
+  }, [doc.docId, lineDealsKey]);
 
   // The preview is computed server-side from the SAVED document lines (their mapped materialCode,
   // qty, unit, price). It used to load only when the document or Deal changed, so after a re-map
@@ -205,7 +227,7 @@ const ZohoSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function Zoho
     let cancelled = false;
     setLoading(true);
     setError(null);
-    getZohoSalesOrderPreview(doc.docId, selectedDealId)
+    getZohoSalesOrderPreview(doc.docId, selectedDealId, lineDeals)
       .then((value) => {
         if (!cancelled) setPreview(value);
       })
@@ -219,7 +241,8 @@ const ZohoSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function Zoho
         if (!cancelled) setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [doc.docId, selectedDealId, linesKey]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doc.docId, selectedDealId, linesKey, lineDealsKey]);
 
   useEffect(() => {
     if (!preview) return;
@@ -321,6 +344,9 @@ const ZohoSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function Zoho
       remarks: dirtyHeader.current.has('remarks') ? header.remarks : header.remarks || undefined,
       shipTo,
       salesUserId: preview?.flow?.newDeal && salesUserId ? salesUserId : undefined,
+      lineDeals,
+      newDealForecast: Object.fromEntries(dealKeys.filter(isNewDealKey)
+        .filter((k) => newDealForecast[k]).map((k) => [k, newDealForecast[k]])),
       // Only what the person typed (plus an AI-confirmed material) goes as an override; untouched
       // quantities / prices come from the backend's own conversion. Numbers accept "1,250.50".
       lines: Object.entries(lineEdits)
@@ -389,12 +415,16 @@ const ZohoSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function Zoho
   // A Deal of another customer (picked through the manual Deal search) needs a deliberate yes;
   // the backend refuses it otherwise (AcceptOtherAccount).
   const docCustomer = String(map.header.customer?.code || '').trim();
-  const dealAccount = String(resolvedDeal?.accountCode || '').trim();
-  const dealOfOtherCustomer = !!docCustomer && !!dealAccount && docCustomer.toUpperCase() !== dealAccount.toUpperCase();
+  const otherCustomerDeals = dealKeys
+    .map((k) => dealOfKey(k, deals))
+    .filter((d): d is ZohoDeal => !!d && !!docCustomer && !!String(d.accountCode || '').trim()
+      && String(d.accountCode).trim().toUpperCase() !== docCustomer.toUpperCase());
+  const dealOfOtherCustomer = otherCustomerDeals.length > 0;
   const [confirmOtherDeal, setConfirmOtherDeal] = useState(false);
 
+  const forecastMissing = dealKeys.filter(isNewDealKey).some((k) => !newDealForecast[k]);
   const send = () => {
-    if (!selectedDealId || !hasShipTo) return;
+    if (!selectedDealId || !hasShipTo || forecastMissing) return;
     if (badNumbers.length > 0) {
       showToast(`Check the quantity / price of item ${badNumbers.join(', ')} — not a valid number`, 'error');
       return;
@@ -440,11 +470,14 @@ const ZohoSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function Zoho
         <div ref={editorRef}>
           <ZohoSalesOrderEditor
             preview={mergedPreview} loading={loading} error={error} selectedDealId={selectedDealId}
-            docLines={doc.lines} resolvedDeal={resolvedDeal} providers={providers} header={header}
+            docLines={doc.lines} dealOfItem={dealOfItem} dealLabel={dealLabel} dealByKey={(k) => dealOfKey(k, deals)} providers={providers} header={header}
             onHeaderChange={userEditHeader}
             lineEdits={lineEdits} onLineChange={userEditLine} onUseAiMatch={useAiMatch}
             sending={sending} result={result} onSend={send} onViewPayload={viewPayload} posted={posted}
             shipToMissing={!hasShipTo}
+            newDealForecast={newDealForecast}
+            onNewDealForecast={(key, v) => setNewDealForecast((cur) => ({ ...cur, [key]: v }))}
+            forecastMissing={forecastMissing}
             salesUserId={salesUserId}
             onOwnerChange={setSalesUserId}
             ownerMissing={!!preview?.flow?.newDeal && preview.dealOwnerActive === false && !salesUserId}
@@ -459,8 +492,10 @@ const ZohoSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function Zoho
         title="Deal of another customer"
         message={
           <>
-            Deal <b>{resolvedDeal?.dealName}</b> belongs to customer <b>{dealAccount}</b>, but this document's customer
-            is <b>{docCustomer}</b>. Send the Sales Order on this Deal anyway?
+            {otherCustomerDeals.map((d) => (
+              <Fragment key={d.id}>Deal <b>{d.dealName}</b> belongs to customer <b>{d.accountCode}</b>. </Fragment>
+            ))}
+            This document's customer is <b>{docCustomer}</b>. Send the Sales Order on {otherCustomerDeals.length > 1 ? 'these Deals' : 'this Deal'} anyway?
           </>
         }
         confirmLabel="Send anyway"

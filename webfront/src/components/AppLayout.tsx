@@ -25,13 +25,13 @@ function pageTitle(pathname: string): string {
 }
 
 function pageDescription(pathname: string): string {
-  if (pathname === '/') return 'Monitor document flow, OCR quality, and items that need attention.';
-  if (pathname.startsWith('/import')) return 'Upload a document and let OCR prepare it for review.';
-  if (pathname.startsWith('/doc/')) return 'Review extracted data, resolve mappings, and submit with confidence.';
-  if (pathname.startsWith('/list')) return 'Search, filter, and continue working on your documents.';
-  if (pathname.startsWith('/master')) return 'Maintain reusable mappings for faster, more accurate processing.';
-  if (pathname.startsWith('/audit-log')) return 'Review important activity and changes across the system.';
-  if (pathname.startsWith('/log')) return 'Track submissions and responses from SAP.';
+  if (pathname === '/') return 'Documents in progress and what needs your attention.';
+  if (pathname.startsWith('/import')) return 'Upload a file. OCR reads it, then you check it.';
+  if (pathname.startsWith('/doc/')) return 'Check what OCR read, match the codes, then send.';
+  if (pathname.startsWith('/list')) return 'Find a document and pick up where you left off.';
+  if (pathname.startsWith('/master')) return 'Codes that link names in documents to SAP and Zoho.';
+  if (pathname.startsWith('/audit-log')) return 'Who changed what, and when.';
+  if (pathname.startsWith('/log')) return 'What was sent to SAP and what SAP replied.';
   if (pathname.startsWith('/admin/sharepoint')) return 'Check the SharePoint connection and the files archived after posting.';
   return 'MGT Document OCR workspace';
 }
@@ -189,13 +189,13 @@ function BlockedScreen({ message, status, onRetry }: { message: string; status: 
             <i className={noAccess ? 'fa-solid fa-lock' : 'fa-solid fa-triangle-exclamation'} />
           </div>
           <h2 style={{ margin: '0 0 8px' }}>{noAccess ? 'No access to MGT Document OCR' : 'System unavailable'}</h2>
-          <p className="hint" style={{ margin: '0 0 6px' }}>
+          <p className="hint" style={{ margin: '0 0 8px' }}>
             {noAccess
               ? 'Your account signed in, but it is not set up for this system. Please contact IT to be added.'
               : 'The server or database cannot be reached right now, so the system cannot be used. Please try again in a moment, or contact IT if it keeps happening.'}
           </p>
-          <p className="hint" style={{ margin: '0 0 20px', fontSize: 12 }}>{message}</p>
-          <div className="row" style={{ gap: 10, justifyContent: 'center' }}>
+          <p className="hint" style={{ margin: '0 0 24px', fontSize: 14 }}>{message}</p>
+          <div className="row" style={{ gap: 12, justifyContent: 'center' }}>
             {!noAccess && (
               <button type="button" className="btn primary" onClick={onRetry}>
                 <i className="fa-solid fa-arrow-rotate-right" /> Try again

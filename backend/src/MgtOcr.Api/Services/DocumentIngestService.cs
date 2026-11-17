@@ -8,7 +8,7 @@ namespace MgtOcr.Api.Services;
 // queue worker. Mirrors DocumentsController.Upload's core: read the saved file, route AP->AP/II by
 // PO number, then create the document row. Password prompting stays in the sync endpoint; the batch
 // path rejects encrypted PDFs before enqueuing, so `password` is normally null here.
-public class DocumentIngestService(OcrEngine ocr, DocumentRepository repo, MgtOcr.Core.Config.AppConfig config)
+public class DocumentIngestService(OcrEngine ocr, DocumentRepository repo, MgtOcr.Core.Config.AppConfig config, ReadHintService readHints)
 {
     public async Task<(int DocId, string Module, string? Note)> IngestAsync(
         string module, string storedPath, string fileName, int size, string engine,
@@ -22,7 +22,11 @@ public class DocumentIngestService(OcrEngine ocr, DocumentRepository repo, MgtOc
         // Locked to Gemini for the auto/empty path (per Megachem), same as the sync upload.
         var uploadEngine = "gemini"; // Gemini only (Megachem, 7 Oct 2026), whatever engine was requested
         var t0 = DateTime.UtcNow;
-        var pd = await ocr.ExtractAsync(storedPath, mod, uploadEngine, password, salesOrg);
+        // Sales Order reading rules (sql/39): customer found in the text layer -> its rules ride in the same request.
+        var hints = await readHints.PrepareAsync(mod, storedPath, salesOrg);
+        var pd = await ocr.ExtractAsync(storedPath, mod, uploadEngine, password, salesOrg, hints);
+        if (ReadHintService.NoteFor(hints) is { Length: > 0 } hintNote && pd.Provider == "gemini")
+            pd.ConfidenceNote = pd.ConfidenceNote.Length > 0 ? $"{pd.ConfidenceNote} / {hintNote}" : hintNote;
         var durationMs = (int)(DateTime.UtcNow - t0).TotalMilliseconds;
         // Expense is always an Incoming Invoice (FB60, no PO). Its bundles carry a FORM SHIPPING
         // EXPENSE sheet whose "PO. NO." (the goods PO the costs relate to) would otherwise be read
@@ -59,6 +63,7 @@ public class DocumentIngestService(OcrEngine ocr, DocumentRepository repo, MgtOc
             : fileName;
         var docId = await repo.CreateDocumentAsync(mod, ext, docFileName, storedPath, size, user, apDocCategory, durationMs, salesOrg,
             jobStartedAt: jobStart);
+        if (pd.Provider == "gemini") await readHints.SaveDocAsync(docId, mod, hints, pd.PositionsJson);
         return (docId, mod, pd.Note);
     }
 }

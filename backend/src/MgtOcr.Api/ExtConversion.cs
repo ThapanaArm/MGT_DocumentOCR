@@ -78,11 +78,16 @@ public static partial class ExtConversion
     // word chars/Thai block/dot/dash/space with "_", trim, cap at 120 chars.
     [GeneratedRegex(@"[^\w฀-๿.\- ]")]
     private static partial Regex UnsafeChars();
+    [GeneratedRegex(@"\.{2,}")]
+    private static partial Regex DotRuns();
 
     public static string SafeName(string? name)
     {
         var n = (name ?? "file").Normalize(NormalizationForm.FormC);
         n = UnsafeChars().Replace(n, "_").Trim();
+        // "a..pdf" -> "a.pdf": a stored path never contains "..", so GeminiOcr's path guard
+        // (path.Contains("..") -> Invalid file path) can never reject a real upload.
+        n = DotRuns().Replace(n, ".");
         if (n.Length == 0) n = "file";
         return n.Length > 120 ? n[..120] : n;
     }

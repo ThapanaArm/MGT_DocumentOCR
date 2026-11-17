@@ -295,9 +295,9 @@ export default function MaterialSearchSelect({
   };
 
   const rowStyle = (active: boolean, isSelected: boolean): React.CSSProperties => ({
-    padding: '9px 12px',
+    padding: '8px 12px',
     cursor: 'pointer',
-    fontSize: 13.5,
+    fontSize: 14,
     lineHeight: 1.45,
     background: active ? 'var(--brand-soft)' : isSelected ? 'var(--line-soft)' : 'transparent',
     color: 'var(--text)',
@@ -323,7 +323,7 @@ export default function MaterialSearchSelect({
       }}
     >
       {selectedLabel && (
-        <div style={{ padding: '4px 10px 6px', fontSize: 11, color: 'var(--muted)' }}>
+        <div style={{ padding: '4px 12px 8px', fontSize: 14, color: 'var(--muted)' }}>
           Current: {selectedLabel}
         </div>
       )}
@@ -340,13 +340,13 @@ export default function MaterialSearchSelect({
         </div>
       )}
       {listOptions.length === 0 && (
-        <div style={{ padding: '10px', fontSize: 13, color: 'var(--muted)' }}>
+        <div style={{ padding: '12px', fontSize: 14, color: 'var(--muted)' }}>
           {sapLoading || loading ? 'Searching…' : idleText || 'No items found — try another search term'}
         </div>
       )}
       {listOptions.map((o, index) => {
         const groupHead = fuzzy && o.group && o.group !== listOptions[index - 1]?.group ? (
-          <div style={{ padding: '8px 10px 2px', fontSize: 11, fontWeight: 700, color: 'var(--muted)', textTransform: 'uppercase' }}>
+          <div style={{ padding: '8px 12px 2px', fontSize: 14, fontWeight: 700, color: 'var(--muted)', textTransform: 'uppercase' }}>
             {o.group}
           </div>
         ) : null;
@@ -375,8 +375,8 @@ export default function MaterialSearchSelect({
             {(o.source === 'sap' || o.source === 'zoho') && (
               <span
                 style={{
-                  marginLeft: 6,
-                  fontSize: 11,
+                  marginLeft: 8,
+                  fontSize: 14,
                   color: 'var(--info)',
                   border: '1px solid var(--info)',
                   borderRadius: 4,
@@ -387,24 +387,24 @@ export default function MaterialSearchSelect({
               </span>
             )}
             {o.value === value && (
-              <i className="fa-solid fa-check" style={{ marginLeft: 6, color: 'var(--brand)' }} />
+              <i className="fa-solid fa-check" style={{ marginLeft: 8, color: 'var(--brand)' }} />
             )}
-            {o.hint && <div style={{ fontSize: 11.5, color: 'var(--muted)' }}>{o.hint}</div>}
+            {o.hint && <div style={{ fontSize: 14, color: 'var(--muted)' }}>{o.hint}</div>}
             {renderExtra?.(o)}
           </div>
           </div>
         );
       })}
       {searchSap && q.length >= 2 && (
-        <div style={{ padding: '6px 10px', fontSize: 12, color: 'var(--muted)' }}>
+        <div style={{ padding: '8px 12px', fontSize: 14, color: 'var(--muted)' }}>
           {sapLoading ? `Searching ${remoteLabel}…` : `Found ${sapOptions.length} in ${remoteLabel}`}
           {sapError && ` · ${sapError}`}
         </div>
       )}
       <div
         style={{
-          padding: '6px 10px',
-          fontSize: 11,
+          padding: '8px 12px',
+          fontSize: 14,
           color: 'var(--muted)',
           borderTop: '1px solid var(--line-soft)',
           position: 'sticky',
@@ -429,7 +429,7 @@ export default function MaterialSearchSelect({
             top: '50%',
             transform: 'translateY(-50%)',
             color: 'var(--muted)',
-            fontSize: 12,
+            fontSize: 14,
             pointerEvents: 'none',
           }}
         />

@@ -184,10 +184,10 @@ export default function CompareModal<T>({
             </button>
           )}
         </div>
-        {loadingFull && <p className="hint" style={{ margin: '0 0 10px' }}>Loading the full record for each match…</p>}
-        {askError && <p className="hint" style={{ margin: '0 0 10px' }}>Could not get an AI comparison: {askError}</p>}
+        {loadingFull && <p className="hint" style={{ margin: '0 0 12px' }}>Loading the full record for each match…</p>}
+        {askError && <p className="hint" style={{ margin: '0 0 12px' }}>Could not get an AI comparison: {askError}</p>}
         {aiModels.length > 0 && !aiModels.some((p) => p.ready) && (
-          <p className="hint" style={{ margin: '0 0 10px' }}>
+          <p className="hint" style={{ margin: '0 0 12px' }}>
             You must configure at least one AI model API key before "Ask AI to compare" will work
           </p>
         )}

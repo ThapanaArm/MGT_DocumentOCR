@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { num } from '../../utils/format';
 import { formatDate } from '../common/DateInput';
 import type { DocHeader, DocModel, MapEntry, MapField, MapResult } from '../../api/documents';
@@ -32,7 +32,6 @@ import {
   getZohoDealsByAccountCode,
   getZohoDealById,
   searchZohoDeals,
-  NEW_DEAL_ID,
   getZohoWebLinks,
   getZohoQuoteByNo,
   searchZohoMaterials,
@@ -50,6 +49,19 @@ import {
 } from '../../api/zoho';
 import type { CompareField } from '../../api/compare';
 import CompareModal, { type CompareCandidateItem } from './CompareModal';
+import DealGroupBoard from './DealGroupBoard';
+import {
+  autoAssignDeals,
+  dealCodeChecks,
+  dealItemCode,
+  dealKeyLabel,
+  dealOfKey,
+  dealProductMatch,
+  distinctKeys,
+  isKnownDealKey,
+  isDraftDeal,
+  isNewDealKey,
+} from '../../utils/zohoDealGroups';
 import Modal, { ModalHeader } from '../Modal';
 import MaterialSearchSelect, { type MaterialSearchOption } from './MaterialSearchSelect';
 import { useMeta } from '../../state/MetaContext';
@@ -59,7 +71,7 @@ import { useMeta } from '../../state/MetaContext';
 function SideList({ items, side, system = 'SAP' }: { items?: MapField[]; side: 'doc' | 'sap'; system?: string }) {
   if (!items || !items.length)
     return (
-      <div className="hint" style={{ padding: '6px 0' }}>
+      <div className="hint" style={{ padding: '8px 0' }}>
         {side === 'sap' ? `No data found in ${system} yet` : '—'}
       </div>
     );
@@ -72,12 +84,12 @@ function SideList({ items, side, system = 'SAP' }: { items?: MapField[]; side: '
             <td>
               {f.value || <span className="hint">—</span>}
               {f.match === true && (
-                <span className="badge b-ok" style={{ padding: '1px 7px', marginLeft: 4 }}>
+                <span className="badge b-ok" style={{ padding: '1px 8px', marginLeft: 4 }}>
                   <i className="fa-solid fa-check" />
                 </span>
               )}
               {f.match === false && (
-                <span className="badge b-warn" style={{ padding: '1px 7px', marginLeft: 4 }}>
+                <span className="badge b-warn" style={{ padding: '1px 8px', marginLeft: 4 }}>
                   <i className="fa-solid fa-not-equal" />
                 </span>
               )}
@@ -388,7 +400,7 @@ function SapCustomerPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [name, tax, companyCode]);
 
-  const hint = (text: string) => <div className="hint" style={{ padding: '6px 0' }}>{text}</div>;
+  const hint = (text: string) => <div className="hint" style={{ padding: '8px 0' }}>{text}</div>;
   const { ocrProviders } = useMeta();
   const [aiOpen, setAiOpen] = useState(false);
 
@@ -410,13 +422,13 @@ function SapCustomerPanel({
   );
 
   if (!name && !tax)
-    return <div className="hint" style={{ padding: '6px 0' }}><div>Enter a search term to look up the {partyLabel.toLowerCase()} in SAP</div>{renderManualSearchBox()}</div>;
+    return <div className="hint" style={{ padding: '8px 0' }}><div>Enter a search term to look up the {partyLabel.toLowerCase()} in SAP</div>{renderManualSearchBox()}</div>;
   if (loading) return hint('Searching SAP…');
   if (error)
-    return <div className="hint" style={{ padding: '6px 0' }}><div>SAP search is temporarily unavailable.</div>{renderManualSearchBox()}</div>;
+    return <div className="hint" style={{ padding: '8px 0' }}><div>SAP search is temporarily unavailable.</div>{renderManualSearchBox()}</div>;
   if (searched && results.length === 0)
     return (
-      <div className="hint" style={{ padding: '6px 0' }}>
+      <div className="hint" style={{ padding: '8px 0' }}>
         <div>No match found in SAP — use "+ Add New {partyLabel}" to enter it manually</div>
         {renderManualSearchBox()}
       </div>
@@ -449,8 +461,10 @@ function SapCustomerPanel({
 
   return (
     <>
+      {/* Search box above the result list (16 Nov 2026). */}
+      <div style={{ marginBottom: 8 }}>{renderManualSearchBox()}</div>
       {results.length > 1 && (
-        <div className="hint" style={{ padding: '6px 0', display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div className="hint" style={{ padding: '8px 0', display: 'flex', alignItems: 'center', gap: 8 }}>
           <span>Found {results.length} matches in SAP — ask AI, ask in the chat box below, or pick one directly:</span>
           <button className="btn sm" onClick={() => setAiOpen(true)}>
             <i className="fa-solid fa-wand-magic-sparkles" /> Ask AI to match
@@ -480,10 +494,6 @@ function SapCustomerPanel({
           ))}
         </tbody>
       </table>
-      <div className="hint" style={{ padding: '6px 0' }}>
-        <div>Not the right one? Try another search term</div>
-        {renderManualSearchBox()}
-      </div>
       <CompareModal<SapBusinessPartner>
         open={aiOpen}
         onClose={() => setAiOpen(false)}
@@ -661,7 +671,7 @@ function SoldMaterialsList({
   const visible = showAll ? ranked : ranked.slice(0, limit);
   return (
     <div style={{ marginBottom: 8 }}>
-      <div className="hint" style={{ padding: '6px 0', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+      <div className="hint" style={{ padding: '8px 0', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
         <span>
           <i className="fa-solid fa-clock-rotate-left" /> <b>Previously sold to this customer</b> —{' '}
           {matched > 0 ? `${matched} of ${ranked.length} look like this line` : `${ranked.length} items, none look like this line`}{' '}
@@ -728,18 +738,18 @@ function SoldMaterialsSuggestions({
 }) {
   const { history, error } = useSoldMaterials(customer);
   if (!(customer || '').trim())
-    return <>{fallback}<div className="hint" style={{ padding: '2px 0 6px' }}>Match the customer first to see what they bought before.</div></>;
+    return <>{fallback}<div className="hint" style={{ padding: '2px 0 8px' }}>Match the customer first to see what they bought before.</div></>;
   if (history === null)
-    return <div className="hint" style={{ padding: '6px 0' }}>Checking what this customer bought before…</div>;
+    return <div className="hint" style={{ padding: '8px 0' }}>Checking what this customer bought before…</div>;
   if (error)
-    return <>{fallback}<div className="hint" style={{ padding: '2px 0 6px' }}><i className="fa-solid fa-triangle-exclamation" /> {error}</div></>;
+    return <>{fallback}<div className="hint" style={{ padding: '2px 0 8px' }}><i className="fa-solid fa-triangle-exclamation" /> {error}</div></>;
   if (history.length === 0)
-    return <>{fallback}<div className="hint" style={{ padding: '2px 0 6px' }}>No sales to this customer in the last 12 months — use "Search SAP".</div></>;
+    return <>{fallback}<div className="hint" style={{ padding: '2px 0 8px' }}>No sales to this customer in the last 12 months — use "Search SAP".</div></>;
   return (
     <>
       <SoldMaterialsList ranked={rankSoldMaterials(history, (docDescription || '').trim(), docCode)} disabled={disabled} onUse={onUse}
         docDesc={docDescription} docCode={docCode} />
-      <div className="hint" style={{ padding: '2px 0 6px' }}>Not in the list? Use "Search SAP" to look up other materials.</div>
+      <div className="hint" style={{ padding: '2px 0 8px' }}>Not in the list? Use "Search SAP" to look up other materials.</div>
     </>
   );
 }
@@ -895,7 +905,7 @@ function SapMaterialPanel({
     </div>
   );
 
-  const hint = (text: string) => <div className="hint" style={{ padding: '6px 0' }}>{text}</div>;
+  const hint = (text: string) => <div className="hint" style={{ padding: '8px 0' }}>{text}</div>;
 
   // First (automatic) search only: the customer's own sales history comes first, closest to this
   // line on top. Once the person types their own keyword (appliedQuery set) only that keyword's
@@ -914,15 +924,15 @@ function SapMaterialPanel({
   const keywordResults = autoMode ? results.filter((m) => !soldCodes.has(m.materialCode.toUpperCase())) : results;
 
   if (!query || query.length < 2)
-    return <>{soldNode}<div className="hint" style={{ padding: '6px 0' }}><div>Type a search term to look up Material in SAP</div>{renderSearchBox()}</div></>;
+    return <>{soldNode}<div className="hint" style={{ padding: '8px 0' }}><div>Type a search term to look up Material in SAP</div>{renderSearchBox()}</div></>;
   if (loading) return <>{soldNode}{hint('Searching SAP…')}</>;
   if (error)
-    return <>{soldNode}<div className="hint" style={{ padding: '6px 0' }}><div>SAP search is temporarily unavailable.</div>{renderSearchBox()}</div></>;
+    return <>{soldNode}<div className="hint" style={{ padding: '8px 0' }}><div>SAP search is temporarily unavailable.</div>{renderSearchBox()}</div></>;
   if (searched && keywordResults.length === 0)
     return (
       <>
         {soldNode}
-        <div className="hint" style={{ padding: '6px 0' }}>
+        <div className="hint" style={{ padding: '8px 0' }}>
           <div>
             {results.length > 0
               ? `No other match for "${query}" in SAP — try another search term, or use "+ Add New Item"`
@@ -964,8 +974,10 @@ function SapMaterialPanel({
 
   return (
     <>
+      {/* Search box above the result list (16 Nov 2026). */}
+      <div style={{ marginBottom: 8 }}>{renderSearchBox()}</div>
       {soldNode}
-      <div className="hint" style={{ padding: '6px 0', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+      <div className="hint" style={{ padding: '8px 0', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
         <span>
           {soldRanked.length > 0 ? `Search "${query}": ` : ''}Found {sorted.length} matches in SAP — showing the {Math.min(sorted.length, 5)} closest matches:
         </span>
@@ -996,10 +1008,6 @@ function SapMaterialPanel({
           ))}
         </tbody>
       </table>
-      <div className="hint" style={{ padding: '6px 0' }}>
-        <div>Not the right one? Try another search term</div>
-        {renderSearchBox()}
-      </div>
       <CompareModal<SapMaterial>
         open={aiOpen}
         onClose={() => setAiOpen(false)}
@@ -1051,7 +1059,7 @@ function ZohoMaterialPanel({
 }) {
   // Zoho-style dropdown (5 Nov 2026): type or paste, the Deal's items filter as you type.
   const [query, setQuery] = useState('');
-  const hint = (text: string) => <div className="hint" style={{ padding: '6px 0' }}>{text}</div>;
+  const hint = (text: string) => <div className="hint" style={{ padding: '8px 0' }}>{text}</div>;
   // Before any early return (hooks must run in the same order every render).
   const dealLastPrices = useLastPrices(accountCode, (dealItems || []).map((it) => it.materialCode || ''));
   const zohoSearch = allowZohoSearch ? (
@@ -1088,7 +1096,7 @@ function ZohoMaterialPanel({
 
   return (
     <>
-      <div className="hint" style={{ padding: '6px 0' }}>
+      <div className="hint" style={{ padding: '8px 0' }}>
         Items from this Deal ({dealItems.length}) — click the box to pick one (closest first), or type / paste
         the code or name to filter:
       </div>
@@ -1157,7 +1165,7 @@ function ConversionLine({ unit, ratio, subUnit, docQty, docUom }: {
   const fmt = (n: number) => n.toLocaleString('en-US', { maximumFractionDigits: 3 });
   const inUnit = hasRatio && qty > 0 && du === String(subUnit).trim().toLowerCase() ? qty / r : null;
   return (
-    <div style={{ fontSize: 12, marginTop: 2 }}>
+    <div style={{ fontSize: 14, marginTop: 2 }}>
       <span className="hint">Unit</span>{' '}
       <b>{hasRatio ? `1 ${unit} = ${fmt(r)} ${subUnit}` : unit}</b>
       {inUnit != null && <span className="hint"> · {fmt(qty)} {subUnit} = <b>{fmt(inUnit)} {unit}</b></span>}
@@ -1168,7 +1176,7 @@ function ConversionLine({ unit, ratio, subUnit, docQty, docUom }: {
 function LastPriceLine({ price }: { price?: ZohoLastPrice }) {
   if (!price) return null;
   return (
-    <div style={{ fontSize: 12, marginTop: 2 }} title={price.salesOrderName ? `From ${price.salesOrderName}` : undefined}>
+    <div style={{ fontSize: 14, marginTop: 2 }} title={price.salesOrderName ? `From ${price.salesOrderName}` : undefined}>
       <span className="hint">Last Price</span>{' '}
       <b style={{ fontVariantNumeric: 'tabular-nums' }}>{price.price.toLocaleString('en-US', { maximumFractionDigits: 2 })}</b>
       {price.updateDate && <span className="hint"> · {formatDate(price.updateDate)}</span>}
@@ -1226,7 +1234,7 @@ function ZohoMaterialSearch({
 
   if (!shown)
     return (
-      <div style={{ padding: '6px 0' }}>
+      <div style={{ padding: '8px 0' }}>
         <button className="btn sm" onClick={() => setShown(true)}>
           <i className="fa-solid fa-magnifying-glass" /> Search all Zoho Materials
         </button>
@@ -1244,7 +1252,7 @@ function ZohoMaterialSearch({
   }));
 
   return (
-    <div style={{ padding: '6px 0', display: 'flex', flexDirection: 'column', gap: 6 }}>
+    <div style={{ padding: '8px 0', display: 'flex', flexDirection: 'column', gap: 8 }}>
       <div className="hint">
         Search Zoho Materials — type or paste a Material Code or Name, press Search (or Enter), then pick from
         the list (Material Code is searched first, then Material Name):
@@ -1443,7 +1451,7 @@ function ZohoCustomerPanel({
     </div>
   );
 
-  const hint = (text: string) => <div className="hint" style={{ padding: '6px 0' }}>{text}</div>;
+  const hint = (text: string) => <div className="hint" style={{ padding: '8px 0' }}>{text}</div>;
   const { ocrProviders } = useMeta();
   const [aiOpen, setAiOpen] = useState(false);
   const aiCandidates: CompareCandidateItem<ZohoAccount>[] = results.map((acc) => ({
@@ -1459,17 +1467,19 @@ function ZohoCustomerPanel({
   }));
 
   if (!name && !tax)
-    return <div className="hint" style={{ padding: '6px 0' }}><div>Enter a search term to look up the customer in Zoho CRM</div>{renderManualSearchBox()}</div>;
+    return <div className="hint" style={{ padding: '8px 0' }}><div>Enter a search term to look up the customer in Zoho CRM</div>{renderManualSearchBox()}</div>;
   if (loading) return hint('Searching Zoho CRM…');
   if (error)
-    return <div className="hint" style={{ padding: '6px 0' }}><div>Zoho CRM search is temporarily unavailable.</div>{renderManualSearchBox()}</div>;
+    return <div className="hint" style={{ padding: '8px 0' }}><div>Zoho CRM search is temporarily unavailable.</div>{renderManualSearchBox()}</div>;
   if (searched && results.length === 0)
-    return <div className="hint" style={{ padding: '6px 0' }}><div>No match found in Zoho CRM — use "+ Add New Customer" to enter it manually</div>{renderManualSearchBox()}</div>;
+    return <div className="hint" style={{ padding: '8px 0' }}><div>No match found in Zoho CRM — use "+ Add New Customer" to enter it manually</div>{renderManualSearchBox()}</div>;
 
   return (
     <>
+      {/* Search box above the result list (16 Nov 2026). */}
+      <div style={{ marginBottom: 8 }}>{renderManualSearchBox()}</div>
       {results.length > 1 && (
-        <div className="hint" style={{ padding: '6px 0', display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div className="hint" style={{ padding: '8px 0', display: 'flex', alignItems: 'center', gap: 8 }}>
           <span>Found {results.length} matches in Zoho CRM — ask AI, ask in the chat box below, or pick one directly:</span>
           <button className="btn sm" onClick={() => setAiOpen(true)}>
             <i className="fa-solid fa-wand-magic-sparkles" /> Ask AI to match
@@ -1504,10 +1514,6 @@ function ZohoCustomerPanel({
           ))}
         </tbody>
       </table>
-      <div className="hint" style={{ padding: '6px 0' }}>
-        <div>Not the right one? Try another search term</div>
-        {renderManualSearchBox()}
-      </div>
       <CompareModal<ZohoAccount>
         open={aiOpen}
         onClose={() => setAiOpen(false)}
@@ -1681,7 +1687,8 @@ function SapShipToPanel({
     if (!q) return;
     setNameLoading(true);
     setNameError(null);
-    searchSapBusinessPartner({ name: q })
+    // Name or code (16 Nov 2026): the backend tries the code first, then the name.
+    searchSapBusinessPartner({ name: q, code: q })
       .then((r) => {
         if (!Array.isArray(r?.results)) {
           setNameResults([]);
@@ -1698,16 +1705,16 @@ function SapShipToPanel({
   };
 
   const renderNameSearchFallback = () => (
-    <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--line-soft)' }}>
+    <div style={{ marginBottom: 12, paddingBottom: 12, borderBottom: '1px solid var(--line-soft)' }}>
       <div className="hint">
-        Search Ship-to by name directly — use this instead of the results above if they're wrong, or when it already exists in SAP but isn't yet linked to this Sold-to:
+        Search Ship-to by name or code — also one in SAP that isn't linked to this Sold-to yet:
       </div>
-      <div style={{ marginTop: 6, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+      <div style={{ marginTop: 8, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
         <input
           type="text"
           value={nameQuery}
           onChange={(e) => setNameQuery(e.target.value)}
-          placeholder="Ship-to name"
+          placeholder="Ship-to name or code"
           className="txt"
           style={{ minWidth: 220 }}
         />
@@ -1752,7 +1759,7 @@ function SapShipToPanel({
     </div>
   );
 
-  const hint = (text: string) => <div className="hint" style={{ padding: '6px 0' }}>{text}</div>;
+  const hint = (text: string) => <div className="hint" style={{ padding: '8px 0' }}>{text}</div>;
 
   if (!soldToSapCode) return hint('A matched customer (with a SAP code) is required first');
   if (loading) return hint('Searching SAP…');
@@ -1765,9 +1772,11 @@ function SapShipToPanel({
   // search box unconditionally lets them override an auto-found match at any time.
   return (
     <div>
+      {/* Search box above the lists (16 Nov 2026). */}
+      {renderNameSearchFallback()}
       {error && hint('Could not search SAP: ' + error)}
       {!error && searched && results.length === 0 && (
-        <div className="hint" style={{ padding: '6px 0' }}>
+        <div className="hint" style={{ padding: '8px 0' }}>
           No Ship-to found in SAP for this customer — use "+ Add New Ship-to" to enter it manually
         </div>
       )}
@@ -1791,7 +1800,6 @@ function SapShipToPanel({
           </tbody>
         </table>
       )}
-      {renderNameSearchFallback()}
     </div>
   );
 }
@@ -1889,7 +1897,7 @@ function ZohoShipToPanel({
     };
   }, [accountId]);
 
-  const hint = (text: string) => <div className="hint" style={{ padding: '6px 0' }}>{text}</div>;
+  const hint = (text: string) => <div className="hint" style={{ padding: '8px 0' }}>{text}</div>;
   const { ocrProviders } = useMeta();
   const [aiOpen, setAiOpen] = useState(false);
 
@@ -1905,7 +1913,7 @@ function ZohoShipToPanel({
     <div key={i} style={i > 0 ? { borderTop: '1px dashed var(--border, #444)', marginTop: 8, paddingTop: 8 } : undefined}>
       {info.source === 'shipto-module' && <div className="hint">From Ship-to Module</div>}
       <AddressFieldRows info={info} />
-      <div style={{ padding: '6px 0' }}>
+      <div style={{ padding: '8px 0' }}>
         <button className="btn sm primary" disabled={disabled} onClick={() => onUse(info, useAccountCode)}>
           Use &amp; Save
         </button>
@@ -1933,7 +1941,8 @@ function ZohoShipToPanel({
     const q = term.trim();
     if (!q) return;
     setAccLoading(true); setAccError(null); setPickedAcc(null); setPickedShipTos(null);
-    searchZohoAccount({ name: q })
+    // Name or code (16 Nov 2026): Account Code first, then the Account's Ship-to Code, then the name.
+    searchZohoAccount({ name: q, code: q })
       .then((r) => setAccResults(Array.isArray(r?.results) ? r.results : []))
       .catch((e) => setAccError(e?.message || 'Zoho CRM search failed'))
       .finally(() => { setAccLoading(false); setAccSearched(true); });
@@ -1947,15 +1956,15 @@ function ZohoShipToPanel({
   };
 
   const renderNameSearch = () => (
-    <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--line-soft)' }}>
-      <div className="hint">Or search Ship-to by company name (including affiliates whose name doesn't match the buyer):</div>
-      <div style={{ marginTop: 6, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+    <div style={{ marginBottom: 12, paddingBottom: 12, borderBottom: '1px solid var(--line-soft)' }}>
+      <div className="hint">Search Ship-to by company name or code (also affiliates with another name):</div>
+      <div style={{ marginTop: 8, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
         <input
           type="text"
           value={nameQuery}
           onChange={(e) => setNameQuery(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter') runNameSearch(nameQuery); }}
-          placeholder="Company name / Ship-to"
+          placeholder="Company name or code"
           className="txt"
           style={{ minWidth: 220 }}
         />
@@ -2019,15 +2028,17 @@ function ZohoShipToPanel({
   // so a Ship-to under a different affiliated company can be found even when this account has some.
   return (
     <>
+      {/* Search box above the lists (16 Nov 2026). */}
+      {renderNameSearch()}
       {!accountId && hint('This customer is not linked to a Zoho account')}
       {accountId && loading && hint('Reading Ship-to info from Zoho CRM…')}
       {accountId && error && hint('Could not read Zoho CRM: ' + error)}
       {accountId && !loading && !error && searched && (!shipTos || shipTos.length === 0) &&
-        hint('No Ship-to on this account — search by company name below, or use "+ Add New Ship-to"')}
+        hint('No Ship-to on this account — search by company name or code above, or use "+ Add New Ship-to"')}
       {accountId && shipTos && shipTos.length > 0 && (
         <>
           {hasMultiple && shipTos.length > 1 && (
-            <div className="hint" style={{ padding: '6px 0', display: 'flex', alignItems: 'center', gap: 8 }}>
+            <div className="hint" style={{ padding: '8px 0', display: 'flex', alignItems: 'center', gap: 8 }}>
               <span>This account is marked as having more than one ship-to — {shipTos.length} delivery addresses on file:</span>
               <button className="btn sm" onClick={() => setAiOpen(true)}>
                 <i className="fa-solid fa-wand-magic-sparkles" /> Ask AI to match
@@ -2039,7 +2050,7 @@ function ZohoShipToPanel({
       )}
       {sibLoading && hint('Looking for other customer codes with the same Tax ID…')}
       {siblings.length > 0 && (
-        <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--line-soft)' }}>
+        <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--line-soft)' }}>
           <div className="hint">Other customer codes with the same Tax ID ({custTaxId}) — their addresses can be used as Ship-to:</div>
           {siblings.map(({ acc, shipTos: st, error: err }) => (
             <div key={acc.accountId} style={{ marginTop: 8 }}>
@@ -2051,7 +2062,6 @@ function ZohoShipToPanel({
           ))}
         </div>
       )}
-      {renderNameSearch()}
       <CompareModal<ZohoShipToInfo>
         open={aiOpen}
         onClose={() => setAiOpen(false)}
@@ -2109,19 +2119,19 @@ function ZohoCustomerBrief({ customerCode, masters }: { customerCode?: string; m
   }, [accountCode]);
 
   if (!accountCode) return null;
-  if (state === 'loading') return <div className="hint" style={{ marginTop: 6 }}>Reading the customer from Zoho CRM…</div>;
-  if (state === 'error') return <div className="hint" style={{ marginTop: 6 }}>Zoho CRM customer details are temporarily unavailable.</div>;
+  if (state === 'loading') return <div className="hint" style={{ marginTop: 8 }}>Reading the customer from Zoho CRM…</div>;
+  if (state === 'error') return <div className="hint" style={{ marginTop: 8 }}>Zoho CRM customer details are temporarily unavailable.</div>;
   if (!address && fields.length === 0) return null;
   return (
     <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px dashed var(--g300)', display: 'flex', flexDirection: 'column', gap: 4 }}>
       {address && (
-        <div style={{ display: 'flex', gap: 6 }}>
+        <div style={{ display: 'flex', gap: 8 }}>
           <i className="fa-solid fa-location-dot" style={{ color: 'var(--g500)', marginTop: 3 }} />
           <span style={{ overflowWrap: 'anywhere' }}>{address}</span>
         </div>
       )}
       {fields.length > 0 && (
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '2px 14px' }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '2px 16px' }}>
           {fields.map((f) => (
             <span key={f.label}><span className="hint">{f.label}</span> <b>{f.value}</b></span>
           ))}
@@ -2571,86 +2581,11 @@ function RowMapTable({
    "Material — Row N" cards instead (see ZohoMaterialPanel, fed via onDealResolved) -- this card
    used to duplicate that as its own "Deal Items vs Document Lines" table, which was removed as
    redundant. Purely informational otherwise -- doesn't feed map.pass/map.errors. */
-/* Deal search (Megachem, 10 Nov 2026):
-   1. Deals of this Customer Code, Stage Draft/Qualification, Meeting/Memo or Sample & Result, whose
-      Material Codes AND quantities match the PO.
-   2. No Deal matches the quantities -> fall back to Customer Code + Material Code only, and the Deal
-      card shows "สินค้าไม่ครบ" in bold red.
-   PO rows of the same material are added together before the quantity is compared (one Deal item may
-   be ordered on two PO rows with different delivery dates, equal or different quantities), and Deal
-   items of the same material are added together too. */
-const DEAL_SEARCH_STAGES = ['draft/qualification', 'meeting/memo', 'sample&result'];
-const dealStageKey = (stage?: string | null) => String(stage || '').replace(/\s+/g, '').toLowerCase();
-
-// A line's Material Code candidates: the code on the PO (OCR/CS) first, then the code mapped by
-// Master Mapping / CS -- either may be the Zoho Material Code (the backend tries them in the same order).
-function lineCodes(line: DocModel['lines'][number]) {
-  return [...new Set([line.extCode, line.materialCode].map((c) => String(c || '').trim().toLowerCase()).filter(Boolean))];
-}
-const dealItemCode = (it: ZohoDealItem) => String(it.materialCode || '').trim().toLowerCase();
-
-const unitKey = (unit?: string | null) => String(unit || '').trim().toLowerCase();
-
-// A quantity given in `unit`, converted into `base`'s Unit (1 Unit = Conversion Ratio Sub Units,
-// same rule as the backend). null = the unit cannot be converted.
-function toDealUnit(qty: number, unit: string | null | undefined, base: ZohoDealItem): number | null {
-  const from = unitKey(unit);
-  const to = unitKey(base.unit);
-  if (!from || !to || from === to) return qty;
-  const ratio = Number(base.conversionRatio);
-  return from === unitKey(base.subUnit) && ratio > 0 ? qty / ratio : null;
-}
-
-type DealCodeCheck = {
-  lines: DocModel['lines'];
-  items: ZohoDealItem[];
-  poQty: number | null;
-  dealQty: number | null;
-  unit: string;
-  qtyOk: boolean;
-};
-
-// Per Material Code that is on both the PO and the Deal: the PO total vs the Deal total, in the Deal's Unit.
-function dealCodeChecks(deal: ZohoDeal, lines: DocModel['lines']) {
-  const dealCodes = new Set(deal.items.map(dealItemCode).filter(Boolean));
-  const byCode = new Map<string, DocModel['lines']>();
-  lines.forEach((line) => {
-    const code = lineCodes(line).find((c) => dealCodes.has(c));
-    if (code) byCode.set(code, [...(byCode.get(code) || []), line]);
-  });
-  const total = (values: (number | null)[]) =>
-    values.every((v): v is number => v != null) ? values.reduce((sum, v) => sum + v, 0) : null;
-  const checks = new Map<string, DealCodeCheck>();
-  byCode.forEach((codeLines, code) => {
-    const items = deal.items.filter((it) => dealItemCode(it) === code);
-    if (!items.length) return;
-    const base = items[0];
-    const poQty = total(codeLines.map((l) => (num(l.qty) > 0 ? toDealUnit(num(l.qty), l.uom, base) : null)));
-    const dealQty = total(items.map((it) => (Number(it.quantity) > 0 ? toDealUnit(Number(it.quantity), it.unit, base) : null)));
-    checks.set(code, {
-      lines: codeLines, items, poQty, dealQty, unit: base.unit || '',
-      qtyOk: poQty != null && dealQty != null && Math.abs(poQty - dealQty) < 0.001,
-    });
-  });
-  return checks;
-}
-
-function dealProductMatch(deal: ZohoDeal, lines: DocModel['lines'], requireQuantity = true) {
-  let matched = 0;
-  let byPoCode = 0; // lines matched by the code on the PO itself (stronger than a mapped code)
-  dealCodeChecks(deal, lines).forEach((c, code) => {
-    if (requireQuantity && !c.qtyOk) return;
-    matched += c.lines.length;
-    byPoCode += c.lines.filter((l) => lineCodes(l)[0] === code).length;
-  });
-  return { matched, byPoCode, total: lines.length, ok: lines.length > 0 && matched === lines.length };
-}
-
 const qtyText = (v: number | null) => (v == null ? '?' : v.toLocaleString('en-US', { maximumFractionDigits: 3 }));
 const shortQtyStyle: React.CSSProperties = { color: '#b91c1c', fontWeight: 700 };
 
 const dealSentenceStyle: React.CSSProperties = {
-  display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', padding: '12px 14px', margin: '4px 0 12px',
+  display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', padding: '12px 16px', margin: '4px 0 12px',
   borderRadius: 10, background: 'var(--brand-soft)',
 };
 
@@ -2661,7 +2596,7 @@ function DealItemsList({ deal, lines }: { deal: ZohoDeal; lines: DocModel['lines
   const shown = deal.items.slice(0, 6);
   const checks = dealCodeChecks(deal, lines);
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 2, fontSize: 13 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 2, fontSize: 14 }}>
       {shown.map((it, i) => {
         const c = checks.get(dealItemCode(it));
         const hit = !!c?.qtyOk;
@@ -2674,7 +2609,7 @@ function DealItemsList({ deal, lines }: { deal: ZohoDeal; lines: DocModel['lines
             {[it.materialCode, it.materialDescription || it.materialName].filter(Boolean).join(' — ')}
             {it.quantity != null ? ` · ${deal.isWcd ? 'Forecast ' : ''}${num(it.quantity).toLocaleString('en-US')} ${it.unit || ''}` : ''}
             {c && c.lines.length > 1 && ` · PO ${c.lines.length} rows = ${qtyText(c.poQty)} ${c.unit}`}
-            {short && ` — สินค้าไม่ครบ (PO ${qtyText(c!.poQty)} / Deal ${qtyText(c!.dealQty)} ${c!.unit})`}
+            {short && ` — Qty mismatch (PO ${qtyText(c!.poQty)} / Deal ${qtyText(c!.dealQty)} ${c!.unit})`}
           </span>
         );
       })}
@@ -2776,7 +2711,7 @@ function DealDetailModal({ dealId, dealBase, onClose, onBack }: {
     { label: 'Closing', value: val('Closing_Date') ? dealValue('Closing_Date', val('Closing_Date')) : '' },
     { label: 'Delivery', value: val('Delivery_Date') ? dealValue('Delivery_Date', val('Delivery_Date')) : '' },
   ].filter((t) => t.value);
-  const smallTitle: React.CSSProperties = { fontSize: 11, fontWeight: 700, letterSpacing: '.06em', color: 'var(--muted)', margin: 0 };
+  const smallTitle: React.CSSProperties = { fontSize: 14, fontWeight: 700, letterSpacing: '.06em', color: 'var(--muted)', margin: 0 };
 
   return (
     <Modal open={!!dealId} onClose={onClose} wide>
@@ -2799,14 +2734,14 @@ function DealDetailModal({ dealId, dealBase, onClose, onBack }: {
 
             {/* Key numbers */}
             {tiles.length > 0 && (
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 10 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 12 }}>
                 {tiles.map((t) => (
                   <div key={t.label} style={{
                     minWidth: 0,
-                    background: 'var(--line-soft)', borderRadius: 12, padding: '10px 14px',
+                    background: 'var(--line-soft)', borderRadius: 12, padding: '12px 16px',
                   }}>
                     <p style={smallTitle}>{t.label.toUpperCase()}</p>
-                    <div style={{ fontWeight: 700, fontSize: 15, marginTop: 2, fontVariantNumeric: 'tabular-nums', overflowWrap: 'anywhere' }}>{t.value}</div>
+                    <div style={{ fontWeight: 700, fontSize: 16, marginTop: 2, fontVariantNumeric: 'tabular-nums', overflowWrap: 'anywhere' }}>{t.value}</div>
                   </div>
                 ))}
               </div>
@@ -2814,11 +2749,11 @@ function DealDetailModal({ dealId, dealBase, onClose, onBack }: {
 
             {/* Other fields: one box per section, side by side, all the same size */}
             {sections.length > 0 && (
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 10 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 12 }}>
                 {sections.map((sec) => (
-                  <section key={sec.title} style={{ border: '1px solid var(--line)', borderRadius: 12, padding: '10px 14px' }}>
-                    <p style={{ ...smallTitle, marginBottom: 6 }}>{sec.title.toUpperCase()}</p>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(96px, 42%) 1fr', gap: '4px 12px', fontSize: 13, lineHeight: 1.4 }}>
+                  <section key={sec.title} style={{ border: '1px solid var(--line)', borderRadius: 12, padding: '12px 16px' }}>
+                    <p style={{ ...smallTitle, marginBottom: 8 }}>{sec.title.toUpperCase()}</p>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(96px, 42%) 1fr', gap: '4px 12px', fontSize: 14, lineHeight: 1.4 }}>
                       {sec.rows.map((f, i) => (
                         <Fragment key={(f.api || f.label) + i}>
                           <span className="hint">{f.label}</span>
@@ -2832,7 +2767,7 @@ function DealDetailModal({ dealId, dealBase, onClose, onBack }: {
             )}
 
             {/* Deal Items */}
-            <section style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <section style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               <p style={smallTitle}>DEAL ITEMS ({items?.rows.length ?? 0})</p>
               {items && items.rows.length > 0 ? (
                 <div className="tw" style={{ overflowX: 'auto' }}>
@@ -2856,7 +2791,7 @@ function DealDetailModal({ dealId, dealBase, onClose, onBack }: {
                             <td style={{ position: 'sticky', left: 0, zIndex: 1, background: 'var(--card)', minWidth: 220, maxWidth: 300 }}>
                               <b style={{ whiteSpace: 'nowrap' }}>{code || '—'}</b>
                               {name && name !== code && (
-                                <div className="hint" title={name} style={{ fontSize: 12, lineHeight: 1.35, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                <div className="hint" title={name} style={{ fontSize: 14, lineHeight: 1.35, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                                   {name}
                                 </div>
                               )}
@@ -2882,7 +2817,7 @@ function DealDetailModal({ dealId, dealBase, onClose, onBack }: {
         {/* Footer: who/when on the left, actions on the right */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', borderTop: '1px solid var(--line)', paddingTop: 12 }}>
           {detail && (val('Created_Time') || val('Modified_Time')) && (
-            <span className="hint" style={{ fontSize: 12, flex: '1 1 260px' }}>
+            <span className="hint" style={{ fontSize: 14, flex: '1 1 260px' }}>
               {val('Created_Time') && <>Created {dealValue('Created_Time', val('Created_Time'))}{val('Created_By') ? ` by ${val('Created_By')}` : ''}</>}
               {val('Modified_Time') && <> · Modified {dealValue('Modified_Time', val('Modified_Time'))}{val('Modified_By') ? ` by ${val('Modified_By')}` : ''}</>}
             </span>
@@ -2913,7 +2848,7 @@ function DealMatchChip({ deal, lines }: { deal: ZohoDeal; lines: DocModel['lines
     const short = [...dealCodeChecks(deal, lines).values()].filter((c) => !c.qtyOk);
     return (
       <span className="badge b-warn" style={{ ...chip, ...shortQtyStyle }}>
-        <i className="fa-solid fa-triangle-exclamation" /> สินค้าไม่ครบ — {short.map((c) =>
+        <i className="fa-solid fa-triangle-exclamation" /> Qty mismatch — {short.map((c) =>
           `PO ${qtyText(c.poQty)} / Deal ${qtyText(c.dealQty)} ${c.unit}`).join(', ')}
       </span>
     );
@@ -2925,80 +2860,36 @@ function DealMatchChip({ deal, lines }: { deal: ZohoDeal; lines: DocModel['lines
   );
 }
 
-function MatchBadge({ deal, lines }: { deal: ZohoDeal; lines: DocModel['lines'] }) {
-  const m = dealProductMatch(deal, lines);
-  if (!m.ok && dealProductMatch(deal, lines, false).ok) {
-    // Every PO material is on this Deal, but the quantities differ: "สินค้าไม่ครบ" in bold red.
-    const short = [...dealCodeChecks(deal, lines).values()].filter((c) => !c.qtyOk);
-    return (
-      <span className="badge b-warn" style={shortQtyStyle}
-        title={short.map((c) => `${c.items[0].materialCode}: PO ${qtyText(c.poQty)} / Deal ${qtyText(c.dealQty)} ${c.unit}`).join('\n')}>
-        <i className="fa-solid fa-triangle-exclamation" /> สินค้าไม่ครบ — {short.map((c) =>
-          `${c.items[0].materialCode} PO ${qtyText(c.poQty)} / Deal ${qtyText(c.dealQty)} ${c.unit}`).join(', ')}
-      </span>
-    );
-  }
-  // Plain words (29 Oct 2026): what was compared and how many document items passed.
-  const what = 'OCR/CS material codes and combined quantities';
-  const items = `${m.total} item${m.total === 1 ? '' : 's'}`;
-  const text = m.ok
-    ? `All ${items} on the PO: ${what} match this Deal`
-    : `Only ${m.matched} of ${items} on the PO: ${what} match this Deal`;
-  return (
-    <span className={'badge ' + (m.ok ? 'b-ok' : 'b-warn')}
-      title="PO lines for the same product are grouped, then compared by OCR/CS material code and combined quantity">
-      <i className={'fa-solid ' + (m.ok ? 'fa-check' : 'fa-triangle-exclamation')} /> {text}
-    </span>
-  );
-}
-
-function autoPickDeal(deals: ZohoDeal[], lines: DocModel['lines'], poNo?: string | null, quoteDealId?: string | null, customerCode?: string) {
-  // No Deal at all for this customer (Megachem, 11 Nov 2026): "Open a new Deal" is the default.
-  // Deals exist but none matches: '' -- CS picks one or opens a new Deal themselves.
-  if (deals.length === 0) return NEW_DEAL_ID;
-  const sameCustomer = (d: ZohoDeal) =>
-    !!customerCode && String(d.accountCode || '').trim().toLowerCase() === customerCode.trim().toLowerCase();
-  // The PO quotes Megachem's own Quote No.: that Quote's Deal wins before the product check
-  // (27 Oct 2026 rule), whatever its Stage -- as long as it is this customer's Deal.
-  const byQuote = quoteDealId ? deals.find((d) => d.id === quoteDealId && sameCustomer(d)) : undefined;
-  if (byQuote) return byQuote.id;
-  // 1. Customer Code + Stage + Material Code + Qty; 2. else Customer Code + Stage + Material Code.
-  const eligible = deals.filter((d) => DEAL_SEARCH_STAGES.includes(dealStageKey(d.stage))
-    && !!customerCode && String(d.accountCode || '').trim().toLowerCase() === customerCode.trim().toLowerCase());
-  const po = String(poNo || '').trim().toLowerCase();
-  const exact = eligible.filter((d) => dealProductMatch(d, lines).ok);
-  // Exact quantity first; otherwise require all material codes and show the quantity warning.
-  const productMatches = eligible.filter((d) => dealProductMatch(d, lines, false).ok);
-
-  const hits = exact.length ? exact : productMatches;
-  if (!hits.length) return ''; // Wrong/missing codes require review, never silently create a Deal.
-  const refMatch = (d: ZohoDeal) => (po && String(d.customerRef || '').trim().toLowerCase() === po ? 1 : 0);
-  const created = (d: ZohoDeal) => Date.parse(String(d.createdTime || '')) || 0;
-  return [...hits].sort((a, b) => Number(b.id === quoteDealId) - Number(a.id === quoteDealId)
-    || dealProductMatch(b, lines, false).matched - dealProductMatch(a, lines, false).matched
-    || dealProductMatch(b, lines, false).byPoCode - dealProductMatch(a, lines, false).byPoCode
-    || refMatch(b) - refMatch(a) || created(b) - created(a))[0].id;
-}
-
+// MGT: placed after the Item (material) cards (16 Nov 2026) -- Megachem maps the materials first, then
+// the Deals are searched (waitingFor).
 function ZohoDealCard({
   no,
   customerCode,
   doc,
-  selectedId,
-  onSelectId,
-  onDealResolved,
+  assignment,
+  byUser,
+  locked,
+  onAssign,
+  onDealsChange,
+  waitingFor = [],
 }: {
-  no: number;
+  no?: number;
+  /** itemNo of lines whose material is not mapped yet: the Deal search waits until every material is mapped. */
+  waitingFor?: string[];
   customerCode?: string;
   doc: DocModel;
-  /** Controlled from DocumentPage (rather than local state) so the "Send to Zoho" confirmation
-   *  knows which Deal is currently picked. */
-  selectedId: string;
-  onSelectId: (id: string) => void;
-  /** Reports the full resolved Deal record (incl. its Deal Items) up to MappingCards as soon as
-   *  it's known, so the "Material — Row N" cards below can offer the AI-suggested-match tool
-   *  against this Deal's own Items without re-fetching the Deals list themselves. */
-  onDealResolved?: (deal: ZohoDeal | null) => void;
+  /** Deal key of each line as saved on the document (line.extra.zohoDeal): a Zoho Deal id, or
+   *  "__new__", "__new__2" ... for a Deal Send opens. One PO may hold items of several Deals (16 Nov 2026). */
+  assignment: string[];
+  /** CS grouped the items themselves (header.zohoDealsByUser): the automatic grouping then stops
+   *  overriding their choice. */
+  byUser: boolean;
+  locked: boolean;
+  /** Save the Deal of every line (DocumentPage stores it on the lines with a silent re-map). */
+  onAssign: (assignment: string[], byUser: boolean) => void;
+  /** The open Deals read from Zoho (plus any picked through the Deal search), reported up so the
+   *  Material cards and the Sales Order step know each line's Deal Items. */
+  onDealsChange?: (deals: ZohoDeal[]) => void;
 }) {
   // Looked up by the customer's own code (Account_Code on the Deal record) -- deliberately NOT
   // the Zoho Account id used by ZohoSoldToAddressPanel/ShipTo above, so this works even when the
@@ -3008,34 +2899,25 @@ function ZohoDealCard({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Manual fallback search (by Deal Name) for when the Account_Code lookup below finds no open
-  // Deal -- see the "Can't find it?" box rendered in the empty-state branch further down, and
-  // ZohoDealClient.SearchByNameAsync for why this can find Deals the automatic lookup can't
-  // (wrong/blank Account_Code, or an already-Closed stage).
+  // Manual search (by Deal Name / code) for a Deal the Account_Code lookup does not list (wrong/blank
+  // Account_Code, or an already-Closed stage) -- see ZohoDealClient.SearchByNameAsync.
+  const [searchOpen, setSearchOpen] = useState(false);
   const [manualQuery, setManualQuery] = useState('');
   const [manualSearching, setManualSearching] = useState(false);
   const [manualResults, setManualResults] = useState<ZohoDeal[] | null>(null);
   const [manualError, setManualError] = useState<string | null>(null);
 
-  // true once the person picks a Deal themselves (dropdown, AI match, manual search) -- the
-  // automatic product-based pick (autoPickDeal) then stops overriding their choice.
-  const userPicked = useRef(false);
-  // "Change Deal" list open/closed, and the Zoho web address a Deal opens at (dealBase + id).
-  const [listOpen, setListOpen] = useState(false);
-  const [dealFilter, setDealFilter] = useState('');
-  // Deal list shown on the card itself (10 Nov 2026): while no Deal is chosen, or after "Change".
-  const [changing, setChanging] = useState(false);
-  // Deal detail popup: which Deal, and whether it was opened from the "Change Deal" list (Back returns there).
+  const [boardOpen, setBoardOpen] = useState(false);
   const [detailId, setDetailId] = useState<string | null>(null);
-  const [detailFromList, setDetailFromList] = useState(false); // the Deal ticked in the "Change Deal" popup, until "Use this Deal"
   const [dealBase, setDealBase] = useState<string | null>(null);
   useEffect(() => {
     getZohoWebLinks().then((r) => setDealBase(r.dealBase)).catch(() => setDealBase(null));
   }, []);
-  const pickByUser = (id: string) => {
-    userPicked.current = true;
-    onSelectId(id);
-  };
+  useEffect(() => {
+    onDealsChange?.(deals || []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deals]);
+
   // The Megachem Quote No. the PO refers to, if any, and that Quote's Deal (27 Oct 2026).
   const quoteRefs = docQuoteRefs(doc.header as Record<string, unknown>, doc.lines);
   const quoteRefsKey = quoteRefs.join(',');
@@ -3057,86 +2939,69 @@ function ZohoDealCard({
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [quoteRefsKey]);
-  const linesKey = doc.lines.map((l) => [l.extCode ?? '', l.materialCode ?? '', l.desc ?? '', l.qty, l.uom].join('|')).join(';');
+  const linesKey = doc.lines.map((l) => [l.extCode ?? '', l.materialCode ?? '', l.desc ?? '', l.qty, l.uom,
+    (l.extra as Record<string, unknown> | undefined)?.deliveryDate ?? ''].join('|')).join(';');
+  // Materials first (Megachem, 16 Nov 2026): no Deal search until every line has a mapped material.
+  const waiting = waitingFor.length > 0;
 
   useEffect(() => {
     setManualQuery('');
     setManualResults(null);
     setManualError(null);
-    if (!customerCode) {
-      setDeals(null);
-      onSelectId('');
-      return;
-    }
-    let cancelled = false;
-    // Drop the previous customer's Deal straight away (12 Oct 2026): while the new lookup runs --
-    // or if it fails -- nothing stays selected, so Send can't create the order on the old
-    // customer's Deal. The new list re-selects the same Deal if it belongs to this customer too.
-    setListOpen(false);
-    setChanging(false);
-    const keep = userPicked.current ? selectedId : '';
-    userPicked.current = false;
+    setSearchOpen(false);
+    setBoardOpen(false);
     setDeals(null);
-    onSelectId('');
+    if (!customerCode || waiting) return;
+    let cancelled = false;
     setLoading(true);
     setError(null);
     getZohoDealsByAccountCode(customerCode)
-      .then((r) => {
-        if (cancelled) return;
-        setDeals(r.deals);
-        // A Deal the person chose stays chosen; otherwise the system picks by products (autoPickDeal).
-        // No Deal at all for this customer: autoPickDeal returns "Open a new Deal" (11 Nov 2026).
-        if (keep && r.deals.some((d) => d.id === keep)) {
-          userPicked.current = true;
-          onSelectId(keep);
-        } else {
-          onSelectId(autoPickDeal(r.deals, doc.lines, doc.header.poNo, quoteRef?.dealId, customerCode));
-        }
-      })
-      .catch((e) => {
-        if (!cancelled) setError(e?.message || 'Zoho CRM lookup failed');
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [customerCode]);
-
-  // Re-check the automatic pick when the document's lines change (e.g. after Mapping fills in the
-  // material codes), as long as the person hasn't chosen a Deal themselves.
-  useEffect(() => {
-    if (!deals || userPicked.current) return;
-    onSelectId(autoPickDeal(deals, doc.lines, doc.header.poNo, quoteRef?.dealId, customerCode));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [deals, linesKey, doc.header.poNo, quoteRef?.dealId]);
+      .then((r) => { if (!cancelled) setDeals(r.deals); })
+      .catch((e) => { if (!cancelled) setError(e?.message || 'Zoho CRM lookup failed'); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [customerCode, waiting]);
 
   // The Deal of the Quote No. on the PO is not in the list (e.g. its Stage moved on after "Convert
-  // to Quote", so the by-account-code lookup filtered it out): fetch it, add it and select it --
-  // only for this customer's Deal, and not when that Quote is already Completed (11 Nov 2026).
+  // to Quote", so the by-account-code lookup filtered it out): fetch it and add it -- only for this
+  // customer's Deal, and not when that Quote is already Completed (11 Nov 2026).
   useEffect(() => {
     const dealId = quoteRef?.dealId;
-    if (!deals || !dealId || userPicked.current || deals.some((d) => d.id === dealId)) return;
+    if (!deals || !dealId || deals.some((d) => d.id === dealId)) return;
     if ((quoteRef?.stage || '').trim().toLowerCase() === 'completed') return;
     let cancelled = false;
     getZohoDealById(dealId)
       .then((d) => {
-        if (cancelled || userPicked.current || !d?.id) return;
+        if (cancelled || !d?.id) return;
         if (!customerCode || String(d.accountCode || '').trim().toLowerCase() !== customerCode.trim().toLowerCase()) return;
+        if (!isDraftDeal(d)) return; // only Draft/Qualification Deals are used (16 Nov 2026)
         setDeals((prev) => (prev && !prev.some((x) => x.id === d.id) ? [d, ...prev] : prev));
-        onSelectId(d.id);
       })
-      .catch(() => { /* not readable -- keep the normal pick */ });
+      .catch(() => { /* not readable -- keep the normal grouping */ });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [deals, quoteRef?.dealId, quoteRef?.stage, customerCode]);
 
-  const hint = (text: string) => <div className="hint" style={{ padding: '6px 0' }}>{text}</div>;
-  const deal = deals?.find((d) => d.id === selectedId);
-  const { ocrProviders } = useMeta();
-  const [aiOpen, setAiOpen] = useState(false);
+  // The system's grouping (autoAssignDeals) -- used until CS groups the items themselves, and again
+  // when a saved Deal is no longer on the list (e.g. the customer changed).
+  const auto = useMemo(
+    () => (deals ? autoAssignDeals(deals, doc.lines, {
+      poNo: doc.header.poNo, quoteDealId: quoteRef?.dealId, customerCode, headerDate: doc.header.deliveryDate,
+    }) : []),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [deals, linesKey, doc.header.poNo, doc.header.deliveryDate, quoteRef?.dealId, customerCode],
+  );
+  const savedValid = !!deals && doc.lines.length > 0 && assignment.length === doc.lines.length
+    && assignment.every((k) => !!k && isKnownDealKey(k, deals));
+  const useSaved = savedValid && (byUser || locked);
+  const shown = useSaved ? assignment : auto;
+  const assignKey = assignment.join(',');
+  const autoKey = auto.join(',');
+  useEffect(() => {
+    if (!deals || locked || useSaved) return;
+    if (autoKey !== assignKey || byUser) onAssign(auto, false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deals, autoKey, assignKey, byUser, locked, useSaved]);
 
   const runManualDealSearch = () => {
     const q = manualQuery.trim();
@@ -3148,27 +3013,20 @@ function ZohoDealCard({
       .catch((e) => setManualError(e?.message || 'Zoho CRM search failed'))
       .finally(() => setManualSearching(false));
   };
-
-  // Picking a manual-search result adds it into `deals` (so the usual comparison view below just
-  // renders it like any auto-found Deal) and selects it -- even when its Account_Code doesn't
-  // match this document's customer, or its Stage is Closed, since the person is choosing it on
-  // purpose after seeing why the automatic lookup missed it.
-  const selectPickedDeal = (d: ZohoDeal) => {
-    userPicked.current = true;
+  // A Deal picked from the search joins the list (even another Account's or a Closed one -- CS chose
+  // it on purpose) and the board opens so CS can move the right items into it.
+  const addPickedDeal = (d: ZohoDeal) => {
     setDeals((prev) => [d, ...(prev || []).filter((x) => x.id !== d.id)]);
-    onSelectId(d.id);
     setManualResults(null);
     setManualQuery('');
+    setSearchOpen(false);
+    setBoardOpen(true);
   };
 
-  useEffect(() => {
-    onDealResolved?.(deal ?? null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [deal]);
-
-  // "Ask AI to match" for the Deal: give the AI the document's own header (Customer PO, delivery
-  // date) plus a one-line summary of its materials, and let it judge which open Deal this document
-  // belongs to. The person still confirms by clicking "Use this record" -- the AI only advises.
+  const { ocrProviders } = useMeta();
+  const [aiOpen, setAiOpen] = useState(false);
+  // "Ask AI to match": the AI judges which open Deal the whole document belongs to; using its pick
+  // puts every item on that Deal (CS can still regroup them on the board).
   const dealDocFields: CompareField[] = [
     { label: 'Customer PO No.', value: doc.header.poNo },
     { label: 'Delivery Date', value: doc.header.deliveryDate },
@@ -3187,128 +3045,137 @@ function ZohoDealCard({
     raw: d,
   }));
 
-  // Deals in the order they are offered (10 Nov 2026): code + quantity match first, then code match,
-  // then the rest; newest first within each. Up to INLINE_DEALS on the card, the rest under "See more".
-  const INLINE_DEALS = 5;
-  const created = (d: ZohoDeal) => Date.parse(String(d.createdTime || '')) || 0;
-  const rankedDeals = [...(deals || [])].sort((a, b) =>
-    Number(dealProductMatch(b, doc.lines).ok) - Number(dealProductMatch(a, doc.lines).ok)
-    || Number(dealProductMatch(b, doc.lines, false).ok) - Number(dealProductMatch(a, doc.lines, false).ok)
-    || dealProductMatch(b, doc.lines, false).matched - dealProductMatch(a, doc.lines, false).matched
-    || created(b) - created(a));
-  const showList = changing || !selectedId;
-  const choose = (id: string) => {
-    pickByUser(id);
-    setChanging(false);
-    setListOpen(false);
-  };
+  const hint = (text: string) => <div className="hint" style={{ padding: '8px 0' }}>{text}</div>;
+  const keys = distinctKeys(shown);
+  const partLines = (key: string) => doc.lines.filter((_, i) => shown[i] === key);
+  const newKeys = keys.filter(isNewDealKey);
+  const single = keys.length === 1 ? dealOfKey(keys[0], deals || []) : null;
 
-  // Deal list (10 Nov 2026, simplified): one card per Deal; click a card to use that Deal. The chosen
-  // card has a green border and a filled radio. Details / Open in Zoho sit on the right of each card.
-  const dealRowStyle = (on: boolean, dashed = false): React.CSSProperties => ({
-    display: 'flex', alignItems: 'flex-start', gap: 12, padding: '12px 14px', cursor: 'pointer', textAlign: 'left',
-    border: `1px ${dashed && !on ? 'dashed' : 'solid'} ${on ? 'var(--brand)' : 'var(--line)'}`, borderRadius: 12,
-    background: on ? 'var(--brand-soft)' : 'transparent',
-  });
-  const radio = (on: boolean) => (
-    <i className={on ? 'fa-solid fa-circle-dot' : 'fa-regular fa-circle'}
-      style={{ color: on ? 'var(--brand)' : 'var(--g500)', marginTop: 3, fontSize: 16 }} />
-  );
-  const onKeyPick = (id: string) => (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); choose(id); }
-  };
-  const dealRow = (d: ZohoDeal, fromModal: boolean) => {
-    const on = d.id === selectedId;
-    return (
-      <div key={d.id} role="radio" aria-checked={on} tabIndex={0} style={dealRowStyle(on)}
-        onClick={() => choose(d.id)} onKeyDown={onKeyPick(d.id)}>
-        {radio(on)}
-        <div style={{ flex: '1 1 320px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 }}>
-            <b style={{ overflowWrap: 'anywhere' }}>{d.dealName}</b>
-            <span className="badge b-idle">{d.stage}</span>
-            <span className={'badge ' + (d.isWcd ? 'b-ok' : 'b-idle')}>{d.isWcd ? 'Forecast (WCD)' : 'No forecast'}</span>
-          </div>
-          <DealMatchChip deal={d} lines={doc.lines} />
-          <DealItemsList deal={d} lines={doc.lines} />
-          <span className="hint" style={{ fontSize: 12 }}>
-            Customer Ref: {d.customerRef || '—'}{d.createdTime ? ` · Created ${formatDate(d.createdTime)}` : ''}
-          </span>
-        </div>
-        <span style={{ display: 'flex', gap: 8, alignItems: 'center' }} onClick={(e) => e.stopPropagation()}>
-          <button type="button" className="btn sm" title="Show everything on this Deal"
-            onClick={() => { if (fromModal) setListOpen(false); setDetailFromList(fromModal); setDetailId(d.id); }}>
-            <i className="fa-solid fa-circle-info" /> Details
-          </button>
-          {dealBase && (
-            <a className="btn sm" href={dealBase + encodeURIComponent(d.id)} target="_blank" rel="noopener noreferrer"
-              title="Open this Deal in Zoho CRM" aria-label="Open this Deal in Zoho CRM">
-              <i className="fa-solid fa-arrow-up-right-from-square" />
-            </a>
-          )}
-        </span>
+  const searchBox = (
+    <div style={{ marginTop: 8 }}>
+      <div className="hint">
+        A Deal won't show here if its Account wasn't linked (so its Account Code doesn't match this customer), or if
+        its Stage is already Closed. Search by Deal name, customer code or description:
       </div>
-    );
-  };
-  const newDealRow = () => {
-    const on = selectedId === NEW_DEAL_ID;
-    return (
-      <div role="radio" aria-checked={on} tabIndex={0} style={dealRowStyle(on, true)}
-        onClick={() => choose(NEW_DEAL_ID)} onKeyDown={onKeyPick(NEW_DEAL_ID)}>
-        {radio(on)}
-        <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <b><i className="fa-solid fa-plus" /> Open a new Deal</b>
-          <span className="hint">None of these fit — no forecast (Forecast Status No), Stage “Sales Order Created”</span>
-        </div>
-      </div>
-    );
-  };
-
-  // The Deal list on the card: up to INLINE_DEALS Deals + "Open a new Deal"; "Show all" for the rest.
-  const inlineList = (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-        <b>Choose the Deal for this Sales Order</b>
-        <span className="hint">— click a Deal to use it ({rankedDeals.length} open in Zoho)</span>
-        <span style={{ flex: 1 }} />
-        {changing && !!selectedId && (
-          <button type="button" className="btn sm" onClick={() => setChanging(false)}>Keep current Deal</button>
-        )}
-      </div>
-      {!selectedId && (
-        <div style={{ color: '#b91c1c', fontWeight: 700 }}>
-          ไม่พบ Deal ที่รหัสสินค้าตรงกับ OCR/CS — ตรวจสอบรหัสใน Deal แล้วเลือก Deal เอง
-        </div>
-      )}
-      {rankedDeals.slice(0, INLINE_DEALS).map((d) => dealRow(d, false))}
-      {newDealRow()}
-      {rankedDeals.length > INLINE_DEALS && (
-        <button type="button" className="btn sm" style={{ alignSelf: 'flex-start' }}
-          onClick={() => { setDealFilter(''); setListOpen(true); }}>
-          Show all {rankedDeals.length} Deals…
+      <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <input type="search" className="txt" style={{ minWidth: 240 }} value={manualQuery}
+          onChange={(e) => setManualQuery(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') runManualDealSearch(); }}
+          placeholder="Deal name, customer code or description" aria-label="Search Deal by name in Zoho CRM" />
+        <button className="btn sm" onClick={runManualDealSearch} disabled={!manualQuery.trim() || manualSearching}>
+          <i className="fa-solid fa-magnifying-glass" /> {manualSearching ? 'Searching…' : 'Search'}
         </button>
+      </div>
+      {manualError && <div className="hint" style={{ padding: '8px 0' }}>Zoho CRM search is temporarily unavailable.</div>}
+      {manualResults && manualResults.length === 0 && hint('No Deal matches that name in Zoho CRM')}
+      {manualResults && manualResults.length > 0 && (
+        <table className="cmp" style={{ marginTop: 8 }}>
+          <tbody>
+            {manualResults.map((d) => (
+              <tr key={d.id}>
+                <td>
+                  <b>{d.dealName}</b> <span className="badge b-idle">{d.stage}</span>
+                  {d.accountCode && d.accountCode !== customerCode && (
+                    <div className="hint">Account Code in Zoho: {d.accountCode} (this document's customer code: {customerCode})</div>
+                  )}
+                </td>
+                <td>
+                  {isDraftDeal(d)
+                    ? <button className="btn sm primary" onClick={() => addPickedDeal(d)} disabled={locked}>Add to this PO</button>
+                    : <span className="hint">Only Draft/Qualification</span>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       )}
     </div>
   );
 
+  // One box per Deal of the document: which Deal, its status, and the PO items on it.
+  const partBox = (key: string, n: number) => {
+    const deal = dealOfKey(key, deals || []);
+    const lines = partLines(key);
+    return (
+      <div key={key} style={{ ...dealSentenceStyle, alignItems: 'flex-start', margin: '4px 0 8px',
+        background: deal ? 'var(--brand-soft)' : 'transparent', border: deal ? undefined : '1px dashed var(--line)' }}>
+        <i className={'fa-solid ' + (deal ? 'fa-circle-check' : 'fa-circle-plus')} style={{ color: 'var(--brand)', fontSize: 18, marginTop: 2 }} />
+        <div style={{ flex: '1 1 320px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+            {keys.length > 1 && <span className="hint">Deal {n} of {keys.length}</span>}
+            {deal ? (
+              <>
+                <b style={{ overflowWrap: 'anywhere' }}>{deal.dealName}</b>
+                {(deal.dealNumber || deal.deliveryDate) && (
+                  <span className="hint" style={{ fontWeight: 600 }}>
+                    {[deal.dealNumber, deal.deliveryDate && `Delivery ${formatDate(deal.deliveryDate)}`].filter(Boolean).join(' · ')}
+                  </span>
+                )}
+                <span className="badge b-idle">{deal.stage}</span>
+                <span className={'badge ' + (deal.isWcd ? 'b-ok' : 'b-idle')}>{deal.isWcd ? 'Forecast (WCD)' : 'No forecast'}</span>
+                {quoteRef?.dealId === deal.id && <span className="badge b-ok">PO refers to Quote {quoteRef.quoteNo}</span>}
+              </>
+            ) : (
+              <>
+                <b>{dealKeyLabel(key, deals || [], keys)} — opened on Send</b>
+                <span className="badge b-idle">Forecast: choose on Send</span>
+              </>
+            )}
+          </div>
+          {deal ? (
+            <>
+              <DealMatchChip deal={deal} lines={lines} />
+              <DealItemsList deal={deal} lines={lines} />
+            </>
+          ) : (
+            <span style={{ color: '#b91c1c', fontWeight: 700 }}>
+              No open Deal has these materials — a new Deal will be opened (choose Forecast Yes/No in Step 3). Check the material codes before sending.
+            </span>
+          )}
+          <span className="hint" style={{ fontSize: 14 }}>
+            PO item{lines.length === 1 ? '' : 's'}: {lines.map((l) => {
+              const date = String((l.extra as Record<string, unknown> | undefined)?.deliveryDate ?? '').trim() || String(doc.header.deliveryDate || '').trim();
+              return `${l.itemNo} · ${[l.materialCode || l.extCode, l.desc].filter(Boolean).join(' — ') || '(no description)'}${date ? ` · Delivery ${formatDate(date)}` : ''}`;
+            }).join(' | ')}
+          </span>
+        </div>
+        {deal && (
+          <span style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <button type="button" className="btn sm" onClick={() => setDetailId(deal.id)}>
+              <i className="fa-solid fa-circle-info" /> Details
+            </button>
+            {dealBase && (
+              <a className="btn sm" href={dealBase + encodeURIComponent(deal.id)} target="_blank" rel="noopener noreferrer"
+                title="Open this Deal in Zoho CRM" aria-label="Open this Deal in Zoho CRM">
+                <i className="fa-solid fa-arrow-up-right-from-square" />
+              </a>
+            )}
+          </span>
+        )}
+      </div>
+    );
+  };
+
   return (
     <div className="cmp-card">
       <div className="cmp-head">
-        <span className="cmp-no">{no}</span>
+        {no != null && <span className="cmp-no">{no}</span>}
         <b>Deal (Zoho)</b>
         {loading ? (
           <span className="badge b-idle">Reading…</span>
         ) : !customerCode ? (
           <span className="badge b-idle">Waiting for customer</span>
-        ) : selectedId === NEW_DEAL_ID ? (
-          <span className="badge b-idle"><i className="fa-solid fa-plus" /> New Deal · No forecast</span>
-        ) : deal ? (
+        ) : keys.length > 1 ? (
+          <span className="badge b-ok"><i className="fa-solid fa-layer-group" /> {keys.length} Deals{newKeys.length ? ` (${newKeys.length} new)` : ''}</span>
+        ) : single ? (
           <span className="badge b-ok"><i className="fa-solid fa-check" /> Deal selected</span>
+        ) : keys.length === 1 ? (
+          <span className="badge b-idle"><i className="fa-solid fa-plus" /> New Deal</span>
         ) : null}
-        <span className="hint">Next step: pick the Deal this document's Sales Order belongs to</span>
+        <span className="hint">Next step: check which Deal each item belongs to</span>
         <div className="sp" />
-        {deals && deals.length > 1 && (
-          <button className="btn sm" style={{ marginLeft: 6 }} onClick={() => setAiOpen(true)}>
+        {deals && deals.length > 1 && !locked && (
+          <button className="btn sm" style={{ marginLeft: 8 }} onClick={() => setAiOpen(true)}>
             <i className="fa-solid fa-wand-magic-sparkles" /> Ask AI to match
           </button>
         )}
@@ -3316,169 +3183,74 @@ function ZohoDealCard({
       <div className="cmp-body" style={{ display: 'block' }}>
         {!customerCode
           ? hint('A customer must be specified first')
+          : waiting
+          ? hint(`Map the material of item ${waitingFor.join(', ')} in Step 2 first — the Deals are searched after that.`)
           : loading
           ? hint('Reading open Deals from Zoho CRM…')
           : error
           ? hint('Could not read Zoho CRM: ' + error)
-          : !deals || deals.length === 0
-          ? (
-              <>
-                {hint('ไม่พบ Deal ใน Stage Draft/Qualification, Meeting/Memo หรือ Sample & Result สำหรับ Customer Code นี้ กรุณาตรวจสอบข้อมูลก่อนเลือกสร้าง Deal ใหม่')}
-                <div style={{ marginTop: 4 }}>
-                  <div className="hint">
-                    Not seeing it? A Deal you added won't show here if its Account wasn't linked
-                    (so its Account Code doesn't match this customer), or if its Stage is already
-                    Closed. Search by Deal name, customer code or description to check:
-                  </div>
-                  <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                    <input
-                      type="search"
-                      className="txt"
-                      style={{ minWidth: 240 }}
-                      value={manualQuery}
-                      onChange={(e) => setManualQuery(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === 'Enter') runManualDealSearch(); }}
-                      placeholder="Deal name, customer code or description"
-                      aria-label="Search Deal by name in Zoho CRM"
-                    />
-                    <button className="btn sm" onClick={runManualDealSearch} disabled={!manualQuery.trim() || manualSearching}>
-                      <i className="fa-solid fa-magnifying-glass" /> {manualSearching ? 'Searching…' : 'Search'}
-                    </button>
-                  </div>
-                  {manualError && <div className="hint" style={{ padding: '6px 0' }}>Zoho CRM search is temporarily unavailable.</div>}
-                  {manualResults && manualResults.length === 0 && hint('No Deal matches that name in Zoho CRM')}
-                  {manualResults && manualResults.length > 0 && (
-                    <table className="cmp" style={{ marginTop: 6 }}>
-                      <tbody>
-                        {manualResults.map((d) => (
-                          <tr key={d.id}>
-                            <td>
-                              <b>{d.dealName}</b>{' '}
-                              <span className="badge b-idle">{d.stage}</span>
-                              {d.accountCode && d.accountCode !== customerCode && (
-                                <div className="hint">
-                                  Account Code in Zoho: {d.accountCode} (this document's customer code: {customerCode})
-                                </div>
-                              )}
-                            </td>
-                            <td>
-                              <button className="btn sm primary" onClick={() => selectPickedDeal(d)}>
-                                Use this Deal
-                              </button>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  )}
-                </div>
-                {/* No Deal for this customer: CS may still open a new Deal (not WCD) after checking. */}
-                <div style={{ marginTop: 12 }}>{newDealRow()}</div>
-              </>
-            )
-          : showList
-          ? inlineList
+          : !deals
+          ? null
           : (
             <>
-              {/* Deal in one line (27 Oct 2026, Megachem's option C): which Deal this Sales Order uses,
-                  a link to it in Zoho, and "Change…" -- the other Deals are picked in a popup. */}
-              <div style={dealSentenceStyle}>
-                <i className={'fa-solid ' + (deal ? 'fa-circle-check' : 'fa-circle-plus')} style={{ color: 'var(--brand)', fontSize: 18 }} />
-                <div style={{ flex: '1 1 320px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 4 }}>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
-                    {deal ? (
-                      <>
-                        <span>Using Deal</span>
-                        <b style={{ overflowWrap: 'anywhere' }}>{deal.dealName}</b>
-                        <span className={'badge ' + (deal.isWcd ? 'b-ok' : 'b-idle')}>{deal.isWcd ? 'Forecast (WCD)' : 'No forecast'}</span>
-                        <MatchBadge deal={deal} lines={doc.lines} />
-                      </>
-                    ) : selectedId === NEW_DEAL_ID ? (
-                      <>
-                        <b>A new Deal will be opened</b>
-                        <span className="badge b-idle">No forecast</span>
-                      </>
-                    ) : (
-                      <b style={{ color: '#b91c1c' }}>ไม่พบ Deal ที่รหัสสินค้าตรงกับ OCR/CS — ตรวจสอบรหัสใน Deal</b>
+              {deals.length === 0 && hint('No Draft/Qualification Deal for this Customer Code — every item will go to a new Deal. Check before sending.')}
+              {keys.map((k, i) => partBox(k, i + 1))}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginTop: 4 }}>
+                <span className="hint">
+                  {useSaved && byUser
+                    ? 'Grouped by you'
+                    : keys.length > 1
+                    ? 'Grouped automatically per item — Customer Code + Material Code (+ Qty), the Quote No. on the PO first'
+                    : single
+                    ? dealProductMatch(single, doc.lines).ok
+                      ? 'Picked automatically — Customer Code, Material Code and Quantity match'
+                      : 'Picked automatically by Customer Code and Material Code — please review before sending'
+                    : 'None of the open Deals has this document\'s products'}
+                </span>
+                <span style={{ flex: 1 }} />
+                {!locked && (
+                  <>
+                    {byUser && (
+                      <button type="button" className="btn sm" onClick={() => onAssign(auto, false)}
+                        title="Drop your grouping and let the system group the items again">
+                        Use automatic grouping
+                      </button>
                     )}
-                  </div>
-                  <span className="hint">
-                    {userPicked.current
-                      ? 'Chosen by you'
-                      : deal
-                      ? quoteRef?.dealId === deal.id
-                        ? `Picked automatically — the PO refers to Quote ${quoteRef.quoteNo}, which is on this Deal`
-                        : dealProductMatch(deal, doc.lines).ok
-                          ? 'Picked automatically — Customer Code, Material Code and Quantity match'
-                          : 'Picked automatically by Customer Code and Material Code — Quantity is different (สินค้าไม่ครบ), please review before sending'
-                      : selectedId === NEW_DEAL_ID
-                      ? 'None of the open Deals has this document\'s products — Forecast Status No, Stage “Sales Order Created”'
-                      : ''}
-                  </span>
-                </div>
-                {deal && (
-                  <button type="button" className="btn sm" onClick={() => { setDetailFromList(false); setDetailId(deal.id); }}>
-                    <i className="fa-solid fa-circle-info" /> Details
-                  </button>
+                    <button type="button" className="btn sm" onClick={() => setSearchOpen((v) => !v)}>
+                      <i className="fa-solid fa-magnifying-glass" /> Find another Deal…
+                    </button>
+                    <button type="button" className="btn sm primary" onClick={() => setBoardOpen(true)} disabled={!doc.lines.length}>
+                      <i className="fa-solid fa-layer-group" /> Group items into Deals… <span className="hint">({deals.length} open)</span>
+                    </button>
+                  </>
                 )}
-                <button type="button" className="btn sm" onClick={() => setChanging(true)}>
-                  Change… <span className="hint">({deals.length} open)</span>
-                </button>
               </div>
-              {deal && (
-            <>
-              <RowMapTable
-                docLabel="Document"
-                srcLabel={deal.dealName}
-                rows={[
-                  {
-                    label: 'Customer PO No.',
-                    docValue: doc.header.poNo,
-                    srcValue: deal.customerRef,
-                    match: strEq(doc.header.poNo, deal.customerRef),
-                  },
-                  {
-                    label: 'Delivery Date',
-                    docValue: doc.header.deliveryDate,
-                    srcValue: deal.deliveryDate,
-                    match: strEq(doc.header.deliveryDate, deal.deliveryDate),
-                  },
-                ]}
-              />
-            </>
-            )}
+              {(searchOpen || deals.length === 0) && !locked && searchBox}
+              {single && (
+                <RowMapTable
+                  docLabel="Document"
+                  srcLabel={single.dealName}
+                  rows={[
+                    { label: 'Customer PO No.', docValue: doc.header.poNo, srcValue: single.customerRef, match: strEq(doc.header.poNo, single.customerRef) },
+                    { label: 'Delivery Date', docValue: doc.header.deliveryDate, srcValue: single.deliveryDate, match: strEq(doc.header.deliveryDate, single.deliveryDate) },
+                  ]}
+                />
+              )}
             </>
           )}
       </div>
-      <Modal open={listOpen} onClose={() => setListOpen(false)} wide>
-        <ModalHeader title={`All Deals (${rankedDeals.length})`} onClose={() => setListOpen(false)} />
-        <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          <input type="search" className="input" aria-label="Search Deals by code, name or description"
-            placeholder="Deal / Material code, name or description…"
-            value={dealFilter} onChange={(e) => setDealFilter(e.target.value)} />
-          <span className="hint">Click a Deal to use it.</span>
-          <div role="radiogroup" aria-label="Deal for this Sales Order" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {rankedDeals.map((d) => {
-              const q = dealFilter.trim().toLocaleLowerCase();
-              const values = [d.dealName, d.accountCode, ...d.items.flatMap((it) =>
-                [it.materialCode, it.materialName, it.materialDescription])];
-              const score = !q ? 1 : d.items.some((it) => it.materialCode?.trim().toLocaleLowerCase() === q) ? 1000
-                : values.some((v) => v?.toLocaleLowerCase().includes(q)) ? 100 : 0;
-              return { d, score };
-            }).filter(({ score }) => score > 0).sort((a, b) => b.score - a.score).map(({ d }) => dealRow(d, true))}
-            {newDealRow()}
-          </div>
-          <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-            <button type="button" className="btn" onClick={() => setListOpen(false)}>Close</button>
-          </div>
-        </div>
-      </Modal>
-      <DealDetailModal
-        dealId={detailId}
-        dealBase={dealBase}
-        onClose={() => setDetailId(null)}
-        onBack={detailFromList ? () => { setDetailId(null); setListOpen(true); } : undefined}
-      />
+      {boardOpen && deals && (
+        <DealGroupBoard
+          lines={doc.lines}
+          deals={deals}
+          assignment={shown}
+          headerDate={doc.header.deliveryDate}
+          onShowDeal={(id) => setDetailId(id)}
+          onClose={() => setBoardOpen(false)}
+          onSave={(a) => { onAssign(a, true); setBoardOpen(false); }}
+        />
+      )}
+      <DealDetailModal dealId={detailId} dealBase={dealBase} onClose={() => setDetailId(null)} />
       <CompareModal<ZohoDeal>
         open={aiOpen}
         onClose={() => setAiOpen(false)}
@@ -3487,7 +3259,7 @@ function ZohoDealCard({
         candidates={dealCandidates}
         providers={ocrProviders || []}
         onUse={(d) => {
-          pickByUser(d.id);
+          onAssign(doc.lines.map(() => d.id), true);
           setAiOpen(false);
         }}
       />
@@ -3536,8 +3308,8 @@ function CustomerCandidatesPanel({
     return { code, rows, docNames, sapName, taxId, shipTos };
   });
   return (
-    <div style={{ padding: '6px 0' }}>
-      <div className="hint" style={{ marginBottom: 6 }}>
+    <div style={{ padding: '8px 0' }}>
+      <div className="hint" style={{ marginBottom: 8 }}>
         {suggestOnly ? (
           <>
             <i className="fa-solid fa-lightbulb" /> Other code{codes.length > 1 ? 's' : ''} in Master Mapping with the
@@ -3717,7 +3489,7 @@ function SalesEmployeePicker({
             {!suggestionMatches && !disabled && (
               <>
                 {' '}
-                <button className="btn sm" style={{ marginLeft: 6 }} onClick={() => onChange(suggestion.personId)}>
+                <button className="btn sm" style={{ marginLeft: 8 }} onClick={() => onChange(suggestion.personId)}>
                   Use this
                 </button>
               </>
@@ -3793,28 +3565,28 @@ interface Props {
   /** GLC/SAP only: creates the local Ship-to master row from a chosen SAP
    *  A_CustSalesPartnerFunc partner-function link and applies it — see SapShipToPanel. */
   onUseSapShipTo?: (link: SapPartnerFunctionLink) => void;
-  /** MGT/Zoho only: which Deal (by Zoho record id) is currently picked on the Deal card --
-   *  lifted up to DocumentPage so its "Send to Zoho" confirmation knows which Deal to link the
-   *  new Sales Order to. */
-  selectedDealId?: string;
-  onSelectDeal?: (dealId: string) => void;
+
   /** MGT/Zoho only: result of GET .../sales-order/preview for the selected Deal, fetched by
    *  DocumentPage as soon as a Deal is picked (independent of opening the Send-to-Zoho confirm
    *  modal). Drives the "Material — Row N" cards below: for an MGT document, material matching
    *  happens against this Deal's own Ordered Items in Zoho, not the local SAP-sourced Material
    *  Master, so the card shows this instead of the usual r.sap SAP comparison. */
-  /** MGT/Zoho only: the full resolved Deal (with its Deal Items), reported up so DocumentPage can
-   *  drive the inline Sales Order editor (which replaced the per-line "Material — Row N" cards). */
-  onDealResolved?: (deal: ZohoDeal | null) => void;
+
   /** MGT/Zoho only: the document's own "DETAIL — Line Items" table, rendered inside this card
    *  (instead of as a separate card) so all of the document-vs-Zoho review sits in one place. */
   detailContent?: React.ReactNode;
-  /** MGT/Zoho only: the matched Deal's Ordered Items, shown as the material candidates in the
-   *  per-line Material cards (there is no global Zoho material search). */
-  dealItems?: ZohoDealItem[];
-  /** MGT/Zoho only: the selected Deal is WCD (Forecast Status Yes) -- then lines may only be its own
-   *  items; otherwise (no Deal / not WCD) the Material cards can also search all Zoho Materials. */
-  dealIsWcd?: boolean;
+  /** MGT/Zoho only: the Deal key of every line (line.extra.zohoDeal) -- one PO may hold items of
+   *  several Deals (16 Nov 2026) -- and whether CS grouped them themselves. */
+  dealAssignment?: string[];
+  dealsByUser?: boolean;
+  /** MGT/Zoho only: save the Deal of every line (DocumentPage stores it with a silent re-map). */
+  onAssignDeals?: (assignment: string[], byUser: boolean) => void;
+  /** MGT/Zoho only: the open Deals the Deal card read from Zoho. */
+  onDealsChange?: (deals: ZohoDeal[]) => void;
+  /** MGT/Zoho only: the Deal of line i (null = a new Deal / none yet). Its Ordered Items are the
+   *  material candidates of that line's Material card; a WCD Deal (Forecast Status Yes) only takes its
+   *  own items, otherwise the card can also search all Zoho Materials. */
+  lineDealOf?: (i: number) => ZohoDeal | null;
   /** MGT/Zoho only: pick a Deal Ordered Item for line i and save it as a CustomerMaterial mapping. */
   onUseZohoMaterial?: (i: number, item: ZohoDealItem) => void;
   /** MGT/Zoho only: use a Deal item / Zoho Material on line i for THIS document only (the line was
@@ -3853,12 +3625,12 @@ export default function MappingCards({
   onClearMatch,
   onUseZohoShipTo,
   onUseSapShipTo,
-  selectedDealId,
-  onSelectDeal,
-  onDealResolved,
+  dealAssignment,
+  dealsByUser,
+  onAssignDeals,
+  onDealsChange,
   detailContent,
-  dealItems,
-  dealIsWcd,
+  lineDealOf,
   onUseZohoMaterial,
   onPickZohoMaterialForDoc,
 }: Props) {
@@ -3913,7 +3685,8 @@ export default function MappingCards({
         .map((c) => {
           const v = String(c.ComcompyCodeSAP ?? '').trim();
           const displayName = String(c.CompanyName ?? c.CompanyNameSAP ?? '').trim();
-          const searchable = [displayName, c.CompanyNameSAP, c.TaxId, c.Branch, v]
+          // Searchable by code too (16 Nov 2026): the SAP / Zoho code and the code on the document.
+          const searchable = [displayName, c.CompanyNameSAP, c.TaxId, c.Branch, v, c.CustomerCode]
             .map((x) => String(x ?? '').trim()).filter(Boolean).join(' ');
           return { v, name: searchable, t: displayName ? `${v} — ${displayName}` : v };
         })
@@ -3930,7 +3703,7 @@ export default function MappingCards({
         .map((s) => {
           const v = String(s.SapShipToCode ?? '').trim();
           const displayName = String(s.ShipToName ?? '').trim();
-          const searchable = [displayName, s.Address, s.City, s.PostCode, s.CustomerCode, v]
+          const searchable = [displayName, s.Address, s.City, s.PostCode, s.CustomerCode, v, s.ShipToCode]
             .map((x) => String(x ?? '').trim()).filter(Boolean).join(' ');
           return { v, name: searchable, t: displayName ? `${v} — ${displayName}` : v };
         })
@@ -3952,7 +3725,7 @@ export default function MappingCards({
 
   const addBtn = (label: string, fn: () => void) =>
     posted ? null : (
-      <button className="btn sm" style={{ marginLeft: 6 }} onClick={fn}>
+      <button className="btn sm" style={{ marginLeft: 8 }} onClick={fn}>
         + {label}
       </button>
     );
@@ -4014,7 +3787,7 @@ export default function MappingCards({
             {!posted && (
               <button
                 className={'btn sm' + (vendorSapOpen ? ' primary' : '')}
-                style={{ marginLeft: 6 }}
+                style={{ marginLeft: 8 }}
                 onClick={() => setVendorSapOpen((v) => !v)}
                 title="Look this supplier up in SAP and add it to the vendor master"
               >
@@ -4058,7 +3831,7 @@ export default function MappingCards({
             {!posted && (
               <button
                 className={'btn sm' + (customerSapOpen ? ' primary' : '')}
-                style={{ marginLeft: 6 }}
+                style={{ marginLeft: 8 }}
                 onClick={() => setCustomerSapOpen((v) => !v)}
                 title={isMgt ? 'Search for a new account in Zoho CRM' : 'Search for a new customer in SAP'}
               >
@@ -4164,7 +3937,7 @@ export default function MappingCards({
               (c.code ? (
                 addBtn('Add New Ship-to', onQuickAddShipTo)
               ) : (
-                <span className="hint" style={{ marginLeft: 6 }}>
+                <span className="hint" style={{ marginLeft: 8 }}>
                   A customer must be specified first
                 </span>
               ))}
@@ -4175,7 +3948,7 @@ export default function MappingCards({
             {!posted && c.code && (isMgt ? onUseZohoShipTo : onUseSapShipTo) && (
               <button
                 className={'btn sm' + (shipToSapOpen ? ' primary' : '')}
-                style={{ marginLeft: 6 }}
+                style={{ marginLeft: 8 }}
                 onClick={() => setShipToSapOpen((v) => !v)}
                 title={isMgt ? 'Search for a new delivery address in Zoho CRM' : 'Search for a new delivery address in SAP'}
               >
@@ -4263,23 +4036,8 @@ export default function MappingCards({
         )}
       </CmpCard>,
     );
-    // Deal comparison is now its own top-level card (see ZohoDealCard) -- promoted out of this
-    // sub-section so the person can line up Deal Items against the document's own lines field by
-    // field, instead of reading a flat, unrelated list tucked inside the Customer record.
-    if (isMgt && c.code) {
-      n++;
-      headerCards.push(
-        <ZohoDealCard
-          key="deal"
-          no={n}
-          customerCode={c.code}
-          doc={doc}
-          selectedId={selectedDealId || ''}
-          onSelectId={onSelectDeal || (() => {})}
-          onDealResolved={onDealResolved}
-        />,
-      );
-    }
+    // MGT: the Deal card comes after the Item cards (see dealCard below), 16 Nov 2026 -- materials are
+    // mapped first, then the Deals are searched.
   }
 
   const nMat = ++n;
@@ -4288,6 +4046,12 @@ export default function MappingCards({
   // CustomerMaterial mapping — the same persistent mapping the SAP path produces. The SAP-only Unit
   // Conversion sub-section is hidden for MGT (an MGT Sales Order goes to Zoho, not SAP).
   const matCards = doc.lines.map((l, i) => {
+    // MGT: this line's own Deal (one PO may hold items of several Deals, 16 Nov 2026).
+    const lineDeal = isMgt ? lineDealOf?.(i) ?? null : null;
+    const dealItems = lineDeal?.items;
+    // Step 2 never limits a line to its Deal's items: Deals are chosen in Step 3, after the materials
+    // are mapped (16 Nov 2026), so the Zoho Materials search always stays open here.
+    const dealIsWcd = false;
     const r = map.lines[i];
     // Withholding tax / VAT / customs-duty rows are taxes, not items — they are recorded in the
     // Tax and Withholding Tax tabs and have no material to match. Offering a material search for
@@ -4364,7 +4128,7 @@ export default function MappingCards({
             <div className="cmp-arrow">→</div>
             <div className="cmp-col sap">
               <div className="cmp-label"><i className="fa-solid fa-building-columns" /> Data from SAP</div>
-              <div style={{ padding: '6px 0' }}>
+              <div style={{ padding: '8px 0' }}>
                 <b>Freight</b> {num(amt).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}{' '}
                 {String(doc.header.currency || 'THB')}
                 <div className="hint">
@@ -4477,7 +4241,7 @@ export default function MappingCards({
             )}
             {r.status === 'fail' && addBtn('Add New Item', () => onQuickAddMaterial(i))}
             {!isMgt && !posted && onSetLineCharge && r.status === 'fail' && (
-              <button className="btn sm" style={{ marginLeft: 6 }} onClick={() => onSetLineCharge(i, 'freight')}
+              <button className="btn sm" style={{ marginLeft: 8 }} onClick={() => onSetLineCharge(i, 'freight')}
                 title="Not goods: send this amount as the Freight condition on the Sales Order">
                 <i className="fa-solid fa-truck" /> Freight charge
               </button>
@@ -4485,7 +4249,7 @@ export default function MappingCards({
             {!posted && (
               <button
                 className={'btn sm' + (matSapOpen[i] ? ' primary' : '')}
-                style={{ marginLeft: 6 }}
+                style={{ marginLeft: 8 }}
                 onClick={() => setMatSapOpen((prev) => ({ ...prev, [i]: !prev[i] }))}
                 title={isMgt ? 'Search for a new item in Zoho (Deal)' : 'Search for a new item in SAP'}
               >
@@ -4599,6 +4363,27 @@ export default function MappingCards({
     );
   });
 
+
+  // MGT Deal card, after the Item cards (16 Nov 2026): the Deal search waits until every line has a
+  // mapped material (Megachem: map the materials first, then search the Deals).
+  const customerCodeForDeal = map.header.customer?.code;
+  const dealCard = isMgt && doc.module === 'SO' && customerCodeForDeal ? (
+    <ZohoDealCard
+      key="deal"
+      no={nMat + 1}
+      customerCode={customerCodeForDeal}
+      doc={doc}
+      assignment={dealAssignment || []}
+      byUser={!!dealsByUser}
+      locked={posted}
+      onAssign={onAssignDeals || (() => {})}
+      onDealsChange={onDealsChange}
+      waitingFor={doc.lines
+        .map((l, i) => (map.lines[i]?.code ? null : String(l.itemNo ?? (i + 1) * 10)))
+        .filter((x): x is string => !!x)}
+    />
+  ) : null;
+
   return (
     <div className="card">
       <div className="card-h">
@@ -4620,16 +4405,20 @@ export default function MappingCards({
             Incoming Invoice (II/FB60) posts G/L account items instead, so OCR lines there must not
             be presented as Sales-Order-style materials. */}
         {(doc.module === 'SO' || doc.module === 'AP') && matCards.some(Boolean) && <>
-          <p className="sec-title" style={{ marginTop: 20 }}>
+          <p className="sec-title" style={{ marginTop: 24 }}>
             {isMgt
               ? `${nMat}. ITEM (per line)`
               : `${nMat}. ITEM & ${nMat + 1}. RELATE UNIT (per line)`}
           </p>
           {matCards}
         </>}
+        {dealCard && <>
+          <p className="sec-title" style={{ marginTop: 24 }}>{`${nMat + 1}. DEAL (Zoho)`}</p>
+          {dealCard}
+        </>}
         {detailContent && (
           <>
-            <p className="sec-title" style={{ marginTop: 20 }}>
+            <p className="sec-title" style={{ marginTop: 24 }}>
               DETAIL — Line Items (from the document)
             </p>
             {detailContent}

@@ -133,7 +133,7 @@ export default function WhtTable({
             </tbody>
           </table>
         </div>
-        <p className="hint" style={{ marginTop: 10 }}>
+        <p className="hint" style={{ marginTop: 12 }}>
           In SAP you key only W/Tax Code and W/Tax Base — SAP computes W/Tax Amt from the code's
           rate, so the amount column here is what the document says, kept as a cross-check.
           W/Tax Base is the invoice amount before VAT; changing the code recalculates it.

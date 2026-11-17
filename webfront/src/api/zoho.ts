@@ -156,12 +156,17 @@ export interface ZohoDeal {
   isWcd?: boolean;
   /** Created_Time of the Deal (newest wins among several Deals matching the PO's products). */
   createdTime?: string | null;
+  /** "Deal Number" auto-number (e.g. DL-000305) -- tells apart Deals that share a name. */
+  dealNumber?: string | null;
 }
 
 /** Deal id meaning "this document has no Deal": not WCD, so the send opens a new Deal in Zoho
- *  (Forecast Status No, Stage "Sales Order Created"), then a Quote, then the Sales Order.
+ *  (Stage "Draft/Qualification", Forecast Status chosen by CS), then a Quote, then the Sales Order.
  *  Same value as ZohoSalesOrderController.NewDealId. */
 export const NEW_DEAL_ID = '__new__';
+/* One PO, several Deals (16 Nov 2026): each line carries its Deal key (line.extra.zohoDeal) -- a Zoho
+   Deal id, or NEW_DEAL_ID, NEW_DEAL_ID + "2", ... for each new Deal Send opens. */
+export type ZohoLineDeals = Record<string, string>;
 
 /* Zoho Materials by code, name or description (GET /api/zoho/materials/search) -- for a line when the document has
    no Deal or a non-WCD Deal. */
@@ -267,10 +272,16 @@ export const searchZohoDeals = (query: string, top = 20) =>
    preview call as an editable default -- nothing is sent un-reviewable. paymentTermsOptions/
    paymentCurrencyOptions come straight from Zoho's own live picklist metadata, not a hand-typed
    list, so they always match whatever Megachem's Zoho admin has configured. */
-export type ZohoSalesOrderSkippedLine = { itemNo?: unknown; desc?: string | null; extCode?: string | null; reason: string };
+export type ZohoSalesOrderSkippedLine = {
+  itemNo?: unknown; desc?: string | null; extCode?: string | null; reason: string;
+  /** Deal key of the line (one PO, several Deals). */
+  dealKey?: string;
+};
 
 export interface ZohoSalesOrderPreviewLine {
   itemNo: unknown;
+  /** Deal key of the line (one PO, several Deals). */
+  dealKey?: string;
   desc?: string | null;
   extCode?: string | null;
   materialName?: string | null;
@@ -326,8 +337,23 @@ export interface ZohoSalesOrderPreview {
   lastPriceError?: string | null;
   lines: ZohoSalesOrderPreviewLine[];
   skipped: ZohoSalesOrderSkippedLine[];
-  /** Zoho chain Deal -> Quote -> Sales Order: what the send will do before the Sales Order. */
+  /** Zoho chain Deal -> Quote -> Sales Order: what the send will do before the Sales Order.
+   *  With several Deals: the first Deal's, with newDeal = any Deal is opened on Send. */
   flow?: ZohoSalesOrderFlow;
+  /** One entry per Deal of the document (16 Nov 2026), in send order. */
+  deals?: ZohoSalesOrderDealPart[];
+}
+
+export interface ZohoSalesOrderDealPart {
+  key: string;
+  dealName: string;
+  dealId?: string | null;
+  flow: ZohoSalesOrderFlow;
+  /** Quote / Sales Order Subject of this Deal (its name). */
+  subject?: string | null;
+  itemNos: unknown[];
+  ownerName?: string | null;
+  ownerError?: string | null;
 }
 
 export interface ZohoSalesOrderFlow {
@@ -346,9 +372,10 @@ export interface ZohoSalesOrderFlow {
   quoteRefs?: string[];
 }
 
-export const getZohoSalesOrderPreview = (docId: number, dealId: string) =>
+export const getZohoSalesOrderPreview = (docId: number, dealId: string, lineDeals?: ZohoLineDeals) =>
   api.get<ZohoSalesOrderPreview>(
-    '/api/zoho/sales-order/preview/' + docId + '?dealId=' + encodeURIComponent(dealId),
+    '/api/zoho/sales-order/preview/' + docId + '?dealId=' + encodeURIComponent(dealId)
+      + (lineDeals ? '&lineDeals=' + encodeURIComponent(JSON.stringify(lineDeals)) : ''),
   );
 
 export interface ZohoSalesOrderLineEdit {
@@ -378,8 +405,13 @@ export interface ZohoSalesOrderEdits {
   lines?: ZohoSalesOrderLineEdit[];
   /** The person confirmed sending on a Deal whose Account isn't this document's customer. */
   acceptOtherAccount?: boolean;
-  /** New Deal only: Ms_User.UserID of the Sales person picked as Deal Owner (blank = Account Owner). */
+  /** New Deal only: Ms_User.UserID of the Sales person picked as Deal Owner (blank = Account Owner).
+   *  With several new Deals on one PO, the same Sales owns each of them. */
   salesUserId?: string;
+  /** itemNo -> Deal key of every line (one PO, several Deals). */
+  lineDeals?: ZohoLineDeals;
+  /** New Deal key -> Forecast Status "Yes" / "No" chosen by CS on Send (required for every new Deal). */
+  newDealForecast?: Record<string, 'Yes' | 'No'>;
 }
 
 export interface ZohoSalesOrderResult {

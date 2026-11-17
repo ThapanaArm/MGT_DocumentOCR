@@ -18,7 +18,7 @@ export default function Pager({
   const cur = Math.min(Math.max(1, page), totalPages);
   return (
     <div className="pager">
-      <div className="row pager-size" style={{ gap: 6, alignItems: 'center' }}>
+      <div className="row pager-size" style={{ gap: 8, alignItems: 'center' }}>
         <span className="hint">Show</span>
         <select
           value={pageSize}
@@ -35,7 +35,7 @@ export default function Pager({
         </select>
         <span className="hint pager-per-page"><span className="pager-per-page-desktop">per page</span><span className="pager-per-page-mobile">rows</span></span>
       </div>
-      <div className="row pager-nav" style={{ gap: 6, alignItems: 'center' }}>
+      <div className="row pager-nav" style={{ gap: 8, alignItems: 'center' }}>
         <button className="btn sm ghost" onClick={() => setPage(Math.max(1, cur - 1))} disabled={cur <= 1}>
           <i className="fa-solid fa-angle-left" /> <span className="pager-nav-text">Previous</span>
         </button>

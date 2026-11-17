@@ -65,7 +65,7 @@ export default function SoMappingIssues({ map, isMgt, onOpenMaster }: Props) {
           </li>
         )}
       </ul>
-      <div className="row" style={{ marginTop: 14 }}>
+      <div className="row" style={{ marginTop: 16 }}>
         <button className="btn" onClick={onOpenMaster}>
           <i className="fa-solid fa-gear" /> Open Master Mapping
         </button>

@@ -27,19 +27,19 @@ export default class ErrorBoundary extends Component<{ children: ReactNode }, St
     return (
       <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', background: 'var(--bg)', color: 'var(--text)', padding: 24 }}>
         <div style={{ maxWidth: 440, textAlign: 'center' }}>
-          <div style={{ fontSize: 34, marginBottom: 10 }}>⚠️</div>
-          <h1 style={{ fontSize: 19, margin: '0 0 8px' }}>Something went wrong</h1>
-          <p style={{ color: 'var(--muted, #6b7b70)', fontSize: 14, margin: '0 0 18px' }}>
+          <div style={{ fontSize: 32, marginBottom: 12 }}>⚠️</div>
+          <h1 style={{ fontSize: 18, margin: '0 0 8px' }}>Something went wrong</h1>
+          <p style={{ color: 'var(--muted, #6b7b70)', fontSize: 14, margin: '0 0 16px' }}>
             Something went wrong. Try reloading the page. If it keeps happening, contact IT.
           </p>
-          <pre style={{ textAlign: 'left', fontSize: 12, background: 'var(--card, #fff)', border: '1px solid var(--line, #e4e7e5)', borderRadius: 8, padding: '10px 12px', overflow: 'auto', maxHeight: 160, color: 'var(--red, #bd120f)' }}>
+          <pre style={{ textAlign: 'left', fontSize: 14, background: 'var(--card, #fff)', border: '1px solid var(--line, #e4e7e5)', borderRadius: 8, padding: '12px 12px', overflow: 'auto', maxHeight: 160, color: 'var(--red, #bd120f)' }}>
             {this.state.error.message}
           </pre>
           <button
             type="button"
             className="btn primary"
             onClick={() => window.location.reload()}
-            style={{ marginTop: 16, padding: '9px 20px' }}
+            style={{ marginTop: 16, padding: '8px 24px' }}
           >
             Reload page
           </button>

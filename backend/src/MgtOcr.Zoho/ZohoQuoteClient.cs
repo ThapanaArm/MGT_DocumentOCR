@@ -119,6 +119,8 @@ public class ZohoQuoteClient(ZohoClient zoho)
         var rows = new JsonArray();
         foreach (var it in items) rows.Add(ZohoRecordFields.ItemRow(it, "Unit"));
         record[_itemsField] = rows;
+        // Fields Zoho's screen fills from the Account (e.g. the tax fields) -- the API doesn't, so copy them.
+        await ZohoRecordFields.ApplyAccountDefaultsAsync(zoho, module, record, accountId);
         return record;
     }
 

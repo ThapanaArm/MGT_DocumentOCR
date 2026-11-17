@@ -269,7 +269,7 @@ export default function ImportPage() {
               Current module: <b>{mod === 'AP' ? 'Invoice' : MODULE_LABEL[mod] || moduleLabel(mod)}</b>
             </div>
             {progress && (
-              <div style={{ maxWidth: 440, margin: '18px auto 0' }}>
+              <div style={{ maxWidth: 440, margin: '16px auto 0' }}>
                 <div className="hint">{progress.text}</div>
                 <div className="bar">
                   <i style={{ width: progress.pct + '%' }} />
@@ -277,8 +277,8 @@ export default function ImportPage() {
               </div>
             )}
             {pwPrompt && (
-              <div style={{ maxWidth: 440, margin: '18px auto 0', textAlign: 'left' }}>
-                <label className="hint" style={{ fontWeight: 600, display: 'block', marginBottom: 6 }}>
+              <div style={{ maxWidth: 440, margin: '16px auto 0', textAlign: 'left' }}>
+                <label className="hint" style={{ fontWeight: 600, display: 'block', marginBottom: 8 }}>
                   <i className="fa-solid fa-lock" /> This PDF is password-protected — enter the document open password
                 </label>
                 <div style={{ display: 'flex', gap: 8 }}>
@@ -298,14 +298,14 @@ export default function ImportPage() {
                   </button>
                 </div>
                 {pwPrompt.wrong && (
-                  <p className="hint" style={{ color: 'var(--red)', margin: '6px 0 0' }}>
+                  <p className="hint" style={{ color: 'var(--red)', margin: '8px 0 0' }}>
                     <i className="fa-solid fa-triangle-exclamation" /> Incorrect password — please try again
                   </p>
                 )}
-                <p className="hint" style={{ margin: '6px 0 0', fontSize: 12 }}>{pwPrompt.file.name}</p>
+                <p className="hint" style={{ margin: '8px 0 0', fontSize: 14 }}>{pwPrompt.file.name}</p>
               </div>
             )}
-            <div className="hint" style={{ marginTop: 18 }}>
+            <div className="hint" style={{ marginTop: 16 }}>
               or{' '}
               <a
                 href="#"
