@@ -53,6 +53,34 @@ public static partial class ChatFix
     [GeneratedRegex(@"\{.*\}", RegexOptions.Singleline)]
     private static partial Regex JsonObjectRegex();
 
+    private static readonly string[] TaxRowFields =
+        ["issuerTaxId", "issuerName", "issuerBranch", "taxDocNo", "taxDocDate", "baseAmount", "docCurrencyAmt", "taxCode", "taxKind", "label"];
+
+    private static List<object?>? MergeTaxRows(object? current, object? fromAi)
+    {
+        if (current is not System.Collections.IEnumerable cur || current is string) return null;
+        if (fromAi is not List<object?> ai || ai.Count == 0) return null;
+        var rows = cur.OfType<Dictionary<string, object?>>().Select(r => new Dictionary<string, object?>(r)).ToList();
+        if (rows.Count == 0) return null;
+        static string No(Dictionary<string, object?> r) => (r.GetStr("taxDocNo") ?? "").Trim().ToUpperInvariant();
+        var changed = false;
+        for (var i = 0; i < ai.Count; i++)
+        {
+            if (ai[i] is not Dictionary<string, object?> a) continue;
+            var target = No(a).Length > 0 ? rows.FirstOrDefault(r => No(r) == No(a)) : null;
+            target ??= i < rows.Count ? rows[i] : null;
+            if (target == null) continue;
+            foreach (var f in TaxRowFields)
+            {
+                if (!a.TryGetValue(f, out var v) || v == null) continue;
+                if (Convert.ToString(target.GetValueOrDefault(f)) == Convert.ToString(v)) continue;
+                target[f] = v;
+                changed = true;
+            }
+        }
+        return changed ? rows.Cast<object?>().ToList() : null;
+    }
+
     private static string Trunc(string s, int max) => string.IsNullOrEmpty(s) || s.Length <= max ? s : s.Substring(0, max) + "…";
 
     public static async Task<(ChatFixResult? Result, string? Error)> ChatFixDocumentAsync(string module, Dictionary<string, object?> header,
@@ -239,6 +267,11 @@ public static partial class ChatFix
             {
                 h = HeaderParser.BlankHeader(module);
                 foreach (var kv in ph) if (h.ContainsKey(kv.Key)) h[kv.Key] = kv.Value;
+                // The Tax tab (header.taxItems) is not an extraction key, so the edit was dropped
+                // while the reply said "fixed" (AP, 2026-11-18: Tax ID of ICD2/W260008144). Its rows
+                // are merged field by field onto the current ones, matched by tax invoice number
+                // (else position) — a row the AI left out or added is not removed or created.
+                if (MergeTaxRows(header.Get("taxItems"), ph.Get("taxItems")) is { } taxItems) h["taxItems"] = taxItems;
             }
 
             // Only accept a materialCode the AI actually saw offered -- never let a hallucinated code
