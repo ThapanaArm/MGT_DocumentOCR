@@ -993,7 +993,8 @@ function seedTaxItems(d: DocModel): DocModel {
   };
   const vatRows = vatLines.length
     ? vatLines
-        .map((l) => mkRow(Number(l.amount) || 0, kindOf(l), String(l.extra?.vendorCode ?? ''), 'Input VAT', l))
+        .map((l) => mkRow(Number(l.amount) || 0, kindOf(l), String(l.extra?.vendorCode ?? ''),
+          kindOf(l) === 'DEFERRED' ? 'Deferred Input VAT' : 'Input VAT', l))
         .filter((r) => r.docCurrencyAmt > 0)
     : [mkRow(amt, onInvoice ? 'DEFERRED' : 'INPUT')];
   // Customs charges (import duty, excise, interior tax) are not items on the FORM, so the read

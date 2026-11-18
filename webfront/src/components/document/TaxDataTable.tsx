@@ -14,6 +14,13 @@ const isVatLabel = (l: unknown) => {
   const s = String(l ?? '').trim().toLowerCase();
   return s === '' || s === 'input vat' || s === 'deferred input vat';
 };
+function shownLabel(t: TaxItem): string {
+  if (!isVatLabel(t.label)) return String(t.label ?? '');
+  const code = String(t.taxCode ?? '').trim().toUpperCase();
+  if (/^D[0-9]$/.test(code)) return VAT_LABELS.DEFERRED;
+  if (/^V[0-9]$/.test(code)) return VAT_LABELS.INPUT;
+  return String(t.label ?? '');
+}
 function linkedEdits(t: TaxItem, key: string, value: string): Array<[string, string]> {
   const out: Array<[string, string]> = [[key, value]];
   const code = String(t.taxCode ?? '').trim().toUpperCase();
@@ -109,7 +116,9 @@ export default function TaxDataTable({
                   <tr key={i}>
                     <td>
                       <input
-                        value={t.label || ''}
+                        // A VAT row's name follows its code (rows saved before the three were linked
+                        // still read "Input VAT" next to D1): shown as the code says.
+                        value={shownLabel(t)}
                         readOnly={posted}
                         onChange={(e) => edit(i, 'label', e.target.value)}
                         placeholder="e.g. Input VAT, Import Duty"
