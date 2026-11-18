@@ -1254,6 +1254,81 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             : PhysicalFile(Path.GetFullPath(path), contentType);
     }
 
+    // POST /api/documents/123/read-region { field, page, box: [ymin,xmin,ymax,xmax] } → { value }.
+    // A frame moved on "View document": the value is read again from inside it (one small Gemini
+    // request) and returned; the screen puts it in the field, and Save keeps it (AP, 2026-11-18).
+    [HttpPost("api/documents/{docId:int}/read-region")]
+    public async Task<IActionResult> ReadRegion(int docId, [FromBody] Dictionary<string, object?> body)
+    {
+        var field = body.GetStr("field").Trim();
+        var page = 0;
+        // The body arrives as JSON elements: "box" is a JsonElement array, not a .NET list (casting
+        // it to IEnumerable gave nothing and every request answered "field and box are required").
+        static int Num(object? v) => v switch
+        {
+            System.Text.Json.JsonElement { ValueKind: System.Text.Json.JsonValueKind.Number } je => (int)Math.Round(je.GetDouble()),
+            System.Text.Json.JsonElement je when double.TryParse(je.ToString(), System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var d1) => (int)Math.Round(d1),
+            null => -1,
+            _ => double.TryParse(Convert.ToString(v, System.Globalization.CultureInfo.InvariantCulture), System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var d2) ? (int)Math.Round(d2) : -1,
+        };
+        var rawBox = body.Get("box");
+        var box = rawBox switch
+        {
+            System.Text.Json.JsonElement { ValueKind: System.Text.Json.JsonValueKind.Array } arr => arr.EnumerateArray().Select(e => Num(e)).ToArray(),
+            System.Collections.IEnumerable list and not string => list.Cast<object?>().Select(Num).ToArray(),
+            _ => [],
+        };
+        if (!int.TryParse(body.GetStr("page"), out page))
+            page = Num(body.Get("page"));
+        if (page < 1) throw new HttpApiException(400, "page is required");
+        if (field.Length == 0 || box.Length != 4 || box.Any(v => v < 0)) throw new HttpApiException(400, "field and box are required");
+        var path = await LocalFileOf(docId);
+        var jpeg = MgtOcr.Ocr.PdfRasterizer.RenderRegionToJpeg(path, page - 1, box)
+            ?? throw new HttpApiException(400, "The frame is outside the page or too small");
+        const string module = "AP";
+        var job = await jobLog.StartAsync(await jobLog.NextJobNumberAsync(), "OCR_REGION", docId: docId, module: module,
+            provider: "gemini", fileName: field, performedBy: await ActorAsync());
+        var (value, error, tin, tout) = await MgtOcr.Ocr.Providers.GeminiOcr.ReadRegionAsync(jpeg, field, config);
+        await jobLog.FinishAsync(job, error == null ? "SUCCESS" : "FAILED", message: error, tokensIn: tin, tokensOut: tout, provider: "gemini");
+        if (error != null) throw new HttpApiException(502, "อ่านค่าจากกรอบไม่ได้: " + error);
+        return Ok(new { value = value ?? "" });
+    }
+
+    // GET /api/documents/123/pages → { count, isPdf }. The "View document" frames are drawn over
+    // page pictures, not over the browser's PDF viewer, so the screen needs to know how many there are.
+    [HttpGet("api/documents/{docId:int}/pages")]
+    public async Task<IActionResult> DocumentPages(int docId)
+    {
+        var path = await LocalFileOf(docId);
+        var isPdf = path.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase);
+        return Ok(new { count = isPdf ? MgtOcr.Ocr.PdfRasterizer.PageCount(path) : 1, isPdf });
+    }
+
+    // GET /api/documents/123/page/4 → that page of the original file as a JPEG (1-based). Rendered on
+    // request at 110 dpi: enough to read on screen, small enough to load page by page.
+    [HttpGet("api/documents/{docId:int}/page/{page:int}")]
+    public async Task<IActionResult> DocumentPage(int docId, int page)
+    {
+        var path = await LocalFileOf(docId);
+        if (!path.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase))
+            return PhysicalFile(Path.GetFullPath(path), MediaTypeForFile(path));
+        var bytes = MgtOcr.Ocr.PdfRasterizer.RenderPageToJpeg(path, page - 1, 110, 80)
+            ?? throw new HttpApiException(404, $"Page {page} could not be rendered");
+        return File(bytes, "image/jpeg");
+    }
+
+    private async Task<string> LocalFileOf(int docId)
+    {
+        var docT = DocumentTables.ForId(docId).Doc;
+        dynamic? d = await GetDbInstance().QueryOneAsync($"SELECT StoredPath FROM {docT} WHERE DocId=@docId", new { docId });
+        string? path = d?.StoredPath;
+        if (string.IsNullOrEmpty(path) || !System.IO.File.Exists(path))
+            throw new HttpApiException(404, "The original file is not on this server (archived) — page pictures are not available");
+        return path;
+    }
+
     // Media type from the file's extension. Only the types this app actually stores are listed;
     // anything else falls back to octet-stream, which the browser offers as a download.
     private static string MediaTypeForFile(string fileName) =>
@@ -1836,10 +1911,14 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         }
         if (module is "AP" or "II")
         {
-            // MGT (AP, 2026-11-16): the supplier abbreviation is not required — MGT's vendor
-            // mapping differs from GLC's. A ShortName already on the vendor is still used; without
-            // one the text starts with the first word of the vendor's name, as before.
-            Export.SupplierShortNames.Apply(header, masterData.Vendors, pm);
+            // The supplier's abbreviation (Vendor card, ocr.Vendor.ShortName) leads every
+            // "<abbr>,INV.<no>" text. The user types it; a supplier without one cannot be sent
+            // (AP, 2026-11-12). Restored for MGT, same as GLC (AP, 2026-11-17).
+            var abbr = Export.SupplierShortNames.Apply(header, masterData.Vendors, pm);
+            if (forPost && pm != null && abbr.Length == 0)
+                throw new HttpApiException(400,
+                    $"ผู้ขาย {pm.GetStr("VendorCode")} {pm.GetStr("VendorName")} ยังไม่มีอักษรย่อ — "
+                    + "เพิ่มอักษรย่อที่การ์ด Vendor / Supplier ใน Step 2 ก่อนส่งเข้า SAP");
             Export.SupplierShortNames.RewriteGeneratedTexts(header);
         }
         var source = new Dictionary<string, object?>
@@ -1985,7 +2064,27 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             var vendors = Export.SupplierInvoicePayload.VendorsOf(doc, SameParty);
             // MGT (AP, 2026-11-16): one document per supplier INVOICE — FLS's Freight and Local
             // Handling invoices go as two documents (PRD 5100000595 / 596).
-            if (vendors.Count <= 1 && Export.SupplierInvoicePayload.DocsPerInvoice(doc, party, SameParty) is { Count: > 1 } perInvoice)
+            // Two documents of one supplier need two References: a row with no supplier invoice
+            // number is stopped before anything reaches SAP (M8/804 would refuse the second).
+            List<Dictionary<string, object?>> PerInvoice(string v)
+            {
+                var docs = Export.SupplierInvoicePayload.DocsPerInvoice(doc, v, SameParty);
+                // Only documents that would end up with the SAME Reference are a problem (M8/804
+                // refuses the second): those with no invoice number of their own all fall back to
+                // the document's number. An insurance document takes the PO and one such document
+                // alone is fine (AP, 2026-11-16, #840: Local Handling | Insurance | Import Duty).
+                var missingInv = docs.Count > 1
+                    ? docs.Select(d => d.Get("header") as Dictionary<string, object?>)
+                        .Where(hh => hh.GetStr("_needsInvoiceNo").Length > 0 && hh?.Get("_insuranceOnly") is not true)
+                        .Select(hh => hh.GetStr("_needsInvoiceNo")).ToList()
+                    : [];
+                if (forPost && missingInv.Count > 1)
+                    throw new HttpApiException(400,
+                        $"ผู้ขาย {v} มีหลายรายการที่ต้องแยกเป็นคนละใบ แต่ยังไม่มีเลขใบแจ้งหนี้ (จะได้ Reference ซ้ำกัน): {string.Join(" | ", missingInv)} "
+                        + "— ใส่ Reference ของแต่ละใบในแท็บของใบนั้นที่ Basic Data (ช่อง Reference → SAP) หรือกรอกคอลัมน์ Supplier Inv. No. ในตาราง DETAIL แล้ว Save และส่งใหม่");
+                return docs;
+            }
+            if (vendors.Count <= 1 && PerInvoice(party) is { Count: > 1 } perInvoice)
             {
                 var docs = new List<Dictionary<string, object?>>();
                 foreach (var vd in perInvoice)
@@ -2032,7 +2131,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
                         }
                         continue;
                     }
-                    foreach (var vd in Export.SupplierInvoicePayload.DocsPerInvoice(doc, v, SameParty))
+                    foreach (var vd in PerInvoice(v))
                         split.AddRange(Export.SupplierInvoicePayload.SplitByTaxCode(Export.SupplierInvoicePayload.Build(
                             vd, apCompany, v, poItems, source, apTerms, v, goodsReceiptItems,
                             config.SapSupplierInvoiceTaxBaseClearingAccount, SameParty, perPo)).Select(MapVendors));
@@ -2050,6 +2149,27 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
 
         var payload = SapPayloadBuilder.BuildPayload(config, module, header, lines, res, pm, source);
         return ([payload], res);
+    }
+
+    /// <summary>Moves the unit of PO-reference lines from PurchaseOrderQuantityUnit, which SAP converts through the
+    /// unit's ISO code, to PurchaseOrderQtyUnitSAPCode, which it takes as is. Quantities stay.
+    /// Returns how many lines changed.</summary>
+    private static int UseSapUnitCode(Dictionary<string, object?> payload)
+    {
+        var raw = payload.GetValueOrDefault("to_SuplrInvcItemPurOrdRef");
+        if (raw is Dictionary<string, object?> wrap) raw = wrap.GetValueOrDefault("results");
+        if (raw is not System.Collections.IEnumerable items || raw is string) return 0;
+        var n = 0;
+        foreach (var o in items)
+            if (o is Dictionary<string, object?> it
+                && (it.GetValueOrDefault("PurchaseOrderQuantityUnit")?.ToString() ?? "").Trim() is { Length: > 0 } unit)
+            {
+                // The unit stays where it was: removing it left the line with NO unit, and SAP
+                // answered that blank with the same BM/034 "ISO code SPACE".
+                it["PurchaseOrderQtyUnitSAPCode"] = unit;
+                n++;
+            }
+        return n;
     }
 
     /// <summary>TEST tenant only (Sap:SupplierInvoice:Environment = dev): the Reference gets
@@ -2506,6 +2626,14 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
                 catch (JsonException) { /* an unreadable old log row is not a reason to block posting */ }
             }
         }
+        // The Invoice Date is SAP's DocumentDate and mandatory. A read that found none (#855: the
+        // scanned form carries no date of its own) sent every document without it and SAP refused
+        // the first with MM_IV_SI_API/010 "Fill in mandatory field 'DocumentDate'". Stopped here,
+        // before anything is created, with what to do.
+        if ((module is "AP" or "II") && payloads.Any(pl => pl.GetValueOrDefault("DocumentDate") is null))
+            throw new HttpApiException(400,
+                "ยังไม่มี Invoice Date (วันที่ใบแจ้งหนี้) — กรอกช่อง Invoice Date ในส่วน HEADER "
+                + "(ใช้วันที่ในใบแจ้งหนี้ของผู้ขาย) แล้ว Save และส่งใหม่");
         var skipped = new HashSet<Dictionary<string, object?>>();
         foreach (var p in payloads)
         {
@@ -2521,6 +2649,21 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             // Stop at the first refusal: posting the rest would scatter half a bundle across SAP
             // and leave the person reconciling it by hand.
             var one = await sap.PostAsync(module, p);
+            // BM/034 "No measurement unit is assigned to ISO code SPACE": the PO's unit (DR, drum, on
+            // MGT PO 2130000029) has no ISO code in the tenant, and PurchaseOrderQuantityUnit is
+            // converted through ISO. Sent again once with the unit in PurchaseOrderQtyUnitSAPCode —
+            // SAP's own code, no ISO conversion — and the quantity kept. NOT without the quantity:
+            // that was tried and SAP parked 5105600321 with 0 DR on every line, "Price too high",
+            // "Order item … will be ignored" and "Balance in currency THB, currency type 30".
+            if (!one.Success && one.Message.Contains("BM/034", StringComparison.OrdinalIgnoreCase)
+                && UseSapUnitCode(p) > 0)
+            {
+                logger.LogWarning("[AP] BM/034 on {Ref} — retrying with the SAP unit code", p.GetStr("SupplierInvoiceIDByInvcgParty"));
+                one = await sap.PostAsync(module, p);
+                if (!one.Success)
+                    one = one with { Message = "หน่วยใน PO ไม่มีรหัส ISO ใน SAP (BM/034) — ลองส่งด้วยรหัสหน่วยของ SAP แล้วยังไม่ผ่าน: "
+                        + one.Message + " · ให้ทีม SAP กำหนด ISO code ให้หน่วยนี้ (เช่น DR = drum) แล้วส่งใหม่" };
+            }
             // The posted journal entry leaves Assignment / Text EMPTY on the lines SAP builds itself
             // (the GR/IR delivery-cost line, Purchase Variance) -- the invoice API has no field for
             // the one and drops the other (5100000129). Filled right after with Journal Entry -
@@ -2611,7 +2754,10 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
                 {
                     docId, module, sapDocNo = one.SapDocNo, endpoint = one.Endpoint,
                     payloadJson = JsonSerializer.Serialize(p, PyJson.Options),
-                    success = one.Success ? 1 : 0, message = one.Message, user,
+                    // A rolled-back invoice is logged as NOT created (AP, 2026-11-16, 5105600313): logged
+                    // as created, the next send skipped it as "already created" and the bundle was
+                    // marked posted with that supplier invoice missing from SAP.
+                    success = one.Success && !rolledBack.Contains(p) ? 1 : 0, message = one.Message, user,
                     // Which company's submission history this belongs to — the poster's own, Admin
                     // included, for the same reason a document is filed under the importer's company.
                     salesOrg = ownCompany,

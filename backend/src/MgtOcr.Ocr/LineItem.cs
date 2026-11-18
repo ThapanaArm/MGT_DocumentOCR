@@ -44,6 +44,10 @@ public class LineItem
     // for Freight, LOG101202LCH for Local Handling) — one SAP document per invoice (extra.invoiceNo).
     public string InvoiceNo { get; set; } = "";
 
+    // Where the read found this row: "<file page>:<ymin>,<xmin>,<ymax>,<xmax>" (0-1000), from
+    // Gemini's _positions.lines (AP, 2026-11-18). Kept as extra._box for the "View document" frames.
+    public string SourceBox { get; set; } = "";
+
     // How a form cost row splits on the document behind it — Cargoport's D/O receipt under the
     // 12,386.00 "DO" row: 1,752.50 NON VAT + 10,633.50 SALES 7% + VAT 744.35. NonVat + BeforeVat is
     // the cost (what Amount holds); + Vat is what the supplier is paid. All 0 when not known.

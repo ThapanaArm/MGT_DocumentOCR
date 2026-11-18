@@ -29,6 +29,10 @@ public class AppConfig
     // existing Claude/Azure/Typhoon clients.
     public string GeminiApiKey { get; init; } = "";
     public string GeminiModel { get; init; } = "gemini-2.5-flash";
+    // Ocr:Positions:Enabled (default true): the main Gemini read also reports WHERE it found each
+    // header value and each line (boxes 0-1000 per page), shown as frames on "View document" so a
+    // form whose layout changed shows what was read from where (AP, 2026-11-18).
+    public bool OcrRecordPositions { get; init; } = true;
     public string OpenAiApiKey { get; init; } = "";
     public string OpenAiModel { get; init; } = "gpt-4o";
     // PaddleOCR-Standalone (local exe). Blank Cmd = look in C:\Program Files\PaddleOCR-CPU|GPU.

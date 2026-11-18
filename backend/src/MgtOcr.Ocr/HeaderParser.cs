@@ -25,6 +25,9 @@ public class ParsedDocument
     public decimal? CostIn { get; set; }
     public decimal? CostOut { get; set; }
     public string? CostCurrency { get; set; }
+    // Gemini's "_positions" object from the main request, as returned (image numbers of THAT
+    // request). GeminiOcr turns it into file pages on header._positions and line SourceBox.
+    public string? PositionsJson { get; set; }
 }
 
 public static class HeaderParser

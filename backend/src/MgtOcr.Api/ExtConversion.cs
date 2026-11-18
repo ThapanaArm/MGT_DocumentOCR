@@ -61,6 +61,8 @@ public static partial class ExtConversion
         if (!string.IsNullOrWhiteSpace(l.PoRef)) extra["poRef"] = l.PoRef.Trim();
         // The supplier invoice that bills the row (MGT: one SAP document per invoice).
         if (!string.IsNullOrWhiteSpace(l.InvoiceNo)) extra["invoiceNo"] = l.InvoiceNo.Trim();
+        // Where the row was read (page:box) — the frame drawn on "View document".
+        if (!string.IsNullOrWhiteSpace(l.SourceBox)) extra["_box"] = l.SourceBox.Trim();
         // INPUT / DEFERRED for a VAT row — drives the input-VAT report vs ภาษีซื้อรอเรียกเก็บ.
         if (!string.IsNullOrWhiteSpace(l.TaxKind)) extra["taxKind"] = l.TaxKind.Trim();
         // Identity of the tax invoice behind a VAT row — one row per invoice in the Input VAT file

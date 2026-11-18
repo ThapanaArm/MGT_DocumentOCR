@@ -62,7 +62,7 @@ public static partial class VisionPrompt
             "poLines": [{"extCode": "รหัส/ล็อตสินค้าตามใบสั่งซื้อ", "desc": "ชื่อสินค้า",
                          "qty": 0, "uom": "หน่วยนับ", "price": 0, "amount": 0}],
             "subTotal": 0, "vatRate": 7, "vatAmount": 0, "whtAmount": 0, "totalAmount": 0,
-            "sourceDocs": [{"docType": "Invoice / Tax Invoice / Receipt / Debit Note", "issuerName": "ชื่อผู้ออกเอกสารเป็นภาษาอังกฤษเท่านั้น (ใช้ชื่ออังกฤษที่พิมพ์ในใบ ถ้ามีแต่ภาษาไทยให้แปลเป็นชื่ออังกฤษทางการขององค์กร หรือถอดเสียงเป็นอักษรอังกฤษถ้าเป็นชื่อบุคคล เช่น วิเชียร ยอดแก้ว = WICHIAN YODKAEW)", "docNo": "เลขที่เอกสาร", "docDate": "YYYY-MM-DD", "costType": "Local หรือ Insurance หรือ Fee หรือ Overseas", "currency": "THB", "nonVatAmount": 0, "amountBeforeVat": 0, "vatAmount": 0, "totalAmount": 0, "includedIn": "", "shipper": "", "blNo": "", "shipperInvoiceNo": ""}]
+            "sourceDocs": [{"docType": "Invoice / Tax Invoice / Receipt / Debit Note", "issuerName": "ชื่อผู้ออกเอกสารเป็นภาษาอังกฤษเท่านั้น (ใช้ชื่ออังกฤษที่พิมพ์ในใบ ถ้ามีแต่ภาษาไทยให้แปลเป็นชื่ออังกฤษทางการขององค์กร หรือถอดเสียงเป็นอักษรอังกฤษถ้าเป็นชื่อบุคคล เช่น วิเชียร ยอดแก้ว = WICHIAN YODKAEW)", "docNo": "เลขที่เอกสาร", "docDate": "YYYY-MM-DD", "costType": "Local หรือ Insurance หรือ Fee หรือ Overseas", "currency": "THB", "nonVatAmount": 0, "amountBeforeVat": 0, "vatAmount": 0, "totalAmount": 0, "includedIn": "", "shipper": "", "blNo": "", "shipperInvoiceNo": "", "invoiceRefs": [{"invoiceNo": "", "description": "", "amount": 0}]}]
           },
           "lines": [{"extCode": "รหัสสินค้า/บริการถ้ามี", "desc": "ชื่อ/รายละเอียดสินค้าหรือบริการ",
                      "qty": 0, "uom": "หน่วยนับ", "price": 0, "amount": 0,
@@ -148,6 +148,10 @@ public static partial class VisionPrompt
         "  · costType = หมวดในคอลัมน์ COSTS ของฟอร์มที่ค่าใช้จ่ายของใบนี้อยู่: \"Local\" (ค่าขนส่ง/ค่าบริการชิปปิ้ง/DO/ค่าคลัง/ค่าท่าเรือ), " +
         "\"Fee\" (ค่าธรรมเนียม/อากร/ภาษีของกรมศุลกากรหรือสรรพสามิต), \"Insurance\" (ค่าประกันภัย), \"Overseas\" (ค่าใช้จ่ายของผู้ขายต่างประเทศ) " +
         "ถ้าใบเดียวมีหลายหมวด ให้แยกเป็นหลายรายการ ใช้ docNo เดียวกัน แต่ละรายการใส่เฉพาะยอดของหมวดนั้น\n" +
+        // AP, 2026-11-16: FLS's receipt RE2512206 lists the invoices it settles (LOG101185LCH ocean
+        // freight, LOG101202LCH transportation) — each is its own SAP document's Reference.
+        "  · invoiceRefs = ถ้าใบเสร็จ/ใบกำกับภาษีมีตารางที่มีคอลัมน์ \"Invoice Number / เลขที่ใบแจ้งหนี้\" ให้ใส่ทุกแถวของตารางนั้น " +
+        "(invoiceNo = เลขในคอลัมน์นั้น เช่น LOG101185LCH, description = รายการ เช่น OCEAN FREIGHT CHARGE, amount = จำนวนเงินของแถว) ถ้าไม่มีตารางแบบนี้ให้เป็นอาร์เรย์ว่าง\n" +
         "  · amountBeforeVat = ยอดก่อน VAT ทั้งหมดของใบ = ส่วนที่ไม่มี/ยกเว้นภาษี + ส่วนที่คำนวณภาษี 7% (เช่น 3,590.64 + 1,500.00 = 5,090.64), " +
         "nonVatAmount = เฉพาะส่วนที่ไม่มี/ยกเว้นภาษี (เป็นส่วนหนึ่งของ amountBeforeVat), vatAmount = ภาษีมูลค่าเพิ่ม, " +
         "totalAmount = จำนวนเงินทั้งสิ้น (ก่อนหัก ณ ที่จ่าย) = amountBeforeVat + vatAmount ตามที่พิมพ์ในใบ ห้ามคำนวณใหม่ถ้าในใบมีตัวเลข\n" +
@@ -314,7 +318,7 @@ public static partial class VisionPrompt
 
     private const string SupportingSchema = """
         {
-          "header": {"sourceDocs": [{"docType": "Invoice / Tax Invoice / Receipt / Debit Note", "issuerName": "ชื่อผู้ออกเอกสารเป็นภาษาอังกฤษเท่านั้น (ใช้ชื่ออังกฤษที่พิมพ์ในใบ ถ้ามีแต่ภาษาไทยให้แปลเป็นชื่ออังกฤษทางการขององค์กร หรือถอดเสียงเป็นอักษรอังกฤษถ้าเป็นชื่อบุคคล เช่น วิเชียร ยอดแก้ว = WICHIAN YODKAEW)", "docNo": "เลขที่เอกสาร", "docDate": "YYYY-MM-DD", "costType": "Local หรือ Insurance หรือ Fee หรือ Overseas", "currency": "THB", "nonVatAmount": 0, "amountBeforeVat": 0, "vatAmount": 0, "totalAmount": 0, "includedIn": "", "shipper": "", "blNo": "", "shipperInvoiceNo": ""}]},
+          "header": {"sourceDocs": [{"docType": "Invoice / Tax Invoice / Receipt / Debit Note", "issuerName": "ชื่อผู้ออกเอกสารเป็นภาษาอังกฤษเท่านั้น (ใช้ชื่ออังกฤษที่พิมพ์ในใบ ถ้ามีแต่ภาษาไทยให้แปลเป็นชื่ออังกฤษทางการขององค์กร หรือถอดเสียงเป็นอักษรอังกฤษถ้าเป็นชื่อบุคคล เช่น วิเชียร ยอดแก้ว = WICHIAN YODKAEW)", "docNo": "เลขที่เอกสาร", "docDate": "YYYY-MM-DD", "costType": "Local หรือ Insurance หรือ Fee หรือ Overseas", "currency": "THB", "nonVatAmount": 0, "amountBeforeVat": 0, "vatAmount": 0, "totalAmount": 0, "includedIn": "", "shipper": "", "blNo": "", "shipperInvoiceNo": "", "invoiceRefs": [{"invoiceNo": "", "description": "", "amount": 0}]}]},
           "lines": [{"extCode": "VAT หรือ WHT หรือ DUTY เท่านั้น", "desc": "",
                      "qty": 1, "uom": "EA", "price": 0, "amount": 0, "vendorCode": "",
                      "taxKind": "", "taxDocNo": "", "taxDocDate": "",

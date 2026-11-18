@@ -65,6 +65,9 @@ public static partial class GeminiOcr
             };
             if (imgs.Count == 0)
                 return (null, $"Could not rasterize '{Path.GetFileName(path)}' to images (renderer produced 0 pages \u2014 check the PDF rasterizer on the server)");
+            // The file page behind each image, kept in step with every reorder below, so the
+            // positions the read reports ("image 1") land on the right page of the file.
+            var pageNos = Enumerable.Range(1, imgs.Count).ToList();
 
             // A prompt rule alone ("take lines from the FORM SHIPPING EXPENSE page") was not enough:
             // with 17 pages Gemini still took the first invoice's lines. When the text layer shows
@@ -117,18 +120,33 @@ public static partial class GeminiOcr
                 }
                 else if (isPoRead)
                     Log($"PO read: purchase order page(s) {string.Join(", ", formIdxs.Select(i => i + 1))}");
+                // A SCANNED bundle has no text layer, so neither regex above can see the form, and
+                // a long one is then read as "the first six pages" — on PO 2130000427 that was the
+                // JV, the GR sheets and the supplier's invoice, with the form on page 8 never in
+                // the request that makes the lines: the goods were read, dropped as goods, and the
+                // document came out with no cost lines at all. One cheap look at small thumbnails
+                // finds the form page so it can be pulled to the front like a text-layer hit.
+                if (!isPoRead && formIdxs.Count == 0 && imgs.Count > ChunkThreshold)
+                {
+                    formIdxs = await FindFormPagesByVisionAsync(path, Math.Min(pageCount, MaxPages), config);
+                    Log(formIdxs.Count > 0
+                        ? $"No text layer for the form \u2014 found FORM SHIPPING EXPENSE on page(s) {string.Join(", ", formIdxs.Select(i => i + 1))} by looking"
+                        : "No FORM SHIPPING EXPENSE page found, by text or by looking \u2014 reading the first pages instead");
+                }
                 var formPageNos = formIdxs.Select(i => i + 1).ToList();
                 var formPages = new List<byte[]>();
+                var formPagesNo = new List<int>();
                 foreach (var idx in formIdxs)
                 {
-                    if (idx < imgs.Count) { formPages.Add(imgs[idx]); }
-                    else if (PdfRasterizer.RenderPageToJpeg(path, idx, dpi, quality) is { } extra) { formPages.Add(extra); }
+                    if (idx < imgs.Count) { formPages.Add(imgs[idx]); formPagesNo.Add(pageNos[idx]); }
+                    else if (PdfRasterizer.RenderPageToJpeg(path, idx, dpi, quality) is { } extra) { formPages.Add(extra); formPagesNo.Add(idx + 1); }
                 }
                 if (formPages.Count > 0)
                 {
-                    foreach (var idx in formIdxs.Where(i => i < imgs.Count).OrderByDescending(i => i)) imgs.RemoveAt(idx);
-                    while (imgs.Count + formPages.Count > MaxPages) imgs.RemoveAt(imgs.Count - 1);
+                    foreach (var idx in formIdxs.Where(i => i < imgs.Count).OrderByDescending(i => i)) { imgs.RemoveAt(idx); pageNos.RemoveAt(idx); }
+                    while (imgs.Count + formPages.Count > MaxPages) { imgs.RemoveAt(imgs.Count - 1); pageNos.RemoveAt(pageNos.Count - 1); }
                     imgs.InsertRange(0, formPages);
+                    pageNos.InsertRange(0, formPagesNo);
                     formCount = formPages.Count;
                     prompt = isPoRead
                         ? $"สำคัญ: {formPages.Count} ภาพแรกคือหน้า PURCHASE ORDER (หน้า {string.Join(", ", formPageNos)} ของไฟล์) " +
@@ -161,9 +179,11 @@ public static partial class GeminiOcr
             // (they only contribute tax rows). Each request is small enough to answer in well under
             // a minute, and the first one is MORE accurate on its own than it was buried in twenty
             // other pages.
+            if (config.OcrRecordPositions && module is "AP" or "II") prompt += PositionInstructions();
             if (isPdf && imgs.Count > ChunkThreshold)
-                return ShippingFormText.ApplyMultiForm(path, module, salesOrg,
-                    await ChunkedAsync(imgs, formCount, mime, prompt, module, config, dpi, salesOrg, apDocCategory));
+                return MgtDeliveryCostsOnly(ShippingFormText.ApplyMultiForm(path, module, salesOrg,
+                    ApplyPositions(await ChunkedAsync(imgs, formCount, mime, prompt, module, config, dpi, salesOrg, apDocCategory), pageNos)),
+                    module, salesOrg, apDocCategory);
 
             // A file short enough to read in one request still needs the customs rows pointed at the
             // customs vendor: the model fills vendorCode from the form when it can, but it leaves it
@@ -175,7 +195,8 @@ public static partial class GeminiOcr
                 VisionPrompt.FillLineVatFromSourceDocs(oneShot.Doc);
                 VisionPrompt.FillLineVatFromTaxRows(oneShot.Doc);
             }
-            return ShippingFormText.ApplyMultiForm(path, module, salesOrg, oneShot);
+            return MgtDeliveryCostsOnly(ShippingFormText.ApplyMultiForm(path, module, salesOrg, ApplyPositions(oneShot, pageNos)),
+                module, salesOrg, apDocCategory);
         }
         catch (Exception ex)
         {
@@ -209,6 +230,299 @@ public static partial class GeminiOcr
     /// run onto a second page.</summary>
     private const int HeaderPages = 2;
     private const int ChunkSize = 8;
+
+    /// <summary>MGT, "Planned delivery costs" (AP, 2026-11-16): the read may only return the rows of
+    /// the form's VENDOR CODE block (Freight / Local Handling / Insurance / Pallet / Intertek, extCode
+    /// COST) and the tax rows. A scanned bundle has no text layer to find the form by, so the model
+    /// sometimes took the goods supplier's invoice instead — 16 x IBC CANOLA OIL 40,000 AUD in the
+    /// DETAIL of a delivery-cost document, and again from each group of supporting pages. Those goods
+    /// rows are dropped here, and the note says so; the goods are posted by their own document.</summary>
+    private static (ParsedDocument? Doc, string? Error) MgtDeliveryCostsOnly(
+        (ParsedDocument? Doc, string? Error) read, string module, string salesOrg, string apDocCategory)
+    {
+        var doc = read.Doc;
+        if (doc == null || module is not ("AP" or "II") || !CompanyRules.IsMgt(salesOrg)
+            || VisionPrompt.IsInventoryPo(apDocCategory)) return read;
+        static bool Keep(LineItem l)
+        {
+            var ext = (l.ExtCode ?? "").Trim().ToUpperInvariant();
+            if (ext is "COST" or "VAT" or "WHT" or "DUTY") return true;
+            return System.Text.RegularExpressions.Regex.IsMatch(l.Desc ?? "",
+                @"FREIGHT|HANDLING|INSURANCE|PALLET|INTERTEK|IMPORT\s*TAX|DUTY|^\s*VAT|WITHHOLDING|ภาษี|อากร|ค่าระวาง|ประกัน",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        }
+        FillInvoiceNos(doc);
+        FillVendorDateAndTaxId(doc);
+        var dropped = doc.Lines.Where(l => !Keep(l)).ToList();
+        if (dropped.Count == 0) return read;
+        doc.Lines = doc.Lines.Where(Keep).ToList();
+        // The header total followed the goods invoice too (40,000 AUD); the costs are the document.
+        var costs = doc.Lines.Where(l => (l.ExtCode ?? "").Trim().Equals("COST", StringComparison.OrdinalIgnoreCase)).ToList();
+        if (costs.Count > 0) doc.Header["totalAmount"] = Math.Round(costs.Sum(l => l.Amount), 2);
+        var note = $"ตัดรายการสินค้าออก {dropped.Count} แถว (เอกสาร Planned delivery costs ใช้เฉพาะตาราง VENDOR CODE ท้ายฟอร์ม): "
+            + string.Join(", ", dropped.Take(3).Select(l => (l.Desc ?? "").Trim()).Where(d => d.Length > 0))
+            + (doc.Lines.Any(l => (l.ExtCode ?? "").Trim().Equals("COST", StringComparison.OrdinalIgnoreCase)) ? ""
+                : " — ไม่พบรายการค่าใช้จ่ายจากฟอร์ม ตรวจว่าไฟล์มีหน้า FORM SHIPPING EXPENSE แล้วกด Re-read");
+        doc.ConfidenceNote = doc.ConfidenceNote.Length > 0 ? $"{doc.ConfidenceNote} / {note}" : note;
+        Log($"[MGT] dropped {dropped.Count} goods line(s) from a delivery-cost read");
+        return read;
+    }
+
+    /// <summary>MGT (AP, 2026-11-17, #855 / #861): the FORM SHIPPING EXPENSE carries no invoice date
+    /// and no tax id, and on a scanned bundle the header request does not see the vendor's own
+    /// invoice, so both came back empty and SAP refused the document ("Fill in mandatory field
+    /// 'DocumentDate'"). The supporting pages did read that invoice — as a sourceDoc and as its VAT
+    /// row — so the header takes them from there: the document of the invoicing party (its name
+    /// shares a distinctive word with the header's vendor). Only empty fields are filled.</summary>
+    private static void FillVendorDateAndTaxId(ParsedDocument doc)
+    {
+        static string Get(Dictionary<string, object?> d, string k) => Convert.ToString(d.GetValueOrDefault(k))?.Trim() ?? "";
+        var vendor = Get(doc.Header, "vendorName");
+        static IEnumerable<string> Words(string s) => System.Text.RegularExpressions.Regex
+            .Split(s.ToUpperInvariant().Replace(".", ""), @"[^A-Z0-9ก-๙]+")
+            .Where(w => w.Length >= 3 && w is not ("THE" or "CO" or "LTD" or "COMPANY" or "LIMITED" or "THAILAND" or "PUBLIC"
+                or "GROUP" or "INTERNATIONAL" or "LOGISTICS" or "SERVICE" or "SERVICES" or "TRANSPORT" or "SHIPPING"
+                or "FREIGHT" or "EXPRESS" or "TRADING" or "CORPORATION"));
+        var mine = Words(vendor).ToHashSet();
+        if (mine.Count == 0) return;
+        bool Ours(string issuer) => Words(issuer).Any(mine.Contains);
+
+        if (Get(doc.Header, "invoiceDate").Length == 0
+            && doc.Header.TryGetValue("sourceDocs", out var v) && v is List<object?> docs)
+        {
+            var date = docs.OfType<Dictionary<string, object?>>()
+                .Where(d => Ours(Get(d, "issuerName")))
+                .Select(d => Get(d, "docDate"))
+                .FirstOrDefault(x => System.Text.RegularExpressions.Regex.IsMatch(x, @"^\d{4}-\d{2}-\d{2}$"));
+            date ??= doc.Lines.Where(l => Ours(l.IssuerName ?? "")).Select(l => (l.TaxDocDate ?? "").Trim())
+                .FirstOrDefault(x => System.Text.RegularExpressions.Regex.IsMatch(x, @"^\d{4}-\d{2}-\d{2}$"));
+            if (date != null)
+            {
+                doc.Header["invoiceDate"] = date;
+                Log($"[MGT] invoice date {date} from the vendor's own document");
+            }
+        }
+        if (Get(doc.Header, "vendorTaxId").Length == 0)
+        {
+            var tax = doc.Lines.Where(l => Ours(l.IssuerName ?? ""))
+                .Select(l => System.Text.RegularExpressions.Regex.Replace(l.IssuerTaxId ?? "", @"\D", ""))
+                .FirstOrDefault(x => x.Length == 13);
+            if (tax != null)
+            {
+                doc.Header["vendorTaxId"] = tax;
+                Log($"[MGT] vendor tax id {tax} from the vendor's own tax invoice");
+            }
+        }
+    }
+
+    /// <summary>MGT (AP, 2026-11-16): each cost row's supplier invoice, from the invoice table of the
+    /// forwarder's receipt (sourceDocs[].invoiceRefs — RE2512206 lists LOG101185LCH OCEAN FREIGHT and
+    /// LOG101202LCH TRANSPORTATION). The receipt usually sits in a group of supporting pages, which
+    /// never sees the cost rows, so the pairing is done here: Freight takes the freight invoice,
+    /// Local Handling the other one. Rows that already name an invoice are left alone.</summary>
+    private static void FillInvoiceNos(ParsedDocument doc)
+    {
+        var refs = new List<(string No, string Desc)>();
+        if (doc.Header.TryGetValue("sourceDocs", out var v) && v is List<object?> docs)
+            foreach (var d in docs.OfType<Dictionary<string, object?>>())
+                if (d.TryGetValue("invoiceRefs", out var r) && r is List<object?> rows)
+                    foreach (var row in rows.OfType<Dictionary<string, object?>>())
+                    {
+                        var no = Convert.ToString(row.GetValueOrDefault("invoiceNo"))?.Trim() ?? "";
+                        if (no.Length > 0 && !refs.Any(x => x.No.Equals(no, StringComparison.OrdinalIgnoreCase)))
+                            refs.Add((no, Convert.ToString(row.GetValueOrDefault("description")) ?? ""));
+                    }
+        if (refs.Count == 0) return;
+        static bool IsFreight(string t) => System.Text.RegularExpressions.Regex.IsMatch(t ?? "", @"FREIGHT|OCEAN|AIR\s*FREIGHT|ค่าระวาง",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        static bool IsInsurance(string t) => System.Text.RegularExpressions.Regex.IsMatch(t ?? "", @"INSURANCE|ประกัน",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        var used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var l in doc.Lines)
+        {
+            if (!(l.ExtCode ?? "").Trim().Equals("COST", StringComparison.OrdinalIgnoreCase) || (l.InvoiceNo ?? "").Trim().Length > 0) continue;
+            if (IsInsurance(l.Desc)) continue;   // the insurer's document uses the PO
+            var want = IsFreight(l.Desc);
+            var hit = refs.FirstOrDefault(x => !used.Contains(x.No) && IsFreight(x.Desc) == want && !IsInsurance(x.Desc));
+            if (hit.No == null) continue;
+            l.InvoiceNo = hit.No;
+            used.Add(hit.No);
+        }
+        if (used.Count > 0) Log($"[MGT] supplier invoice numbers from the receipt: {string.Join(", ", used)}");
+    }
+
+    /// <summary>Reads ONE value from a cut-out of the page (a frame the person moved on "View
+    /// document"). Small request: one picture of a few centimetres. Returns the value or an error.</summary>
+    public static async Task<(string? Value, string? Error, int? TokensIn, int? TokensOut)> ReadRegionAsync(
+        byte[] jpeg, string field, AppConfig config)
+    {
+        if (string.IsNullOrEmpty(config.GeminiApiKey)) return (null, "GeminiApiKey is empty in config", null, null);
+        var kind = field switch
+        {
+            "invoiceDate" => "วันที่ ตอบรูปแบบ YYYY-MM-DD (ปี พ.ศ. ให้แปลงเป็น ค.ศ.)",
+            "subTotal" or "vatAmount" or "totalAmount" => "จำนวนเงิน ตอบเป็นตัวเลขล้วน ไม่มีลูกน้ำ ไม่มีสกุลเงิน",
+            "vendorTaxId" => "เลขประจำตัวผู้เสียภาษี 13 หลัก ตัวเลขล้วน",
+            _ => "ข้อความตามที่พิมพ์ในภาพ",
+        };
+        var prompt = $"ภาพนี้คือส่วนหนึ่งของเอกสาร อ่านค่าของช่อง \"{field}\" ที่อยู่ในภาพ ({kind}) " +
+                     "ตอบเป็น JSON เท่านั้น: {\"value\": \"...\"} ถ้าในภาพไม่มีค่าที่อ่านได้ให้ตอบ {\"value\": \"\"}";
+        var body = new
+        {
+            contents = new[] { new { role = "user", parts = (object)new List<object>
+            {
+                new { text = prompt },
+                new { inline_data = new { mime_type = "image/jpeg", data = Convert.ToBase64String(jpeg) } },
+            } } },
+            generationConfig = new { temperature = 0, maxOutputTokens = 2048, responseMimeType = "application/json" },
+        };
+        try
+        {
+            var url = $"https://generativelanguage.googleapis.com/v1beta/models/{config.GeminiModel}:generateContent?key={config.GeminiApiKey}";
+            using var req = new HttpRequestMessage(HttpMethod.Post, url)
+            {
+                Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json"),
+            };
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+            using var resp = await Http.SendAsync(req, cts.Token);
+            var respText = await resp.Content.ReadAsStringAsync(cts.Token);
+            if (!resp.IsSuccessStatusCode) return (null, $"Gemini HTTP {(int)resp.StatusCode}: {Trunc(respText, 300)}", null, null);
+            var (tin, tout) = Usage(respText);
+            var raw = ExtractText(respText).Trim();
+            var st = raw.IndexOf('{'); var en = raw.LastIndexOf('}');
+            if (st < 0 || en <= st) return (null, "Gemini returned no value", tin, tout);
+            using var j = JsonDocument.Parse(raw[st..(en + 1)]);
+            var v = j.RootElement.TryGetProperty("value", out var vv) ? vv.ToString().Trim() : "";
+            return (v, null, tin, tout);
+        }
+        catch (Exception ex) { return (null, $"{ex.GetType().Name}: {ex.Message}", null, null); }
+    }
+
+    // The header values whose position the read reports (AP, 2026-11-18).
+    private static readonly string[] PositionFields =
+    [
+        "invoiceNo", "invoiceDate", "vendorName", "vendorTaxId", "poRef", "currency",
+        "subTotal", "vatAmount", "totalAmount", "goodsSupplier", "goodsInvoiceNo", "linesTable",
+    ];
+
+    /// <summary>Asks the main read to say where it found each value: one extra key in the same JSON.
+    /// The answer is a few hundred tokens; the values themselves are still read from the images.</summary>
+    private static string PositionInstructions() =>
+        "\n\nเพิ่ม key \"_positions\" ใน JSON คำตอบเดียวกัน (นอกเหนือจาก header และ lines) บอกตำแหน่งที่อ่านแต่ละค่าได้ " +
+        "รูปแบบ {\"invoiceNo\":{\"image\":1,\"box\":[ymin,xmin,ymax,xmax]}, ..., \"lines\":[{\"image\":1,\"box\":[ymin,xmin,ymax,xmax]}, ...]} " +
+        "พิกัด 0-1000 ของภาพนั้น, image = ลำดับภาพในคำขอนี้ (เริ่มที่ 1) " +
+        "สำหรับ " + string.Join(", ", PositionFields) + " (linesTable = กรอบของตารางที่ใช้ทำ lines) " +
+        "และ \"lines\" = กรอบของแถวที่อ่านแต่ละแถวของ lines เรียงตามลำดับ lines เดียวกัน (แถวที่ไม่ได้อ่านจากภาพใดภาพหนึ่งใส่ null) " +
+        "ค่าที่ไม่พบไม่ต้องใส่ ห้ามเดาตำแหน่ง";
+
+    private static string? ExtractPositions(string raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw) || !raw.Contains("_positions")) return null;
+        var st = raw.IndexOf('{'); var en = raw.LastIndexOf('}');
+        if (st < 0 || en <= st) return null;
+        try
+        {
+            using var d = JsonDocument.Parse(raw[st..(en + 1)]);
+            return d.RootElement.TryGetProperty("_positions", out var pos) && pos.ValueKind == JsonValueKind.Object
+                ? pos.GetRawText() : null;
+        }
+        catch (JsonException) { return null; }
+    }
+
+    /// <summary>Turns the read's "_positions" (images of its own request) into FILE pages:
+    /// header._positions = {field: "page:ymin,xmin,ymax,xmax"} and each line's SourceBox. Only the
+    /// main request reports positions, and its images are the first ones of pageNos.</summary>
+    private static (ParsedDocument? Doc, string? Error) ApplyPositions((ParsedDocument? Doc, string? Error) read, List<int> pageNos)
+    {
+        var doc = read.Doc;
+        if (doc == null || string.IsNullOrWhiteSpace(doc.PositionsJson)) return read;
+        string? Box(JsonElement e)
+        {
+            if (e.ValueKind != JsonValueKind.Object || !e.TryGetProperty("box", out var b) || b.ValueKind != JsonValueKind.Array) return null;
+            var n = b.EnumerateArray().Where(x => x.ValueKind == JsonValueKind.Number).Select(x => (int)Math.Round(x.GetDouble())).ToList();
+            if (n.Count != 4 || n[2] <= n[0] || n[3] <= n[1]) return null;
+            var img = e.TryGetProperty("image", out var im) && im.ValueKind == JsonValueKind.Number ? im.GetInt32() : 1;
+            if (img < 1 || img > pageNos.Count) return null;
+            return $"{pageNos[img - 1]}:{string.Join(",", n.Select(v => Math.Clamp(v, 0, 1000)))}";
+        }
+        try
+        {
+            using var d = JsonDocument.Parse(doc.PositionsJson);
+            var fields = new Dictionary<string, object?>();
+            foreach (var p in d.RootElement.EnumerateObject())
+            {
+                if (p.Name == "lines")
+                {
+                    if (p.Value.ValueKind != JsonValueKind.Array) continue;
+                    var i = 0;
+                    foreach (var e in p.Value.EnumerateArray())
+                    {
+                        if (i < doc.Lines.Count && Box(e) is { } lb) doc.Lines[i].SourceBox = lb;
+                        i++;
+                    }
+                }
+                else if (Box(p.Value) is { } hb) fields[p.Name] = hb;
+            }
+            if (fields.Count > 0) doc.Header["_positions"] = fields;
+            Log($"Positions: {fields.Count} header field(s), {doc.Lines.Count(l => l.SourceBox.Length > 0)} line(s)");
+        }
+        catch (JsonException) { /* positions are a display aid; a bad answer never fails the read */ }
+        return read;
+    }
+
+    /// <summary>Which pages are a FORM SHIPPING EXPENSE sheet, by looking: every page at thumbnail
+    /// size in one small request. Used only when the text layer cannot say (a scanned bundle).
+    /// Returns zero-based page indexes; empty when none is found or the request fails — the read
+    /// then goes on exactly as before, so this can only help.</summary>
+    private static async Task<List<int>> FindFormPagesByVisionAsync(string path, int pages, AppConfig config)
+    {
+        try
+        {
+            var thumbs = PdfRasterizer.RenderPagesToJpeg(path, maxPages: pages, dpi: 60, quality: 60);
+            if (thumbs.Count < 2) return [];
+            var parts = new List<object>
+            {
+                new
+                {
+                    text = $"มี {thumbs.Count} ภาพ เรียงเป็นหน้า 1 ถึง {thumbs.Count} ของไฟล์เดียวกัน " +
+                           "ให้หาหน้าที่หัวกระดาษพิมพ์ว่า FORM SHIPPING EXPENSE (ฟอร์มสรุปค่าขนส่ง มีตาราง DESCRIPTION / SHIPPING BROKER HANDLING / " +
+                           "MGT'S GR EST. HANDLING และกล่อง VENDOR CODE ท้ายฟอร์ม) — ไม่ใช่ใบแจ้งหนี้ ใบเสร็จ ใบสั่งซื้อ หรือใบรับสินค้า " +
+                           "ตอบเป็น JSON เท่านั้น: {\"pages\": [เลขหน้าเริ่มที่ 1]} ถ้าไม่มีให้ตอบ {\"pages\": []}",
+                },
+            };
+            parts.AddRange(thumbs.Select(b => (object)new { inline_data = new { mime_type = "image/jpeg", data = Convert.ToBase64String(b) } }));
+            var body = new
+            {
+                contents = new[] { new { role = "user", parts = (object)parts } },
+                generationConfig = new { temperature = 0, maxOutputTokens = 4096, responseMimeType = "application/json" },
+            };
+            var url = $"https://generativelanguage.googleapis.com/v1beta/models/{config.GeminiModel}:generateContent?key={config.GeminiApiKey}";
+            using var req = new HttpRequestMessage(HttpMethod.Post, url)
+            {
+                Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json"),
+            };
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(120));
+            using var resp = await Http.SendAsync(req, cts.Token);
+            var respText = await resp.Content.ReadAsStringAsync(cts.Token);
+            if (!resp.IsSuccessStatusCode)
+            {
+                Log($"Form page finder: HTTP {(int)resp.StatusCode}: {Trunc(respText, 300)}");
+                return [];
+            }
+            var raw = ExtractText(respText).Trim();
+            if (raw.StartsWith("```")) raw = raw.Trim('`').Replace("json", "", StringComparison.OrdinalIgnoreCase).Trim();
+            using var j = JsonDocument.Parse(raw);
+            if (!j.RootElement.TryGetProperty("pages", out var arr) || arr.ValueKind != JsonValueKind.Array) return [];
+            return arr.EnumerateArray()
+                .Select(e => e.ValueKind == JsonValueKind.Number && e.TryGetInt32(out var n) ? n - 1 : -1)
+                .Where(i => i >= 0 && i < thumbs.Count)
+                .Distinct().OrderBy(i => i).ToList();
+        }
+        catch (Exception ex)
+        {
+            Log($"Form page finder failed: {ex.GetType().Name}: {ex.Message}");
+            return [];
+        }
+    }
 
     /// <summary>Pages read on their own first when the file has no FORM SHIPPING EXPENSE sheet to
     /// anchor on — the header and any line items are almost always at the front.</summary>
@@ -294,6 +608,7 @@ public static partial class GeminiOcr
                             // Pages actually sent in THIS request. Needed to report cost and
                             // time per page; nothing else in the pipeline knows the figure.
                             parsedDoc.Pages = pageCount;
+                            parsedDoc.PositionsJson = ExtractPositions(raw);
                             return (parsedDoc, null);
                         }
                         // 200 OK but the body held no parseable JSON. This is NOT a connection problem —

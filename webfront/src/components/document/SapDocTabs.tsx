@@ -20,6 +20,10 @@ export interface SapDocTab {
   lineAssignment: string;
   text: string;
   note?: string;
+  /** Positions in doc.lines of the rows this document is made of (screen tabs only). */
+  lineIdx?: number[];
+  /** The Reference was typed by hand (extra.sapRef). */
+  manualRef?: boolean;
 }
 
 type Payload = Record<string, any>;
@@ -39,39 +43,49 @@ export function screenTabs(args: {
   text: string;
 }): SapDocTab[] {
   const { lines, mainVendor, po, invoiceNo, text } = args;
-  const groups = new Map<string, { vendor: string; inv: string; costs: string[]; amount: number }>();
-  const firstInvOf = new Map<string, string>();
-  for (const l of lines) {
+  const groups = new Map<string, { vendor: string; inv: string; manual: string; costs: string[]; amount: number; idx: number[] }>();
+  lines.forEach((l, li) => {
     const ext = String(l.extCode ?? '').trim().toUpperCase();
-    if (['VAT', 'WHT'].includes(ext) || /^\s*(VAT|WITHHOLDING)/i.test(String(l.desc ?? ''))) continue;
+    if (['VAT', 'WHT'].includes(ext) || /^\s*(VAT|WITHHOLDING)/i.test(String(l.desc ?? ''))) return;
     const amount = Number(l.amount) || 0;
-    if (!amount) continue;
+    if (!amount) return;
     const x = (l.extra ?? {}) as Record<string, any>;
     const vendor = String(x.vendorCode ?? '').trim() || mainVendor;
-    let inv = String(x.invoiceNo ?? '').trim();
-    if (inv && !firstInvOf.has(vendor)) firstInvOf.set(vendor, inv);
-    if (!inv) inv = firstInvOf.get(vendor) ?? '';
-    const key = `${vendor}|${inv.toUpperCase()}`;
-    const g = groups.get(key) ?? { vendor, inv, costs: [], amount: 0 };
+    // One document per supplier invoice, and per row of the form when no invoice is named —
+    // FREIGHT and LOCAL HANDLING are never one document (same rule as the backend).
+    const inv = String(x.invoiceNo ?? '').trim();
+    const key = `${vendor}|${inv ? 'INV:' + inv.toUpperCase() : 'ROW:' + String(l.desc ?? '').trim().toUpperCase()}`;
+    const g = groups.get(key) ?? { vendor, inv, manual: '', costs: [], amount: 0, idx: [] };
     g.costs.push(String(l.desc ?? '').trim());
     g.amount = Math.round((g.amount + amount) * 100) / 100;
+    g.idx.push(li);
+    if (!g.manual) g.manual = String(x.sapRef ?? '').trim();
     groups.set(key, g);
-  }
+  });
   return [...groups.values()].map((g, i) => {
     const insurance = g.costs.length > 0 && g.costs.every((c) => /INSURANCE|ประกัน/i.test(c));
+    // The customs document takes the PO too (PRD 5100000747: Reference / Assignment 2130000720).
+    const customs = g.costs.length > 0
+      && g.costs.every((c) => /IMPORT|DUTY|CUSTOMS|FEE|ภาษี|อากร|ศุลกากร|ค่าธรรมเนียม/i.test(c));
+    const byPo = insurance || customs;
     // The supplier invoice the lines name (LOG101185LCH) — not the receipt / tax invoice number
     // (RE2512206) the header carries; that one is only shown when no line names an invoice.
-    const reference = insurance ? po : g.inv || invoiceNo || po;
+    // A Reference typed in this tab (extra.sapRef on its rows) wins, as it does in the backend.
+    const reference = g.manual || (byPo ? po : g.inv || invoiceNo || po);
     return {
       key: `s${i}`,
       vendor: g.vendor,
       costs: g.costs,
       amount: g.amount,
       reference,
-      vendorAssignment: insurance ? po : reference,
+      vendorAssignment: byPo ? po : reference,
       lineAssignment: po,
       text,
-      note: insurance ? 'ใบประกัน: Reference / Assignment = เลข PO'
+      lineIdx: g.idx,
+      manualRef: !!g.manual,
+      note: g.manual ? 'Reference แก้เอง — ลบให้ว่างเพื่อกลับไปใช้ค่าที่ระบบหาให้'
+        : insurance ? 'ใบประกัน: Reference / Assignment = เลข PO'
+        : customs ? 'ใบกรมศุลฯ: Reference / Assignment = เลข PO, VAT นำเข้าเป็นบรรทัด Input tax'
         : !g.inv ? 'ยังไม่มีเลขใบแจ้งหนี้ของรายการ (คอลัมน์ Supplier Inv. No. ในตาราง DETAIL) — Reference นี้เป็นเลขของเอกสาร' : undefined,
     };
   });
@@ -99,14 +113,27 @@ function payloadTabs(docs: Payload[]): SapDocTab[] {
   });
 }
 
-export default function SapDocTabs({ docId, fromScreen }: { docId: number; fromScreen: SapDocTab[] }) {
+export default function SapDocTabs({ docId, fromScreen, onReference }: {
+  docId: number;
+  fromScreen: SapDocTab[];
+  /** Writes a typed Reference onto the rows of one document (extra.sapRef); '' clears it. */
+  onReference?: (lineIdx: number[], value: string) => void;
+}) {
   const [fromSap, setFromSap] = useState<SapDocTab[] | null>(null);
   const [errors, setErrors] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [failed, setFailed] = useState('');
   const [active, setActive] = useState(0);
+  // What the Reference box shows while it is being typed in: emptying it clears the hand-typed
+  // Reference, and without this the box would jump straight back to the derived one mid-edit.
+  const [refDraft, setRefDraft] = useState<string | null>(null);
   const tabs = fromSap ?? fromScreen;
   const cur = tabs[Math.min(active, Math.max(tabs.length - 1, 0))];
+  // Two documents of one supplier with the same Reference: SAP refuses the second (M8/804), and
+  // it means the rows have no supplier invoice number yet (AP, 2026-11-16).
+  // The TEST tag is dropped but its part letter kept: "-T843" and "-T843B" are two References.
+  const refKey = (t: SapDocTab) => `${t.vendor}|${t.reference.replace(/-T\d+(?=[A-Z]?$)/, '').toUpperCase()}`;
+  const dupKeys = new Set(tabs.map(refKey).filter((k, i, a) => a.indexOf(k) !== i));
 
   const check = async () => {
     setLoading(true);
@@ -123,6 +150,28 @@ export default function SapDocTabs({ docId, fromScreen }: { docId: number; fromS
       setLoading(false);
     }
   };
+
+  // The screen tab a shown tab stands for: itself, or — after "ตรวจกับ SAP" — the screen tab at the
+  // same position when the two lists line up (same count). The supplier is not compared: the
+  // payload carries the TEST code the vendor map sends (4000021) and the screen the document's own
+  // (4000675), so the two never matched and the box stayed read-only (#843). Both lists follow the
+  // order of the rows; a list SAP split further (one document per tax code) does not line up and
+  // the edit is made on the screen's tabs instead.
+  const screenFor = (i: number): SapDocTab | undefined => {
+    if (!fromSap) return fromScreen[i];
+    return fromScreen.length === fromSap.length ? fromScreen[i] : undefined;
+  };
+  const curIdx = Math.min(active, Math.max(tabs.length - 1, 0));
+  const editable = !!onReference && !!screenFor(curIdx)?.lineIdx?.length;
+  const setReference = (value: string) => {
+    const target = screenFor(curIdx);
+    if (!onReference || !target?.lineIdx?.length) return;
+    onReference(target.lineIdx, value);
+    // Back to the screen's values, which now carry the edit; "ตรวจกับ SAP" shows SAP's again.
+    if (fromSap) setFromSap(null);
+  };
+  // TEST adds "-T{docId}" when it sends; the box edits the Reference itself.
+  const refShown = (t: SapDocTab) => (fromSap ? t.reference.replace(/-T\d+[A-Z]?$/, '') : t.reference);
 
   const box = (label: string, value: string) => (
     <div className="f" key={label}>
@@ -155,7 +204,7 @@ export default function SapDocTabs({ docId, fromScreen }: { docId: number; fromS
                 key={t.key}
                 type="button"
                 className="btn sm"
-                onClick={() => setActive(i)}
+                onClick={() => { setActive(i); setRefDraft(null); }}
                 style={{
                   borderRadius: '8px 8px 0 0',
                   borderBottom: i === active ? '2px solid var(--brand)' : '2px solid transparent',
@@ -163,7 +212,7 @@ export default function SapDocTabs({ docId, fromScreen }: { docId: number; fromS
                 }}
                 title={t.costs.join(', ')}
               >
-                {i + 1}. {t.vendor || '—'} · {t.costs.join(' + ') || '—'}
+                {i + 1}. {t.vendor || '—'} · {t.costs.join(' + ') || '—'}{dupKeys.has(refKey(t)) ? ' ⚠' : ''}
               </button>
             ))}
           </div>
@@ -171,13 +220,43 @@ export default function SapDocTabs({ docId, fromScreen }: { docId: number; fromS
             <div className="grid" style={{ marginTop: 8 }}>
               {box('ผู้ขาย', cur.vendor)}
               {box('ยอด', `${fmtAmt(cur.amount)}${cur.currency ? ' ' + cur.currency : ''}`)}
-              {box('Reference → SAP', cur.reference)}
+              {editable ? (
+                <div className="f" key="ref">
+                  <label>Reference → SAP (แก้ได้)</label>
+                  <input
+                    type="text"
+                    maxLength={16}
+                    value={refDraft ?? refShown(cur)}
+                    onFocus={() => setRefDraft(refShown(cur))}
+                    onBlur={() => setRefDraft(null)}
+                    onChange={(e) => {
+                      setRefDraft(e.target.value);
+                      setReference(e.target.value.trim());
+                    }}
+                    style={cur.manualRef ? { borderColor: 'var(--warn, #c08000)' } : undefined}
+                  />
+                </div>
+              ) : (
+                <div className="f" key="ref">
+                  <label>Reference → SAP</label>
+                  <input type="text" value={cur.reference} readOnly style={{ background: 'var(--bg-subtle, #f5f5f5)' }} />
+                  {fromSap && onReference && (
+                    <span className="hint">แก้ได้ที่ค่าจากหน้าจอ — กด "กลับไปค่าจากหน้าจอ"</span>
+                  )}
+                </div>
+              )}
               {box('Assignment — บรรทัดผู้ขาย', cur.vendorAssignment)}
               {box('Assignment — บรรทัดค่าใช้จ่าย', cur.lineAssignment)}
               {box('Text — ทุกบรรทัด', cur.text)}
             </div>
           )}
           {cur?.note && <div className="hint" style={{ marginTop: 4 }}>{cur.note}</div>}
+          {cur && dupKeys.has(refKey(cur)) && (
+            <div className="hint" style={{ marginTop: 4, color: 'var(--danger, #c00000)' }}>
+              Reference ซ้ำกับอีกใบของผู้ขายเดียวกัน — กรอกเลขใบแจ้งหนี้ของแต่ละแถวในคอลัมน์ Supplier Inv. No. (ตาราง DETAIL)
+              เช่น Freight = LOG101185LCH, Local Handling = LOG101202LCH แล้วกด Save และตรวจอีกครั้ง
+            </div>
+          )}
         </>
       )}
       {fromSap && errors.length > 0 && (

@@ -56,13 +56,14 @@ import TaxDataTable from '../components/document/TaxDataTable';
 import WhtTable from '../components/document/WhtTable';
 import IncomingInvoiceCard from '../components/document/IncomingInvoiceCard';
 import SapDocTabs, { screenTabs } from '../components/document/SapDocTabs';
+import DocumentBoxes, { hasDocumentFrames } from '../components/document/DocumentBoxes';
 import MappingCards from '../components/document/MappingCards';
 import ChatFixCard from '../components/document/ChatFixCard';
 import LineExtraModal from '../components/document/LineExtraModal';
 import MasterEditModal, {
   type MasterEditState,
 } from '../components/master/MasterEditModal';
-import { fetchBlobUrl,
+import { api as apiClient, fetchBlobUrl,
   ApiError,
 } from '../api/client';
 import { createMaster, updateMaster } from '../api/masters';
@@ -450,7 +451,18 @@ function firstWordOf(name: unknown): string {
  *  was not read. Mirrors SupplierInvoicePayload.MgtShippingText. */
 function mgtShippingText(h: Record<string, any>): string {
   const supplier = String(h.goodsSupplier ?? '').trim() || String(h.vendorName ?? '').trim();
-  const name = supplier.toUpperCase().split(/[\s,]+/).filter(Boolean).slice(0, 2).join(' ');
+  // Up to the first bracket or legal suffix, at most two words: "HUNTSMAN (SINGAPORE) PTE LTD."
+  // → "HUNTSMAN" (PRD 5100000747), "GOOD EARTH …" → "GOOD EARTH" (same rule as the backend).
+  const STOP = new Set(['PTE', 'PTY', 'LTD', 'LIMITED', 'CO', 'COMPANY', 'CORP', 'CORPORATION', 'INC', 'PLC', 'PCL',
+    'PUBLIC', 'SDN', 'BHD', 'GMBH', 'AG', 'SA', 'LLC', 'BV', 'NV', 'SPA', 'SRL', 'KK', 'TBK']);
+  const words: string[] = [];
+  // Indonesian names lead with PT ("PT.FINACHEM ADIJAYA PRIMA"): the prefix is not the name.
+  for (const w of supplier.toUpperCase().trim().replace(/^PT(\.\s*|\s+)/, '').split(/[\s,]+/).filter(Boolean)) {
+    if (w.startsWith('(') || STOP.has(w.replace(/\.+$/, ''))) break;
+    words.push(w);
+    if (words.length === 2) break;
+  }
+  const name = words.join(' ');
   const no = String(h.goodsInvoiceNo ?? '').trim() || String(h.poRef ?? '').split(/[,\s]+/)[0] || '';
   return name && no ? `${name} Inv. ${no}` : name || no;
 }
@@ -565,6 +577,11 @@ function docPosOf(h: Record<string, any>): string[] {
   };
   if (Array.isArray(h.poOrder)) h.poOrder.forEach(add);
   if (Array.isArray(h.poList)) h.poList.forEach((e: any) => add(e?.po));
+  // One PO in the Purchasing Order box replaces the header's PO (a TEST PO standing in for the
+  // printed one) — it is not a second PO of the bundle (same rule as the backend's PoNumbers).
+  const box = String(h.PurchasingOrder ?? '').match(/\b\d{10}\b/g) ?? [];
+  // Also over ONE PO the read left in poOrder/poList (2130000164 printed, 2130000044 typed).
+  if (out.length <= 1 && box.length === 1) return [box[0]];
   add(h.PurchasingOrder);
   add(h.poRef);
   return out;
@@ -845,12 +862,25 @@ function seedHeaderTaxCode(d: DocModel): DocModel {
   // are exempt (VX) because the tax lives on the Tax tab, one row per invoice. Letting the
   // "vendor 1xxxxxx = V1" rule touch those would overwrite codes the read got right.
   const vendor = String((d as Record<string, any>).partnerCode ?? d.header.vendorCode ?? '');
-  const byVendor = isInventoryPoDoc(d) ? taxDefaultsForVendor(vendor) : null;
+  let byVendor = isInventoryPoDoc(d) ? taxDefaultsForVendor(vendor) : null;
+  // MGT Accounting (Ariya, 2026-11-17), goods: a Thai supplier's tax invoice at 7% is V1 with
+  // "Calculate Tax" ticked; at 0% it is VX. A domestic invoice the read found no VAT on is the 0% case.
+  if (byVendor?.taxCode === 'V1' && !(Number(String(d.header.vatAmount ?? '').replace(/,/g, '')) > 0)) byVendor = { taxCode: 'VX', calculateTax: '' };
   const next: Record<string, any> = {};
   if (!String(d.header.taxCode ?? '').trim()) {
     next.taxCode = byVendor?.taxCode ?? HEADER_TAX_CODE;
     // Only alongside a tax code we just decided: "Calculate Tax" changes what SAP posts.
     if (byVendor) next.calculateTax = byVendor.calculateTax;
+  }
+  // MGT Accounting (AP, 2026-11-17): an overseas supplier's invoice (vendor 2xxxxxx) is dated the
+  // day it is keyed, i.e. the Posting Date; a domestic one keeps the date printed on it. The
+  // printed date is kept in supplierInvoiceDate. Done once, so a date typed afterwards stays.
+  const postingDate = String(d.header.postingDate ?? '').trim();
+  if (isInventoryPoDoc(d) && /^2\d/.test(vendor.trim()) && postingDate
+    && !String(d.header.supplierInvoiceDate ?? '').trim()
+    && String(d.header.invoiceDate ?? '').trim() !== postingDate) {
+    next.supplierInvoiceDate = String(d.header.invoiceDate ?? '').trim() || '-';
+    next.invoiceDate = postingDate;
   }
   if (d.header.businessPlace !== businessPlace) next.businessPlace = businessPlace;
   if (d.header.branch !== branch) next.branch = branch;
@@ -1117,6 +1147,9 @@ export default function DocumentPage() {
   // <iframe src="/api/..."> cannot send that header — the request came back 401 and the viewer was
   // simply blank. Fetch it with the token instead and hand the iframe/img a blob URL.
   const [fileUrl, setFileUrl] = useState<string | null>(null);
+  // "View document": the page pictures with a frame around each value read ('frames'), or the
+  // original file in the browser's viewer ('file'). Frames when the read recorded positions.
+  const [viewMode, setViewMode] = useState<'frames' | 'file'>('frames');
   const [fileErr, setFileErr] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
   // The purchase order read from SAP for the PO Reference tab, and whether a read is in flight.
@@ -1347,6 +1380,57 @@ export default function DocumentPage() {
     setDoc({ ...doc, header });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [doc?.docId, vendorAbbr, map?.header.vendor?.code]);
+
+  /* Payment tab as SAP shows it (AP, 2026-11-18, PRD 5105601505: Pyt Terms 5004 / 30 days,
+     BaselineDt 06.11.2025 = the invoice date, Due on 06.12.2025). Filled only where empty:
+     - Pyt Terms key: the words on the paper when they match ONE term of the master exactly
+       ("30 days" -> 5004), else the matched vendor's own terms from the vendor master. Sent as the
+       key, so SAP no longer falls back to whatever the PO carries (TEST took 1001, 0 days).
+     - Baseline Date: the invoice date (an overseas supplier's, vendor 2xxxxxx: the posting date,
+       the same day its invoice date is keyed on).
+     - Due Date: baseline + N days, for a plain "N Days" term only; anything that counts from
+       another date (B/L, end of month) is left to SAP. */
+  const vendorTermsCode = (() => {
+    if (!doc || !masters || !map || doc.module === 'SO') return '';
+    const code = String(map.header.vendor?.code ?? '').trim();
+    const row = code ? (masters.vendors || []).find((v) => String(v.VendorCode ?? '').trim() === code) : undefined;
+    return String(row?.PaymentTerms ?? '').trim();
+  })();
+  useEffect(() => {
+    if (!doc || doc.module === 'SO' || !masters) return;
+    if (['POSTED', 'SPLIT', 'PARTIAL', 'POSTING'].includes(String(doc.status))) return;
+    const hh = doc.header as Record<string, any>;
+    const terms = ((masters as Record<string, any>).paymentterms || []) as Array<Record<string, any>>;
+    const norm = (t: unknown) => String(t ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
+    const next: Record<string, any> = {};
+    if (!String(hh.paymentTermsCode ?? '').trim()) {
+      const txt = norm(hh.paymentTerms);
+      const hits = txt ? terms.filter((t) => norm(t.Text) === txt || norm(t.Code) === txt) : [];
+      const code = hits.length === 1 ? String(hits[0].Code ?? '').trim() : vendorTermsCode;
+      if (code) next.paymentTermsCode = code;
+    }
+    const vendorCode = String(map?.header.vendor?.code ?? (doc as Record<string, any>).partnerCode ?? '').trim();
+    if (!String(hh.baselineDate ?? '').trim()) {
+      const base = /^2\d/.test(vendorCode) && isInventoryPoDoc(doc)
+        ? String(hh.postingDate ?? '').trim()
+        : String(hh.invoiceDate ?? '').trim();
+      if (/^\d{4}-\d{2}-\d{2}$/.test(base)) next.baselineDate = base;
+    }
+    const base = String(next.baselineDate ?? hh.baselineDate ?? '').trim();
+    const code = String(next.paymentTermsCode ?? hh.paymentTermsCode ?? '').trim();
+    if (!String(hh.dueDate ?? '').trim() && /^\d{4}-\d{2}-\d{2}$/.test(base) && code) {
+      const text = String(terms.find((t) => String(t.Code ?? '').trim() === code)?.Text ?? '');
+      const m = /^\s*(?:within\s+)?(\d{1,3})\s*days?(?:\s+(?:net|due\s+net))?\s*$/i.exec(text);
+      if (m) {
+        const d = new Date(`${base}T00:00:00Z`);
+        d.setUTCDate(d.getUTCDate() + Number(m[1]));
+        next.dueDate = d.toISOString().slice(0, 10);
+      }
+    }
+    if (!Object.keys(next).length) return;
+    setDoc({ ...doc, header: { ...hh, ...next } });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doc?.docId, masters, map?.header.vendor?.code, vendorTermsCode, doc?.header.invoiceDate, doc?.header.postingDate, doc?.header.paymentTerms, doc?.header.paymentTermsCode]);
 
   /* MGT shipping (AP, 2026-11-16): the Basic Data Text is "GOOD EARTH Inv. INV-0498". A text the
      screen generated the old way ("FLS,INV.RE2512206") or a cost's own name is replaced; one
@@ -1582,7 +1666,10 @@ export default function DocumentPage() {
         // Only AP supplier invoices with a PO feed the PO/GR reconciliation snapshots. Run it
         // after SAP accepted the invoice; a reconciliation read failure must never undo or hide
         // the successful SAP result. The button below lets users retry and backfill older AP docs.
-        const poRef = String(h.poRef ?? '').trim();
+        // The PO the invoice was actually posted against: the PO Reference tab's Purchasing Order
+        // box wins over the header's PO (a TEST PO standing in for the printed one — 2130000044
+        // for 2130000164), exactly as the backend picks it (AP, 2026-11-16).
+        const poRef = poNumberOf(h);
         if ((doc.module === 'AP' || doc.module === 'II') && poRef && !r.simulated) {
           setReconciling(true);
           void reconcilePurchaseOrder(poRef, doc.docId)
@@ -1666,7 +1753,7 @@ export default function DocumentPage() {
 
   const refreshApReconciliation = () =>
     guard(async () => {
-      const po = String(h.poRef ?? '').trim();
+      const po = poNumberOf(h);   // same PO the invoice was posted against
       if (!po || !['AP', 'II'].includes(doc.module) || !posted) return;
       setReconciling(true);
       try {
@@ -1702,9 +1789,10 @@ export default function DocumentPage() {
     }
     if (!String(map?.header.vendor.code ?? '').trim()) {
       out.push('ยังไม่ได้จับคู่ผู้ขาย (Vendor) ใน Step 2');
+    } else if (!vendorAbbr) {
+      // Same as GLC again (AP, 2026-11-17): the supplier's abbreviation is required.
+      out.push('ผู้ขายยังไม่มีอักษรย่อ — เพิ่มที่การ์ด Vendor / Supplier ใน Step 2 (ใช้ขึ้นต้น Text เช่น KCC,INV.<เลขที่ invoice>)');
     }
-    // MGT (AP, 2026-11-16): no supplier abbreviation — MGT's vendor mapping differs from GLC's,
-    // so sending is not held for one and the Vendor card has no "Add abbreviation" button.
     // Issuer names go to SAP as the Input tax line's Text and to the input tax report: English
     // only (AP, 2026-11-11). The read is asked for English and Thai agency names are mapped, so a
     // Thai name left here is one the read kept — corrected once in Master 8, it stays English.
@@ -1985,6 +2073,18 @@ export default function DocumentPage() {
       await loadMasters(true);
       setManualHeader('vendor', code);
       showToast(already ? 'Vendor refreshed from SAP and matched' : 'Vendor added from SAP and matched');
+    });
+
+  // The supplier's abbreviation, typed on the Vendor card (Step 2). Saved on the vendor master so
+  // every later document of this supplier has it; the effect above moves the texts over.
+  // Restored for MGT, same as GLC (AP, 2026-11-17).
+  const saveVendorShortName = (code: string, abbr: string) =>
+    guard(async () => {
+      const v = abbr.trim().toUpperCase().slice(0, 20);
+      if (!code || !v) { showToast('กรอกอักษรย่อของผู้ขายก่อน'); return; }
+      await updateMaster('vendors', code, { ShortName: v });
+      await loadMasters(true);
+      showToast(`บันทึกอักษรย่อ ${v} ให้ผู้ขาย ${code} แล้ว`, 'success');
     });
 
   // MGT uses the real Zoho Account Code stored in Customer.ComcompyCodeSAP.
@@ -2613,6 +2713,23 @@ export default function DocumentPage() {
      showing the bundle's own total, which belongs to nobody. */
   const sendBreakdown = (() => {
     if (doc.module !== 'AP' && doc.module !== 'II') return [];
+    // MGT shipping (AP, 2026-11-16): one SAP document per row of the VENDOR CODE block / supplier
+    // invoice, all VX — the same split the Basic Data tabs and the backend make, costs only.
+    if (!isInventoryPoDoc(doc)) {
+      return screenTabs({
+        lines: doc.lines || [],
+        mainVendor: mainVendorCode,
+        po: poNumberOf(h),
+        invoiceNo: String(h.invoiceNo ?? '').trim(),
+        text: mgtShippingText(h),
+      }).map((t) => ({
+        code: t.vendor,
+        name: t.vendor === mainVendorCode ? String(map?.header.vendor.text ?? '') : '',
+        invoiceNo: t.reference + (t.costs.length ? ` · ${t.costs.join(' + ')}` : ''),
+        lines: t.costs.length,
+        total: Number(t.amount) || 0,
+      }));
+    }
     const codeOf = (l: DocLine) => String(l.extra?.vendorCode ?? '').trim();
     const isTax = (l: DocLine) => ['VAT', 'WHT', 'DUTY'].includes(String(l.extCode ?? ''));
     const main = mainVendorCode;
@@ -3400,6 +3517,7 @@ export default function DocumentPage() {
           onUseSapCustomer={useSapCustomer}
           onUseSapVendor={useSapVendor}
           vendorShortName={vendorAbbr}
+          onSaveVendorShortName={saveVendorShortName}
           onUseZohoAccount={useZohoCustomer}
           onUseSapShipTo={useSapShipTo}
           isMgt={isMgt}
@@ -3505,6 +3623,9 @@ export default function DocumentPage() {
                         <SapDocTabs
                           key={doc.docId}
                           docId={doc.docId}
+                          // The Reference of one SAP document, typed here, goes on that document's
+                          // rows (extra.sapRef) and the backend sends it as is (AP, 2026-11-16).
+                          onReference={(idx, value) => idx.forEach((i) => editLineExtra(i, 'sapRef', value))}
                           fromScreen={screenTabs({
                             lines: doc.lines || [],
                             mainVendor: String((doc as Record<string, any>).partnerCode ?? h.vendorCode ?? '').trim(),
@@ -3937,7 +4058,43 @@ export default function DocumentPage() {
         />
         <div className="card-b">
           <p className="hint">Compare the original file with the data extracted in the HEADER/DETAIL sections</p>
-          {doc.provider === 'demo' ? (
+          {doc.provider !== 'demo' && hasDocumentFrames(doc.header, doc.lines || []) && (
+            <div className="row" style={{ gap: 6, marginBottom: 8 }}>
+              <button type="button" className={`btn sm${viewMode === 'frames' ? ' primary' : ''}`} onClick={() => setViewMode('frames')}>
+                <i className="fa-regular fa-square" /> แสดงกรอบที่อ่าน
+              </button>
+              <button type="button" className={`btn sm${viewMode === 'file' ? ' primary' : ''}`} onClick={() => setViewMode('file')}>
+                <i className="fa-regular fa-file-pdf" /> ไฟล์ต้นฉบับ
+              </button>
+            </div>
+          )}
+          {doc.provider !== 'demo' && viewMode === 'frames' && hasDocumentFrames(doc.header, doc.lines || []) ? (
+            <DocumentBoxes
+              docId={doc.docId}
+              header={doc.header}
+              lines={doc.lines || []}
+              // A frame the person dragged into place replaces the read's position (saved with Save).
+              onMove={posted ? undefined : (key, value) => {
+                if (key.startsWith('h:')) {
+                  // editHeader is typed for strings; the positions map is stored as the object it is.
+                  editHeader('_positions', { ...((doc.header._positions as Record<string, string>) ?? {}), [key.slice(2)]: value } as unknown as string);
+                } else if (key.startsWith('l:')) {
+                  editLineExtra(Number(key.slice(2)), '_box', value);
+                }
+              }}
+              // Read the value again from inside a moved frame and put it in the field (Save keeps it).
+              onReadRegion={posted ? undefined : async (field, page, box) => {
+                try {
+                  const r = await apiClient.post<{ value: string }>(`/api/documents/${doc.docId}/read-region`, { field, page, box });
+                  if (!r.value) { showToast('ไม่พบค่าในกรอบนี้ — ลองขยายกรอบให้ครอบข้อความ'); return; }
+                  editHeader(field, r.value);
+                  showToast(`อ่านได้ "${r.value}" — กด Save เพื่อบันทึก`, 'success');
+                } catch (e) {
+                  showToast(e instanceof Error ? e.message : String(e));
+                }
+              }}
+            />
+          ) : doc.provider === 'demo' ? (
             <p className="hint">This document was generated from sample data (demo) — no original file to view</p>
           ) : fileErr ? (
             <p className="hint">Could not open the original file: {fileErr}</p>
@@ -3977,10 +4134,12 @@ export default function DocumentPage() {
         </div>
       </Modal>
 
-      <Modal open={postOpen} onClose={() => setPostOpen(false)}>
+      {/* While a send is running the dialog cannot be closed (Cancel, ✕, Esc, backdrop): SAP may
+          already be creating documents, and closing it hid the result and the rollback note. */}
+      <Modal open={postOpen} onClose={() => { if (!posting) setPostOpen(false); }}>
         <ModalHeader
           title="Confirm Submission to SAP S/4HANA"
-          onClose={() => setPostOpen(false)}
+          onClose={() => { if (!posting) setPostOpen(false); }}
         />
         <div className="card-b">
             <>
@@ -4023,8 +4182,8 @@ export default function DocumentPage() {
                               </tr>
                             </thead>
                             <tbody>
-                              {sendBreakdown.map((v) => (
-                                <tr key={v.code}>
+                              {sendBreakdown.map((v, i) => (
+                                <tr key={`${v.code}-${i}`}>
                                   <td>{v.code}{v.name ? ` — ${v.name}` : ''}</td>
                                   <td>{v.invoiceNo || <span className="hint">—</span>}</td>
                                   <td style={{ textAlign: 'right' }}>{v.lines}</td>
@@ -4132,7 +4291,12 @@ export default function DocumentPage() {
                 >
                   {posting ? 'Sending…' : 'Confirm send to SAP'}
                 </button>
-                <button className="btn" onClick={() => setPostOpen(false)}>
+                <button
+                  className="btn"
+                  onClick={() => setPostOpen(false)}
+                  disabled={posting}
+                  title={posting ? 'กำลังส่งเข้า SAP — รอให้เสร็จก่อน' : undefined}
+                >
                   Cancel
                 </button>
               </div>

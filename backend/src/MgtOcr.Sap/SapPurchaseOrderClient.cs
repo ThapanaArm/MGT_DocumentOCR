@@ -29,7 +29,14 @@ public record SapPurchaseOrderItem(
     // name the goods-receipt material document (M8/375 if missing); false = it must NOT
     // (M8/376 "Only fill fields 'ReferenceDocument, -FiscalYear, -Item' ... if GR-based IV is
     // active"). null = the field was not in SAP's response, so the caller keeps its old behaviour.
-    bool? GrBasedIv = null);
+    bool? GrBasedIv = null,
+    // The unit the PO PRICE is in (OrderPriceUnit) and how many of it make the numerator /
+    // denominator of one order unit. MGT POs order drums and may price them per KG; a supplier
+    // invoice line that carries a quantity needs the price unit too, or SAP converts an empty
+    // unit and refuses the invoice with BM/034 "No measurement unit is assigned to ISO code SPACE".
+    string PriceUnit = "",
+    decimal PriceUnitNumerator = 0,
+    decimal PriceUnitDenominator = 0);
 
 /// <summary>One pricing element of a purchase order item, from to_PurchaseOrderPricingElement.
 ///
@@ -101,7 +108,10 @@ public class SapPurchaseOrderClient(AppConfig config, HttpClient httpClient)
                 Conditions(el),
                 ExchangeRateOf(el),
                 el.TryGetProperty("InvoiceIsGoodsReceiptBased", out _)
-                    ? (bool?)IsFlag(el, "InvoiceIsGoodsReceiptBased") : null))
+                    ? (bool?)IsFlag(el, "InvoiceIsGoodsReceiptBased") : null,
+                GetString(el, "OrderPriceUnit") ?? "",
+                GetDecimal(el, "OrderPriceUnitToOrderUnitNmrtr"),
+                GetDecimal(el, "OrdPriceUnitToOrderUnitDnmntr")))
             .Where(x => x.Item.Length > 0)
             .ToList();
 
