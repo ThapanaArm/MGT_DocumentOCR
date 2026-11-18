@@ -203,7 +203,11 @@ export default function GlItemsTable({
                       <input
                         value={g.costCenter || ''}
                         readOnly={posted}
-                        onChange={(e) => onEdit(i, 'costCenter', e.target.value)}
+                        maxLength={10}
+                        placeholder="—"
+                        title="รหัส Cost Center ใน SAP (ไม่เกิน 10 ตัว) — ข้อความให้ใส่ช่อง Text"
+                        style={/[^A-Za-z0-9]/.test(String(g.costCenter || '')) ? { borderColor: 'var(--danger, #c00000)' } : undefined}
+                        onChange={(e) => onEdit(i, 'costCenter', e.target.value.replace(/[^A-Za-z0-9]/g, '').slice(0, 10))}
                       />
                     </td>
                     <td>

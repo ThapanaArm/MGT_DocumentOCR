@@ -290,7 +290,17 @@ public static class SupplierInvoicePayload
                 ["SupplierInvoiceItemText"] = Cut(g.GetStr("itemText").Trim(), 50),
                 ["_manualGl"] = true,
             };
-            if (g.GetStr("costCenter").Trim() is { Length: > 0 } cc) row["CostCenter"] = cc;
+            if (g.GetStr("costCenter").Trim() is { Length: > 0 } cc)
+            {
+                // SAP's Cost Center is at most 10 characters, letters and digits only; anything else
+                // is text typed into the wrong box (TEST, 2026-11-18: "2130000720 A002-0690602271"
+                // → "Property 'CostCenter' has invalid value"). Say so before SAP does.
+                if (cc.Length > 10 || !cc.All(char.IsLetterOrDigit))
+                    throw new MgtOcr.Core.HttpApiException(400,
+                        $"G/L Account Items: Cost Center \"{cc}\" ไม่ใช่รหัส Cost Center (ไม่เกิน 10 ตัว ตัวอักษร/ตัวเลขเท่านั้น) "
+                        + $"— บรรทัด {acct} {F2(amount)}: ถ้าเป็นข้อความให้ย้ายไปช่อง Text แล้วเว้นช่อง Cost Center ว่าง");
+                row["CostCenter"] = cc;
+            }
             // A line on a tax account must carry its base (F5A375).
             if (acct.TrimStart('0') is DeferredVatReversal.GlInputTax or DeferredVatReversal.GlDeferredInputTax)
                 row["TaxBaseAmountInTransCrcy"] = F2(Num(g.Get("taxBase")) > 0 ? Num(g.Get("taxBase")) : Math.Round(amount / 0.07, 2));
@@ -483,7 +493,10 @@ public static class SupplierInvoicePayload
             // our behalf (Cargoport, the Port Authority …) go on ONE line per tax code, the way
             // Accounting posts them (5100001131: PROMPT 105.00 D1, then 782.99 D1 = Cargoport 744.35
             // + Port Authority 38.64).
-            var ownInvoice = Or(vendor.Length > 0 ? InvoiceNoOf(taxRows) : "", header.GetStr("invoiceNo").Trim());
+            // The main supplier's own invoice is the header's (S.N.R. 0433). Taking the first tax row
+            // instead picked a receipt it paid on our behalf (DHL W1736878) and named the whole document
+            // after DHL (TEST 5100000075, AP 2026-11-18).
+            var ownInvoice = MainSupplierInvoice(header, vendor, mainVendor, Party, taxRows);
             var vatLines = new List<(string Code, bool Own, bool Deferred, double Amount, double Base, string DocNo, string Issuer, bool Customs)>();
             foreach (var t in taxRows)
             {
@@ -530,8 +543,11 @@ public static class SupplierInvoicePayload
             // MGT (PRD 5100000710): the VAT line's Text is the invoicing party's full name,
             // "S.N.R. IMPORT-EXPORT CO.,LTD.", not "<abbr>,INV.<no>".
             if (partyName.Length > 0) vatText = MgtOcr.Ocr.VisionPrompt.EnglishIssuerName(partyName);
+            // MGT (PRD 5100000710): ONE deferred VAT line for the supplier's invoice — 1,252.36 = its own
+            // 189.00 + the VAT of the receipts it paid on our behalf (DHL 1,036.06, KLN 27.30) — not one
+            // per issuer. The customs import VAT keeps its own line per receipt.
             foreach (var g in vatLines.GroupBy(v => (v.Code, v.Deferred,
-                         Key: v.Customs ? "CUSTOMS|" + v.DocNo : v.Own ? "OWN|" + v.DocNo : "PAID-ON-BEHALF")))
+                         Key: v.Customs ? "CUSTOMS|" + v.DocNo : "SUPPLIER")))
             {
                 var items = g.ToList();
                 var amt = Math.Round(items.Sum(v => v.Amount), 2);
@@ -716,7 +732,7 @@ public static class SupplierInvoicePayload
         var supplierRef = refManual ? invoiceRef
             : (insuranceOnly || customsCostsOnly) && poRef.Length > 0 ? poRef
             : invoiceRef.Length > 0 && !isPoKeyed ? invoiceRef
-            : isPoKeyed && poRef.Length > 0 ? GoodsReference(header, poRef) : Or(vendor.Length > 0 ? DocNoKey(InvoiceNoOf(taxRows)) : "",
+            : isPoKeyed && poRef.Length > 0 ? GoodsReference(header, poRef) : Or(vendor.Length > 0 ? DocNoKey(MainSupplierInvoice(header, vendor, mainVendor, Party, taxRows)) : "",
             Or(header.GetStr("invoiceNo").Trim(),
                Or(header.GetStr("goodsInvoiceNo").Trim(), poRef)));
         // MGT Accounting (AP, 2026-11-17): a domestic supplier's invoice is dated as printed
@@ -1162,6 +1178,17 @@ public static class SupplierInvoicePayload
         return slash > 0 ? v[..slash].Trim() : v;
     }
 
+    /// <summary>The invoice number of the supplier this document is for: the header's when that is
+    /// the bundle's main supplier, else its own tax row's (an issuer of another supplier's document).</summary>
+    private static string MainSupplierInvoice(Dictionary<string, object?> header, string vendor, string mainVendor,
+        Func<string, string> party, IEnumerable<Dictionary<string, object?>> taxRows)
+    {
+        var headerInv = header.GetStr("invoiceNo").Trim();
+        var isMain = vendor.Length == 0 || string.Equals(party(vendor), party(mainVendor), StringComparison.OrdinalIgnoreCase);
+        if (isMain && headerInv.Length > 0) return headerInv;
+        return Or(vendor.Length > 0 ? InvoiceNoOf(taxRows) : "", headerInv);
+    }
+
     private static string InvoiceNoOf(IEnumerable<Dictionary<string, object?>> taxRows) =>
         taxRows.Select(t => t.GetStr("taxDocNo").Trim()).FirstOrDefault(v => v.Length > 0) ?? "";
 
@@ -1370,6 +1397,24 @@ public static class SupplierInvoicePayload
         // rows, AP 2026-11-16) wins over everything read or derived, the insurance PO included.
         string ManualOf(IEnumerable<Dictionary<string, object?>> ls) =>
             ls.Select(l => ((Dictionary<string, object?>)l["extra"]!).GetStr("sapRef").Trim()).FirstOrDefault(n => n.Length > 0) ?? "";
+        // The Customs Department's and the insurer's rows take the PURCHASE ORDER as Reference, so
+        // splitting them by receipt (2801-092745 import duty, 2801-092746 …) only made two documents
+        // with one Reference (M8/804). They are ONE document, as PRD 5100000747 (AP, 2026-11-18).
+        static bool ByPo(Dictionary<string, object?> l) =>
+            System.Text.RegularExpressions.Regex.IsMatch(l.GetStr("desc"),
+                "INSURANCE|ประกัน|IMPORT|DUTY|CUSTOMS|FEE|ภาษี|อากร|ศุลกากร|ค่าธรรมเนียม",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+            || ((Dictionary<string, object?>)l["extra"]!).GetStr("deliveryCondType").Trim().ToUpperInvariant() is "ZINS" or "ZIM1" or "ZFE2";
+        if (groups.Count > 1 && mine.All(ByPo))
+        {
+            var manualPo = ManualOf(mine);
+            return [new Dictionary<string, object?>(doc)
+            {
+                ["header"] = manualPo.Length > 0
+                    ? new Dictionary<string, object?>(header) { ["_invoiceRef"] = manualPo, ["_refManual"] = true }
+                    : new Dictionary<string, object?>(header),
+            }];
+        }
         if (groups.Count <= 1)
         {
             var manualOnly = groups.Count == 1 ? ManualOf(groups[0]) : "";

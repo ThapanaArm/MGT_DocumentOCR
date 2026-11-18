@@ -54,7 +54,11 @@ export function screenTabs(args: {
     // One document per supplier invoice, and per row of the form when no invoice is named —
     // FREIGHT and LOCAL HANDLING are never one document (same rule as the backend).
     const inv = String(x.invoiceNo ?? '').trim();
-    const key = `${vendor}|${inv ? 'INV:' + inv.toUpperCase() : 'ROW:' + String(l.desc ?? '').trim().toUpperCase()}`;
+    // Customs / insurance rows take the PO as Reference: one document per supplier, never one per
+    // receipt (same rule as the backend's DocsPerInvoice, AP 2026-11-18).
+    const byPoRow = /INSURANCE|ประกัน|IMPORT|DUTY|CUSTOMS|FEE|ภาษี|อากร|ศุลกากร|ค่าธรรมเนียม/i.test(String(l.desc ?? ''))
+      || ['ZINS', 'ZIM1', 'ZFE2'].includes(String(x.deliveryCondType ?? '').trim().toUpperCase());
+    const key = `${vendor}|${byPoRow ? 'PO' : inv ? 'INV:' + inv.toUpperCase() : 'ROW:' + String(l.desc ?? '').trim().toUpperCase()}`;
     const g = groups.get(key) ?? { vendor, inv, manual: '', costs: [], amount: 0, idx: [] };
     g.costs.push(String(l.desc ?? '').trim());
     g.amount = Math.round((g.amount + amount) * 100) / 100;

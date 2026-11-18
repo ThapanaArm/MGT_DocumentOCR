@@ -504,9 +504,20 @@ public static partial class GeminiOcr
     private static void FillInvoiceNos(ParsedDocument doc)
     {
         var refs = new List<(string No, string Desc)>();
+        // Only the main supplier's own receipts say which of ITS invoices a cost row is. A receipt of
+        // somebody it paid on our behalf (DHL's tax invoice W1736878 on S.N.R.'s bundle) lists that
+        // party's numbers, which became S.N.R.'s Reference (TEST 5100000075, AP 2026-11-18).
+        static HashSet<string> Words(string s) => System.Text.RegularExpressions.Regex
+            .Split((s ?? "").ToUpperInvariant().Replace(".", ""), @"[^A-Z0-9ก-๙]+")
+            .Where(w => w.Length >= 3 && w is not ("THE" or "CO" or "LTD" or "COMPANY" or "LIMITED" or "THAILAND" or "PUBLIC"
+                or "GROUP" or "INTERNATIONAL" or "LOGISTICS" or "SERVICE" or "SERVICES" or "TRANSPORT" or "SHIPPING"
+                or "FREIGHT" or "EXPRESS" or "TRADING" or "CORPORATION" or "IMPORT" or "EXPORT" or "FORWARDING"))
+            .ToHashSet();
+        var mainWords = Words(Convert.ToString(doc.Header.GetValueOrDefault("vendorName")) ?? "");
         if (doc.Header.TryGetValue("sourceDocs", out var v) && v is List<object?> docs)
             foreach (var d in docs.OfType<Dictionary<string, object?>>())
-                if (d.TryGetValue("invoiceRefs", out var r) && r is List<object?> rows)
+                if ((mainWords.Count == 0 || Words(Convert.ToString(d.GetValueOrDefault("issuerName")) ?? "").Overlaps(mainWords))
+                    && d.TryGetValue("invoiceRefs", out var r) && r is List<object?> rows)
                     foreach (var row in rows.OfType<Dictionary<string, object?>>())
                     {
                         var no = Convert.ToString(row.GetValueOrDefault("invoiceNo"))?.Trim() ?? "";
