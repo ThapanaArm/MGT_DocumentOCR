@@ -1533,6 +1533,12 @@ export default function DocumentPage() {
   // Uploaded file of a never-posted document is removed after the retention period (FileCleanupWorker).
   const retention = fileRetention(doc, doc.retentionHours);
   const fileExpired = retention.kind === 'expired';
+  // Keyed against a purchase order (goods or planned delivery costs) the document's lines are the PO
+  // items and the delivery costs; only rows AP adds by hand (Prepayment …) go out as G/L Account Items.
+  // The rows the screen seeds from the costs and the Tax tab would never be sent, and showing them
+  // read as if they would (AP, 2026-11-18: "Import Tax 54,492.00" under the Customs Department).
+  const glPoKeyed = doc.module === 'AP' && poNumberOf(h).length > 0;
+  const glShown = (g: Record<string, any>) => !glPoKeyed || g.manual === true || g.manual === 'true';
   const glItems = h.glItems || [];
   const showDetail = doc.module !== 'II' && doc.module !== 'PODP';
   const showGlItems = doc.module === 'AP' || doc.module === 'II';
@@ -1724,6 +1730,17 @@ export default function DocumentPage() {
 
   const postDeferredJv = () =>
     guard(async () => {
+      // The JV only moves rows chosen as V1 (a tax invoice / receipt is in the bundle) out of D1.
+      // A row left on D1 is an invoice only: it stays deferred until the receipt comes and is
+      // cleared at month end — so say that here instead of letting SAP-side checks refuse it.
+      const claimNow = ((h.taxItems as Array<Record<string, any>>) || []).filter((t) =>
+        /^V[0-9]$/i.test(String(t.taxCode ?? '').trim()) && !/CUSTOMS|ศุลกากร/i.test(String(t.issuerName ?? ''))
+        && (Number(t.docCurrencyAmt) || 0) !== 0);
+      if (claimNow.length === 0) {
+        showToast('ยังไม่มีภาษีที่ต้องกลับค่า — แถวในแท็บ Tax เป็น D1 (มีแค่ใบแจ้งหนี้) จึงค้างเป็นภาษีซื้อไม่ถึงกำหนดไว้ก่อน '
+          + 'เมื่อได้ใบเสร็จ/ใบกำกับภาษีแล้ว ให้เปลี่ยนแถวนั้นเป็น V1 แล้วค่อยกด JV', 'error');
+        return;
+      }
       const today = new Date();
       const iso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
       const postingDate = window.prompt(
@@ -3157,9 +3174,10 @@ export default function DocumentPage() {
   // document" filter still wins when it is set.
   const glVendor = vendorFilter || (glVendorOptions.length > 1 ? glTabVendor : '');
   const glRows = (() => {
-    if (!glVendor) return { items: glItems as Array<Record<string, any>>, at: glItems.map((_: unknown, i: number) => i) };
     const at: number[] = [];
     (glItems as Array<Record<string, any>>).forEach((r, i) => {
+      if (!glShown(r)) return;
+      if (!glVendor) { at.push(i); return; }
       // An untagged row is the main supplier's — the first document when the matched code (a TEST
       // stand-in like 4000023) is not one the tabs show.
       const home = glVendorOptions.some(([c]) => c === glMainVendor) ? glMainVendor : glVendorOptions[0]?.[0] ?? glMainVendor;

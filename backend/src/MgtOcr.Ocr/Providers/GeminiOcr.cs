@@ -399,6 +399,7 @@ public static partial class GeminiOcr
         }
         FillInvoiceNos(doc);
         FillVendorDateAndTaxId(doc);
+        DropCustomsFeesBilledByAgent(doc);
         var dropped = doc.Lines.Where(l => !Keep(l)).ToList();
         if (dropped.Count == 0) return read;
         doc.Lines = doc.Lines.Where(Keep).ToList();
@@ -412,6 +413,40 @@ public static partial class GeminiOcr
         doc.ConfidenceNote = doc.ConfidenceNote.Length > 0 ? $"{doc.ConfidenceNote} / {note}" : note;
         Log($"[MGT] dropped {dropped.Count} goods line(s) from a delivery-cost read");
         return read;
+    }
+
+    /// <summary>MGT (AP, 2026-11-18, PO 2130000720): a Customs Department receipt for a FEE only (the
+    /// 200.00 customs fee 2801-092746, overtime) is already on the FORM — CUSTOMS FEE / OT CHARGE under
+    /// the agent's LOCAL HANDLING (S.N.R. 4000496; PRD nets it off as Prepayment "Customs Fee" 200.00).
+    /// The Customs Department's own document carries the import duty and the import VAT only
+    /// (PRD 5100000747), so the fee read off the receipt as a DUTY row must not become a document
+    /// of its own. The receipt stays listed, filed under Local and as included in the agent's invoice.</summary>
+    private static void DropCustomsFeesBilledByAgent(ParsedDocument doc)
+    {
+        static bool Fee(string d) => System.Text.RegularExpressions.Regex.IsMatch(d ?? "",
+            @"FEE|ค่าธรรมเนียม|OVER\s*TIME|ล่วงเวลา", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+            && !System.Text.RegularExpressions.Regex.IsMatch(d ?? "", @"IMPORT\s*(DUTY|TAX)|EXCISE|INTERIOR|อากรขาเข้า|สรรพสามิต|มหาดไทย",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        var fees = doc.Lines.Where(l => (l.ExtCode ?? "").Trim().Equals("DUTY", StringComparison.OrdinalIgnoreCase) && Fee(l.Desc ?? "")).ToList();
+        if (fees.Count == 0) return;
+        doc.Lines = doc.Lines.Except(fees).ToList();
+        var agentInv = Convert.ToString(doc.Header.GetValueOrDefault("invoiceNo"))?.Trim() ?? "";
+        if (doc.Header.TryGetValue("sourceDocs", out var v) && v is List<object?> docs)
+            foreach (var d in docs.OfType<Dictionary<string, object?>>())
+            {
+                var issuer = Convert.ToString(d.GetValueOrDefault("issuerName")) ?? "";
+                if (!System.Text.RegularExpressions.Regex.IsMatch(issuer, "CUSTOMS|ศุลกากร", System.Text.RegularExpressions.RegexOptions.IgnoreCase)) continue;
+                var vat = double.TryParse(Convert.ToString(d.GetValueOrDefault("vatAmount"), System.Globalization.CultureInfo.InvariantCulture),
+                    System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var x) ? x : 0;
+                var total = double.TryParse(Convert.ToString(d.GetValueOrDefault("totalAmount"), System.Globalization.CultureInfo.InvariantCulture),
+                    System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var t) ? t : 0;
+                if (vat != 0 || !fees.Any(f => Math.Abs(f.Amount - total) < 0.005)) continue;
+                d["costType"] = "Local";
+                if (agentInv.Length > 0 && string.IsNullOrWhiteSpace(Convert.ToString(d.GetValueOrDefault("includedIn")))) d["includedIn"] = agentInv;
+            }
+        var note = $"ค่าธรรมเนียมกรมศุลฯ {string.Join(", ", fees.Select(f => f.Amount.ToString("N2")))} อยู่ใน Local Handling ของตัวแทนแล้ว (FORM) — ไม่ตั้งเป็นเอกสารแยก";
+        doc.ConfidenceNote = doc.ConfidenceNote.Length > 0 ? $"{doc.ConfidenceNote} / {note}" : note;
+        Log($"[MGT] {note}");
     }
 
     /// <summary>MGT (AP, 2026-11-17, #855 / #861): the FORM SHIPPING EXPENSE carries no invoice date
