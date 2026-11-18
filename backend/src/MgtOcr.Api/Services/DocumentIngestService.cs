@@ -8,7 +8,7 @@ namespace MgtOcr.Api.Services;
 // queue worker. Mirrors DocumentsController.Upload's core: read the saved file, route AP->AP/II by
 // PO number, then create the document row. Password prompting stays in the sync endpoint; the batch
 // path rejects encrypted PDFs before enqueuing, so `password` is normally null here.
-public class DocumentIngestService(OcrEngine ocr, DocumentRepository repo, JobLogRepository jobs, PageMemoryStore pageMemory, FileDuplicateStore duplicates, Db db, MgtOcr.Core.Config.AppConfig config)
+public class DocumentIngestService(OcrEngine ocr, DocumentRepository repo, JobLogRepository jobs, PageMemoryStore pageMemory, FileDuplicateStore duplicates, Db db, MgtOcr.Core.Config.AppConfig config, WhtVendorRules whtRules)
 {
     public static string UploadEngineFor(string module, string? requested)
     {
@@ -116,6 +116,7 @@ public class DocumentIngestService(OcrEngine ocr, DocumentRepository repo, JobLo
             var seen = $"Same file as document #{sameFile}";
             pd.ConfidenceNote = string.Join(" / ", new[] { pd.ConfidenceNote, seen, dupWarning }.Where(x => !string.IsNullOrEmpty(x)));
         }
+        if (mod is "AP" or "II") await whtRules.ApplyAsync(pd, salesOrg);
         var ext = ExtConversion.ToExtDict(pd);
         var docId = await repo.CreateDocumentAsync(mod, ext, fileName, storedPath, size, user, apDocCategory, durationMs, salesOrg);
         await pageMemory.SaveReadAsync(docId, mod, apDocCategory, pd);

@@ -569,6 +569,7 @@ export const MASTER_DEF: Record<string, MasterDef> = {
   whtmaps: {
     label: 'Withholding Tax Mapping', mod: 'AP', key: 'Id', cols: [
       { k: 'SalesOrg', l: 'Company', help: 'Leave blank to use this rule for both companies · MGT = 1000 / GLC = 2000' },
+      { k: 'VendorTaxId', l: 'Supplier Tax ID', maxLen: 13, help: 'Set = applied by itself to this supplier\'s invoice when it prints no WHT: its charge lines containing the words below are withheld at this rate (S.N.R. 0105539021630: Shipping Charge 3%). Blank = reference only' },
       { k: 'IncomeType', l: 'Kind of income', required: true, help: 'As Accounting names it, e.g. ค่าขนส่ง, ค่าบริการ/ค่าจ้างทำของ, ค่าเช่า' },
       { k: 'Keywords', l: 'Words on the document', help: 'Comma separated, e.g. TRUCKING,ค่าขนส่ง — used to recognise the kind of income from the cost line' },
       { k: 'Rate', l: 'Rate (%)', required: true, help: '1 transport · 3 service / hire of work · 5 rent · 2 advertising' },

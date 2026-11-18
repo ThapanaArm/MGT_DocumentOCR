@@ -62,6 +62,7 @@ public static partial class VisionPrompt
             "poLines": [{"extCode": "รหัส/ล็อตสินค้าตามใบสั่งซื้อ", "desc": "ชื่อสินค้า",
                          "qty": 0, "uom": "หน่วยนับ", "price": 0, "amount": 0}],
             "subTotal": 0, "vatRate": 7, "vatAmount": 0, "whtAmount": 0, "totalAmount": 0,
+            "agentCharges": [{"desc": "ชื่อรายการตามที่พิมพ์ในใบ (ภาษาอังกฤษถ้ามี)", "amount": 0}],
             "sourceDocs": [{"docType": "Invoice / Tax Invoice / Receipt / Debit Note", "issuerName": "ชื่อผู้ออกเอกสารเป็นภาษาอังกฤษเท่านั้น (ใช้ชื่ออังกฤษที่พิมพ์ในใบ ถ้ามีแต่ภาษาไทยให้แปลเป็นชื่ออังกฤษทางการขององค์กร หรือถอดเสียงเป็นอักษรอังกฤษถ้าเป็นชื่อบุคคล เช่น วิเชียร ยอดแก้ว = WICHIAN YODKAEW)", "docNo": "เลขที่เอกสาร", "docDate": "YYYY-MM-DD", "costType": "Local หรือ Insurance หรือ Fee หรือ Overseas", "currency": "THB", "nonVatAmount": 0, "amountBeforeVat": 0, "vatAmount": 0, "totalAmount": 0, "includedIn": "", "shipper": "", "blNo": "", "shipperInvoiceNo": "", "invoiceRefs": [{"invoiceNo": "", "description": "", "amount": 0}]}]
           },
           "lines": [{"extCode": "รหัสสินค้า/บริการถ้ามี", "desc": "ชื่อ/รายละเอียดสินค้าหรือบริการ",
@@ -160,6 +161,10 @@ public static partial class VisionPrompt
         // LOG101202LCH — not a customs fee or tax.
         "  · ใบเสร็จกรมศุลกากรที่รายการเป็น \"ค่าทำการล่วงเวลา\" (ค่าล่วงเวลา / Overtime) ไม่ใช่ภาษีหรืออากร: costType = \"Local\" (แถว OT CHARGE ในฟอร์ม), vatAmount = 0 " +
         "และถ้าใบแจ้งหนี้ของตัวแทนชิปปิ้งมีรายการ CUSTOMS OVER TIME / OT CHARGE ที่ยอดเท่ากับผลรวมใบเหล่านี้ ให้ includedIn = เลขที่ใบแจ้งหนี้นั้น\n" +
+        // AP, 2026-11-18: the supplier's own charge lines, for withholding rules per supplier (Master 7).
+        "  · agentCharges = ทุกรายการที่มียอดเงินในใบแจ้งหนี้ของผู้ขายหลัก (รายที่เราจ่ายเงินตรง = header.vendorName) " +
+        "desc = ชื่อรายการตามที่พิมพ์ (เช่น Shipping Charge, Truck and Driver Hire), amount = ยอดของรายการนั้นก่อน VAT " +
+        "ไม่รวมแถว VAT / TOTAL / ยอดรวม ถ้าไม่มีใบแจ้งหนี้ของผู้ขายหลักให้เป็นอาร์เรย์ว่าง\n" +
         "  · includedIn = เลขที่ใบแจ้งหนี้ของตัวแทนชิปปิ้ง ถ้าใบนี้เป็นใบเสร็จที่ตัวแทนจ่ายแทนแล้วเรียกเก็บรวมอยู่ในใบแจ้งหนี้ของตัวแทนอีกที " +
         "(เช่น ใบเสร็จค่า DO / ค่าท่าเรือที่อยู่ในใบแจ้งหนี้ของ PROMPT แล้ว) ใบที่เราจ่ายเองโดยตรงให้ใส่สตริงว่าง\n" +
         "  · ใบวางบิล/ใบแจ้งหนี้ กับใบกำกับภาษี/ใบเสร็จ ของรายการเดียวกัน (ผู้ออกเดียวกัน ยอดเท่ากัน) ให้ใส่รายการเดียว\n" +
@@ -351,6 +356,7 @@ public static partial class VisionPrompt
             + "issuerBranch = รหัสสาขา 4 หลัก สำนักงานใหญ่ = \"0000\" (ห้าม 5 หลัก), baseAmount = มูลค่าก่อน VAT ของใบนั้น\n" +
         "- WHT: ภาษีหัก ณ ที่จ่ายที่พบในใบเหล่านี้ 1 แถวต่อ 1 รายการ extCode = \"WHT\", "
             + "desc = \"Withholding Tax <อัตรา>% <ชื่อผู้ออกเอกสาร> <เลขที่เอกสาร>\", amount = price = ยอดที่หัก (ตัวเลขบวก)\n" +
+        WhtKeywordRules +
         "- DUTY: ค่าธรรมเนียมและภาษีในใบเสร็จกรมศุลกากร/ใบขนสินค้าขาเข้า extCode = \"DUTY\" แถวละรายการ "
             + "ได้แก่ อากรขาเข้า (desc = \"Import Duty\"), ภาษีสรรพสามิต (\"Excise Tax\"), ภาษีเก็บเพิ่มเพื่อมหาดไทย (\"Interior Tax\") "
             + "ข้ามรายการที่ยอดเป็น 0 ส่วน VAT ของใบนั้นให้ไปอยู่ในแถว VAT ตามปกติ "
@@ -451,6 +457,18 @@ public static partial class VisionPrompt
         "ให้แยกเป็น 2 แถวตามใบเสร็จกรมสรรพสามิตที่แนบมาในไฟล์: desc = \"ภาษีสรรพสามิต\" และ desc = \"ภาษีเก็บเพิ่มเพื่อมหาดไทย\" " +
         "ใช้ vendorCode เดียวกับแถว EXCISE FEE เดิม ห้ามใส่แถวยอดรวมซ้ำอีก";
 
+    /// <summary>Withholding the supplier's invoice does not print, taken from one named line
+    /// (Accounting, 2026-11-18): S.N.R. bills its own service as "Shipping Charge" (2,700.00 on
+    /// invoice 0433) and is withheld 3% on it — PRD 5100000710: OA / 09, base 2,700.00, 81.00.
+    /// One entry per supplier; add the next one here.</summary>
+    internal const string WhtKeywordRules =
+        "- หัก ณ ที่จ่ายตามคีย์เวิร์ด (ใบแจ้งหนี้ไม่ได้พิมพ์ยอดหัก ณ ที่จ่าย แต่ต้องหัก): ถ้าผู้ออกใบเป็นรายด้านล่าง " +
+        "ให้สร้างแถว WHT เอง โดยฐาน = ยอดของบรรทัดตามคีย์เวิร์ดในใบนั้น (ห้ามใช้ยอดรวมทั้งใบ) และถ้าใบพิมพ์ยอดหักไว้แล้วให้ใช้ยอดที่พิมพ์แทน:\n" +
+        "  · S.N.R. IMPORT-EXPORT CO.,LTD. (เลขผู้เสียภาษี 0105539021630): คีย์เวิร์ด \"Shipping Charge\" อัตรา 3% ค่าบริการ " +
+        "→ extCode = \"WHT\", desc = \"Withholding Tax 3% Service S.N.R. IMPORT-EXPORT CO.,LTD. <เลขที่ใบ>\", " +
+        "qty = 1, amount = price = ยอดบรรทัด Shipping Charge × 3% ปัดทศนิยม 2 ตำแหน่ง (เช่น 2,700.00 → 81.00) " +
+        "และนับรวมใน header.whtAmount\n";
+
     private const string BundleTaxRules =
         "\n- (เฉพาะกรณีที่มีหน้า FORM SHIPPING EXPENSE) ค่าธรรมเนียมและภาษีในใบเสร็จกรมศุลกากร/ใบขนสินค้าขาเข้าที่แนบมาในไฟล์ " +
         "ให้ใส่เป็นแถวต่อท้าย lines โดยใช้ extCode = \"DUTY\" (ไม่ใช่รายการค่าใช้จ่ายในฟอร์ม) แถวละรายการ ได้แก่ " +
@@ -461,7 +479,8 @@ public static partial class VisionPrompt
         "เฉพาะใบที่ออกโดยผู้ขายรายเดียวกับ header.vendorName (รายที่เราจ่ายเงินโดยตรง) เท่านั้น " +
         "ใบของผู้ขายรายอื่นในชุด ตัวแทนชิปปิ้งหักและนำส่งแทนไปแล้ว ห้ามใส่ " +
         "1 แถวต่อ 1 รายการ: extCode = \"WHT\", desc = \"Withholding Tax <อัตรา>% <ชื่อผู้ออกเอกสาร> <เลขที่เอกสาร>\", " +
-        "qty = 1, amount = price = ยอดที่หัก (ตัวเลขบวก) และใส่ header.whtAmount = ผลรวมยอดหัก ณ ที่จ่ายทั้งหมด" +
+        "qty = 1, amount = price = ยอดที่หัก (ตัวเลขบวก) และใส่ header.whtAmount = ผลรวมยอดหัก ณ ที่จ่ายทั้งหมด\n" +
+        WhtKeywordRules +
         "\n- (เฉพาะกรณีที่มีหน้า FORM SHIPPING EXPENSE) ต่อท้าย lines ด้วยภาษีมูลค่าเพิ่ม (VAT/ภาษีมูลค่าเพิ่ม 7%) ทุกรายการที่พบในใบแจ้งหนี้/ใบเสร็จ/ใบกำกับภาษีทุกหน้าในไฟล์ " +
         "1 แถวต่อ 1 ใบ: extCode = \"VAT\", desc = \"VAT 7% <ชื่อผู้ออกเอกสาร> <เลขที่เอกสาร>\", qty = 1, amount = price = ยอด VAT ของใบนั้น " +
         "และใส่ vendorCode ของแถว VAT/WHT ให้ตรงกับรหัส vendor ในคอลัมน์ VENDOR ของฟอร์มที่เป็นเจ้าของค่าใช้จ่ายใบนั้น ถ้าจับคู่ไม่ได้ให้ใส่สตริงว่าง " +

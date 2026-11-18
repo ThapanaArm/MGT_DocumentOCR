@@ -164,10 +164,12 @@ function seedWhtItems(d: DocModel): DocModel {
   const rows = whtLines.length
     ? whtLines.map((l) => {
         const amtFc = Number(l.amount) || 0;
-        const code = guessWhtCode(String(l.desc || ''));
+        // "[OA/09]" = type/code set by a supplier rule in Master 7 (backend WhtVendorRules).
+        const tagged = String(l.desc || '').match(/\[([A-Z0-9]{2})\/(\d{2})\]/);
+        const code = tagged ? tagged[2] : guessWhtCode(String(l.desc || ''));
         const rate = WHT_CODE_RATE[code];
         return {
-          wtType: DEFAULT_WHT_TYPE,
+          wtType: tagged ? tagged[1] : DEFAULT_WHT_TYPE,
           whtCode: code,
           recipientType: DEFAULT_RECIPIENT_TYPE,
           // The description the read writes carries the rate ("Withholding Tax 1% ..."), so the
@@ -1162,6 +1164,8 @@ export default function DocumentPage() {
   // one click away rather than removed, because GR-based IV is a per-PO-item setting: a domestic
   // PO could be flagged for it one day, and then the invoice cannot be posted without them.
   const [showGrFields, setShowGrFields] = useState(false);
+  // The supplier of the SAP-document tab open under Basic Data; G/L Account Items follow it.
+  const [glTabVendor, setGlTabVendor] = useState('');
   const [poAssigning, setPoAssigning] = useState(false);
   // Why the document could not be loaded, shown in place of a bare "Failed to load document".
   const [failedReason, setFailedReason] = useState('');
@@ -3139,8 +3143,36 @@ export default function DocumentPage() {
   // The G/L table follows the same filter. Without it, picking a supplier narrowed the Tax tab but
   // left every tax row in the G/L table — a GLC bundle showed the Customs Department's duty and VAT
   // under the shipping agent, and the exported file posted them there too.
-  const glRows = forVendor<Record<string, any>>(glItems);
+  // Which SAP document a G/L row goes on (Prepayment etc.): one per supplier on this bundle.
+  const glMainVendor = String((doc as Record<string, any>).partnerCode ?? h.vendorCode ?? '').trim();
+  const glVendorOptions: Array<[string, string]> = [];
+  for (const t of screenTabs({ lines: doc.lines || [], mainVendor: glMainVendor, po: '', invoiceNo: '', text: '' })) {
+    const hit = glVendorOptions.find(([c]) => c === t.vendor);
+    const what = t.costs.join(' + ');
+    if (hit) hit[1] = `${hit[1]} + ${what}`;
+    else if (t.vendor) glVendorOptions.push([t.vendor, `${t.vendor} · ${what}`]);
+  }
+  // With several SAP documents (one per supplier) the table shows the rows of the tab that is open
+  // under Basic Data, and a new row goes on that document (AP, 2026-11-18). The "Vendor in this
+  // document" filter still wins when it is set.
+  const glVendor = vendorFilter || (glVendorOptions.length > 1 ? glTabVendor : '');
+  const glRows = (() => {
+    if (!glVendor) return { items: glItems as Array<Record<string, any>>, at: glItems.map((_: unknown, i: number) => i) };
+    const at: number[] = [];
+    (glItems as Array<Record<string, any>>).forEach((r, i) => {
+      // An untagged row is the main supplier's — the first document when the matched code (a TEST
+      // stand-in like 4000023) is not one the tabs show.
+      const home = glVendorOptions.some(([c]) => c === glMainVendor) ? glMainVendor : glVendorOptions[0]?.[0] ?? glMainVendor;
+      if ((String(r.vendorCode ?? '').trim() || home) === glVendor) at.push(i);
+    });
+    return { items: at.map((i) => glItems[i] as Record<string, any>), at };
+  })();
   const glProps = {
+    vendorOptions: glVendor ? [] : glVendorOptions,
+    title: glVendor && glVendorOptions.length > 1
+      ? `G/L Account Items — ${glVendorOptions.find(([c]) => c === glVendor)?.[1] ?? glVendor}`
+      : undefined,
+    mainVendor: glVendorOptions.some(([c]) => c === glMainVendor) ? glMainVendor : glVendorOptions[0]?.[0] ?? glMainVendor,
     module: doc.module,
     items: glRows.items,
     posted: locked,
@@ -3150,7 +3182,7 @@ export default function DocumentPage() {
       addGlItem({
         taxCode: 'VX',
         assignment: String(h.poRef ?? '').trim(),
-        ...(vendorFilter ? { vendorCode: vendorFilter } : {}),
+        ...(glVendor ? { vendorCode: glVendor } : {}),
         ...(preset || {}),
       }),
     onDelete: (i: number) => delGlItem(glRows.at[i]),
@@ -3647,6 +3679,7 @@ export default function DocumentPage() {
                           // The check builds the real payload, which needs the vendor and the PO
                           // matched first — before Step 2 it could only fail.
                           notReady={!map ? 'กด Step 2 — Data Mapping ด้านล่างก่อน แล้วค่อยตรวจกับ SAP' : undefined}
+                          onActiveVendor={setGlTabVendor}
                           fromScreen={screenTabs({
                             lines: doc.lines || [],
                             mainVendor: String((doc as Record<string, any>).partnerCode ?? h.vendorCode ?? '').trim(),
@@ -3956,7 +3989,7 @@ export default function DocumentPage() {
           which is how switching to the customs vendor showed the customs rows' assignment and tax
           code beside the PREVIOUS vendor's amounts. */}
       {showGlItems && (
-        <GlItemsTable key={`${vendorFilter || 'all'}-${glRows.items.length}`} {...glProps} />
+        <GlItemsTable key={`${glVendor || 'all'}-${glRows.items.length}`} {...glProps} />
       )}
 
       {/* Chat fix */}

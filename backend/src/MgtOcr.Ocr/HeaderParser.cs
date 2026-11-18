@@ -82,6 +82,9 @@ public static class HeaderParser
             // adds them up per heading and checks them against the FORM SHIPPING EXPENSE, which is
             // what the cost lines are read from. Must be listed here or the parser drops it.
             ["sourceDocs"] = new List<object?>(),
+            // The main supplier's own charge lines (desc / amount): WhtVendorRules withholds on the
+            // ones Master 7 names for that supplier when the invoice prints no WHT (AP, 2026-11-18).
+            ["agentCharges"] = new List<object?>(),
         };
 
     // _po_number_date(): some forms (e.g. Henkel/European buyers) write PO number + buyer code +

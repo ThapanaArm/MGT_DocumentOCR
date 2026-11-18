@@ -57,7 +57,7 @@ public static class MasterDefinitions
         // Withholding tax by kind of income: the rate, the SAP withholding type/code and which
         // return (PND3 for an individual, PND53 for a company) it is filed on.
         ["whtmaps"] = new("ocr.WhtMap", "Id", true,
-            ["SalesOrg", "IncomeType", "Keywords", "Rate", "WhtType", "WhtCode", "FormType", "GlAccount", "Note", "IsActive"],
+            ["SalesOrg", "VendorTaxId", "IncomeType", "Keywords", "Rate", "WhtType", "WhtCode", "FormType", "GlAccount", "Note", "IsActive"],
             "CASE WHEN SalesOrg IS NULL THEN 0 ELSE 1 END, SalesOrg, IncomeType, Id"),
 
         // Tax ID -> the standard name of a tax-invoice issuer (sql/35_supplier_tax_map.sql). Filled

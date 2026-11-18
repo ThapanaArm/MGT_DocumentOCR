@@ -238,6 +238,7 @@ builder.Services.AddSingleton<OcrJobRepository>();
 builder.Services.AddSingleton<JobLogRepository>();
 // Page memory for AP bundles (sql/43_page_memory.sql): which page of a bundle is what.
 builder.Services.AddSingleton<MgtOcr.Api.Services.PageMemoryStore>();
+builder.Services.AddSingleton<MgtOcr.Api.Services.WhtVendorRules>();
 // Same file uploaded again (sql/44_file_hash.sql): copy the checked earlier document, warn on a re-post.
 builder.Services.AddSingleton<MgtOcr.Api.Services.FileDuplicateStore>();
 // Off unless Ocr:PageMemory:Backfill=true: fills ocr.DocPageMap for documents read before it existed.

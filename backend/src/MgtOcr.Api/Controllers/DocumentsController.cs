@@ -861,6 +861,9 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         await jobLog.FinishAsync(reocrJob, "SUCCESS", tokensIn: pd.TokensIn, tokensOut: pd.TokensOut,
             cost: pd.Cost, costCurrency: pd.CostCurrency, provider: pd.Provider);
         var filled = await repo.ApplyVendorMemoryAsync(module, pd.Header);
+        if (module is "AP" or "II")
+            await HttpContext.RequestServices.GetRequiredService<MgtOcr.Api.Services.WhtVendorRules>()
+                .ApplyAsync(pd, await repo.GetCompanyAsync(docId));
         if (filled.Count > 0)
         {
             var note = "Filled from a previously confirmed partner (not read directly from this document): " + string.Join(", ", filled);
