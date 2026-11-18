@@ -92,8 +92,15 @@ public static class SupplierInvoicePayload
             && customsCosts.All(l => System.Text.RegularExpressions.Regex.IsMatch(l.GetStr("desc"),
                 @"IMPORT|DUTY|CUSTOMS|FEE|ภาษี|อากร|ศุลกากร|ค่าธรรมเนียม", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
                 || ((Dictionary<string, object?>)l["extra"]!).GetStr("deliveryCondType").Trim().ToUpperInvariant() is "ZIM1" or "ZFE2");
-        // Its VAT stays — the customs receipts' import VAT only; anything else is a stray row.
-        if (mgtVx) taxRows = customsCostsOnly ? taxRows.Where(DeferredVatReversal.IsImportVat).ToList() : [];
+        // Its VAT stays — the customs receipts' import VAT only.
+        // Anybody else's document follows the Tax tab (AP, 2026-11-18, PRD 5100000710 S.N.R.:
+        // Dr 11730000 Deferred input tax 1,252.36 D1 on the forwarder's invoice): a row left on D1/V1
+        // goes out as its VAT line, a row set to VX does not. A customs import-VAT row on another
+        // party's document is still a mis-tagged row and stays out.
+        if (mgtVx) taxRows = customsCostsOnly
+            ? taxRows.Where(DeferredVatReversal.IsImportVat).ToList()
+            : taxRows.Where(t => !DeferredVatReversal.IsImportVat(t)
+                && t.GetStr("taxCode").Trim().ToUpperInvariant() is { Length: > 0 } tc && tc != "VX").ToList();
 
         // Goods-receipt reference. A PO item flagged for GR-based invoice verification (the
         // default on a stock PO) can only be invoiced against the material document the goods
@@ -255,6 +262,37 @@ public static class SupplierInvoicePayload
                 ["AssignmentReference"] = Cut(g.GetStr("assignment"), 18),
                 ["SupplierInvoiceItemText"] = Cut(g.GetStr("itemText"), 50),
             });
+        }
+
+        // G/L lines keyed by hand in G/L Account Items (AP, 2026-11-18, PRD 5100000710 S.N.R.): the
+        // forwarder's invoice nets off what was paid in advance and is not on the PO —
+        // Cr 11710000 Prepayment-Sundry 45.00 "WHT" and 200.00 "Customs Fee". Only rows the screen
+        // marked manual; the rows it builds from the lines are already the PO / delivery-cost items.
+        foreach (var g in SapImportSupplierInvoiceExcel.ReadRows(header, "glItems").Where(Mine))
+        {
+            if (g.GetStr("manual").Trim().ToLowerInvariant() is not ("true" or "1")) continue;
+            var acct = g.GetStr("glAccount").Trim();
+            var amount = Math.Abs(Num(g.Get("amount")));
+            if (acct.Length == 0 || amount == 0) continue;
+            var code = Or(g.GetStr("taxCode").Trim().ToUpperInvariant(), "VX");
+            var row = new Dictionary<string, object?>
+            {
+                ["SupplierInvoiceItem"] = (++itemNo).ToString(),
+                ["CompanyCode"] = companyCode,
+                ["GLAccount"] = acct,
+                ["DocumentCurrency"] = currency,
+                ["SupplierInvoiceItemAmount"] = F2(amount),
+                ["DebitCreditCode"] = string.Equals(g.GetStr("drCr"), "C", StringComparison.OrdinalIgnoreCase) ? "H" : "S",
+                ["TaxCode"] = code,
+                ["AssignmentReference"] = Cut(Or(g.GetStr("assignment").Trim(), assignment), 18),
+                ["SupplierInvoiceItemText"] = Cut(g.GetStr("itemText").Trim(), 50),
+                ["_manualGl"] = true,
+            };
+            if (g.GetStr("costCenter").Trim() is { Length: > 0 } cc) row["CostCenter"] = cc;
+            // A line on a tax account must carry its base (F5A375).
+            if (acct.TrimStart('0') is DeferredVatReversal.GlInputTax or DeferredVatReversal.GlDeferredInputTax)
+                row["TaxBaseAmountInTransCrcy"] = F2(Num(g.Get("taxBase")) > 0 ? Num(g.Get("taxBase")) : Math.Round(amount / 0.07, 2));
+            glAccountItems.Add(row);
         }
 
         // "Calculate Tax" on the Basic Data tab, the same checkbox MIRO has. Ticked, SAP works the
@@ -487,6 +525,9 @@ public static class SupplierInvoicePayload
             var vatText = partyAbbr.Length > 0 && ownInvoice.Length > 0
                 ? $"{partyAbbr},INV.{ownInvoice}"
                 : partyName.Length > 0 ? MgtOcr.Ocr.VisionPrompt.EnglishIssuerName(partyName) : itemText;
+            // MGT (PRD 5100000710): the VAT line's Text is the invoicing party's full name,
+            // "S.N.R. IMPORT-EXPORT CO.,LTD.", not "<abbr>,INV.<no>".
+            if (partyName.Length > 0) vatText = MgtOcr.Ocr.VisionPrompt.EnglishIssuerName(partyName);
             foreach (var g in vatLines.GroupBy(v => (v.Code, v.Deferred,
                          Key: v.Customs ? "CUSTOMS|" + v.DocNo : v.Own ? "OWN|" + v.DocNo : "PAID-ON-BEHALF")))
             {

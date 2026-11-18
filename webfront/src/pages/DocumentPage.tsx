@@ -3134,7 +3134,14 @@ export default function DocumentPage() {
     items: glRows.items,
     posted: locked,
     onEdit: (i: number, k: string, v: string) => editGlItem(glRows.at[i], k, v),
-    onAdd: addGlItem,
+    // New rows belong to the supplier tab that is open, with the PO as Assignment (PRD 5100000710).
+    onAdd: (preset?: Record<string, any>) =>
+      addGlItem({
+        taxCode: 'VX',
+        assignment: String(h.poRef ?? '').trim(),
+        ...(vendorFilter ? { vendorCode: vendorFilter } : {}),
+        ...(preset || {}),
+      }),
     onDelete: (i: number) => delGlItem(glRows.at[i]),
   };
   const taxProps = {

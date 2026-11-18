@@ -4,6 +4,18 @@ import { TAX_CODES } from '../../constants/fields';
 /* Ports the G/L Account Items table (header.glItems) from docHtml(). */
 export type GlItem = Record<string, any>;
 
+/* Accounts AP keys by hand on a supplier invoice (PRD 5100000710 S.N.R.):
+   Cr 11710000 Prepayment-Sundry for what was paid in advance (WHT, Customs Fee). */
+export const GL_ACCOUNTS: Array<[string, string]> = [
+  ['11710000', 'Prepayment-Sundry'],
+  ['11730000', 'Deferred Input tax'],
+  ['11720000', 'Input tax'],
+  ['52110001', 'Purchase Variance'],
+];
+const GL_PRESETS: Array<{ label: string; row: GlItem }> = [
+  { label: 'Prepayment', row: { glAccount: '11710000', drCr: 'C', taxCode: 'VX' } },
+];
+
 export default function GlItemsTable({
   module,
   items,
@@ -17,14 +29,22 @@ export default function GlItemsTable({
   items: GlItem[];
   posted: boolean;
   onEdit: (i: number, key: string, value: string) => void;
-  onAdd: () => void;
+  onAdd: (preset?: GlItem) => void;
   onDelete: (i: number) => void;
   bare?: boolean; // render without the outer .card wrapper (for use inside a tabbed card)
 }) {
   const addBtn = !posted ? (
-    <button className="btn sm" onClick={onAdd}>
-      + Add Item
-    </button>
+    <span className="row" style={{ gap: 6 }}>
+      {module !== 'II' &&
+        GL_PRESETS.map((p) => (
+          <button key={p.label} className="btn sm ghost" onClick={() => onAdd({ ...p.row })}>
+            + {p.label}
+          </button>
+        ))}
+      <button className="btn sm" onClick={() => onAdd()}>
+        + Add Item
+      </button>
+    </span>
   ) : null;
 
   return (
@@ -42,6 +62,11 @@ export default function GlItemsTable({
         {bare && addBtn && (
           <div className="row" style={{ justifyContent: 'flex-end', marginBottom: 12 }}>{addBtn}</div>
         )}
+        <datalist id="gl-account-options">
+          {GL_ACCOUNTS.map(([a, name]) => (
+            <option key={a} value={a}>{name}</option>
+          ))}
+        </datalist>
         <div className="tw">
           <table>
             <thead>
@@ -64,6 +89,8 @@ export default function GlItemsTable({
                       <input
                         value={g.glAccount || ''}
                         readOnly={posted}
+                        list="gl-account-options"
+                        title={GL_ACCOUNTS.find(([a]) => a === String(g.glAccount || '').trim())?.[1] || ''}
                         onChange={(e) => onEdit(i, 'glAccount', e.target.value)}
                       />
                     </td>

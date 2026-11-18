@@ -113,11 +113,13 @@ export function useDocumentEditor(user: string) {
       items[i] = { ...items[i], [k]: v };
       return { ...d, header: { ...d.header, glItems: items } };
     });
-  const addGlItem = () =>
+  // Rows added here are marked manual: the backend sends them as G/L Account Items as keyed
+  // (Prepayment, Deferred input tax ...), next to the PO / delivery-cost lines it builds itself.
+  const addGlItem = (preset?: Record<string, any>) =>
     setDoc((d) => {
       if (!d) return d;
       const items = (d.header.glItems || []).slice();
-      items.push({ glAccount: '', drCr: '', amount: 0, taxCode: '', assignment: '', itemText: '', costCenter: '' });
+      items.push({ glAccount: '', drCr: '', amount: 0, taxCode: '', assignment: '', itemText: '', costCenter: '', manual: true, ...(preset || {}) });
       return { ...d, header: { ...d.header, glItems: items } };
     });
   const delGlItem = (i: number) =>

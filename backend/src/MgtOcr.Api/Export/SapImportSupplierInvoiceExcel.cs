@@ -837,7 +837,7 @@ public static class SapImportSupplierInvoiceExcel
     private static double Num(object? v) =>
         v is not null && double.TryParse(v.ToString(), out var n) ? n : 0;
 
-    private static List<Dictionary<string, object?>> ReadRows(Dictionary<string, object?> header, string key)
+    internal static List<Dictionary<string, object?>> ReadRows(Dictionary<string, object?> header, string key)
     {
         var list = new List<Dictionary<string, object?>>();
         if (header.Get(key) is not System.Collections.IEnumerable rows) return list;
