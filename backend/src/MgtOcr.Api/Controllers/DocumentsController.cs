@@ -892,7 +892,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
                   WHERE DocId=@docId
                 """, new
             {
-                provider = pd.Provider, confidence = pd.Confidence, confidenceNote = pd.ConfidenceNote,
+                provider = pd.Provider, confidence = pd.Confidence, confidenceNote = DocumentRepository.NoteFits(pd.ConfidenceNote),
                 tokensIn = pd.TokensIn, tokensOut = pd.TokensOut, cost = pd.Cost, costIn = pd.CostIn, costOut = pd.CostOut,
                 costCurrency = pd.CostCurrency, durationMs, pages = pd.Pages,
                 headerJson = JsonSerializer.Serialize(pd.Header, PyJson.Options), rawText,

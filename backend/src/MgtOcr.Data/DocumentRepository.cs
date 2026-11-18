@@ -161,6 +161,12 @@ public partial class DocumentRepository(Db db)
 
     // ext: {header, lines, provider, confidence, confidenceNote, tokensIn, tokensOut, cost, costIn,
     // costOut, costCurrency, rawText} — the same shape app/ocr_engine.py's extract() returns.
+    /// <summary>ocr.Document.OcrConfidenceNote is nvarchar(500). The notes are joined from several
+    /// steps (page memory, WHT rules, customs fees …) and ran past it: SQL refused the whole upload
+    /// with "String or binary data would be truncated" (2026-11-18). Cut to fit; the start says the most.</summary>
+    public static string? NoteFits(string? note) =>
+        string.IsNullOrEmpty(note) || note.Length <= 500 ? note : note[..499] + "…";
+
     public async Task<int> CreateDocumentAsync(string module, Dictionary<string, object?> ext, string fileName,
         string stored, int size, string user, string apDocCategory, int? durationMs = null,
         string? salesOrg = null)
@@ -194,7 +200,7 @@ public partial class DocumentRepository(Db db)
             """, new
         {
             module, fileName, stored, size,
-            provider = ext.Get("provider"), confidence = ext.Get("confidence"), confidenceNote = ext.Get("confidenceNote"),
+            provider = ext.Get("provider"), confidence = ext.Get("confidence"), confidenceNote = NoteFits(ext.GetStr("confidenceNote")),
             tokensIn = ext.Get("tokensIn"), tokensOut = ext.Get("tokensOut"), cost = ext.Get("cost"),
             pages = ext.Get("pages"),
             costIn = ext.Get("costIn"), costOut = ext.Get("costOut"), costCurrency = ext.Get("costCurrency"),
