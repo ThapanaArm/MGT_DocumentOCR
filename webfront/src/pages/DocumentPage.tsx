@@ -52,6 +52,7 @@ import TabbedGroups from '../components/document/TabbedGroups';
 import DetailTable from '../components/document/DetailTable';
 import PoReferenceTable from '../components/document/PoReferenceTable';
 import GlItemsTable from '../components/document/GlItemsTable';
+import GoodsReceiptPicker from '../components/document/GoodsReceiptPicker';
 import TaxDataTable from '../components/document/TaxDataTable';
 import WhtTable from '../components/document/WhtTable';
 import IncomingInvoiceCard from '../components/document/IncomingInvoiceCard';
@@ -3731,7 +3732,7 @@ export default function DocumentPage() {
                        against the goods receipt, and SAP asks for the material document by
                        number, fiscal year and item (M8/375). Left empty when the PO item does
                        not use GR-based IV — nothing is then sent. */
-                    <div className="row" style={{ gap: 14, margin: '0 0 12px', alignItems: 'flex-end' }}>
+                    <div className="row" style={{ gap: 14, margin: '0 0 12px', alignItems: 'flex-end', flexWrap: 'wrap' }}>
                       <label style={{ display: 'grid', gap: 4 }}>
                         <span className="hint">Goods Receipt (Material Doc.)</span>
                         <input
@@ -3755,6 +3756,14 @@ export default function DocumentPage() {
                       <span className="hint" style={{ paddingBottom: 6 }}>
                         กรอกเมื่อ PO เปิด GR-Based IV ไว้ — ว่างได้ถ้าไม่ได้เปิด
                       </span>
+                      <div style={{ flexBasis: '100%' }}>
+                        <GoodsReceiptPicker
+                          po={poNumberOf(h).split(/[,\s]+/)[0] || ''}
+                          matDoc={String(h.refMatDoc ?? '')}
+                          locked={locked}
+                          onPick={(m, y) => { editHeader('refMatDoc', m); editHeader('refMatDocYear', y); }}
+                        />
+                      </div>
                     </div>
                   )}
                   {/* The MIRO grid — Assign all, the PO item per line, the GR item, the
