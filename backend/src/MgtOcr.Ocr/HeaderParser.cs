@@ -12,6 +12,9 @@ public class ParsedDocument
     public string? Note { get; set; } // mirrors Python's "_note" — non-null means a fallback/failure happened
     public string? SampleName { get; set; }
     public string ConfidenceNote { get; set; } = "";
+    // Gemini's "_positions" object from the main request, as returned (image numbers of THAT
+    // request). GeminiOcr turns it into file pages on header._positions and line SourceBox.
+    public string? PositionsJson { get; set; }
 
     // Token usage / estimated cost — only set by AI/LLM-based providers (Claude, Gemini, OpenAI);
     // Tesseract/Azure/Typhoon leave these null. Mirrors ext.get("tokensIn"/"cost"/etc.) in Python.

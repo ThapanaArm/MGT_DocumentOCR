@@ -22,7 +22,10 @@ public class LineItem
     public string IssuerName { get; set; } = "";    // ชื่อผู้ออกใบกำกับภาษี
     public string IssuerTaxId { get; set; } = "";   // เลขประจำตัวผู้เสียภาษี 13 หลัก
     public string IssuerBranch { get; set; } = ""; // สาขา 4 หลัก, 0000 = สำนักงานใหญ่ (ห้าม 5 หลัก)
-    public double BaseAmount { get; set; }          // ฐานภาษี (มูลค่าก่อน VAT) ของใบนั้น
+    public double BaseAmount { get; set; }
+    // Where the read found this row: "<file page>:<ymin>,<xmin>,<ymax>,<xmax>" (0-1000), from
+    // Gemini's _positions.lines (AP, 2026-11-18). Kept as extra._box for the "View document" frames.
+    public string SourceBox { get; set; } = "";          // ฐานภาษี (มูลค่าก่อน VAT) ของใบนั้น
 
     // Vendor code from the FORM SHIPPING EXPENSE "VENDOR" column — each cost row is paid to a
     // different vendor, and one MIRO document can only carry one, so this drives the split.

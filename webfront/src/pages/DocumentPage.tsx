@@ -52,6 +52,7 @@ import TabbedGroups from '../components/document/TabbedGroups';
 import DetailTable from '../components/document/DetailTable';
 import PoReferenceTable from '../components/document/PoReferenceTable';
 import GlItemsTable from '../components/document/GlItemsTable';
+import DocumentBoxes, { hasDocumentFrames } from '../components/document/DocumentBoxes';
 import GoodsReceiptPicker from '../components/document/GoodsReceiptPicker';
 import TaxDataTable from '../components/document/TaxDataTable';
 import WhtTable from '../components/document/WhtTable';
@@ -64,7 +65,7 @@ import MasterEditModal, {
   type MasterEditState,
 } from '../components/master/MasterEditModal';
 import SapDocTabs, { screenTabs } from '../components/document/SapDocTabs';
-import { fetchBlobUrl,
+import { api as apiClient, fetchBlobUrl,
   ApiError,
 } from '../api/client';
 import { createMaster, updateMaster } from '../api/masters';
@@ -1115,6 +1116,8 @@ export default function DocumentPage() {
   // one click away rather than removed, because GR-based IV is a per-PO-item setting: a domestic
   // PO could be flagged for it one day, and then the invoice cannot be posted without them.
   const [showGrFields, setShowGrFields] = useState(false);
+  // View document: the page pictures with the frames of what was read, or the original file.
+  const [viewMode, setViewMode] = useState<'frames' | 'file'>('frames');
   const [poAssigning, setPoAssigning] = useState(false);
   // Why the document could not be loaded, shown in place of a bare "Failed to load document".
   const [failedReason, setFailedReason] = useState('');
@@ -4100,7 +4103,43 @@ export default function DocumentPage() {
         />
         <div className="card-b">
           <p className="hint">Compare the original file with the data extracted in the HEADER/DETAIL sections</p>
-          {doc.provider === 'demo' ? (
+          {doc.provider !== 'demo' && hasDocumentFrames(doc.header, doc.lines || []) && (
+            <div className="row" style={{ gap: 6, marginBottom: 8 }}>
+              <button type="button" className={`btn sm${viewMode === 'frames' ? ' primary' : ''}`} onClick={() => setViewMode('frames')}>
+                <i className="fa-regular fa-square" /> แสดงกรอบที่อ่าน
+              </button>
+              <button type="button" className={`btn sm${viewMode === 'file' ? ' primary' : ''}`} onClick={() => setViewMode('file')}>
+                <i className="fa-regular fa-file-pdf" /> ไฟล์ต้นฉบับ
+              </button>
+            </div>
+          )}
+          {doc.provider !== 'demo' && viewMode === 'frames' && hasDocumentFrames(doc.header, doc.lines || []) ? (
+            <DocumentBoxes
+              docId={doc.docId}
+              header={doc.header}
+              lines={doc.lines || []}
+              // A frame the person dragged into place replaces the read's position (saved with Save).
+              onMove={posted ? undefined : (key, value) => {
+                if (key.startsWith('h:')) {
+                  // editHeader is typed for strings; the positions map is stored as the object it is.
+                  editHeader('_positions', { ...((doc.header._positions as Record<string, string>) ?? {}), [key.slice(2)]: value } as unknown as string);
+                } else if (key.startsWith('l:')) {
+                  editLineExtra(Number(key.slice(2)), '_box', value);
+                }
+              }}
+              // Read the value again from inside a moved frame and put it in the field (Save keeps it).
+              onReadRegion={posted ? undefined : async (field, page, box) => {
+                try {
+                  const r = await apiClient.post<{ value: string }>(`/api/documents/${doc.docId}/read-region`, { field, page, box });
+                  if (!r.value) { showToast('ไม่พบค่าในกรอบนี้ — ลองขยายกรอบให้ครอบข้อความ'); return; }
+                  editHeader(field, r.value);
+                  showToast(`อ่านได้ "${r.value}" — กด Save เพื่อบันทึก`, 'success');
+                } catch (e) {
+                  showToast(e instanceof Error ? e.message : String(e));
+                }
+              }}
+            />
+          ) : doc.provider === 'demo' ? (
             <p className="hint">This document was generated from sample data (demo) — no original file to view</p>
           ) : fileErr ? (
             <p className="hint">Could not open the original file: {fileErr}</p>

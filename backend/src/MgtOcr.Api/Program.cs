@@ -102,6 +102,7 @@ var appConfig = new AppConfig
     TyphoonModel = Get("Ocr:TyphoonModel", "typhoon-ocr"),
     GeminiApiKey = Get("Ocr:GeminiApiKey"),
     GeminiModel = Get("Ocr:GeminiModel", "gemini-2.5-flash"),
+    OcrRecordPositions = GetBool("Ocr:Positions:Enabled", true),
     OpenAiApiKey = Get("Ocr:OpenAiApiKey"),
     OpenAiModel = Get("Ocr:OpenAiModel", "gpt-4o"),
     PaddleOcrCmd = Get("Ocr:PaddleOcrCmd"),

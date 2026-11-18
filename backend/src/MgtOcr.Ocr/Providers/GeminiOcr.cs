@@ -65,6 +65,9 @@ public static partial class GeminiOcr
             };
             if (imgs.Count == 0)
                 return (null, $"Could not rasterize '{Path.GetFileName(path)}' to images (renderer produced 0 pages \u2014 check the PDF rasterizer on the server)");
+            // The file page behind each image, kept in step with every reorder below, so the
+            // positions the read reports ("image 1") land on the right page of the file.
+            var pageNos = Enumerable.Range(1, imgs.Count).ToList();
 
             // A prompt rule alone ("take lines from the FORM SHIPPING EXPENSE page") was not enough:
             // with 17 pages Gemini still took the first invoice's lines. When the text layer shows
@@ -119,16 +122,18 @@ public static partial class GeminiOcr
                     Log($"PO read: purchase order page(s) {string.Join(", ", formIdxs.Select(i => i + 1))}");
                 var formPageNos = formIdxs.Select(i => i + 1).ToList();
                 var formPages = new List<byte[]>();
+                var formPagesNo = new List<int>();
                 foreach (var idx in formIdxs)
                 {
-                    if (idx < imgs.Count) { formPages.Add(imgs[idx]); }
-                    else if (PdfRasterizer.RenderPageToJpeg(path, idx, dpi, quality) is { } extra) { formPages.Add(extra); }
+                    if (idx < imgs.Count) { formPages.Add(imgs[idx]); formPagesNo.Add(pageNos[idx]); }
+                    else if (PdfRasterizer.RenderPageToJpeg(path, idx, dpi, quality) is { } extra) { formPages.Add(extra); formPagesNo.Add(idx + 1); }
                 }
                 if (formPages.Count > 0)
                 {
-                    foreach (var idx in formIdxs.Where(i => i < imgs.Count).OrderByDescending(i => i)) imgs.RemoveAt(idx);
-                    while (imgs.Count + formPages.Count > MaxPages) imgs.RemoveAt(imgs.Count - 1);
+                    foreach (var idx in formIdxs.Where(i => i < imgs.Count).OrderByDescending(i => i)) { imgs.RemoveAt(idx); pageNos.RemoveAt(idx); }
+                    while (imgs.Count + formPages.Count > MaxPages) { imgs.RemoveAt(imgs.Count - 1); pageNos.RemoveAt(pageNos.Count - 1); }
                     imgs.InsertRange(0, formPages);
+                    pageNos.InsertRange(0, formPagesNo);
                     formCount = formPages.Count;
                     prompt = isPoRead
                         ? $"สำคัญ: {formPages.Count} ภาพแรกคือหน้า PURCHASE ORDER (หน้า {string.Join(", ", formPageNos)} ของไฟล์) " +
@@ -157,9 +162,12 @@ public static partial class GeminiOcr
             // (they only contribute tax rows). Each request is small enough to answer in well under
             // a minute, and the first one is MORE accurate on its own than it was buried in twenty
             // other pages.
+            // Where each value was read (header._positions / line SourceBox), shown as frames on
+            // "View document" (Ocr:Positions:Enabled, default on).
+            if (config.OcrRecordPositions && module is "AP" or "II") prompt += PositionInstructions();
             if (isPdf && imgs.Count > ChunkThreshold)
                 return ShippingFormText.ApplyMultiForm(path, module,
-                    await ChunkedAsync(imgs, formCount, mime, prompt, module, config, dpi, salesOrg, apDocCategory));
+                    ApplyPositions(await ChunkedAsync(imgs, formCount, mime, prompt, module, config, dpi, salesOrg, apDocCategory), pageNos));
 
             // A file short enough to read in one request still needs the customs rows pointed at the
             // customs vendor: the model fills vendorCode from the form when it can, but it leaves it
@@ -171,12 +179,130 @@ public static partial class GeminiOcr
                 VisionPrompt.FillLineVatFromSourceDocs(oneShot.Doc);
                 VisionPrompt.FillLineVatFromTaxRows(oneShot.Doc);
             }
-            return ShippingFormText.ApplyMultiForm(path, module, oneShot);
+            return ShippingFormText.ApplyMultiForm(path, module, ApplyPositions(oneShot, pageNos));
         }
         catch (Exception ex)
         {
             return (null, $"Gemini request failed: {ex.GetType().Name}: {ex.Message}");
         }
+    }
+
+    /// <summary>Reads ONE value from a cut-out of the page (a frame the person moved on "View
+    /// document"). Small request: one picture of a few centimetres. Returns the value or an error.</summary>
+    public static async Task<(string? Value, string? Error, int? TokensIn, int? TokensOut)> ReadRegionAsync(
+        byte[] jpeg, string field, AppConfig config)
+    {
+        if (string.IsNullOrEmpty(config.GeminiApiKey)) return (null, "GeminiApiKey is empty in config", null, null);
+        var kind = field switch
+        {
+            "invoiceDate" => "วันที่ ตอบรูปแบบ YYYY-MM-DD (ปี พ.ศ. ให้แปลงเป็น ค.ศ.)",
+            "subTotal" or "vatAmount" or "totalAmount" => "จำนวนเงิน ตอบเป็นตัวเลขล้วน ไม่มีลูกน้ำ ไม่มีสกุลเงิน",
+            "vendorTaxId" => "เลขประจำตัวผู้เสียภาษี 13 หลัก ตัวเลขล้วน",
+            _ => "ข้อความตามที่พิมพ์ในภาพ",
+        };
+        var prompt = $"ภาพนี้คือส่วนหนึ่งของเอกสาร อ่านค่าของช่อง \"{field}\" ที่อยู่ในภาพ ({kind}) " +
+                     "ตอบเป็น JSON เท่านั้น: {\"value\": \"...\"} ถ้าในภาพไม่มีค่าที่อ่านได้ให้ตอบ {\"value\": \"\"}";
+        var body = new
+        {
+            contents = new[] { new { role = "user", parts = (object)new List<object>
+            {
+                new { text = prompt },
+                new { inline_data = new { mime_type = "image/jpeg", data = Convert.ToBase64String(jpeg) } },
+            } } },
+            generationConfig = new { temperature = 0, maxOutputTokens = 2048, responseMimeType = "application/json" },
+        };
+        try
+        {
+            var url = $"https://generativelanguage.googleapis.com/v1beta/models/{config.GeminiModel}:generateContent?key={config.GeminiApiKey}";
+            using var req = new HttpRequestMessage(HttpMethod.Post, url)
+            {
+                Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json"),
+            };
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+            using var resp = await Http.SendAsync(req, cts.Token);
+            var respText = await resp.Content.ReadAsStringAsync(cts.Token);
+            if (!resp.IsSuccessStatusCode) return (null, $"Gemini HTTP {(int)resp.StatusCode}: {Trunc(respText, 300)}", null, null);
+            var (tin, tout) = Usage(respText);
+            var raw = ExtractText(respText).Trim();
+            var st = raw.IndexOf('{'); var en = raw.LastIndexOf('}');
+            if (st < 0 || en <= st) return (null, "Gemini returned no value", tin, tout);
+            using var j = JsonDocument.Parse(raw[st..(en + 1)]);
+            var v = j.RootElement.TryGetProperty("value", out var vv) ? vv.ToString().Trim() : "";
+            return (v, null, tin, tout);
+        }
+        catch (Exception ex) { return (null, $"{ex.GetType().Name}: {ex.Message}", null, null); }
+    }
+
+    // The header values whose position the read reports (AP, 2026-11-18).
+    private static readonly string[] PositionFields =
+    [
+        "invoiceNo", "invoiceDate", "vendorName", "vendorTaxId", "poRef", "currency",
+        "subTotal", "vatAmount", "totalAmount", "goodsSupplier", "goodsInvoiceNo", "linesTable",
+    ];
+
+    /// <summary>Asks the main read to say where it found each value: one extra key in the same JSON.
+    /// The answer is a few hundred tokens; the values themselves are still read from the images.</summary>
+    private static string PositionInstructions() =>
+        "\n\nเพิ่ม key \"_positions\" ใน JSON คำตอบเดียวกัน (นอกเหนือจาก header และ lines) บอกตำแหน่งที่อ่านแต่ละค่าได้ " +
+        "รูปแบบ {\"invoiceNo\":{\"image\":1,\"box\":[ymin,xmin,ymax,xmax]}, ..., \"lines\":[{\"image\":1,\"box\":[ymin,xmin,ymax,xmax]}, ...]} " +
+        "พิกัด 0-1000 ของภาพนั้น, image = ลำดับภาพในคำขอนี้ (เริ่มที่ 1) " +
+        "สำหรับ " + string.Join(", ", PositionFields) + " (linesTable = กรอบของตารางที่ใช้ทำ lines) " +
+        "และ \"lines\" = กรอบของแถวที่อ่านแต่ละแถวของ lines เรียงตามลำดับ lines เดียวกัน (แถวที่ไม่ได้อ่านจากภาพใดภาพหนึ่งใส่ null) " +
+        "ค่าที่ไม่พบไม่ต้องใส่ ห้ามเดาตำแหน่ง";
+
+    private static string? ExtractPositions(string raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw) || !raw.Contains("_positions")) return null;
+        var st = raw.IndexOf('{'); var en = raw.LastIndexOf('}');
+        if (st < 0 || en <= st) return null;
+        try
+        {
+            using var d = JsonDocument.Parse(raw[st..(en + 1)]);
+            return d.RootElement.TryGetProperty("_positions", out var pos) && pos.ValueKind == JsonValueKind.Object
+                ? pos.GetRawText() : null;
+        }
+        catch (JsonException) { return null; }
+    }
+
+    /// <summary>Turns the read's "_positions" (images of its own request) into FILE pages:
+    /// header._positions = {field: "page:ymin,xmin,ymax,xmax"} and each line's SourceBox. Only the
+    /// main request reports positions, and its images are the first ones of pageNos.</summary>
+    private static (ParsedDocument? Doc, string? Error) ApplyPositions((ParsedDocument? Doc, string? Error) read, List<int> pageNos)
+    {
+        var doc = read.Doc;
+        if (doc == null || string.IsNullOrWhiteSpace(doc.PositionsJson)) return read;
+        string? Box(JsonElement e)
+        {
+            if (e.ValueKind != JsonValueKind.Object || !e.TryGetProperty("box", out var b) || b.ValueKind != JsonValueKind.Array) return null;
+            var n = b.EnumerateArray().Where(x => x.ValueKind == JsonValueKind.Number).Select(x => (int)Math.Round(x.GetDouble())).ToList();
+            if (n.Count != 4 || n[2] <= n[0] || n[3] <= n[1]) return null;
+            var img = e.TryGetProperty("image", out var im) && im.ValueKind == JsonValueKind.Number ? im.GetInt32() : 1;
+            if (img < 1 || img > pageNos.Count) return null;
+            return $"{pageNos[img - 1]}:{string.Join(",", n.Select(v => Math.Clamp(v, 0, 1000)))}";
+        }
+        try
+        {
+            using var d = JsonDocument.Parse(doc.PositionsJson);
+            var fields = new Dictionary<string, object?>();
+            foreach (var p in d.RootElement.EnumerateObject())
+            {
+                if (p.Name == "lines")
+                {
+                    if (p.Value.ValueKind != JsonValueKind.Array) continue;
+                    var i = 0;
+                    foreach (var e in p.Value.EnumerateArray())
+                    {
+                        if (i < doc.Lines.Count && Box(e) is { } lb) doc.Lines[i].SourceBox = lb;
+                        i++;
+                    }
+                }
+                else if (Box(p.Value) is { } hb) fields[p.Name] = hb;
+            }
+            if (fields.Count > 0) doc.Header["_positions"] = fields;
+            Log($"Positions: {fields.Count} header field(s), {doc.Lines.Count(l => l.SourceBox.Length > 0)} line(s)");
+        }
+        catch (JsonException) { /* positions are a display aid; a bad answer never fails the read */ }
+        return read;
     }
 
     /// <summary>Text-only structuring: another OCR engine (PaddleOCR) has already read the characters,
@@ -290,6 +416,7 @@ public static partial class GeminiOcr
                             // Pages actually sent in THIS request. Needed to report cost and
                             // time per page; nothing else in the pipeline knows the figure.
                             parsedDoc.Pages = pageCount;
+                            parsedDoc.PositionsJson = ExtractPositions(raw);
                             return (parsedDoc, null);
                         }
                         // 200 OK but the body held no parseable JSON. This is NOT a connection problem —

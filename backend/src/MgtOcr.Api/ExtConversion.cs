@@ -54,6 +54,7 @@ public static partial class ExtConversion
         // Vendor code per line (FORM SHIPPING EXPENSE); read back by the vendor split and shown
         // in the DETAIL table's Vendor column.
         if (!string.IsNullOrWhiteSpace(l.VendorCode)) extra["vendorCode"] = l.VendorCode.Trim();
+        if (!string.IsNullOrWhiteSpace(l.SourceBox)) extra["_box"] = l.SourceBox.Trim();
         // The PO's own item number, shown as "<PO> / <item>" on the PO Reference tab.
         if (!string.IsNullOrWhiteSpace(l.PoItem)) extra["poItem"] = l.PoItem.Trim();
         // The form's COSTS heading — Local / Insurance / Fee / Overseas — which decides the G/L

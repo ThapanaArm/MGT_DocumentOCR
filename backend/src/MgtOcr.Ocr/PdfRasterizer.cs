@@ -48,6 +48,42 @@ public static class PdfRasterizer
         }
     }
 
+    /// <summary>One region of one page (box = ymin,xmin,ymax,xmax on a 0-1000 grid), with a little
+    /// margin, as a JPEG — what "read the value from this frame" sends (AP, 2026-11-18). Works for a
+    /// PDF page and for an uploaded picture (page 0).</summary>
+    public static byte[]? RenderRegionToJpeg(string path, int pageIndex, int[] box, int dpi = 200, int quality = 90)
+    {
+        if (box.Length != 4) return null;
+        SKBitmap? bmp = null;
+        try
+        {
+            if (path.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase))
+            {
+                var bytes = File.ReadAllBytes(path);
+                lock (PdfiumGate)
+                {
+                    if (pageIndex < 0 || pageIndex >= Conversion.GetPageCount(bytes, password: PdfPassword.Current)) return null;
+                    bmp = Conversion.ToImage(bytes, page: pageIndex, password: PdfPassword.Current, options: new RenderOptions(Dpi: dpi));
+                }
+            }
+            else bmp = SKBitmap.Decode(path);
+            if (bmp == null) return null;
+            int Y(int v) => (int)Math.Round(Math.Clamp(v, 0, 1000) / 1000.0 * bmp.Height);
+            int X(int v) => (int)Math.Round(Math.Clamp(v, 0, 1000) / 1000.0 * bmp.Width);
+            // 1.5 % of the page around the frame: a frame drawn a little short still holds the text.
+            var padY = (int)(bmp.Height * 0.015); var padX = (int)(bmp.Width * 0.015);
+            var rect = new SKRectI(Math.Max(0, X(box[1]) - padX), Math.Max(0, Y(box[0]) - padY),
+                Math.Min(bmp.Width, X(box[3]) + padX), Math.Min(bmp.Height, Y(box[2]) + padY));
+            if (rect.Width < 4 || rect.Height < 4) return null;
+            using var crop = new SKBitmap(rect.Width, rect.Height);
+            if (!bmp.ExtractSubset(crop, rect)) return null;
+            using var img = SKImage.FromBitmap(crop);
+            using var data = img.Encode(SKEncodedImageFormat.Jpeg, quality);
+            return data.ToArray();
+        }
+        finally { bmp?.Dispose(); }
+    }
+
     public static List<byte[]> RenderPagesToJpeg(string path, int maxPages, int dpi, int quality = 80)
     {
         var bytes = File.ReadAllBytes(path);

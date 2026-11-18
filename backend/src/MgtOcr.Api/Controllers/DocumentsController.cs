@@ -1284,6 +1284,81 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         return Ok(new { configured = true, receipts });
     }
 
+    // POST /api/documents/123/read-region { field, page, box: [ymin,xmin,ymax,xmax] } → { value }.
+    // A frame moved on "View document": the value is read again from inside it (one small Gemini
+    // request) and returned; the screen puts it in the field, and Save keeps it (AP, 2026-11-18).
+    [HttpPost("api/documents/{docId:int}/read-region")]
+    public async Task<IActionResult> ReadRegion(int docId, [FromBody] Dictionary<string, object?> body)
+    {
+        var field = body.GetStr("field").Trim();
+        var page = 0;
+        // The body arrives as JSON elements: "box" is a JsonElement array, not a .NET list (casting
+        // it to IEnumerable gave nothing and every request answered "field and box are required").
+        static int Num(object? v) => v switch
+        {
+            System.Text.Json.JsonElement { ValueKind: System.Text.Json.JsonValueKind.Number } je => (int)Math.Round(je.GetDouble()),
+            System.Text.Json.JsonElement je when double.TryParse(je.ToString(), System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var d1) => (int)Math.Round(d1),
+            null => -1,
+            _ => double.TryParse(Convert.ToString(v, System.Globalization.CultureInfo.InvariantCulture), System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var d2) ? (int)Math.Round(d2) : -1,
+        };
+        var rawBox = body.Get("box");
+        var box = rawBox switch
+        {
+            System.Text.Json.JsonElement { ValueKind: System.Text.Json.JsonValueKind.Array } arr => arr.EnumerateArray().Select(e => Num(e)).ToArray(),
+            System.Collections.IEnumerable list and not string => list.Cast<object?>().Select(Num).ToArray(),
+            _ => [],
+        };
+        if (!int.TryParse(body.GetStr("page"), out page))
+            page = Num(body.Get("page"));
+        if (page < 1) throw new HttpApiException(400, "page is required");
+        if (field.Length == 0 || box.Length != 4 || box.Any(v => v < 0)) throw new HttpApiException(400, "field and box are required");
+        var path = await LocalFileOf(docId);
+        var jpeg = MgtOcr.Ocr.PdfRasterizer.RenderRegionToJpeg(path, page - 1, box)
+            ?? throw new HttpApiException(400, "The frame is outside the page or too small");
+        const string module = "AP";
+        var job = await jobLog.StartAsync(await jobLog.NextJobNumberAsync(), "OCR_REGION", docId: docId, module: module,
+            provider: "gemini", fileName: field, performedBy: await ActorAsync());
+        var (value, error, tin, tout) = await MgtOcr.Ocr.Providers.GeminiOcr.ReadRegionAsync(jpeg, field, config);
+        await jobLog.FinishAsync(job, error == null ? "SUCCESS" : "FAILED", message: error, tokensIn: tin, tokensOut: tout, provider: "gemini");
+        if (error != null) throw new HttpApiException(502, "อ่านค่าจากกรอบไม่ได้: " + error);
+        return Ok(new { value = value ?? "" });
+    }
+
+    // GET /api/documents/123/pages → { count, isPdf }. The "View document" frames are drawn over
+    // page pictures, not over the browser's PDF viewer, so the screen needs to know how many there are.
+    [HttpGet("api/documents/{docId:int}/pages")]
+    public async Task<IActionResult> DocumentPages(int docId)
+    {
+        var path = await LocalFileOf(docId);
+        var isPdf = path.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase);
+        return Ok(new { count = isPdf ? MgtOcr.Ocr.PdfRasterizer.PageCount(path) : 1, isPdf });
+    }
+
+    // GET /api/documents/123/page/4 → that page of the original file as a JPEG (1-based). Rendered on
+    // request at 110 dpi: enough to read on screen, small enough to load page by page.
+    [HttpGet("api/documents/{docId:int}/page/{page:int}")]
+    public async Task<IActionResult> DocumentPage(int docId, int page)
+    {
+        var path = await LocalFileOf(docId);
+        if (!path.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase))
+            return PhysicalFile(Path.GetFullPath(path), Path.GetExtension(path).ToLowerInvariant() switch { ".png" => "image/png", ".jpg" or ".jpeg" => "image/jpeg", ".gif" => "image/gif", ".webp" => "image/webp", _ => "application/octet-stream" });
+        var bytes = MgtOcr.Ocr.PdfRasterizer.RenderPageToJpeg(path, page - 1, 110, 80)
+            ?? throw new HttpApiException(404, $"Page {page} could not be rendered");
+        return File(bytes, "image/jpeg");
+    }
+
+    private async Task<string> LocalFileOf(int docId)
+    {
+        var docT = DocumentTables.ForId(docId).Doc;
+        dynamic? d = await GetDbInstance().QueryOneAsync($"SELECT StoredPath FROM {docT} WHERE DocId=@docId", new { docId });
+        string? path = d?.StoredPath;
+        if (string.IsNullOrEmpty(path) || !System.IO.File.Exists(path))
+            throw new HttpApiException(404, "The original file is not on this server (archived) — page pictures are not available");
+        return path;
+    }
+
     [HttpGet("api/documents/{docId:int}/rawtext")]
     public async Task<IActionResult> RawText(int docId)
     {
