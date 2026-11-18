@@ -124,10 +124,11 @@ public class OcrEngine(AppConfig config)
     // this logic into every dispatch branch's return statement.
     /// <param name="salesOrg">Which company's accounting rules to read by — "1000" MGT, "2000" GLC.
     /// Empty reads as GLC (see CompanyRules), so nothing changes for a document with no company.</param>
-    public async Task<ParsedDocument> ExtractAsync(string path, string module, string? providerOverride = null, string? password = null, string? salesOrg = null, string? apDocCategory = null)
+    /// <param name="pageHint">Page memory reference pictures (AP/II, Gemini only); null = none.</param>
+    public async Task<ParsedDocument> ExtractAsync(string path, string module, string? providerOverride = null, string? password = null, string? salesOrg = null, string? apDocCategory = null, PageMemoryHint? pageHint = null)
     {
         PdfPassword.Current = password;
-        var doc = await ExtractDispatchAsync(path, module, providerOverride, salesOrg ?? "", apDocCategory ?? "");
+        var doc = await ExtractDispatchAsync(path, module, providerOverride, salesOrg ?? "", apDocCategory ?? "", pageHint);
         doc.Note = doc.Provider switch
         {
             "demo" => string.IsNullOrEmpty(doc.Note) ? "Using sample data (demo) — did not read a real file" : doc.Note,
@@ -140,6 +141,8 @@ public class OcrEngine(AppConfig config)
         // Multi-PO shipping bundle: whether the forms were read from their text layer (ShippingFormText).
         if (doc.Header.TryGetValue("formTextNote", out var ft) && ft?.ToString() is { Length: > 0 } ftNote)
             doc.ConfidenceNote = doc.ConfidenceNote.Length > 0 ? $"{doc.ConfidenceNote} / {ftNote}" : ftNote;
+        if (doc.PageMemoryNote.Length > 0)
+            doc.ConfidenceNote = doc.ConfidenceNote.Length > 0 ? $"{doc.ConfidenceNote} / {doc.PageMemoryNote}" : doc.PageMemoryNote;
 
         if (TokenPrice.TryGetValue(doc.Provider, out var price) && doc.TokensIn is { } tin && doc.TokensOut is { } tout)
         {
@@ -153,7 +156,7 @@ public class OcrEngine(AppConfig config)
     // provider_override: the engine id chosen in the UI — if given, "forces" that provider with
     // no silent fallback to another one. Empty/"auto" uses the normal text->local-OCR chain (does
     // NOT call Azure/Claude/Gemini/OpenAI automatically, since those cost money — must be chosen explicitly).
-    private async Task<ParsedDocument> ExtractDispatchAsync(string path, string module, string? providerOverride = null, string salesOrg = "", string apDocCategory = "")
+    private async Task<ParsedDocument> ExtractDispatchAsync(string path, string module, string? providerOverride = null, string salesOrg = "", string apDocCategory = "", PageMemoryHint? pageHint = null)
     {
         var provider = (providerOverride ?? config.OcrProvider ?? "auto").ToLowerInvariant();
         if (provider == "") provider = "auto";
@@ -174,7 +177,7 @@ public class OcrEngine(AppConfig config)
         if (provider == "openai") provider = "gemini";
         if (provider == "gemini")
         {
-            var (outDoc, gErr) = await GeminiOcr.VisionExtractAsync(path, module, config, salesOrg, apDocCategory);
+            var (outDoc, gErr) = await GeminiOcr.VisionExtractAsync(path, module, config, salesOrg, apDocCategory, pageHint);
             if (outDoc != null) return outDoc;
             return FailedResult(module, gErr ?? "Could not connect to Google Gemini Vision");
         }

@@ -28,6 +28,19 @@ public class ParsedDocument
     // Gemini's "_positions" object from the main request, as returned (image numbers of THAT
     // request). GeminiOcr turns it into file pages on header._positions and line SourceBox.
     public string? PositionsJson { get; set; }
+
+    // Page memory (PageMemory.cs) — set by GeminiOcr on AP/II PDFs when Ocr:PageMemory:Mode is
+    // "shadow" or "on"; saved to ocr.DocPageMap by the API after the document row exists.
+    public List<PageInfo>? PageMap { get; set; }
+    public string PageMemoryMode { get; set; } = "";
+    /// <summary>Mode "on" only: what page memory changed in this read, shown with the confidence note.</summary>
+    public string PageMemoryNote { get; set; } = "";
+
+    // Measuring the read (sql/46_read_hints.sql): Gemini "thinking" tokens (summed over every
+    // request of the read), and the position hints — what this read reported, and whether
+    // it was given an earlier document's positions.
+    public int? ThinkingTokens { get; set; }
+    public bool PositionHintUsed { get; set; }
 }
 
 public static class HeaderParser

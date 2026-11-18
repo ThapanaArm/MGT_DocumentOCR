@@ -1,4 +1,6 @@
+import { useState } from 'react';
 import { fmt, num } from '../../utils/format';
+import GlAccountHelp from './GlAccountHelp';
 import { TAX_CODES } from '../../constants/fields';
 import { GL_ACCOUNT_NAMES } from '../../constants/glAccounts';
 
@@ -42,6 +44,8 @@ export default function GlItemsTable({
   onDelete: (i: number) => void;
   bare?: boolean; // render without the outer .card wrapper (for use inside a tabbed card)
 }) {
+  // Row whose G/L acct value help is open (SAP's F4 dialog).
+  const [helpFor, setHelpFor] = useState<number | null>(null);
   const addBtn = !posted ? (
     <span className="row" style={{ gap: 6 }}>
       {module !== 'II' &&
@@ -71,6 +75,13 @@ export default function GlItemsTable({
         {bare && addBtn && (
           <div className="row" style={{ justifyContent: 'flex-end', marginBottom: 12 }}>{addBtn}</div>
         )}
+        <GlAccountHelp
+          key={helpFor ?? -1}
+          open={helpFor !== null}
+          initial={helpFor !== null ? String(items[helpFor]?.glAccount ?? '') : ''}
+          onPick={(a) => helpFor !== null && onEdit(helpFor, 'glAccount', a)}
+          onClose={() => setHelpFor(null)}
+        />
         <datalist id="gl-account-options">
           {GL_PICKER.map(([a, name]) => (
             <option key={a} value={a}>{name}</option>
@@ -97,13 +108,21 @@ export default function GlItemsTable({
                 items.map((g, i) => (
                   <tr key={i}>
                     <td>
-                      <input
-                        value={g.glAccount || ''}
-                        readOnly={posted}
-                        list="gl-account-options"
-                        title={glName(g.glAccount)}
-                        onChange={(e) => onEdit(i, 'glAccount', e.target.value)}
-                      />
+                      <div style={{ display: 'flex', gap: 4 }}>
+                        <input
+                          value={g.glAccount || ''}
+                          readOnly={posted}
+                          list="gl-account-options"
+                          title={glName(g.glAccount)}
+                          onChange={(e) => onEdit(i, 'glAccount', e.target.value)}
+                          onKeyDown={(e) => { if (e.key === 'F4' && !posted) { e.preventDefault(); setHelpFor(i); } }}
+                        />
+                        {!posted && (
+                          <button className="btn sm ghost" title="ค้นหา G/L Account (F4)" onClick={() => setHelpFor(i)}>
+                            <i className="fa-regular fa-window-restore" />
+                          </button>
+                        )}
+                      </div>
                     </td>
                     <td className="muted">
                       {glName(g.glAccount)}
