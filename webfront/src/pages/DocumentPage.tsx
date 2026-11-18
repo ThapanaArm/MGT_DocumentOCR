@@ -2907,6 +2907,16 @@ export default function DocumentPage() {
      holds exactly what was generated from the old Reference — a text somebody typed is theirs. */
   const editHeaderSynced = (k: string, v: string) => {
     editHeader(k, v);
+    // The header's PO Reference and the PO Reference tab's Purchasing Order are one number: change
+    // either and the other follows (AP, 2026-11-18). A multi-PO bundle's list ("2230000511,
+    // 2230000604") is left alone — the tab box holds a single PO.
+    if (k === 'poRef' || k === 'PurchasingOrder') {
+      const other = k === 'poRef' ? 'PurchasingOrder' : 'poRef';
+      const pos = (s: unknown) => String(s ?? '').match(/\d{10}/g) ?? [];
+      if (pos(v).length <= 1 && pos(h[other]).length <= 1 && String(h[other] ?? '').trim() !== v.trim())
+        editHeader(other, v.trim());
+      return;
+    }
     if (k !== 'invoiceNo') return;
     const current = String(h.headerText ?? '').trim();
     if (current.length > 0 && current !== itemTextFor(h).slice(0, 25)) return;
@@ -3495,7 +3505,7 @@ export default function DocumentPage() {
           {doc.module !== 'II' && (
             <>
               <p className="sec-title">HEADER — Header Information</p>
-              <FieldGrid fields={headerDefFor(doc.module)} values={h} posted={locked} onEdit={editHeader} />
+              <FieldGrid fields={headerDefFor(doc.module)} values={h} posted={locked} onEdit={editHeaderSynced} />
             </>
           )}
         </div>
@@ -3634,6 +3644,9 @@ export default function DocumentPage() {
                           // The Reference of one SAP document, typed here, goes on that document's
                           // rows (extra.sapRef) and the backend sends it as is (AP, 2026-11-16).
                           onReference={(idx, value) => idx.forEach((i) => editLineExtra(i, 'sapRef', value))}
+                          // The check builds the real payload, which needs the vendor and the PO
+                          // matched first — before Step 2 it could only fail.
+                          notReady={!map ? 'กด Step 2 — Data Mapping ด้านล่างก่อน แล้วค่อยตรวจกับ SAP' : undefined}
                           fromScreen={screenTabs({
                             lines: doc.lines || [],
                             mainVendor: String((doc as Record<string, any>).partnerCode ?? h.vendorCode ?? '').trim(),
