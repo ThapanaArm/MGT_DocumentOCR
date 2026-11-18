@@ -604,7 +604,14 @@ public static class SupplierInvoicePayload
         // document.
         // Goods keyed against the PO: the goods supplier's own invoice number (KCCCI260715-012 on
         // the commercial invoice / import declaration), the PO only when none was read (AP, 2026-11-13).
-        var supplierRef = isPoKeyed && poRef.Length > 0 ? GoodsReference(header, poRef) : Or(vendor.Length > 0 ? DocNoKey(InvoiceNoOf(taxRows)) : "",
+        // A Reference typed in this document's tab on Basic Data (extra.sapRef on its rows) wins
+        // over everything derived — same as MGT (AP, 2026-11-18).
+        var manualRef = ((doc.Get("lines") as System.Collections.IEnumerable)?.OfType<Dictionary<string, object?>>() ?? [])
+            .Where(l => l.Get("extra") is Dictionary<string, object?> ex && Mine(ex))
+            .Select(l => ((Dictionary<string, object?>)l["extra"]!).GetStr("sapRef").Trim())
+            .FirstOrDefault(r => r.Length > 0) ?? "";
+        var supplierRef = manualRef.Length > 0 ? manualRef
+            : isPoKeyed && poRef.Length > 0 ? GoodsReference(header, poRef) : Or(vendor.Length > 0 ? DocNoKey(InvoiceNoOf(taxRows)) : "",
             Or(header.GetStr("invoiceNo").Trim(),
                Or(header.GetStr("goodsInvoiceNo").Trim(), poRef)));
         var payload = new Dictionary<string, object?>

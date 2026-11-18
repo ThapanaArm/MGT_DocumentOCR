@@ -62,6 +62,7 @@ import LineExtraModal from '../components/document/LineExtraModal';
 import MasterEditModal, {
   type MasterEditState,
 } from '../components/master/MasterEditModal';
+import SapDocTabs, { screenTabs } from '../components/document/SapDocTabs';
 import { fetchBlobUrl,
   ApiError,
 } from '../api/client';
@@ -1332,6 +1333,56 @@ export default function DocumentPage() {
     setDoc({ ...doc, header });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [doc?.docId, vendorAbbr, map?.header.vendor?.code]);
+
+  /* Payment tab as SAP shows it (AP, 2026-11-18, PRD 5105601505: Pyt Terms 5004 / 30 days,
+     BaselineDt 06.11.2025 = the invoice date, Due on 06.12.2025). Filled only where empty:
+     - Pyt Terms key: the words on the paper when they match ONE term of the master exactly
+       ("30 days" -> 5004), else the matched vendor's own terms from the vendor master. Sent as the
+       key, so SAP no longer falls back to whatever the PO carries (TEST took 1001, 0 days).
+     - Baseline Date: the invoice date (an overseas supplier's goods, vendor 2xxxxxx: the posting date).
+     - Due Date: baseline + N days, for a plain "N Days" term only; anything that counts from
+       another date (B/L, end of month) is left to SAP. */
+  const vendorTermsCode = (() => {
+    if (!doc || !masters || !map || doc.module === 'SO') return '';
+    const code = String(map.header.vendor?.code ?? '').trim();
+    const row = code ? (masters.vendors || []).find((v) => String(v.VendorCode ?? '').trim() === code) : undefined;
+    return String(row?.PaymentTerms ?? '').trim();
+  })();
+  useEffect(() => {
+    if (!doc || doc.module === 'SO' || !masters) return;
+    if (['POSTED', 'SPLIT', 'PARTIAL', 'POSTING'].includes(String(doc.status))) return;
+    const hh = doc.header as Record<string, any>;
+    const terms = ((masters as Record<string, any>).paymentterms || []) as Array<Record<string, any>>;
+    const norm = (t: unknown) => String(t ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
+    const next: Record<string, any> = {};
+    if (!String(hh.paymentTermsCode ?? '').trim()) {
+      const txt = norm(hh.paymentTerms);
+      const hits = txt ? terms.filter((t) => norm(t.Text) === txt || norm(t.Code) === txt) : [];
+      const code = hits.length === 1 ? String(hits[0].Code ?? '').trim() : vendorTermsCode;
+      if (code) next.paymentTermsCode = code;
+    }
+    const vendorCode = String(map?.header.vendor?.code ?? (doc as Record<string, any>).partnerCode ?? '').trim();
+    if (!String(hh.baselineDate ?? '').trim()) {
+      const base = /^2\d/.test(vendorCode) && isInventoryPoDoc(doc)
+        ? String(hh.postingDate ?? '').trim()
+        : String(hh.invoiceDate ?? '').trim();
+      if (/^\d{4}-\d{2}-\d{2}$/.test(base)) next.baselineDate = base;
+    }
+    const base = String(next.baselineDate ?? hh.baselineDate ?? '').trim();
+    const code = String(next.paymentTermsCode ?? hh.paymentTermsCode ?? '').trim();
+    if (!String(hh.dueDate ?? '').trim() && /^\d{4}-\d{2}-\d{2}$/.test(base) && code) {
+      const text = String(terms.find((t) => String(t.Code ?? '').trim() === code)?.Text ?? '');
+      const m = /^\s*(?:within\s+)?(\d{1,3})\s*days?(?:\s+(?:net|due\s+net))?\s*$/i.exec(text);
+      if (m) {
+        const d = new Date(`${base}T00:00:00Z`);
+        d.setUTCDate(d.getUTCDate() + Number(m[1]));
+        next.dueDate = d.toISOString().slice(0, 10);
+      }
+    }
+    if (!Object.keys(next).length) return;
+    setDoc({ ...doc, header: { ...hh, ...next } });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doc?.docId, masters, map?.header.vendor?.code, vendorTermsCode, doc?.header.invoiceDate, doc?.header.postingDate, doc?.header.paymentTerms, doc?.header.paymentTermsCode]);
 
   /* Goods keyed against the PO: the G/L row's Item Text and the Basic Data Text were generated
      while Invoice No. still held the PO ("KCC,INV.2230000565"); the supplier's real invoice
@@ -3572,6 +3623,31 @@ export default function DocumentPage() {
               // dollars or half a million baht. Shown rather than left to be discovered in SAP.
               'Basic Data': (
                 <>
+                  {/* One tab per SAP document with its Reference / Assignment / Text, the Reference
+                      editable (extra.sapRef on that document's rows) — same as MGT (AP, 2026-11-18). */}
+                  {(() => {
+                    const poKeyed = isInventoryPoDoc(doc);
+                    const po = poNumberOf(h);
+                    const looksPo = (v: string) => !!v && (v === po || /^2[12]30\d{6}$/.test(v));
+                    const inv = String(h.invoiceNo ?? '').trim();
+                    const goodsInv = String(h.goodsInvoiceNo ?? '').trim();
+                    return (
+                      <SapDocTabs
+                        key={doc.docId}
+                        docId={doc.docId}
+                        onReference={posted ? undefined : (idx, value) => idx.forEach((i) => editLineExtra(i, 'sapRef', value))}
+                        fromScreen={screenTabs({
+                          lines: doc.lines || [],
+                          mainVendor: String((doc as Record<string, any>).partnerCode ?? h.vendorCode ?? '').trim(),
+                          po,
+                          invoiceNo: inv,
+                          text: String(h.headerText ?? '').trim() || itemTextFor(h),
+                          singleDoc: poKeyed,
+                          goodsReference: (!looksPo(inv) && inv) || (!looksPo(goodsInv) && goodsInv) || po,
+                        })}
+                      />
+                    );
+                  })()}
                   {(() => {
                     const cur = String(h.currency ?? '').trim().toUpperCase();
                     const rate = Number(h.exchangeRate) || 0;

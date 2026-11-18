@@ -389,6 +389,8 @@ export const AP_TRADE_GROUPS: FieldGroup[] = [
       ['baselineDate', 'Baseline Date'],  
       ['dueDate', 'Due Date'], 
       ['paymentTerms', 'Payment Terms'],
+      // The SAP key that is sent (5004), as SAP's Payment tab shows it (AP, 2026-11-18).
+      ['paymentTermsCode', 'Pyt Terms (SAP key)'],
       ['paymentMethod', 'Payment Method'], 
       ['paymentBlock', 'Payment Block', 'select', [ 
         ['', 'Free for payment'],
