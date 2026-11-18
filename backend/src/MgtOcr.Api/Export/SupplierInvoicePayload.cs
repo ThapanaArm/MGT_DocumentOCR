@@ -86,7 +86,9 @@ public static class SupplierInvoicePayload
         var customsCostsOnly = !isPoKeyed
             && ((doc.Get("lines") as System.Collections.IEnumerable)?.OfType<Dictionary<string, object?>>() ?? [])
                 .Where(l => l.Get("extra") is Dictionary<string, object?> ex && Mine(ex)
-                    && l.GetStr("extCode").Trim().ToUpperInvariant() is not ("VAT" or "WHT" or "DUTY")
+                    // DUTY counts here: the form's IMPORT TAX row can come back tagged DUTY, and then the
+                    // Customs Department's own document looked like it had no costs at all (TEST 5100000070).
+                    && l.GetStr("extCode").Trim().ToUpperInvariant() is not ("VAT" or "WHT")
                     && Num(l.Get("amount")) != 0)
                 .ToList() is { Count: > 0 } customsCosts
             && customsCosts.All(l => System.Text.RegularExpressions.Regex.IsMatch(l.GetStr("desc"),
