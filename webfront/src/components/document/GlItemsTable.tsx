@@ -71,12 +71,14 @@ export default function GlItemsTable({
           <table>
             <thead>
               <tr>
-                <th style={{ minWidth: 140 }}>G/L Account</th>
-                <th style={{ width: 100 }}>Dr/Cr</th>
-                <th style={{ minWidth: 130 }}>Amount</th>
-                <th style={{ minWidth: 100 }}>Tax Code</th>
+                {/* Same columns, same order as MIRO's G/L Account tab. */}
+                <th style={{ minWidth: 130 }}>G/L acct</th>
+                <th style={{ minWidth: 150 }}>Short Text</th>
+                <th style={{ width: 100 }}>D/C</th>
+                <th style={{ minWidth: 130 }}>Amount in doc.curr.</th>
+                <th style={{ minWidth: 100 }}>Tax code</th>
                 <th style={{ minWidth: 140 }}>Assignment</th>
-                <th style={{ minWidth: 180 }}>Item Text</th>
+                <th style={{ minWidth: 180 }}>Text</th>
                 <th style={{ minWidth: 130 }}>Cost Center</th>
                 <th style={{ width: 44 }} />
               </tr>
@@ -94,6 +96,9 @@ export default function GlItemsTable({
                         onChange={(e) => onEdit(i, 'glAccount', e.target.value)}
                       />
                     </td>
+                    <td className="muted">
+                      {GL_ACCOUNTS.find(([a]) => a === String(g.glAccount || '').trim().replace(/^0+/, ''))?.[1] || ''}
+                    </td>
                     <td>
                       <select
                         value={g.drCr || ''}
@@ -101,8 +106,8 @@ export default function GlItemsTable({
                         onChange={(e) => onEdit(i, 'drCr', e.target.value)}
                       >
                         <option value="">— Select —</option>
-                        <option value="D">S-Debit</option>
-                        <option value="C">H-Credit</option>
+                        <option value="D">Debit</option>
+                        <option value="C">Credit</option>
                       </select>
                     </td>
                     <td className="num">
@@ -161,7 +166,7 @@ export default function GlItemsTable({
                 ))
               ) : (
                 <tr>
-                  <td colSpan={8} className="empty">
+                  <td colSpan={9} className="empty">
                     No items
                   </td>
                 </tr>
