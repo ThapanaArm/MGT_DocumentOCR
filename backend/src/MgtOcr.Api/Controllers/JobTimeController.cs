@@ -24,11 +24,11 @@ public class JobTimeController(Db db, ICurrentUserAccessor current) : Controller
 
     private const string Source = """
         SELECT DocId, Module, SalesOrg, JobNumber, DocNo, PartnerName, CreatedBy, PostedBy,
-               SapDocNo, JobStartedAt, PostedAt, JobTaskTime, OcrDurationMs
+               SapDocNo, JobStartedAt, PostedAt, JobTaskTimeMs / 60000.0 AS JobTaskTime, OcrDurationMs
         FROM ocr.Document
         UNION ALL
         SELECT DocId, Module, SalesOrg, JobNumber, DocNo, PartnerName, CreatedBy, PostedBy,
-               SapDocNo, JobStartedAt, PostedAt, JobTaskTime, OcrDurationMs
+               SapDocNo, JobStartedAt, PostedAt, JobTaskTimeMs / 60000.0 AS JobTaskTime, OcrDurationMs
         FROM ocr.SalesOrder
         """;
 

@@ -188,7 +188,7 @@ public class SalesOrderPostRepository(Db db)
         var t = DocumentTables.ForId(docId).Doc;
         await using var conn = await db.OpenAsync();
         await conn.ExecuteAsync(all
-            ? $"UPDATE {t} SET Status='POSTED', SapDocNo=@nos, CompanyCode=@companyCode, PostedAt=SYSDATETIME(), PostedBy=@user, UpdatedAt=SYSDATETIME() WHERE DocId=@docId"
+            ? $"UPDATE {t} SET Status='POSTED', SapDocNo=@nos, CompanyCode=@companyCode, PostedAt=SYSDATETIME(), {DocumentRepository.JobTaskTimeMsSet}, PostedBy=@user, UpdatedAt=SYSDATETIME() WHERE DocId=@docId"
             : $"UPDATE {t} SET Status='PARTIAL', SapDocNo=@nos, CompanyCode=@companyCode, UpdatedAt=SYSDATETIME() WHERE DocId=@docId",
             new { nos, companyCode, user, docId });
         return all ? "POSTED" : "PARTIAL";
