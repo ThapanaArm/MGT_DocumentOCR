@@ -1,5 +1,6 @@
 import { fmt, num } from '../../utils/format';
 import { TAX_CODES } from '../../constants/fields';
+import { GL_ACCOUNT_NAMES } from '../../constants/glAccounts';
 
 /* Ports the G/L Account Items table (header.glItems) from docHtml(). */
 export type GlItem = Record<string, any>;
@@ -11,6 +12,14 @@ export const GL_ACCOUNTS: Array<[string, string]> = [
   ['11730000', 'Deferred Input tax'],
   ['11720000', 'Input tax'],
   ['52110001', 'Purchase Variance'],
+];
+/** Short Text of a G/L account, as MIRO shows it (leading zeros ignored). */
+export const glName = (acct: unknown) =>
+  GL_ACCOUNT_NAMES[String(acct ?? '').trim().replace(/^0+(?=\d{8})/, '')] || '';
+// The accounts AP uses most first, then the whole chart of accounts.
+const GL_PICKER: Array<[string, string]> = [
+  ...GL_ACCOUNTS,
+  ...Object.entries(GL_ACCOUNT_NAMES).filter(([a]) => !GL_ACCOUNTS.some(([c]) => c === a)),
 ];
 const GL_PRESETS: Array<{ label: string; row: GlItem }> = [
   { label: 'Prepayment', row: { glAccount: '11710000', drCr: 'C', taxCode: 'VX' } },
@@ -63,7 +72,7 @@ export default function GlItemsTable({
           <div className="row" style={{ justifyContent: 'flex-end', marginBottom: 12 }}>{addBtn}</div>
         )}
         <datalist id="gl-account-options">
-          {GL_ACCOUNTS.map(([a, name]) => (
+          {GL_PICKER.map(([a, name]) => (
             <option key={a} value={a}>{name}</option>
           ))}
         </datalist>
@@ -92,12 +101,12 @@ export default function GlItemsTable({
                         value={g.glAccount || ''}
                         readOnly={posted}
                         list="gl-account-options"
-                        title={GL_ACCOUNTS.find(([a]) => a === String(g.glAccount || '').trim())?.[1] || ''}
+                        title={glName(g.glAccount)}
                         onChange={(e) => onEdit(i, 'glAccount', e.target.value)}
                       />
                     </td>
                     <td className="muted">
-                      {GL_ACCOUNTS.find(([a]) => a === String(g.glAccount || '').trim().replace(/^0+/, ''))?.[1] || ''}
+                      {glName(g.glAccount)}
                     </td>
                     <td>
                       <select
