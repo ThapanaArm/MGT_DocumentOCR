@@ -1231,6 +1231,59 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             action = result.Action is null ? null : new { type = result.Action.Type, query = result.Action.Query } });
     }
 
+    // GET /api/sap/po/2130000720/goods-receipts → the PO's goods receipts from SAP
+    // (API_MATERIAL_DOCUMENT_SRV), one entry per material document, newest first, so the PO Reference
+    // tab can fill Goods Receipt (Material Doc.) / Fiscal Year instead of asking for them by hand
+    // (AP, 2026-11-18). A receipt cancelled by a 102 is returned with reversed = true.
+    [HttpGet("api/sap/po/{po}/goods-receipts")]
+    public async Task<IActionResult> PoGoodsReceipts(string po)
+    {
+        po = (po ?? "").Trim();
+        if (po.Length == 0) throw new HttpApiException(400, "PO is required");
+        if (string.IsNullOrWhiteSpace(config.SapMaterialDocumentBaseUrl))
+            return Ok(new { configured = false, receipts = Array.Empty<object>() });
+        List<System.Text.Json.JsonElement> rows;
+        try { rows = await sapPo.GoodsReceiptItemsAsync(po); }
+        catch (Exception ex) { throw new HttpApiException(502, $"อ่าน Goods Receipt ของ PO {po} จาก SAP ไม่ได้: {ex.Message}"); }
+
+        static string S(System.Text.Json.JsonElement e, string n) =>
+            e.TryGetProperty(n, out var v) ? (v.ValueKind == System.Text.Json.JsonValueKind.String ? v.GetString() ?? "" : v.ToString()) : "";
+        static double N(System.Text.Json.JsonElement e, string n) =>
+            double.TryParse(S(e, n), System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var d) ? d : 0;
+        static string D(string s)
+        {
+            var m = System.Text.RegularExpressions.Regex.Match(s ?? "", @"-?\d+");
+            return (s ?? "").StartsWith("/Date(") && m.Success && long.TryParse(m.Value, out var ms)
+                ? DateTimeOffset.FromUnixTimeMilliseconds(ms).UtcDateTime.ToString("yyyy-MM-dd")
+                : (s ?? "").Length >= 10 ? s![..10] : s ?? "";
+        }
+        static bool IsReversal(System.Text.Json.JsonElement g) =>
+            string.Equals(S(g, "DebitCreditCode"), "H", StringComparison.OrdinalIgnoreCase)
+            || S(g, "GoodsMovementType") is "102" or "122" or "162";
+
+        // Receipts a reversal points back at (ReversedMaterialDocument / Year).
+        var cancelled = rows.Where(IsReversal)
+            .Select(g => $"{S(g, "ReversedMaterialDocument")}|{S(g, "ReversedMaterialDocumentYear")}")
+            .Where(k => k != "|").ToHashSet();
+        var receipts = rows.Where(g => !IsReversal(g))
+            .GroupBy(g => (Doc: S(g, "MaterialDocument"), Year: S(g, "MaterialDocumentYear")))
+            .Where(g => g.Key.Doc.Length > 0)
+            .Select(g => new
+            {
+                matDoc = g.Key.Doc,
+                year = g.Key.Year,
+                postingDate = D(S(g.First(), "PostingDate")),
+                movementType = S(g.First(), "GoodsMovementType"),
+                qty = Math.Round(g.Sum(x => N(x, "QuantityInEntryUnit")), 3),
+                unit = S(g.First(), "EntryUnit"),
+                poItems = g.Select(x => S(x, "PurchaseOrderItem").TrimStart('0')).Where(x => x.Length > 0).Distinct().ToList(),
+                reversed = cancelled.Contains($"{g.Key.Doc}|{g.Key.Year}"),
+            })
+            .OrderByDescending(r => r.year).ThenByDescending(r => r.matDoc)
+            .ToList();
+        return Ok(new { configured = true, receipts });
+    }
+
     [HttpGet("api/documents/{docId:int}/rawtext")]
     public async Task<IActionResult> RawText(int docId)
     {

@@ -52,6 +52,7 @@ import TabbedGroups from '../components/document/TabbedGroups';
 import DetailTable from '../components/document/DetailTable';
 import PoReferenceTable from '../components/document/PoReferenceTable';
 import GlItemsTable from '../components/document/GlItemsTable';
+import GoodsReceiptPicker from '../components/document/GoodsReceiptPicker';
 import TaxDataTable from '../components/document/TaxDataTable';
 import WhtTable from '../components/document/WhtTable';
 import IncomingInvoiceCard from '../components/document/IncomingInvoiceCard';
@@ -2935,6 +2936,16 @@ export default function DocumentPage() {
      holds exactly what was generated from the old Reference — a text somebody typed is theirs. */
   const editHeaderSynced = (k: string, v: string) => {
     editHeader(k, v);
+    // The header's PO Reference and the PO Reference tab's Purchasing Order are one number: change
+    // either and the other follows (AP, 2026-11-18). A multi-PO bundle's list ("2230000511,
+    // 2230000604") is left alone — the tab box holds a single PO.
+    if (k === 'poRef' || k === 'PurchasingOrder') {
+      const other = k === 'poRef' ? 'PurchasingOrder' : 'poRef';
+      const pos = (s: unknown) => String(s ?? '').match(/\d{10}/g) ?? [];
+      if (pos(v).length <= 1 && pos(h[other]).length <= 1 && String(h[other] ?? '').trim() !== v.trim())
+        editHeader(other, v.trim());
+      return;
+    }
     if (k !== 'invoiceNo') return;
     const current = String(h.headerText ?? '').trim();
     if (current.length > 0 && current !== itemTextFor(h).slice(0, 25)) return;
@@ -3513,7 +3524,7 @@ export default function DocumentPage() {
           {doc.module !== 'II' && (
             <>
               <p className="sec-title">HEADER — Header Information</p>
-              <FieldGrid fields={headerDefFor(doc.module)} values={h} posted={locked} onEdit={editHeader} />
+              <FieldGrid fields={headerDefFor(doc.module)} values={h} posted={locked} onEdit={editHeaderSynced} />
             </>
           )}
         </div>
@@ -3724,7 +3735,7 @@ export default function DocumentPage() {
                        against the goods receipt, and SAP asks for the material document by
                        number, fiscal year and item (M8/375). Left empty when the PO item does
                        not use GR-based IV — nothing is then sent. */
-                    <div className="row" style={{ gap: 14, margin: '0 0 12px', alignItems: 'flex-end' }}>
+                    <div className="row" style={{ gap: 14, margin: '0 0 12px', alignItems: 'flex-end', flexWrap: 'wrap' }}>
                       <label style={{ display: 'grid', gap: 4 }}>
                         <span className="hint">Goods Receipt (Material Doc.)</span>
                         <input
@@ -3748,6 +3759,14 @@ export default function DocumentPage() {
                       <span className="hint" style={{ paddingBottom: 6 }}>
                         กรอกเมื่อ PO เปิด GR-Based IV ไว้ — ว่างได้ถ้าไม่ได้เปิด
                       </span>
+                      <div style={{ flexBasis: '100%' }}>
+                        <GoodsReceiptPicker
+                          po={poNumberOf(h).split(/[,\s]+/)[0] || ''}
+                          matDoc={String(h.refMatDoc ?? '')}
+                          locked={locked}
+                          onPick={(m, y) => { editHeader('refMatDoc', m); editHeader('refMatDocYear', y); }}
+                        />
+                      </div>
                     </div>
                   )}
                   {/* The MIRO grid — Assign all, the PO item per line, the GR item, the
