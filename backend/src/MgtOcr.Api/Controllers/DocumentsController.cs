@@ -2810,7 +2810,6 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         {
             foreach (var (p, one) in results)
             {
-<<<<<<< HEAD
                 if (skipped.Contains(p)) continue;   // logged when it was actually created
                 await conn.ExecuteAsync("""
                     INSERT ocr.PostLog(DocId,Module,SapDocNo,Endpoint,PayloadJson,Success,Message,PostedBy,SalesOrg)
@@ -2836,20 +2835,9 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
                 var documentSapDocNo = module is "AP" or "II"
                     ? results.Select(x => x.Result.SapDocNo).FirstOrDefault(n => !string.IsNullOrWhiteSpace(n)) ?? ""
                     : Cut50(sapDocNos);
-                await conn.ExecuteAsync($"UPDATE {docT} SET Status='POSTED', SapDocNo=@sapDocNo, CompanyCode=@companyCode, PostedAt=SYSDATETIME(), PostedBy=@user, UpdatedAt=SYSDATETIME() WHERE DocId=@docId",
+                await conn.ExecuteAsync($"UPDATE {docT} SET Status='POSTED', SapDocNo=@sapDocNo, CompanyCode=@companyCode, PostedAt=SYSDATETIME(), {DocumentRepository.JobTaskTimeMsSet}, PostedBy=@user, UpdatedAt=SYSDATETIME() WHERE DocId=@docId",
                     new { sapDocNo = documentSapDocNo, companyCode, user, docId }, tx);
             }
-=======
-                docId, module, sapDocNo = r.SapDocNo, endpoint = r.Endpoint,
-                payloadJson = JsonSerializer.Serialize(payload, PyJson.Options), success = r.Success ? 1 : 0, message = r.Message, user,
-                // Which company's submission history this belongs to — the poster's own, Admin
-                // included, for the same reason a document is filed under the importer's company.
-                salesOrg = await OwnCompanyAsync() is { Length: > 0 } own ? own : null,
-            }, tx);
-            if (r.Success)
-                await conn.ExecuteAsync($"UPDATE {docT} SET Status='POSTED', SapDocNo=@sapDocNo, CompanyCode=@companyCode, PostedAt=SYSDATETIME(), {DocumentRepository.JobTaskTimeMsSet}, PostedBy=@user, UpdatedAt=SYSDATETIME() WHERE DocId=@docId",
-                    new { sapDocNo = r.SapDocNo, companyCode, user, docId }, tx);
->>>>>>> origin/develop-glc
             await tx.CommitAsync();
         }
         // Queue the source file for SharePoint (real posts only, not simulation). Best effort:
