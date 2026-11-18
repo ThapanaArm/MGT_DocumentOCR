@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { getPayload } from '../../api/documents';
 import type { DocLine } from '../../api/documents';
 import { fmtAmt } from '../../utils/format';
@@ -113,11 +113,15 @@ function payloadTabs(docs: Payload[]): SapDocTab[] {
   });
 }
 
-export default function SapDocTabs({ docId, fromScreen, onReference }: {
+export default function SapDocTabs({ docId, fromScreen, onReference, notReady, onActiveVendor }: {
   docId: number;
   fromScreen: SapDocTab[];
   /** Writes a typed Reference onto the rows of one document (extra.sapRef); '' clears it. */
   onReference?: (lineIdx: number[], value: string) => void;
+  /** Why "ตรวจกับ SAP" cannot run yet (e.g. Step 2 not done) — the button is disabled and this is shown. */
+  notReady?: string;
+  /** The supplier of the tab being looked at (the screen's code), so G/L Account Items follow it. */
+  onActiveVendor?: (vendor: string) => void;
 }) {
   const [fromSap, setFromSap] = useState<SapDocTab[] | null>(null);
   const [errors, setErrors] = useState<string[]>([]);
@@ -170,6 +174,10 @@ export default function SapDocTabs({ docId, fromScreen, onReference }: {
     // Back to the screen's values, which now carry the edit; "ตรวจกับ SAP" shows SAP's again.
     if (fromSap) setFromSap(null);
   };
+  // G/L Account Items follow the tab: switching to the insurer's document shows (and adds) its rows.
+  const activeVendor = (screenFor(curIdx) ?? tabs[curIdx])?.vendor ?? '';
+  useEffect(() => { onActiveVendor?.(activeVendor); }, [activeVendor]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // TEST adds "-T{docId}" when it sends; the box edits the Reference itself.
   const refShown = (t: SapDocTab) => (fromSap ? t.reference.replace(/-T\d+[A-Z]?$/, '') : t.reference);
 
@@ -186,9 +194,11 @@ export default function SapDocTabs({ docId, fromScreen, onReference }: {
         <span className="hint">
           เอกสารที่จะสร้างใน SAP ({tabs.length} ใบ){fromSap ? ' — จาก SAP' : ' — จากหน้าจอ'}
         </span>
-        <button className="btn sm" onClick={check} disabled={loading} type="button">
+        <button className="btn sm" onClick={check} disabled={loading || !!notReady} type="button"
+          title={notReady || 'สร้างเอกสารแบบที่จะส่งเข้า SAP จริง แล้วแสดงให้ตรวจก่อนส่ง'}>
           <i className="fa-solid fa-magnifying-glass" /> {loading ? 'กำลังตรวจ…' : 'ตรวจกับ SAP'}
         </button>
+        {notReady && <span className="hint" style={{ color: 'var(--warn, #b26a00)' }}><i className="fa-solid fa-circle-info" /> {notReady}</span>}
         {fromSap && (
           <button className="btn sm" type="button" onClick={() => { setFromSap(null); setActive(0); }}>
             กลับไปค่าจากหน้าจอ

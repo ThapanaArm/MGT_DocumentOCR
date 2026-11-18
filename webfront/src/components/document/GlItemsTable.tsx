@@ -35,6 +35,9 @@ export default function GlItemsTable({
   onAdd,
   onDelete,
   bare,
+  vendorOptions,
+  mainVendor,
+  title,
 }: {
   module: string;
   items: GlItem[];
@@ -43,6 +46,12 @@ export default function GlItemsTable({
   onAdd: (preset?: GlItem) => void;
   onDelete: (i: number) => void;
   bare?: boolean; // render without the outer .card wrapper (for use inside a tabbed card)
+  /** The SAP documents of this bundle, by supplier: [code, label]. With two or more, each row says
+   *  which supplier's document it goes on (blank = the main supplier's, as the backend does). */
+  vendorOptions?: Array<[string, string]>;
+  mainVendor?: string;
+  /** Heading override, e.g. which supplier's SAP document the rows shown belong to. */
+  title?: string;
 }) {
   // Row whose G/L acct value help is open (SAP's F4 dialog).
   const [helpFor, setHelpFor] = useState<number | null>(null);
@@ -65,7 +74,7 @@ export default function GlItemsTable({
       {!bare && (
         <div className="card-h">
           <h2>
-            {module === 'II' ? 'Line Items' : 'G/L Account Items'} ({items.length})
+            {title ?? (module === 'II' ? 'Line Items' : 'G/L Account Items')} ({items.length})
           </h2>
           <div className="sp" />
           {addBtn}
@@ -92,7 +101,8 @@ export default function GlItemsTable({
             <thead>
               <tr>
                 {/* Same columns, same order as MIRO's G/L Account tab. */}
-                <th style={{ minWidth: 130 }}>G/L acct</th>
+                {vendorOptions && vendorOptions.length > 1 && <th style={{ minWidth: 190 }}>เข้าเอกสารของ</th>}
+                <th style={{ minWidth: 150 }}>G/L acct</th>
                 <th style={{ minWidth: 150 }}>Short Text</th>
                 <th style={{ width: 100 }}>D/C</th>
                 <th style={{ minWidth: 130 }}>Amount in doc.curr.</th>
@@ -107,10 +117,23 @@ export default function GlItemsTable({
               {items.length ? (
                 items.map((g, i) => (
                   <tr key={i}>
+                    {vendorOptions && vendorOptions.length > 1 && (
+                      <td>
+                        <select
+                          value={String(g.vendorCode ?? '').trim() || mainVendor || ''}
+                          disabled={posted}
+                          onChange={(e) => onEdit(i, 'vendorCode', e.target.value)}
+                          title="ใบแจ้งหนี้ใน SAP ที่บรรทัดนี้จะไปอยู่"
+                        >
+                          {vendorOptions.map(([c, l]) => <option key={c} value={c}>{l}</option>)}
+                        </select>
+                      </td>
+                    )}
                     <td>
                       <div style={{ display: 'flex', gap: 4 }}>
                         <input
                           value={g.glAccount || ''}
+                          style={{ minWidth: 100 }}
                           readOnly={posted}
                           list="gl-account-options"
                           title={glName(g.glAccount)}
@@ -194,7 +217,7 @@ export default function GlItemsTable({
                 ))
               ) : (
                 <tr>
-                  <td colSpan={9} className="empty">
+                  <td colSpan={vendorOptions && vendorOptions.length > 1 ? 10 : 9} className="empty">
                     No items
                   </td>
                 </tr>

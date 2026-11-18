@@ -6,6 +6,37 @@ import { TAX_CODES, isDutyRow } from '../../constants/fields';
    TxValidFrm, Tax Rate. */
 export type TaxItem = Record<string, any>;
 
+/* Item, Tax Code and Input Tax Type say the same thing three ways and must agree (AP, 2026-11-18):
+   D1 = Deferred tax = "Deferred Input VAT", V1 = Input tax = "Input VAT". Changing any one of them
+   moves the other two. VX / duty rows are left alone. */
+const VAT_LABELS = { INPUT: 'Input VAT', DEFERRED: 'Deferred Input VAT' } as const;
+const isVatLabel = (l: unknown) => {
+  const s = String(l ?? '').trim().toLowerCase();
+  return s === '' || s === 'input vat' || s === 'deferred input vat';
+};
+function linkedEdits(t: TaxItem, key: string, value: string): Array<[string, string]> {
+  const out: Array<[string, string]> = [[key, value]];
+  const code = String(t.taxCode ?? '').trim().toUpperCase();
+  const digit = /^[VD]([0-9])$/.test(code) ? code[1] : '1';
+  const setKind = (kind: 'INPUT' | 'DEFERRED') => {
+    if (key !== 'taxKind') out.push(['taxKind', kind]);
+    if (key !== 'taxCode') out.push(['taxCode', (kind === 'DEFERRED' ? 'D' : 'V') + digit]);
+    if (key !== 'label' && isVatLabel(t.label)) out.push(['label', VAT_LABELS[kind]]);
+  };
+  if (key === 'taxCode') {
+    const v = value.trim().toUpperCase();
+    if (/^D[0-9]$/.test(v)) { out.push(['taxKind', 'DEFERRED']); if (isVatLabel(t.label)) out.push(['label', VAT_LABELS.DEFERRED]); }
+    else if (/^V[0-9]$/.test(v)) { out.push(['taxKind', 'INPUT']); if (isVatLabel(t.label)) out.push(['label', VAT_LABELS.INPUT]); }
+  } else if (key === 'taxKind' && (value === 'INPUT' || value === 'DEFERRED')) {
+    if (code !== 'VX') setKind(value);
+  } else if (key === 'label') {
+    const s = value.trim().toLowerCase();
+    if (s === 'deferred input vat') setKind('DEFERRED');
+    else if (s === 'input vat') setKind('INPUT');
+  }
+  return out;
+}
+
 export default function TaxDataTable({
   items,
   posted,
@@ -21,6 +52,10 @@ export default function TaxDataTable({
   onDelete: (i: number) => void;
   bare?: boolean; // render without the outer .card wrapper (for use inside a tabbed card)
 }) {
+  const edit = (i: number, key: string, value: string) => {
+    for (const [k, v] of linkedEdits(items[i] || {}, key, value)) onEdit(i, k, v);
+  };
+
   const total = items.reduce((a, t) => a + num(t.docCurrencyAmt), 0);
   const addBtn = !posted ? (
     <button className="btn sm" onClick={onAdd}>
@@ -45,6 +80,10 @@ export default function TaxDataTable({
           </div>
         )}
         <div className="tw">
+          <datalist id="tax-item-labels">
+            <option value="Input VAT" />
+            <option value="Deferred Input VAT" />
+          </datalist>
           <table>
             <thead>
               <tr>
@@ -72,8 +111,9 @@ export default function TaxDataTable({
                       <input
                         value={t.label || ''}
                         readOnly={posted}
-                        onChange={(e) => onEdit(i, 'label', e.target.value)}
+                        onChange={(e) => edit(i, 'label', e.target.value)}
                         placeholder="e.g. Input VAT, Import Duty"
+                        list="tax-item-labels"
                       />
                     </td>
                     <td>
@@ -101,7 +141,7 @@ export default function TaxDataTable({
                       <select
                         value={t.taxCode || ''}
                         disabled={posted}
-                        onChange={(e) => onEdit(i, 'taxCode', e.target.value)}
+                        onChange={(e) => edit(i, 'taxCode', e.target.value)}
                       >
                         <option value="">— Select —</option>
                         {TAX_CODES.map(([code, label]) => (
@@ -125,7 +165,7 @@ export default function TaxDataTable({
                         <select
                           value={t.taxKind || ''}
                           disabled={posted}
-                          onChange={(e) => onEdit(i, 'taxKind', e.target.value)}
+                          onChange={(e) => edit(i, 'taxKind', e.target.value)}
                         >
                           <option value="">— Select —</option>
                           <option value="INPUT">Input tax</option>
