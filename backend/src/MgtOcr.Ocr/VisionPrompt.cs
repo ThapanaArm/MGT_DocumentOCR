@@ -155,6 +155,11 @@ public static partial class VisionPrompt
         "  · amountBeforeVat = ยอดก่อน VAT ทั้งหมดของใบ = ส่วนที่ไม่มี/ยกเว้นภาษี + ส่วนที่คำนวณภาษี 7% (เช่น 3,590.64 + 1,500.00 = 5,090.64), " +
         "nonVatAmount = เฉพาะส่วนที่ไม่มี/ยกเว้นภาษี (เป็นส่วนหนึ่งของ amountBeforeVat), vatAmount = ภาษีมูลค่าเพิ่ม, " +
         "totalAmount = จำนวนเงินทั้งสิ้น (ก่อนหัก ณ ที่จ่าย) = amountBeforeVat + vatAmount ตามที่พิมพ์ในใบ ห้ามคำนวณใหม่ถ้าในใบมีตัวเลข\n" +
+        // AP, 2026-11-18 (PO 2130000164): the Customs Department's 2801-630616/617, 200.00 each,
+        // are "ค่าทำการล่วงเวลา" — overtime, billed again by FLS as CUSTOMS OVER TIME 400.00 on
+        // LOG101202LCH — not a customs fee or tax.
+        "  · ใบเสร็จกรมศุลกากรที่รายการเป็น \"ค่าทำการล่วงเวลา\" (ค่าล่วงเวลา / Overtime) ไม่ใช่ภาษีหรืออากร: costType = \"Local\" (แถว OT CHARGE ในฟอร์ม), vatAmount = 0 " +
+        "และถ้าใบแจ้งหนี้ของตัวแทนชิปปิ้งมีรายการ CUSTOMS OVER TIME / OT CHARGE ที่ยอดเท่ากับผลรวมใบเหล่านี้ ให้ includedIn = เลขที่ใบแจ้งหนี้นั้น\n" +
         "  · includedIn = เลขที่ใบแจ้งหนี้ของตัวแทนชิปปิ้ง ถ้าใบนี้เป็นใบเสร็จที่ตัวแทนจ่ายแทนแล้วเรียกเก็บรวมอยู่ในใบแจ้งหนี้ของตัวแทนอีกที " +
         "(เช่น ใบเสร็จค่า DO / ค่าท่าเรือที่อยู่ในใบแจ้งหนี้ของ PROMPT แล้ว) ใบที่เราจ่ายเองโดยตรงให้ใส่สตริงว่าง\n" +
         "  · ใบวางบิล/ใบแจ้งหนี้ กับใบกำกับภาษี/ใบเสร็จ ของรายการเดียวกัน (ผู้ออกเดียวกัน ยอดเท่ากัน) ให้ใส่รายการเดียว\n" +
@@ -348,7 +353,8 @@ public static partial class VisionPrompt
             + "desc = \"Withholding Tax <อัตรา>% <ชื่อผู้ออกเอกสาร> <เลขที่เอกสาร>\", amount = price = ยอดที่หัก (ตัวเลขบวก)\n" +
         "- DUTY: ค่าธรรมเนียมและภาษีในใบเสร็จกรมศุลกากร/ใบขนสินค้าขาเข้า extCode = \"DUTY\" แถวละรายการ "
             + "ได้แก่ อากรขาเข้า (desc = \"Import Duty\"), ภาษีสรรพสามิต (\"Excise Tax\"), ภาษีเก็บเพิ่มเพื่อมหาดไทย (\"Interior Tax\") "
-            + "ข้ามรายการที่ยอดเป็น 0 ส่วน VAT ของใบนั้นให้ไปอยู่ในแถว VAT ตามปกติ\n" +
+            + "ข้ามรายการที่ยอดเป็น 0 ส่วน VAT ของใบนั้นให้ไปอยู่ในแถว VAT ตามปกติ "
+            + "ค่าทำการล่วงเวลา (Overtime) ในใบเสร็จกรมศุลกากรไม่ใช่ภาษีหรืออากร ห้ามใส่เป็นแถว DUTY\n" +
         // The three rules below are the ones this prompt was missing, and each omission cost a
         // wrong figure on screen in bundle #707: the same VAT counted twice from a billing note
         // and its tax invoice, the customs VAT counted twice from the import entry and the
@@ -449,7 +455,7 @@ public static partial class VisionPrompt
         "\n- (เฉพาะกรณีที่มีหน้า FORM SHIPPING EXPENSE) ค่าธรรมเนียมและภาษีในใบเสร็จกรมศุลกากร/ใบขนสินค้าขาเข้าที่แนบมาในไฟล์ " +
         "ให้ใส่เป็นแถวต่อท้าย lines โดยใช้ extCode = \"DUTY\" (ไม่ใช่รายการค่าใช้จ่ายในฟอร์ม) แถวละรายการ ได้แก่ " +
         "อากรขาเข้า (desc = \"Import Duty\"), ภาษีสรรพสามิต (\"Excise Tax\"), ภาษีเก็บเพิ่มเพื่อมหาดไทย (\"Interior Tax\") " +
-        "และค่าธรรมเนียมอื่นของกรมศุลกากรถ้ามี ใช้ vendorCode ของกรมศุลกากรตามที่ปรากฏในฟอร์ม (แถวเดียวกับ CUSTOMS FEE) " +
+        "และค่าธรรมเนียมอื่นของกรมศุลกากรถ้ามี (ยกเว้นค่าทำการล่วงเวลา / Overtime ซึ่งเป็นค่าบริการอยู่ในแถว OT CHARGE ของฟอร์ม ห้ามใส่เป็น DUTY) ใช้ vendorCode ของกรมศุลกากรตามที่ปรากฏในฟอร์ม (แถวเดียวกับ CUSTOMS FEE) " +
         "ข้ามรายการที่ยอดเป็น 0 ส่วนภาษีมูลค่าเพิ่มของใบนั้นให้ไปอยู่ในแถว VAT ตามปกติ" +
         "\n- (เฉพาะกรณีที่มีหน้า FORM SHIPPING EXPENSE) จากนั้นให้ต่อท้าย lines ด้วยภาษีหัก ณ ที่จ่าย (หัก ณ ที่จ่าย / WITHHOLDING TAX) ทุกรายการที่พบในใบแจ้งหนี้/ใบเสร็จ/ใบกำกับภาษีหน้าอื่นในไฟล์ " +
         "เฉพาะใบที่ออกโดยผู้ขายรายเดียวกับ header.vendorName (รายที่เราจ่ายเงินโดยตรง) เท่านั้น " +
@@ -713,6 +719,13 @@ public static partial class VisionPrompt
         // split it so each tax is its own line (98,656.00 + 9,865.60 = 108,521.60). If the read
         // already produced an interior-tax row it did the split itself — splitting again would
         // halve the excise a second time, so this only runs when there is no such row.
+        // Overtime on a customs receipt ("ค่าทำการล่วงเวลา") is a service charge the form already
+        // carries as OT CHARGE (CUSTOMS + CARRIER) under Local — not a duty. As a DUTY row it landed
+        // on the Tax tab and was counted a second time (AP, 2026-11-18, PO 2130000164).
+        lines.RemoveAll(l => string.Equals((l.ExtCode ?? "").Trim(), "DUTY", StringComparison.OrdinalIgnoreCase)
+            && System.Text.RegularExpressions.Regex.IsMatch(l.Desc ?? "", @"ล่วงเวลา|over\s*time|\bOT\b",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase));
+
         var alreadySplit = lines.Any(l => InteriorTaxDesc().IsMatch(l.Desc ?? ""));
         for (var i = alreadySplit ? -1 : lines.Count - 1; i >= 0; i--)
         {
