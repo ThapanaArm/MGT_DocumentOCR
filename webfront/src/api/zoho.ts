@@ -150,6 +150,9 @@ export interface ZohoDeal {
   deliveryDate?: string | null;
   closingDate?: string | null;
   items: ZohoDealItem[];
+  /** false = header only (holds none of the PO's materials, 19 Nov 2026): items not read -- load the Deal
+   *  by id (getZohoDealById) when its items are needed. Missing/true = items loaded. */
+  itemsLoaded?: boolean;
   /** "Forecast Status" picklist (Yes / No / blank). Megachem rule: Yes = WCD Deal. */
   forecastStatus?: string | null;
   /** forecastStatus === "Yes" (computed by the backend). */
@@ -247,9 +250,12 @@ export const getZohoWebLinks = () => {
 export const getZohoDealById = (dealId: string) =>
   api.get<ZohoDeal>('/api/zoho/deals/' + encodeURIComponent(dealId));
 
-export const getZohoDealsByAccountCode = (accountCode: string) =>
+/* materials (19 Nov 2026): the PO's material codes -- only the Deals holding one of them come back with
+   their items; the others come back header-only (itemsLoaded = false). Much faster for a big customer. */
+export const getZohoDealsByAccountCode = (accountCode: string, materials: string[] = []) =>
   api.get<{ count: number; deals: ZohoDeal[] }>(
-    '/api/zoho/deals/by-account-code/' + encodeURIComponent(accountCode),
+    '/api/zoho/deals/by-account-code/' + encodeURIComponent(accountCode)
+      + (materials.length ? '?materials=' + encodeURIComponent(materials.join(',')) : ''),
   );
 
 /* Manual fallback search shown by the Deal card when the Account_Code lookup above finds no
@@ -349,7 +355,7 @@ export interface ZohoSalesOrderDealPart {
   dealName: string;
   dealId?: string | null;
   flow: ZohoSalesOrderFlow;
-  /** Quote / Sales Order Subject of this Deal (its name). */
+  /** Sales Order Subject(s) of this Deal (AccountName_MMYY_All_Items / _BillN, joined with " · "). */
   subject?: string | null;
   itemNos: unknown[];
   ownerName?: string | null;
@@ -412,6 +418,9 @@ export interface ZohoSalesOrderEdits {
   lineDeals?: ZohoLineDeals;
   /** New Deal key -> Forecast Status "Yes" / "No" chosen by CS on Send (required for every new Deal). */
   newDealForecast?: Record<string, 'Yes' | 'No'>;
+  /** Several Deals (19 Nov 2026): Deal key -> Description for that Deal's Sales Orders
+   *  ('' = send none). A Deal not listed uses `remarks`. */
+  dealRemarks?: Record<string, string>;
 }
 
 export interface ZohoSalesOrderResult {

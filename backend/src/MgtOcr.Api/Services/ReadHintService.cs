@@ -15,14 +15,27 @@ namespace MgtOcr.Api.Services;
 /// Megachem does not want reads that cost more).
 ///
 /// After the read: the positions the AI reports are kept per document (ocr.DocReadPosition). When the
-/// document is POSTED to Zoho they become AUTO rules for that customer. A person's rules (Source CS)
-/// always win and are never overwritten by AUTO; a DISABLED field is neither sent nor learned.
+/// document is POSTED to Zoho they become AUTO rules for that customer. A person's rules (Source = that
+/// person's role, e.g. Admin / Leader / Manager / user -- anything but AUTO) always win and are never
+/// overwritten by AUTO; a DISABLED field is neither sent nor learned.
 ///
 /// Every database call is best effort: before sql/39 is run the read goes on as before.</summary>
 public sealed partial class ReadHintService(Db db, AppConfig config, ILogger<ReadHintService> log)
 {
     public const string AutoSource = "AUTO";
-    public const string CsSource = "CS";
+
+    /// <summary>Source of a rule a person set: their real role from Ms_User.UserRole (Admin, Leader,
+    /// Manager, user), not a fixed "CS" (Megachem, 17 Nov 2026: "use the real roles -- I'm not CS").
+    /// Fits Source varchar(10); never "AUTO". Rows written before this keep "CS" and still count as a person's.</summary>
+    public static string PersonSource(string? role)
+    {
+        var r = (role ?? "").Trim();
+        if (r.Length == 0 || r.Equals(AutoSource, StringComparison.OrdinalIgnoreCase)) r = "USER";
+        return r.Length > 10 ? r[..10] : r;
+    }
+
+    /// <summary>True for a rule a person set (any Source except AUTO).</summary>
+    public static bool IsPerson(string? source) => !string.Equals(source, AutoSource, StringComparison.OrdinalIgnoreCase);
 
     // ---------------- customer key ----------------
 
@@ -64,8 +77,13 @@ public sealed partial class ReadHintService(Db db, AppConfig config, ILogger<Rea
         int? PageNo, string? Box, string? Note, string Source);
 
     /// <summary>What to add to the read: always the "_positions" request; plus this customer's rules when
-    /// the customer is found in the text layer. Null when switched off or not a Sales Order.</summary>
-    public async Task<ReadHintRequest?> PrepareAsync(string module, string path, string? salesOrg)
+    /// the customer is found in the text layer. Null when switched off or not a Sales Order.
+    /// knownTaxId / knownName: the customer an earlier read of the SAME document found (re-read). Used when
+    /// the text layer names no customer with rules -- a scanned / photographed PO has no text layer, so on
+    /// re-read its rules were never sent (Megachem, 17 Nov 2026: hand-written PO of แอคมี เคม เทค, "it doesn't
+    /// read at all"). Free: no extra AI request. A first upload of a scanned PO still has nothing to go on.</summary>
+    public async Task<ReadHintRequest?> PrepareAsync(string module, string path, string? salesOrg,
+        string? knownTaxId = null, string? knownName = null)
     {
         if (!config.ReadHintsEnabled || module != "SO") return null;
         try
@@ -81,22 +99,33 @@ public sealed partial class ReadHintService(Db db, AppConfig config, ILogger<Rea
             if (rows.Count == 0) return Plain();
 
             var text = Path.GetExtension(path).Equals(".pdf", StringComparison.OrdinalIgnoreCase) ? PdfExtraction.PdfText(path) : "";
-            if (string.IsNullOrWhiteSpace(text)) return Plain();   // scanned: read as before, positions still recorded
 
             var byKey = rows.GroupBy(r => r.CustomerKey).ToDictionary(g => g.Key, g => g.ToList());
             var own = OwnTaxIds();
-            var candidates = TaxIdLike().Matches(text).Select(m => Digits(m.Value))
-                .Where(d => !own.Contains(d) && byKey.ContainsKey(d)).Distinct().ToList();
+            var candidates = new List<string>();
+            if (!string.IsNullOrWhiteSpace(text))
+            {
+                candidates = TaxIdLike().Matches(text).Select(m => Digits(m.Value))
+                    .Where(d => !own.Contains(d) && byKey.ContainsKey(d)).Distinct().ToList();
+                if (candidates.Count == 0)
+                {
+                    var normText = NormName(text);
+                    candidates = byKey.Keys.Where(k => k.StartsWith("N:") && k.Length > 6 && normText.Contains(k[2..])).ToList();
+                }
+            }
             if (candidates.Count == 0)
             {
-                var normText = NormName(text);
-                candidates = byKey.Keys.Where(k => k.StartsWith("N:") && k.Length > 6 && normText.Contains(k[2..])).ToList();
+                // Scanned (no text layer) or the text names nobody with rules: fall back to the customer an
+                // earlier read of this document found -- by tax ID first, then by name.
+                var t = Digits(knownTaxId);
+                if (t.Length == 13 && !own.Contains(t) && byKey.ContainsKey(t)) candidates.Add(t);
+                else if (NormName(knownName) is { Length: >= 5 } n && byKey.ContainsKey("N:" + n)) candidates.Add("N:" + n);
             }
-            if (candidates.Count == 0) return Plain();
+            if (candidates.Count == 0) return Plain();   // read as before, positions still recorded
 
             // More than one customer on the page (rare): the one a person has set the most rules for, then the most rules.
             var key = candidates
-                .OrderByDescending(k => byKey[k].Count(r => r.Source == CsSource))
+                .OrderByDescending(k => byKey[k].Count(r => IsPerson(r.Source)))
                 .ThenByDescending(k => byKey[k].Count)
                 .First();
             var mine = byKey[key].OrderBy(r => Array.IndexOf(ReadHints.Fields, r.Field)).ToList();
@@ -136,6 +165,71 @@ public sealed partial class ReadHintService(Db db, AppConfig config, ILogger<Rea
     // ---------------- after the read ----------------
 
     /// <summary>Keeps where the AI found each field on this read, and which rules it was given (upload and re-read).</summary>
+    /// <summary>After the read, no AI (Megachem, 17 Nov 2026, แอคมี เคม เทค: Sold-to and Ship-to rules on the same
+    /// address box, Ship-to came back empty -- the base prompt says never repeat Sold-to in Ship-to, and a
+    /// photographed PO's first read has no rules at all). For each ACTIVE rule of this customer whose field
+    /// came back EMPTY: if the rule's box sits on the same place (overlap >= 0.6) as a field of the same
+    /// kind that has a value -- that field's rule box, or where the AI says it read it this time -- copy
+    /// that value. Kinds: address (Sold-to / Ship-to), name (Customer / Ship-to name). Customer = the one
+    /// the rules were sent for, else the customer this read found (so it also works on a first upload of
+    /// a scanned PO). Returns the fields filled; best effort.</summary>
+    public async Task<List<string>> ApplyRuleBoxesAsync(string module, string? salesOrg, Dictionary<string, object?> header,
+        string? positionsJson, ReadHintRequest? sent)
+    {
+        var filled = new List<string>();
+        if (!config.ReadHintsEnabled || module != "SO") return filled;
+        try
+        {
+            var key = sent?.CustomerKey ?? KeyFor(header.GetStr("customerTaxId"), header.GetStr("customerName"));
+            if (key == null) return filled;
+            var org = (salesOrg ?? "").Trim();
+            var rules = (await db.QueryAsync("""
+                SELECT Field, PageNo, Box FROM ocr.CustomerReadHint
+                WHERE Module=@module AND SalesOrg=@org AND CustomerKey=@key AND Status='ACTIVE' AND Box IS NOT NULL
+                """, new { module, org, key }))
+                .Select(r => (Field: (string)r.Field, Page: (int?)r.PageNo ?? 1, Box: ParseBox((string?)r.Box)))
+                .Where(r => r.Box != null).ToList();
+            if (rules.Count == 0) return filled;
+
+            // Where the AI says it read each field this time.
+            var found = new Dictionary<string, (int Page, int[] Box)>();
+            if (!string.IsNullOrWhiteSpace(positionsJson))
+            {
+                using var pj = JsonDocument.Parse(positionsJson);
+                foreach (var p in pj.RootElement.EnumerateObject())
+                {
+                    var page = p.Value.TryGetProperty("image", out var im) && im.TryGetInt32(out var iv) ? iv : 1;
+                    var box = p.Value.TryGetProperty("box", out var bx) && bx.ValueKind == JsonValueKind.Array
+                        ? bx.EnumerateArray().Select(v => v.TryGetInt32(out var n) ? n : -1).ToArray() : null;
+                    if (ReadHints.ValidBox(box)) found[p.Name] = (page, box!);
+                }
+            }
+
+            foreach (var r in rules)
+            {
+                if (header.GetStr(r.Field).Trim().Length > 0) continue;
+                var kind = ReadHints.SameKind.FirstOrDefault(k => k.Contains(r.Field));
+                if (kind == null) continue;
+                foreach (var other in kind.Where(f => f != r.Field))
+                {
+                    var value = header.GetStr(other).Trim();
+                    if (value.Length == 0) continue;
+                    var sameAsRule = rules.Any(o => o.Field == other && o.Page == r.Page && ReadHints.Overlap(o.Box!, r.Box!) >= 0.6);
+                    var sameAsRead = found.TryGetValue(other, out var seen) && seen.Page == r.Page && ReadHints.Overlap(seen.Box, r.Box!) >= 0.6;
+                    if (!sameAsRule && !sameAsRead) continue;
+                    header[r.Field] = value;
+                    filled.Add(r.Field);
+                    break;
+                }
+            }
+        }
+        catch (Exception ex) { log.LogWarning("[ReadHints] rule boxes not applied: {Message}", ex.Message); }
+        return filled;
+    }
+
+    public static string NoteForFilled(List<string> filled) =>
+        filled.Count == 0 ? "" : "Copied from the same place on the PO (reading rules): " + string.Join(", ", filled);
+
     public async Task SaveDocAsync(int docId, string module, ReadHintRequest? req, string? positionsJson)
     {
         if (req == null) return;
@@ -244,30 +338,30 @@ public sealed partial class ReadHintService(Db db, AppConfig config, ILogger<Rea
         return r == null ? (null, null, null) : ((string?)r.PositionsJson, (string?)r.HintsUsed, (string?)r.CustomerKey);
     }
 
-    /// <summary>A person sets / corrects a field's rule (Source CS, ACTIVE). Box null = note-only.</summary>
+    /// <summary>A person sets / corrects a field's rule (Source = their role, ACTIVE). Box null = note-only.</summary>
     public Task SaveCsAsync(string org, string module, string key, string? taxId, string name, string field,
-        int? page, int[]? box, string? note, string user) =>
+        int? page, int[]? box, string? note, string user, string source) =>
         db.ExecuteAsync("""
             MERGE ocr.CustomerReadHint AS t
             USING (SELECT @org AS SalesOrg, @module AS Module, @key AS CustomerKey, @field AS Field) AS s
               ON t.SalesOrg=s.SalesOrg AND t.Module=s.Module AND t.CustomerKey=s.CustomerKey AND t.Field=s.Field
-            WHEN MATCHED THEN UPDATE SET PageNo=@page, Box=@box, Note=@note, Source='CS', Status='ACTIVE',
+            WHEN MATCHED THEN UPDATE SET PageNo=@page, Box=@box, Note=@note, Source=@source, Status='ACTIVE',
                  CustomerTaxId=ISNULL(@taxId, t.CustomerTaxId), CustomerName=ISNULL(NULLIF(@name,''), t.CustomerName),
                  UpdatedBy=@user, UpdatedAt=SYSDATETIME()
             WHEN NOT MATCHED THEN INSERT (SalesOrg, Module, CustomerKey, CustomerTaxId, CustomerName, Field, PageNo, Box, Note,
                  Source, Status, UpdatedBy)
-                 VALUES (@org, @module, @key, @taxId, NULLIF(@name,''), @field, @page, @box, @note, 'CS', 'ACTIVE', @user);
+                 VALUES (@org, @module, @key, @taxId, NULLIF(@name,''), @field, @page, @box, @note, @source, 'ACTIVE', @user);
             """, new
         {
             org, module, key, taxId, name, field,
             page = box == null ? null : page, box = box == null ? null : BoxText(box),
             note = string.IsNullOrWhiteSpace(note) ? null : note.Trim()[..Math.Min(note.Trim().Length, 500)],
-            user,
+            user, source,
         });
 
     /// <summary>Turn a field off (not sent, not learned again) or back on. A missing row is created
     /// DISABLED so AUTO cannot bring it back.</summary>
-    public Task SetStatusAsync(string org, string module, string key, string? taxId, string name, string field, bool active, string user) =>
+    public Task SetStatusAsync(string org, string module, string key, string? taxId, string name, string field, bool active, string user, string source) =>
         db.ExecuteAsync("""
             MERGE ocr.CustomerReadHint AS t
             USING (SELECT @org AS SalesOrg, @module AS Module, @key AS CustomerKey, @field AS Field) AS s
@@ -275,8 +369,8 @@ public sealed partial class ReadHintService(Db db, AppConfig config, ILogger<Rea
             WHEN MATCHED THEN UPDATE SET Status=@status, UpdatedBy=@user, UpdatedAt=SYSDATETIME()
             WHEN NOT MATCHED AND @status='DISABLED' THEN INSERT (SalesOrg, Module, CustomerKey, CustomerTaxId, CustomerName, Field,
                  Source, Status, UpdatedBy)
-                 VALUES (@org, @module, @key, @taxId, NULLIF(@name,''), @field, 'CS', 'DISABLED', @user);
-            """, new { org, module, key, taxId, name, field, status = active ? "ACTIVE" : "DISABLED", user });
+                 VALUES (@org, @module, @key, @taxId, NULLIF(@name,''), @field, @source, 'DISABLED', @user);
+            """, new { org, module, key, taxId, name, field, status = active ? "ACTIVE" : "DISABLED", user, source });
 
     /// <summary>Forget a field's rule completely (AUTO may learn it again from the next posted document).</summary>
     public Task DeleteAsync(string org, string module, string key, string field) =>

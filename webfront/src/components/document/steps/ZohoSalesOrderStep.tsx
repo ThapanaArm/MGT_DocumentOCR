@@ -156,6 +156,10 @@ const ZohoSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function Zoho
   // there is no default (16 Nov 2026 -- most Deals are forecast, but not all).
   const [newDealForecast, setNewDealForecast] = useState<Record<string, 'Yes' | 'No'>>({});
   useEffect(() => { setNewDealForecast({}); }, [doc.docId]);
+  // Several Deals (19 Nov 2026): Description per Deal, only what CS typed. A Deal not typed in shows /
+  // sends the document's Description (header.remarks, the PO Remark).
+  const [dealRemarks, setDealRemarks] = useState<Record<string, string>>({});
+  useEffect(() => { setDealRemarks({}); }, [doc.docId]);
   const [lineEdits, setLineEdits] = useState<Record<string, LineEdit>>({});
   const [sending, setSending] = useState(false);
   const [result, setResult] = useState<ZohoSalesOrderResult | null>(null);
@@ -340,6 +344,10 @@ const ZohoSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function Zoho
     } : undefined);
     return {
       ...Object.fromEntries(Object.entries(header).map(([key, value]) => [key, value || undefined])),
+      // Subject goes only when the person typed one (19 Nov 2026): otherwise the server names each
+      // Sales Order itself (AccountName_MMYY_All_Items / _BillN) -- the prefilled preview text would
+      // otherwise give every order the same name.
+      subject: dirtyHeader.current.has('subject') ? header.subject || undefined : undefined,
       // Preserve explicit clearing of Description instead of restoring the document's Remark.
       remarks: dirtyHeader.current.has('remarks') ? header.remarks : header.remarks || undefined,
       shipTo,
@@ -347,6 +355,10 @@ const ZohoSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function Zoho
       lineDeals,
       newDealForecast: Object.fromEntries(dealKeys.filter(isNewDealKey)
         .filter((k) => newDealForecast[k]).map((k) => [k, newDealForecast[k]])),
+      // Several Deals: every Deal's own Description (typed, else the shared one) -- '' clears it.
+      dealRemarks: (preview?.deals?.length ?? 0) > 1
+        ? Object.fromEntries(preview!.deals!.map((p) => [p.key, dealRemarks[p.key] ?? header.remarks ?? '']))
+        : undefined,
       // Only what the person typed (plus an AI-confirmed material) goes as an override; untouched
       // quantities / prices come from the backend's own conversion. Numbers accept "1,250.50".
       lines: Object.entries(lineEdits)
@@ -477,6 +489,8 @@ const ZohoSalesOrderStep = forwardRef<SalesOrderStepHandle, Props>(function Zoho
             shipToMissing={!hasShipTo}
             newDealForecast={newDealForecast}
             onNewDealForecast={(key, v) => setNewDealForecast((cur) => ({ ...cur, [key]: v }))}
+            dealRemarks={dealRemarks}
+            onDealRemarkChange={(key, v) => setDealRemarks((cur) => ({ ...cur, [key]: v }))}
             forecastMissing={forecastMissing}
             salesUserId={salesUserId}
             onOwnerChange={setSalesUserId}

@@ -96,14 +96,21 @@ public partial class DocumentRepository(Db db)
 
     // Fills only OCR-blank fields from the same partner's previously-confirmed values; never
     // overwrites a value OCR actually read. Returns the field names filled, for a transparency note.
-    public async Task<List<string>> ApplyVendorMemoryAsync(string module, Dictionary<string, object?> header)
+    // skipFields: fields this read had a customer reading rule for (sql/39). They are never filled from
+    // the partner memory -- if the AI found nothing where the rule points, the field stays empty so CS
+    // sees it, instead of an older value that looks read (Toyo Ink, 17 Nov 2026: the HEAD OFFICE address
+    // was filled into Ship-to although a CS rule pointed Ship-to at another box).
+    public async Task<List<string>> ApplyVendorMemoryAsync(string module, Dictionary<string, object?> header,
+        IEnumerable<string>? skipFields = null)
     {
+        var skip = new HashSet<string>(skipFields ?? Array.Empty<string>());
         var taxId = (header.Get(VendorTaxIdField.GetValueOrDefault(module, "")) ?? "").ToString()?.Trim() ?? "";
         var mem = await GetVendorMemoryAsync(module, taxId);
         if (mem.Count == 0) return [];
         var filled = new List<string>();
         foreach (var f in MemorableFields.GetValueOrDefault(module, []))
         {
+            if (skip.Contains(f)) continue;
             var cur = (header.Get(f) ?? "").ToString()?.Trim() ?? "";
             var memVal = (mem.Get(f) ?? "").ToString()?.Trim() ?? "";
             if (cur.Length == 0 && memVal.Length > 0)
@@ -170,10 +177,10 @@ public partial class DocumentRepository(Db db)
 
     public async Task<int> CreateDocumentAsync(string module, Dictionary<string, object?> ext, string fileName,
         string stored, int size, string user, string apDocCategory, int? durationMs = null,
-        string? salesOrg = null, DateTime? jobStartedAt = null)
+        string? salesOrg = null, DateTime? jobStartedAt = null, IEnumerable<string>? noMemoryFields = null)
     {
         var header = (Dictionary<string, object?>)ext["header"]!;
-        var filled = await ApplyVendorMemoryAsync(module, header);
+        var filled = await ApplyVendorMemoryAsync(module, header, noMemoryFields);
         if (filled.Count > 0)
         {
             var note = "Filled from a previously confirmed partner (not read directly from this document): " + string.Join(", ", filled);

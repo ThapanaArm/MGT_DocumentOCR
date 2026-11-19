@@ -141,7 +141,10 @@ public class ZohoSalesOrderController(
         Dictionary<string, string>? LineDeals = null,
         // New Deal key ("__new__", "__new__2" ...) -> Forecast Status "Yes" / "No" that CS chose for it on
         // Send (16 Nov 2026). Required for every new Deal -- there is no default.
-        Dictionary<string, string>? NewDealForecast = null);
+        Dictionary<string, string>? NewDealForecast = null,
+        // Several Deals on one PO (19 Nov 2026): Deal key -> Description for that Deal's Sales Orders
+        // ("" = none). A Deal not listed uses Remarks (else the document's Remark).
+        Dictionary<string, string?>? DealRemarks = null);
 
     // CS's Forecast Status for a new Deal: "Yes" / "No", or null when not chosen (Send then refuses).
     private static string? NewDealForecastOf(CreateSalesOrderRequest body, string dealKey)
@@ -226,7 +229,7 @@ public class ZohoSalesOrderController(
         string? PaymentTerms, string? PaymentCurrency, string? Incoterms, string? TaxId,
         List<MatchedLine> Lines, List<SkippedLine> Skipped,
         List<Dictionary<string, object?>> UomRules, string SalesOrg, string? Remarks = null, bool NewDeal = false,
-        List<string>? QuoteRefs = null);
+        List<string>? QuoteRefs = null, string AccountName = "", List<string>? DealCodes = null);
 
     private async Task<string> ActorAsync(CancellationToken ct = default) =>
         (await currentUser.RequireAsync(ct)).AuditName;
@@ -388,9 +391,17 @@ public class ZohoSalesOrderController(
         if (newDeal && matched.Count > 0)
             deal = deal with { DealName = ZohoDealClient.BuildDealName(newDealAccountName!, matched.Select(l => l.MaterialCode)) };
 
-        // Subject = the Deal's name only (Megachem, 29 Oct 2026: nothing added -- no "Doc#", no "(1/2)").
-        var subject = deal.DealName;
-        if (subject.Length > 50) subject = subject[..50];
+        // Subjects (Megachem, 19 Nov 2026 -- ZohoSubjects): Quote = AccountName_MMYY; Sales Order =
+        // AccountName_MMYY_All_Items when it holds the Deal's materials, else AccountName_MMYY_BillN. (Was
+        // the Deal's name, 29 Oct 2026.) The Deal's materials: its Items, or -- a new Deal -- the lines it is
+        // opened with. Here: the name these lines would get as ONE Sales Order, first Bill; the real
+        // per-order name (and Bill number) is worked out per order on Send / Payload / Preview.
+        var accountName = newDeal ? newDealAccountName ?? "" : Exact(accountFields, "Account Name") ?? "";
+        if (string.IsNullOrWhiteSpace(accountName)) accountName = deal.AccountCode ?? "";
+        var dealCodes = (newDeal ? matched.Select(l => l.MaterialCode) : deal.Items.Select(it => it.MaterialCode))
+            .Where(c => !string.IsNullOrWhiteSpace(c)).Select(c => c!.Trim()).ToList();
+        var subject = ZohoSubjects.SalesOrder(accountName,
+            ZohoSubjects.SameMaterials(matched.Select(l => l.MaterialCode), dealCodes), 1);
 
         // Delivery_Date: same rule as SapPayloadBuilder's RequestedDeliveryDate -- when every line
         // ships on one date (always true for a child of "split by delivery date"), that line date
@@ -419,7 +430,9 @@ public class ZohoSalesOrderController(
             // Document Remark is reviewed as Description and sent to Zoho's header Description.
             Remarks: header.GetStr("remark") is { Length: > 0 } remark ? remark : null,
             NewDeal: newDeal,
-            QuoteRefs: DocQuoteRefs(header, lines));
+            QuoteRefs: DocQuoteRefs(header, lines),
+            AccountName: accountName,
+            DealCodes: dealCodes);
     }
 
     // Megachem Quote numbers the customer's PO refers to (27 Oct 2026): the OCR'd quoteRef plus any
@@ -622,7 +635,7 @@ public class ZohoSalesOrderController(
     }
 
     private Task<JsonObject> BuildNewQuoteRecordAsync(Assembled a, string? dealId, ZohoShipToInfo? shipTo, IEnumerable<SoGroup> groups) =>
-        quoteClient.BuildRecordAsync(dealId, a.Deal.AccountId!, a.Subject, a.Deal.AccountCode, a.TaxId, a.CustomerRef,
+        quoteClient.BuildRecordAsync(dealId, a.Deal.AccountId!, a.QuoteSubject, a.Deal.AccountCode, a.TaxId, a.CustomerRef,
             HeaderDate(a.DeliveryDate, groups), a.PaymentTerms, a.PaymentCurrency, a.Incoterms, shipTo, a.SoLines);
 
     // Step 1 of a send without a Deal: open the (non-WCD) Deal. A retry after a failed later step
@@ -853,6 +866,29 @@ public class ZohoSalesOrderController(
 
         var views = new List<PartPreview>();
         foreach (var p in DealParts(keys)) views.Add(await PreviewPartAsync(docId, p.Key, p.ItemNos));
+
+        // Each Sales Order's Subject (Megachem, 19 Nov 2026 -- ZohoSubjects): one per delivery-date group of
+        // the Deal, _All_Items or the Deal's next _BillN (numbered on from its orders in Zoho, best effort).
+        var docLines = (List<Dictionary<string, object?>>)doc["lines"]!;
+        var previewGroups = SoDeliveryGroups.Build((Dictionary<string, object?>)doc["header"]!, docLines,
+            dealOf: (l, i) => keys[SoDeliveryGroups.ItemNoOf(l, i)]);
+        var soSubjects = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        foreach (var v in views)
+        {
+            var lastBill = v.D.NewDeal ? 0 : await LastBillNoAsync(v.D.Deal.Id, docId, bestEffort: true);
+            var names = new List<string>();
+            foreach (var g in previewGroups.Where(g => g.Deal == v.Key))
+            {
+                var codes = v.D.Lines.Where(l => g.ItemNos.Contains(l.ItemNo)).Select(l => l.MaterialCode).ToList();
+                if (codes.Count == 0) continue;
+                var all = ZohoSubjects.SameMaterials(codes, v.D.DealCodes ?? []);
+                names.Add(ZohoSubjects.SalesOrder(v.D.AccountName, all, lastBill + 1));
+                if (!all) lastBill++;
+            }
+            soSubjects[v.Key] = names.Count > 0 ? names : [v.D.Subject];
+        }
+        string SubjectOf(PartPreview v) => string.Join(" · ", soSubjects[v.Key]);
+
         var first = views[0];
         var d = first.D;
         var allLines = views.SelectMany(v => v.D.Lines.Select(l => (v.Key, Line: l))).ToList();
@@ -890,12 +926,16 @@ public class ZohoSalesOrderController(
                 dealName = v.Label,
                 dealId = v.D.NewDeal ? null : v.D.Deal.Id,
                 flow = v.Flow,
-                subject = v.D.Subject,
+                subject = SubjectOf(v),
+                salesOrderSubjects = soSubjects[v.Key],
+                quoteSubject = ZohoSubjects.Quote(v.D.AccountName),
                 itemNos = v.D.Lines.Select(l => l.ItemNo).Concat(v.D.Skipped.Select(s => s.ItemNo)).ToList(),
                 ownerName = v.OwnerName,
                 ownerError = v.OwnerError,
             }),
-            subject = d.Subject,
+            subject = SubjectOf(first),
+            salesOrderSubjects = soSubjects[first.Key],
+            quoteSubject = ZohoSubjects.Quote(d.AccountName),
             customerRef = d.CustomerRef,
             deliveryDate = d.DeliveryDate,
             paymentTerms = d.PaymentTerms,
@@ -1006,8 +1046,11 @@ public class ZohoSalesOrderController(
                 LastPrice: lastPrices.TryGetValue(l.MaterialCode ?? "", out var lp) ? lp.Price : null);
         }).ToList();
 
-        var subject = single && body.Subject is { Length: > 0 } ? body.Subject : d.Subject;
-        if (subject.Length > 50) subject = subject[..50];
+        // A Subject the person typed (one Deal only) names every Sales Order of the send; otherwise each order
+        // gets its own All_Items / BillN name (SoSubjectOf). The Quote always follows AccountName_MMYY.
+        string? typedSubject = single && !string.IsNullOrWhiteSpace(body.Subject) ? body.Subject.Trim() : null;
+        if (typedSubject is { Length: > 50 }) typedSubject = typedSubject[..50];
+        var subject = typedSubject ?? d.Subject;
 
         return new Assembled(
             Deal: d.Deal,
@@ -1019,15 +1062,22 @@ public class ZohoSalesOrderController(
             PaymentCurrency: body.PaymentCurrency is { Length: > 0 } ? body.PaymentCurrency : d.PaymentCurrency,
             Incoterms: body.Incoterms is { Length: > 0 } ? body.Incoterms : d.Incoterms,
             ShipTo: await FillShipToAddressAsync(d.Deal, body.ShipTo, docId),
-            // Null means no override; an explicit empty string clears the document's Remark.
-            Remarks: body.Remarks ?? d.Remarks,
+            // Null means no override; an explicit empty string clears the document's Remark. Several
+            // Deals: the Deal's own Description when CS gave one (19 Nov 2026).
+            Remarks: !single && body.DealRemarks is { } dr && dr.TryGetValue(dealKey, out var dealRemark) && dealRemark is not null
+                ? dealRemark
+                : body.Remarks ?? d.Remarks,
             SoLines: soLines,
             StillSkipped: stillSkipped,
             Doc: d.Doc,
             SoItemNos: resolvedLines.Select(l => l.ItemNo).ToList(),
             NewDeal: d.NewDeal,
             QuoteRefs: d.QuoteRefs ?? [],
-            OwnerId: d.NewDeal && !string.IsNullOrWhiteSpace(body.SalesUserId) ? await ResolveSalesOwnerAsync(body.SalesUserId.Trim()) : null);
+            OwnerId: d.NewDeal && !string.IsNullOrWhiteSpace(body.SalesUserId) ? await ResolveSalesOwnerAsync(body.SalesUserId.Trim()) : null,
+            QuoteSubject: ZohoSubjects.Quote(d.AccountName),
+            AccountName: d.AccountName,
+            DealCodes: d.DealCodes ?? [],
+            TypedSubject: typedSubject);
     }
 
     private record Assembled(
@@ -1040,7 +1090,37 @@ public class ZohoSalesOrderController(
         List<string> SoItemNos, // itemNo of each SoLines entry (same order) -- used to cut per-delivery-date groups
         bool NewDeal = false,
         List<string>? QuoteRefs = null,
-        string? OwnerId = null);
+        string? OwnerId = null,
+        string QuoteSubject = "",
+        string AccountName = "",
+        List<string>? DealCodes = null,
+        string? TypedSubject = null);
+
+    // Subject of one Sales Order (Megachem, 19 Nov 2026 -- ZohoSubjects): AccountName_MMYY_All_Items when it
+    // holds exactly the Deal's materials (quantities not compared), else AccountName_MMYY_Bill{lastBill + 1}.
+    // UsesBill = this order takes the next Bill number. A typed Subject wins (and takes no number).
+    private static (string Subject, bool UsesBill) SoSubjectOf(Assembled a, IEnumerable<ZohoSalesOrderLine> items, int lastBill)
+    {
+        if (!string.IsNullOrWhiteSpace(a.TypedSubject)) return (a.TypedSubject!, false);
+        var all = ZohoSubjects.SameMaterials(items.Select(i => i.MaterialCode), a.DealCodes ?? []);
+        return (ZohoSubjects.SalesOrder(a.AccountName, all, lastBill + 1), !all);
+    }
+
+    // Highest _BillN already used by a Sales Order of the Deal in Zoho (0: none, or a Deal not opened yet).
+    // Bill numbers run on across every order of the Deal, from any document (Megachem, 19 Nov 2026).
+    // bestEffort (Preview / Payload): a failed read just starts at Bill1; on Send it stops the Deal instead.
+    private async Task<int> LastBillNoAsync(string? dealId, int docId, bool bestEffort = false)
+    {
+        if (string.IsNullOrWhiteSpace(dealId)) return 0;
+        try { return ZohoSubjects.MaxBillNo(await soClient.ListSubjectsByDealAsync(dealId)); }
+        catch (Exception e)
+        {
+            log.LogWarning(e, "Could not read the Sales Orders of Deal {DealId} to number the Bill (doc {DocId})", dealId, docId);
+            if (bestEffort) return 0;
+            throw new HttpApiException(400,
+                $"Could not read this Deal's Sales Orders from Zoho CRM to number the Bill: {e.Message} — nothing was sent for this Deal");
+        }
+    }
 
     // POST /api/zoho/sales-order/create/{docId} { dealId, ...edited fields } — {docId} as a route
     // parameter (not buried inside the body) so DepartmentAccessFilter's docId-based module gate
@@ -1136,6 +1216,7 @@ public class ZohoSalesOrderController(
                 // of this Deal links to that Quote. Skipped when all of this Deal's orders are in Zoho.
                 var deal = a.Deal;
                 string? quoteId = null, quoteNo = null, dealOwnerId = null;
+                var lastBill = 0;
                 if (partGroups.Any(g => !(states.TryGetValue(g.Key, out var st) && st.Posted)))
                 {
                     try
@@ -1143,12 +1224,11 @@ public class ZohoSalesOrderController(
                         if (a.NewDeal)
                         {
                             deal = await EnsureDealAsync(docId, a, partGroups, actor, usedDealIds);
-                            // Zoho may rename a new Deal by its own naming format: the Quote / Sales Order Subject
-                            // follows the Deal's real name unless the person typed a Subject themselves.
-                            if ((!single || string.IsNullOrWhiteSpace(body.Subject)) && !string.IsNullOrWhiteSpace(deal.DealName))
-                                a = a with { Subject = deal.DealName.Length > 50 ? deal.DealName[..50] : deal.DealName };
                         }
                         usedDealIds.Add(deal.Id);
+                        // Bill numbers continue from the Deal's orders already in Zoho (also a Deal an earlier
+                        // attempt of this document opened). Read before the Quote, so a failed read sends nothing.
+                        lastBill = await LastBillNoAsync(deal.Id, docId);
                         var quoteShipTo = a.ShipTo ?? partGroups.Select(g => GroupShipTo(existingHeader, g)).FirstOrDefault(x => x is not null);
                         dealOwnerId = await DealOwnerIdAsync(deal.Id, a);
                         (quoteId, quoteNo) = await EnsureQuoteAsync(docId, deal, a, quoteShipTo, partGroups, actor, dealOwnerId);
@@ -1198,7 +1278,7 @@ public class ZohoSalesOrderController(
                     var items = idx.Select(i => a.SoLines[i]).ToList();
                     var deliveryDate = multi && g.Date.Length > 0 ? g.Date : a.DeliveryDate;
                     var shipTo = GroupShipTo(existingHeader, g) ?? a.ShipTo;
-                    var subject = a.Subject;
+                    var (subject, usesBill) = SoSubjectOf(a, items, lastBill);
 
                     // The previous attempt of this group failed. A timeout can fail AFTER Zoho created the
                     // order, so look for it before sending again (same Deal, Customer Ref, Subject and
@@ -1206,7 +1286,12 @@ public class ZohoSalesOrderController(
                     (string Id, string? SoNo)? earlierOrder = null;
                     if (hasState && !string.IsNullOrEmpty(done!.Error) && !string.IsNullOrWhiteSpace(a.CustomerRef))
                         earlierOrder = await soClient.FindExistingAsync(deal.Id, a.CustomerRef!, subject, deliveryDate,
-                            DateTime.UtcNow.AddDays(-7), alreadyRecorded);
+                            DateTime.UtcNow.AddDays(-7), alreadyRecorded,
+                            subjectPrefix: a.TypedSubject is null ? ZohoSubjects.SalesOrderPrefix(a.AccountName) : null);
+                    // This order takes the next Bill number only when it is really sent now (an order found
+                    // above is already counted in lastBill). A failed attempt keeps its number used, so a
+                    // later order never repeats a number Zoho may have received.
+                    if (earlierOrder is null && usesBill) lastBill++;
 
                     ZohoUpsertResult result;
                     if (earlierOrder is { } found)
@@ -1502,13 +1587,16 @@ public class ZohoSalesOrderController(
             }
 
             var records = new System.Text.Json.Nodes.JsonArray();
+            var lastBill = a.NewDeal ? 0 : await LastBillNoAsync(a.Deal.Id, docId, bestEffort: true);
             foreach (var g in partGroups)
             {
                 var items = Enumerable.Range(0, a.SoLines.Count).Where(i => g.ItemNos.Contains(a.SoItemNos[i])).Select(i => a.SoLines[i]).ToList();
                 if (items.Count == 0) continue;
+                var (soSubject, usesBill) = SoSubjectOf(a, items, lastBill);
+                if (usesBill) lastBill++;
                 var record = await soClient.BuildRecordAsync(
                     dealId: a.NewDeal ? createdOnSend : a.Deal.Id, accountId: a.Deal.AccountId!,
-                    subject: a.Subject,
+                    subject: soSubject,
                     accountCode: a.Deal.AccountCode, taxId: a.TaxId, customerRef: a.CustomerRef,
                     deliveryDate: multi && g.Date.Length > 0 ? g.Date : a.DeliveryDate,
                     paymentTerms: a.PaymentTerms, paymentCurrency: a.PaymentCurrency, incoterms: a.Incoterms,

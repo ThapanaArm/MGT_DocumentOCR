@@ -97,7 +97,7 @@ export default function ReadingRulesModal({
     !rule
       ? draft != null || note.trim().length > 0
       : !sameBox(draft?.box ?? null, savedBox?.box ?? null) || (draft?.page ?? null) !== (savedBox?.page ?? null)
-        || note.trim() !== (rule.note ?? '').trim() || rule.source !== 'CS'
+        || note.trim() !== (rule.note ?? '').trim() || rule.source === 'AUTO'
   );
 
   // ---- drawing on the page ----
@@ -193,7 +193,7 @@ export default function ReadingRulesModal({
   const statusOf = (f: string) => {
     const r = ruleOf(f);
     if (r?.status === 'DISABLED') return { text: 'Off', cls: 'rr-off' };
-    if (r?.source === 'CS') return { text: 'Set by CS', cls: 'rr-cs' };
+    if (r && r.source !== 'AUTO') return { text: `Set by ${r.source}`, cls: 'rr-cs' };
     if (r) return { text: 'Learned', cls: 'rr-auto' };
     if (detectedOf(f)) return { text: 'Found on this PO', cls: 'rr-found' };
     return { text: '—', cls: 'rr-none' };
@@ -230,7 +230,7 @@ export default function ReadingRulesModal({
                 {pageCount > 1 && (
                   <div className="rr-pages">
                     {Array.from({ length: pageCount }, (_, i) => i + 1).map((n) => (
-                      <button key={n} className={'btn sm' + (n === page ? ' primary' : '')} onClick={() => setPage(n)}>
+                      <button key={n} className={'btn sm' + (n === page ? ' on' : '')} aria-pressed={n === page} onClick={() => setPage(n)}>
                         Page {n}
                       </button>
                     ))}
@@ -327,7 +327,7 @@ export default function ReadingRulesModal({
                     </div>
                     {rule && (
                       <p className="hint">
-                        {rule.source === 'CS' ? `Set by ${rule.updatedBy ?? 'CS'}` : 'Learned from posted POs'}
+                        {rule.source !== 'AUTO' ? `Set by ${rule.updatedBy ?? rule.source} (${rule.source})` : 'Learned from posted POs'}
                         {rule.confirmCount > 0 ? ` · confirmed ${rule.confirmCount}×` : ''}
                         {rule.useCount > 0 ? ` · used ${rule.useCount}×` : ''}
                       </p>

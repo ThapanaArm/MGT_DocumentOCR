@@ -122,8 +122,10 @@ public class ReadHintsController(DocumentRepository repo, ReadHintService hints,
         if (box != null && (body.PageNo is not int p || p < 1)) throw new HttpApiException(400, "Page is required with a box");
         if (box == null && string.IsNullOrWhiteSpace(body.Note)) throw new HttpApiException(400, "Draw a box or write a note");
         var c = await CustomerAsync(docId);
-        var user = (await currentUser.RequireAsync()).AuditName;
-        await hints.SaveCsAsync(c.Org, Module, c.Key, c.TaxId, c.Name, field, body.PageNo, box, body.Note, user);
+        var me = await currentUser.RequireAsync();
+        var user = me.AuditName;
+        await hints.SaveCsAsync(c.Org, Module, c.Key, c.TaxId, c.Name, field, body.PageNo, box, body.Note, user,
+            ReadHintService.PersonSource(me.Role));
         await repo.LogAuditAsync(docId, Module, "READ_RULE", user,
             detail: $"Reading rule {field} set for {c.Name} ({c.Key})" + (box != null ? $": page {body.PageNo} box {string.Join(",", box)}" : "") +
                     (string.IsNullOrWhiteSpace(body.Note) ? "" : $" note: {body.Note!.Trim()}"));
@@ -136,8 +138,10 @@ public class ReadHintsController(DocumentRepository repo, ReadHintService hints,
     {
         RequireSo(docId); RequireField(field);
         var c = await CustomerAsync(docId);
-        var user = (await currentUser.RequireAsync()).AuditName;
-        await hints.SetStatusAsync(c.Org, Module, c.Key, c.TaxId, c.Name, field, body.Active, user);
+        var me = await currentUser.RequireAsync();
+        var user = me.AuditName;
+        await hints.SetStatusAsync(c.Org, Module, c.Key, c.TaxId, c.Name, field, body.Active, user,
+            ReadHintService.PersonSource(me.Role));
         await repo.LogAuditAsync(docId, Module, "READ_RULE", user,
             detail: $"Reading rule {field} {(body.Active ? "turned on" : "turned off")} for {c.Name} ({c.Key})");
         return await Get(docId);

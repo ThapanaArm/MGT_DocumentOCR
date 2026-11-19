@@ -153,10 +153,14 @@ public class ZohoAccountController(ZohoAccountClient client, ZohoClient zoho, Zo
     // needs to exist for this to work, unlike account/{id}/shipto|soldto|full above). Deliberately
     // returns every candidate rather than picking "the" match; Megachem wants the person (with
     // the OCR AI-compare tool if they want it) to choose which Deal a document belongs to.
+    // ?materials=A,B,C (19 Nov 2026): the PO's material codes -- only the Deals holding one of them are
+    // read in full (with items); the rest come back as header only (itemsLoaded=false). Much faster for a
+    // customer with many open Deals.
     [HttpGet("deals/by-account-code/{code}")]
-    public async Task<IActionResult> GetDealsByAccountCode(string code)
+    public async Task<IActionResult> GetDealsByAccountCode(string code, [FromQuery] string? materials = null)
     {
-        var found = await deals.FindOpenDealsByAccountCodeAsync(code, onlyOpenDraft: true);
+        var codes = (materials ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var found = await deals.FindOpenDealsByAccountCodeAsync(code, onlyOpenDraft: true, materialCodes: codes);
         return Ok(new { count = found.Count, deals = found });
     }
 

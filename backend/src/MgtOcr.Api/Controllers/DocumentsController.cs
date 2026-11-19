@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+﻿﻿using System.Text.Json;
 using Dapper;
 using MgtOcr.Core;
 using MgtOcr.Core.Auth;
@@ -493,12 +493,19 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         // Re-reading follows the company the document is already filed under, so a second read
         // never silently swaps MGT's rules for GLC's (CompanyRules treats an empty value as GLC).
         var docCompany = await repo.GetCompanyAsync(docId);
-        var hints = await readHints.PrepareAsync(module, storedPath, docCompany);
+        // The customer the previous read found, so a scanned PO (no text layer) still gets its reading rules.
+        var prevHeader = doc["header"] as Dictionary<string, object?> ?? new();
+        var hints = await readHints.PrepareAsync(module, storedPath, docCompany,
+            prevHeader.GetStr("customerTaxId"), prevHeader.GetStr("customerName"));
         var pd = await ocr.ExtractAsync(storedPath, module, reocrEngine, reocrPw, docCompany, hints);
         if (MgtOcr.Api.Services.ReadHintService.NoteFor(hints) is { Length: > 0 } hintNote && pd.Provider == "gemini")
             pd.ConfidenceNote = pd.ConfidenceNote.Length > 0 ? $"{pd.ConfidenceNote} / {hintNote}" : hintNote;
         var durationMs = (int)(DateTime.UtcNow - t0).TotalMilliseconds;
-        var filled = await repo.ApplyVendorMemoryAsync(module, pd.Header);
+        if (pd.Provider == "gemini"
+            && MgtOcr.Api.Services.ReadHintService.NoteForFilled(
+                   await readHints.ApplyRuleBoxesAsync(module, docCompany, pd.Header, pd.PositionsJson, hints)) is { Length: > 0 } boxNote)
+            pd.ConfidenceNote = pd.ConfidenceNote.Length > 0 ? $"{pd.ConfidenceNote} / {boxNote}" : boxNote;
+        var filled = await repo.ApplyVendorMemoryAsync(module, pd.Header, hints?.FieldsSent);
         if (filled.Count > 0)
         {
             var note = "Filled from a previously confirmed partner (not read directly from this document): " + string.Join(", ", filled);

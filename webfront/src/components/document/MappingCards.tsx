@@ -766,6 +766,7 @@ function SapMaterialPanel({
   plant,
   customer,
   disabled,
+  canAddNew = true,
   onUse,
 }: {
   docDescription?: string;
@@ -778,6 +779,8 @@ function SapMaterialPanel({
    *  — GLC only; blank/absent = the Last Price column is simply omitted. */
   customer?: string;
   disabled?: boolean;
+  /** false = the card has no "+ Add New Item" button (Sales Orders), so the hint must not point to it. */
+  canAddNew?: boolean;
   onUse: (m: SapMaterial) => void;
 }) {
   const [results, setResults] = useState<SapMaterial[]>([]);
@@ -934,9 +937,9 @@ function SapMaterialPanel({
         {soldNode}
         <div className="hint" style={{ padding: '8px 0' }}>
           <div>
-            {results.length > 0
-              ? `No other match for "${query}" in SAP — try another search term, or use "+ Add New Item"`
-              : `Not found in SAP — try another search term, or use "+ Add New Item"`}
+            {(results.length > 0
+              ? `No other match for "${query}" in SAP — try another search term`
+              : `Not found in SAP — try another search term`) + (canAddNew ? ', or use "+ Add New Item"' : '')}
           </div>
           {renderSearchBox()}
         </div>
@@ -1472,7 +1475,7 @@ function ZohoCustomerPanel({
   if (error)
     return <div className="hint" style={{ padding: '8px 0' }}><div>Zoho CRM search is temporarily unavailable.</div>{renderManualSearchBox()}</div>;
   if (searched && results.length === 0)
-    return <div className="hint" style={{ padding: '8px 0' }}><div>No match found in Zoho CRM — use "+ Add New Customer" to enter it manually</div>{renderManualSearchBox()}</div>;
+    return <div className="hint" style={{ padding: '8px 0' }}><div>No match found in Zoho CRM — try another name or code</div>{renderManualSearchBox()}</div>;
 
   return (
     <>
@@ -2592,6 +2595,7 @@ const dealSentenceStyle: React.CSSProperties = {
 // The Deal's items in the "Change Deal" popup, each marked with whether a document line matches it
 // Material Code and quantity are compared for both forecast and non-forecast Deals.
 function DealItemsList({ deal, lines }: { deal: ZohoDeal; lines: DocModel['lines'] }) {
+  if (deal.itemsLoaded === false) return <span className="hint">None of this PO&apos;s materials — items not loaded</span>;
   if (!deal.items.length) return <span className="hint">No Deal Items</span>;
   const shown = deal.items.slice(0, 6);
   const checks = dealCodeChecks(deal, lines);
@@ -2943,6 +2947,11 @@ function ZohoDealCard({
     (l.extra as Record<string, unknown> | undefined)?.deliveryDate ?? ''].join('|')).join(';');
   // Materials first (Megachem, 16 Nov 2026): no Deal search until every line has a mapped material.
   const waiting = waitingFor.length > 0;
+  // The PO's material codes (PO code + mapped code of every line) -- the Deal search reads in full only
+  // the customer's Deals holding one of them (19 Nov 2026, speed).
+  const materialCodes = Array.from(new Set(doc.lines
+    .flatMap((l) => [l.extCode, l.materialCode]).map((c) => String(c ?? '').trim()).filter(Boolean))).sort();
+  const materialKey = materialCodes.join(',');
 
   useEffect(() => {
     setManualQuery('');
@@ -2955,12 +2964,13 @@ function ZohoDealCard({
     let cancelled = false;
     setLoading(true);
     setError(null);
-    getZohoDealsByAccountCode(customerCode)
+    getZohoDealsByAccountCode(customerCode, materialCodes)
       .then((r) => { if (!cancelled) setDeals(r.deals); })
       .catch((e) => { if (!cancelled) setError(e?.message || 'Zoho CRM lookup failed'); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [customerCode, waiting]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [customerCode, waiting, materialKey]);
 
   // The Deal of the Quote No. on the PO is not in the list (e.g. its Stage moved on after "Convert
   // to Quote", so the by-account-code lookup filtered it out): fetch it and add it -- only for this
@@ -2997,6 +3007,24 @@ function ZohoDealCard({
   const shown = useSaved ? assignment : auto;
   const assignKey = assignment.join(',');
   const autoKey = auto.join(',');
+  // A Deal read header-only (none of the PO's materials) that items are now grouped into: read it in full,
+  // so its card, the Deal Items list and Step 3 see its items (19 Nov 2026).
+  const shownKey = shown.join(',');
+  useEffect(() => {
+    const ids = Array.from(new Set(shown)).filter((k) => deals?.some((d) => d.id === k && d.itemsLoaded === false));
+    if (!ids.length) return;
+    let cancelled = false;
+    ids.forEach((id) => {
+      getZohoDealById(id)
+        .then((full) => {
+          if (cancelled || !full?.id) return;
+          setDeals((prev) => prev?.map((d) => (d.id === full.id ? { ...full, itemsLoaded: true } : d)) ?? prev);
+        })
+        .catch(() => { /* keep the header-only Deal */ });
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shownKey, deals]);
   useEffect(() => {
     if (!deals || locked || useSaved) return;
     if (autoKey !== assignKey || byUser) onAssign(auto, false);
@@ -3519,7 +3547,8 @@ interface Props {
   onSetSalesArea: (fields: { distChannel?: string; division?: string; salesGroup?: string }) => void;
   onManualLine: (i: number, value: string) => void;
   onQuickAddVendor: () => void;
-  onQuickAddCustomer: () => void;
+  /** No longer used by the card ("+ Add New Customer" removed, 17 Nov 2026); kept so callers compile. */
+  onQuickAddCustomer?: () => void;
   onQuickAddShipTo: () => void;
   onQuickAddMaterial: (i: number) => void;
   onUseSapMaterial: (i: number, material: SapMaterial) => void;
@@ -3605,7 +3634,6 @@ export default function MappingCards({
   onSetSalesArea,
   onManualLine,
   onQuickAddVendor,
-  onQuickAddCustomer,
   onQuickAddShipTo,
   onQuickAddMaterial,
   onUseSapMaterial,
@@ -3786,12 +3814,14 @@ export default function MappingCards({
                 result writes the master row and matches the document in one step. */}
             {!posted && (
               <button
-                className={'btn sm' + (vendorSapOpen ? ' primary' : '')}
+                className={'btn sm search-toggle' + (vendorSapOpen ? ' on' : '')}
+                aria-pressed={!!vendorSapOpen}
                 style={{ marginLeft: 8 }}
                 onClick={() => setVendorSapOpen((v) => !v)}
                 title="Look this supplier up in SAP and add it to the vendor master"
               >
-                <i className="fa-solid fa-magnifying-glass" /> Search SAP
+                <i className="fa-solid fa-magnifying-glass" /> Search SAP{' '}
+                <i className={vendorSapOpen ? 'fa-solid fa-chevron-up' : 'fa-solid fa-chevron-down'} />
               </button>
             )}
           </>
@@ -3827,15 +3857,18 @@ export default function MappingCards({
         picker={
           <>
             {headerSel('customers', 'customer', c.code)}
-            {c.status === 'fail' && addBtn('Add New Customer', onQuickAddCustomer)}
+            {/* "+ Add New Customer" removed (Megachem, 17 Nov 2026): a customer comes from Zoho / SAP via
+                Search, or from Master Mapping -- not typed in by hand here. */}
             {!posted && (
               <button
-                className={'btn sm' + (customerSapOpen ? ' primary' : '')}
+                className={'btn sm search-toggle' + (customerSapOpen ? ' on' : '')}
+                aria-pressed={!!customerSapOpen}
                 style={{ marginLeft: 8 }}
                 onClick={() => setCustomerSapOpen((v) => !v)}
                 title={isMgt ? 'Search for a new account in Zoho CRM' : 'Search for a new customer in SAP'}
               >
-                <i className="fa-solid fa-magnifying-glass" /> {isMgt ? 'Search Zoho' : 'Search SAP'}
+                <i className="fa-solid fa-magnifying-glass" /> {isMgt ? 'Search Zoho' : 'Search SAP'}{' '}
+                <i className={customerSapOpen ? 'fa-solid fa-chevron-up' : 'fa-solid fa-chevron-down'} />
               </button>
             )}
           </>
@@ -3947,12 +3980,14 @@ export default function MappingCards({
                 SAP-search above (it becomes "Manually selected"). */}
             {!posted && c.code && (isMgt ? onUseZohoShipTo : onUseSapShipTo) && (
               <button
-                className={'btn sm' + (shipToSapOpen ? ' primary' : '')}
+                className={'btn sm search-toggle' + (shipToSapOpen ? ' on' : '')}
+                aria-pressed={!!shipToSapOpen}
                 style={{ marginLeft: 8 }}
                 onClick={() => setShipToSapOpen((v) => !v)}
                 title={isMgt ? 'Search for a new delivery address in Zoho CRM' : 'Search for a new delivery address in SAP'}
               >
-                <i className="fa-solid fa-magnifying-glass" /> {isMgt ? 'Search Zoho' : 'Search SAP'}
+                <i className="fa-solid fa-magnifying-glass" /> {isMgt ? 'Search Zoho' : 'Search SAP'}{' '}
+                <i className={shipToSapOpen ? 'fa-solid fa-chevron-up' : 'fa-solid fa-chevron-down'} />
               </button>
             )}
           </div>
@@ -4239,7 +4274,9 @@ export default function MappingCards({
               }}
             />
             )}
-            {r.status === 'fail' && addBtn('Add New Item', () => onQuickAddMaterial(i))}
+            {/* "+ Add New Item" removed for Sales Orders (Megachem, 19 Nov 2026): an SO item comes from
+                Zoho / SAP via Search, or from Master Mapping -- not typed in by hand here. AP keeps it. */}
+            {doc.module !== 'SO' && r.status === 'fail' && addBtn('Add New Item', () => onQuickAddMaterial(i))}
             {!isMgt && !posted && onSetLineCharge && r.status === 'fail' && (
               <button className="btn sm" style={{ marginLeft: 8 }} onClick={() => onSetLineCharge(i, 'freight')}
                 title="Not goods: send this amount as the Freight condition on the Sales Order">
@@ -4248,12 +4285,14 @@ export default function MappingCards({
             )}
             {!posted && (
               <button
-                className={'btn sm' + (matSapOpen[i] ? ' primary' : '')}
+                className={'btn sm search-toggle' + (matSapOpen[i] ? ' on' : '')}
+                aria-pressed={!!matSapOpen[i]}
                 style={{ marginLeft: 8 }}
                 onClick={() => setMatSapOpen((prev) => ({ ...prev, [i]: !prev[i] }))}
                 title={isMgt ? 'Search for a new item in Zoho (Deal)' : 'Search for a new item in SAP'}
               >
-                <i className="fa-solid fa-magnifying-glass" /> {isMgt ? 'Search Zoho' : 'Search SAP'}
+                <i className="fa-solid fa-magnifying-glass" /> {isMgt ? 'Search Zoho' : 'Search SAP'}{' '}
+                <i className={matSapOpen[i] ? 'fa-solid fa-chevron-up' : 'fa-solid fa-chevron-down'} />
               </button>
             )}
           </>
@@ -4306,6 +4345,7 @@ export default function MappingCards({
                 plant={plant}
                 customer={map.header.customer?.sapCode || map.header.customer?.code}
                 disabled={posted}
+                canAddNew={doc.module !== 'SO'}
                 onUse={(m) => {
                   onUseSapMaterial(i, m);
                   setMatSapOpen((prev) => ({ ...prev, [i]: false }));

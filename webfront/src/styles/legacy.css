@@ -450,9 +450,11 @@
 .theme-toggle.dark .tt-knob{transform:translateX(0)}
 .sidebar.collapsed .theme-row{justify-content:center;padding:var(--sp-1) 0 var(--sp-3)}
 
+/* Login look restored to the pre-16-Nov design (17 Nov 2026, Megachem's request).
+   Exempt from the flat UI rules below: keeps its gradient, shadows and Poppins headings. */
 /* ===== sign-in screen (two-panel, white/green) ===== */
 
-.login-wrap{display:flex;min-height:100vh;background:#fff;color:#16241d;font-family:var(--font)}
+.login-wrap{display:flex;min-height:100vh;background:#fff;color:#16241d;font-family:'Graphik TH','Anuphan','IBM Plex Sans Thai','Noto Sans Thai','Inter',-apple-system,'Segoe UI',Tahoma,sans-serif}
 
 /* left panel — brand, headline, illustration */
 .login-left{flex:1.18;position:relative;overflow:hidden;padding:38px 52px 30px;display:flex;flex-direction:column;
@@ -463,78 +465,78 @@
 .login-dots{position:absolute;width:150px;height:120px;background-image:radial-gradient(#00994d33 1.4px,transparent 1.4px);background-size:16px 16px;opacity:.55;z-index:0}
 .login-dots.d1{left:40px;top:132px}.login-dots.d2{right:56px;bottom:150px}
 
-.login-brand{display:flex;align-items:center;gap:var(--sp-4);position:relative;z-index:2}
+.login-brand{display:flex;align-items:center;gap:14px;position:relative;z-index:2}
 .login-logo{height:40px;width:auto;display:block}
 .login-sep{width:1px;height:28px;background:#d7e0da}
-.login-appname{font-size:var(--fs-3);font-weight:700;color:#16241d}
+.login-appname{font-size:19px;font-weight:700;color:#16241d}
 
-.login-head{position:relative;z-index:2;margin:36px 0 var(--sp-1)}
-.login-head h1{font-family:var(--font-head);font-weight:800;font-size:var(--fs-1);line-height:1.12;margin:0;letter-spacing:-.5px;color:#16241d}
+.login-head{position:relative;z-index:2;margin:36px 0 4px}
+.login-head h1{font-family:'Poppins',var(--font);font-weight:800;font-size:clamp(30px,3.4vw,46px);line-height:1.12;margin:0;letter-spacing:-.5px;color:#16241d}
 .login-head h1 span{color:var(--brand)}
 
-.login-ill{position:relative;z-index:2;flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding-top:var(--sp-1)}
+.login-ill{position:relative;z-index:2;flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding-top:4px}
 .login-stage{position:relative;width:470px;max-width:100%;height:300px}
-.login-mini{position:absolute;width:210px;background:#fff;border:1px solid #e5ebe7;border-radius:16px;box-shadow:0 16px 34px #1a2a2012;padding:var(--sp-4) var(--sp-4)}
-.login-mini .mbadge{display:inline-flex;align-items:center;font-size:var(--fs-5);font-weight:700;padding:var(--sp-1) var(--sp-3);border-radius:100px;margin-bottom:var(--sp-3)}
-.login-mini .mln{display:block;height:7px;border-radius:5px;background:#eef2ef;margin:var(--sp-2) 0}
+.login-mini{position:absolute;width:210px;background:#fff;border:1px solid #e5ebe7;border-radius:16px;box-shadow:0 16px 34px #1a2a2012;padding:14px 15px}
+.login-mini .mbadge{display:inline-flex;align-items:center;font-size:12px;font-weight:700;padding:4px 12px;border-radius:100px;margin-bottom:11px}
+.login-mini .mln{display:block;height:7px;border-radius:5px;background:#eef2ef;margin:7px 0}
 .login-mini .mln.s{width:58%}
-.login-mini .mck{position:absolute;right:13px;top:13px;width:22px;height:22px;border-radius:50%;background:var(--brand);color:#fff;display:grid;place-items:center;box-shadow:0 0 0 4px #00994d1f;font-size:var(--fs-5)}
+.login-mini .mck{position:absolute;right:13px;top:13px;width:22px;height:22px;border-radius:50%;background:var(--brand);color:#fff;display:grid;place-items:center;box-shadow:0 0 0 4px #00994d1f;font-size:11px}
 .login-mini.po{transform:rotate(-8deg);left:8px;top:6px;z-index:1}.login-mini.po .mbadge{background:#e8f0fd;color:#3b7fe0}
 .login-mini.so{transform:rotate(6deg);left:210px;top:0;z-index:2}.login-mini.so .mbadge{background:#efeaff;color:#7c5cff}
 
-.login-doc{position:relative;z-index:3;width:330px;margin:74px auto 0;background:#fff;border:1px solid #e5ebe7;border-radius:20px;box-shadow:0 26px 54px #1a2a201f;padding:var(--sp-5) var(--sp-5)}
-.login-doc .ldh{display:flex;align-items:center;gap:var(--sp-3);margin-bottom:var(--sp-4)}
-.login-doc .lfi{width:40px;height:40px;border-radius:11px;background:#e7f8ee;color:var(--brand);display:grid;place-items:center;border:1px solid #bfe9cf;font-size:var(--fs-4)}
-.login-doc .ltt{font-family:var(--font-head);font-weight:700;font-size:var(--fs-3);color:#16241d}
-.login-doc .lbadge{margin-left:auto;font-size:var(--fs-5);font-weight:700;padding:var(--sp-1) var(--sp-3);border-radius:100px;background:#e7f8ee;color:var(--brand)}
-.login-doc .lsrow{display:flex;align-items:center;gap:var(--sp-4);padding:var(--sp-2) 2px}
+.login-doc{position:relative;z-index:3;width:330px;margin:74px auto 0;background:#fff;border:1px solid #e5ebe7;border-radius:20px;box-shadow:0 26px 54px #1a2a201f;padding:20px 22px}
+.login-doc .ldh{display:flex;align-items:center;gap:13px;margin-bottom:15px}
+.login-doc .lfi{width:40px;height:40px;border-radius:11px;background:#e7f8ee;color:var(--brand);display:grid;place-items:center;border:1px solid #bfe9cf;font-size:16px}
+.login-doc .ltt{font-family:'Poppins',var(--font);font-weight:700;font-size:19px;color:#16241d}
+.login-doc .lbadge{margin-left:auto;font-size:12px;font-weight:700;padding:4px 12px;border-radius:100px;background:#e7f8ee;color:var(--brand)}
+.login-doc .lsrow{display:flex;align-items:center;gap:14px;padding:8px 2px}
 .login-doc .lsl{height:9px;border-radius:6px;background:#eef2ef;flex:1}
 .login-doc .lsl.w1{max-width:100%}.login-doc .lsl.w2{max-width:80%}.login-doc .lsl.w3{max-width:58%}
-.login-doc .lck{width:22px;height:22px;border-radius:50%;background:var(--brand);color:#fff;display:grid;place-items:center;flex-shrink:0;box-shadow:0 0 0 4px #00994d1f;font-size:var(--fs-5)}
+.login-doc .lck{width:22px;height:22px;border-radius:50%;background:var(--brand);color:#fff;display:grid;place-items:center;flex-shrink:0;box-shadow:0 0 0 4px #00994d1f;font-size:11px}
 
 .login-flowc{position:relative;z-index:2;width:470px;max-width:100%;margin-top:2px}
 .login-conn{display:block;width:100%;height:52px}
-.login-dests{display:flex;gap:var(--sp-5);justify-content:center}
-.login-dcard{flex:1;max-width:210px;background:#fff;border:1px solid #e5ebe7;border-radius:16px;box-shadow:0 14px 30px #1a2a2014;padding:var(--sp-4) var(--sp-4);display:flex;align-items:center;gap:var(--sp-3)}
-.login-dcard .dlg{width:42px;height:42px;border-radius:12px;display:grid;place-items:center;flex-shrink:0;color:#fff;font-family:var(--font-head);font-weight:800;font-size:var(--fs-4)}
+.login-dests{display:flex;gap:20px;justify-content:center}
+.login-dcard{flex:1;max-width:210px;background:#fff;border:1px solid #e5ebe7;border-radius:16px;box-shadow:0 14px 30px #1a2a2014;padding:14px 15px;display:flex;align-items:center;gap:12px}
+.login-dcard .dlg{width:42px;height:42px;border-radius:12px;display:grid;place-items:center;flex-shrink:0;color:#fff;font-family:'Poppins',var(--font);font-weight:800;font-size:15px}
 .login-dcard.sap .dlg{background:var(--brand)}
 .login-dcard.zoho .dlg{background:#e42527}
-.login-dcard .dnm{font-weight:700;font-size:var(--fs-4);color:#16241d}
-.login-dcard .dnm small{display:block;color:#9aa8a0;font-weight:500;font-size:var(--fs-5);margin-top:1px}
+.login-dcard .dnm{font-weight:700;font-size:15px;color:#16241d}
+.login-dcard .dnm small{display:block;color:#9aa8a0;font-weight:500;font-size:12.5px;margin-top:1px}
 
 /* right panel — sign-in form */
 .login-right{flex:.82;display:flex;flex-direction:column;justify-content:center;align-items:center;padding:28px;background:#fff}
 .login-card{width:420px;max-width:100%}
-.login-title{font-family:var(--font-head);font-weight:800;font-size:var(--fs-1);margin:0 0 var(--sp-2);color:#16241d}
-.login-subtitle{color:#5f6e64;font-size:var(--fs-4);margin:0 0 30px}
-.login-label{display:block;font-size:var(--fs-5);color:#33413a;font-weight:600;margin:0 0 var(--sp-2)}
-.login-field{position:relative;margin:0 0 var(--sp-5)}
-.login-field .ic{position:absolute;left:15px;top:50%;transform:translateY(-50%);color:#9aa8a0;pointer-events:none;font-size:var(--fs-5)}
-.login-field input{width:100%;background:#fff;border:1px solid #dbe4de;border-radius:11px;padding:var(--sp-4) 44px;color:#16241d;font-size:var(--fs-5);outline:none;font-family:inherit}
+.login-title{font-family:'Poppins',var(--font);font-weight:800;font-size:clamp(26px,2.5vw,34px);margin:0 0 6px;color:#16241d}
+.login-subtitle{color:#5f6e64;font-size:15px;margin:0 0 30px}
+.login-label{display:block;font-size:13.5px;color:#33413a;font-weight:600;margin:0 0 8px}
+.login-field{position:relative;margin:0 0 20px}
+.login-field .ic{position:absolute;left:15px;top:50%;transform:translateY(-50%);color:#9aa8a0;pointer-events:none;font-size:14px}
+.login-field input{width:100%;background:#fff;border:1px solid #dbe4de;border-radius:11px;padding:14px 44px;color:#16241d;font-size:14.5px;outline:none;font-family:inherit}
 .login-field input:focus{border-color:var(--brand);box-shadow:0 0 0 3px #00994d1f}
 .login-field input::placeholder{color:#9aa8a0}
-.login-eye{position:absolute;right:10px;top:50%;transform:translateY(-50%);border:none;background:transparent;color:#9aa8a0;cursor:pointer;padding:var(--sp-2);font-size:var(--fs-5);line-height:1}
-.login-row{display:flex;align-items:center;justify-content:space-between;margin:2px 0 var(--sp-5);font-size:var(--fs-5)}
-.login-remember{display:flex;align-items:center;gap:var(--sp-2);color:#5f6e64;cursor:pointer}
+.login-eye{position:absolute;right:10px;top:50%;transform:translateY(-50%);border:none;background:transparent;color:#9aa8a0;cursor:pointer;padding:8px;font-size:14px;line-height:1}
+.login-row{display:flex;align-items:center;justify-content:space-between;margin:2px 0 22px;font-size:13.5px}
+.login-remember{display:flex;align-items:center;gap:9px;color:#5f6e64;cursor:pointer}
 .login-remember input{accent-color:var(--brand);width:18px;height:18px}
 .login-forgot{color:var(--brand);text-decoration:none;font-weight:600}
-.login-error{color:#bd120f;font-size:var(--fs-5);margin:0 0 var(--sp-3)}
-.login-signin{width:100%;background:var(--brand);color:#fff;font-weight:700;font-size:var(--fs-4);border:none;border-radius:12px;padding:var(--sp-4);cursor:pointer;box-shadow:0 8px 20px #00994d36;display:flex;align-items:center;justify-content:center;gap:var(--sp-3)}
+.login-error{color:#bd120f;font-size:12.5px;margin:0 0 12px}
+.login-signin{width:100%;background:var(--brand);color:#fff;font-weight:700;font-size:16px;border:none;border-radius:12px;padding:15px;cursor:pointer;box-shadow:0 8px 20px #00994d36;display:flex;align-items:center;justify-content:center;gap:10px}
 .login-signin:hover{background:#007a3d}
 .login-signin:disabled{opacity:.7;cursor:default}
-.login-divider{display:flex;align-items:center;gap:var(--sp-4);margin:var(--sp-5) 0;color:#9aa8a0;font-size:var(--fs-5);font-weight:600}
+.login-divider{display:flex;align-items:center;gap:14px;margin:22px 0;color:#9aa8a0;font-size:12.5px;font-weight:600}
 .login-divider::before,.login-divider::after{content:'';flex:1;height:1px;background:#e5ebe7}
-.login-ms{width:100%;background:#fff;color:#16241d;border:1px solid #dbe4de;border-radius:12px;padding:var(--sp-4);font-size:var(--fs-4);font-weight:600;display:flex;align-items:center;justify-content:center;gap:var(--sp-3);cursor:pointer}
+.login-ms{width:100%;background:#fff;color:#16241d;border:1px solid #dbe4de;border-radius:12px;padding:14px;font-size:15px;font-weight:600;display:flex;align-items:center;justify-content:center;gap:11px;cursor:pointer}
 .login-ms:hover{background:#f7faf8}
-.login-help{text-align:center;margin:26px 0 0;font-size:var(--fs-5);color:#5f6e64}
+.login-help{text-align:center;margin:26px 0 0;font-size:13.5px;color:#5f6e64}
 .login-help a{color:var(--brand);text-decoration:none;font-weight:600}
-.login-foot{text-align:center;margin-top:34px;font-size:var(--fs-5);color:#9aa8a0}
-.login-mobile-brand{display:none;align-items:center;gap:var(--sp-3);margin-bottom:var(--sp-5)}
+.login-foot{text-align:center;margin-top:34px;font-size:12.5px;color:#9aa8a0}
+.login-mobile-brand{display:none;align-items:center;gap:11px;margin-bottom:24px}
 .login-mobile-logo{height:34px;width:auto;display:block}
-.login-mobile-name{font-weight:700;font-size:var(--fs-3);color:#16241d}
+.login-mobile-name{font-weight:700;font-size:17px;color:#16241d}
 @media (max-width:1080px){.login-left{padding:30px 26px}}
 @media (max-width:900px){.login-left{display:none}.login-right{flex:1}.login-mobile-brand{display:flex}}
-@media (max-width:480px){.login-right{padding:var(--sp-5) var(--sp-4)}.login-title{font-size:var(--fs-2)}}
+@media (max-width:480px){.login-right{padding:22px 18px}.login-title{font-size:28px}}
 
 /* ---- responsive: compact icon sidebar + tighter padding on small screens ---- */
 @media (max-width:760px){
@@ -719,17 +721,18 @@
 @media(max-width:600px){.so-counts{grid-template-columns:1fr}
   .so-counts>div{border-right:0;border-bottom:1px solid var(--line)}.so-counts>div:last-child{border-bottom:0}}
 
-.so-send{background:linear-gradient(135deg,var(--gr1600) 0%,#0c1f17 100%);color:#fff;border-radius:var(--r4);
+/* Send bar: no green fill (Megachem, 19 Nov 2026) -- the green Send button got lost on it; a plain
+   bordered row lets the button stand out. */
+.so-send{background:var(--card);color:var(--text);border:1px solid var(--line);border-radius:var(--r4);
          padding:var(--sp-4) var(--sp-4);display:flex;align-items:center;justify-content:space-between;gap:var(--sp-4);
          flex-wrap:wrap;margin-top:var(--sp-4)}
-.so-send .hint{color:rgba(255,255,255,.7)}
-.so-send b{font-size:var(--fs-5);color:#fff}
+.so-send b{font-size:var(--fs-5);color:var(--text)}
 /* Status text next to the Send buttons: takes the rest of the row and wraps inside it, so the
    title and the hint line stay aligned together (a long hint used to push the block onto its own
    line with only the title right-aligned). */
-.so-send-status{flex:1 1 320px;min-width:0;text-align:right}
+.so-send-status{flex:1 1 320px;min-width:0;text-align:left}
 .so-send-status .hint{margin-top:2px}
-@media(max-width:600px){.so-send{flex-direction:column;align-items:stretch}.so-send-status{text-align:left}}
+@media(max-width:600px){.so-send{flex-direction:column;align-items:stretch}.so-send > .row{margin-left:0!important;justify-content:flex-end}}
 /* Master mapping: document fields and external-system fields stay visibly separate. */
 .master-field-groups { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sp-5); }
 .master-field-groups section { min-width: 0; }
@@ -1351,12 +1354,11 @@ input,select,textarea,.btn,.nav a{-webkit-tap-highlight-color:transparent}
    confirm dialog, .btn.sm.danger outline elsewhere).
    ===================================================================== */
 .card,.cmp-card,.result,.steps,.mod,.mod.sel,.ai-candidate-card,.ai-candidate-card.recommended,
-.topbar,.master-subtabs button.on,.login-mini,.login-doc,.login-dcard,.login-signin,.img-lightbox img{box-shadow:none}
+.topbar,.master-subtabs button.on,.img-lightbox img{box-shadow:none}
 .card,.cmp-card,.result{border-radius:var(--r4)}
 .mod:hover,.ai-candidate-card:hover{transform:none;box-shadow:none}
 .ov{backdrop-filter:none}
-.so-send{background:var(--gr1600)}
-h1,h2,h3,.login-head h1,.login-title,.login-dcard .dlg,.cmp-no,.ai-recommended{font-weight:700}
+h1,h2,h3,.cmp-no,.ai-recommended{font-weight:700}
 
 .btn{background:transparent;border:1px solid var(--g300);color:var(--text);font-weight:600;box-shadow:none}
 .btn:hover:not(:disabled){transform:none;background:var(--line-soft);border-color:var(--g500)}
@@ -1372,15 +1374,47 @@ h1,h2,h3,.login-head h1,.login-title,.login-dcard .dlg,.cmp-no,.ai-recommended{f
 .btn.sm.danger:hover:not(:disabled){background:var(--danger-bg);border-color:var(--danger)}
 .btn.ghost{background:transparent;border-color:transparent}
 .btn.ghost:hover:not(:disabled){background:var(--line-soft);border-color:transparent}
+/* Toggle / selected state (17 Nov 2026): a Search panel that is open, the chosen Forecast Yes/No, the
+   page being shown. Filled brand green so "is it pressed?" is obvious at a glance -- .btn.sm.primary
+   is only an outline (small row actions), which made open and closed look almost the same. */
+.btn.on,.btn.sm.on{background:var(--brand);border-color:var(--brand);color:#fff}
+.btn.on:hover:not(:disabled),.btn.sm.on:hover:not(:disabled){background:var(--brand-h);border-color:var(--brand-h)}
 [data-theme="dark"] .btn{border-color:var(--g1600)}
-/* login: one flat background, left-aligned copy, plain step list */
-.login-left{background:#f6fbf8}
-.login-blob,.login-dots{display:none}
-.login-head{margin:var(--sp-5) 0 0;max-width:520px}
-.login-head h1{font-size:var(--fs-2);line-height:1.3;letter-spacing:0}
-.login-steps{margin:var(--sp-4) 0 0;padding:0 0 0 var(--sp-5);color:#3d4d43;font-size:var(--fs-4);line-height:1.6;display:flex;flex-direction:column;gap:var(--sp-1)}
-.login-ill{align-items:flex-start}
-.login-signin{border-radius:8px}
+/* "Check before sending" fields on the Zoho Sales Order summary (17 Nov 2026, Megachem): Responsible
+   Sales / Deal Owner, Delivery Date, Description, Account Code -- always red so CS reads them before
+   pressing Send. .f-check = a form field, .check-box = the Sales notice box. Red border + red label only
+   (the "Check before sending" pill was removed the same day -- too loud). */
+.f.f-check>label{color:var(--danger);font-weight:700}
+.f.f-check input,.f.f-check select,.f.f-check textarea{border:1.5px solid var(--danger)}
+.f.f-check input:focus,.f.f-check select:focus,.f.f-check textarea:focus{border-color:var(--danger);box-shadow:0 0 0 3px var(--danger-bg)}
+.notice.check-box{border:1.5px solid var(--danger);background:var(--danger-bg);border-radius:var(--r3)}
+.check-label{color:var(--danger)}
+/* Header text fields (FieldGrid ExpandText, 17 Nov 2026): every box one line and the same height; a
+   long value ends in "…". On focus a box with the whole value opens over the fields below (absolute,
+   so the grid does not move) and closes on leaving it. */
+.f-expand{position:relative}
+.f-expand>input{text-overflow:ellipsis}
+.f textarea.f-expand-pop{position:absolute;top:0;left:0;right:0;z-index:20;display:block;resize:none;overflow:hidden;
+  font-family:inherit;color:inherit;white-space:pre-wrap;overflow-wrap:anywhere;min-height:0;
+  border-color:var(--brand);box-shadow:0 0 0 3px rgba(0,204,102,.18),0 8px 20px rgba(0,0,0,.12);outline:none}
+.f textarea.f-expand-pop[readonly]{background:var(--line-soft);color:var(--muted)}
+/* Search SAP / Search Zoho toggles on the mapping cards (17 Nov 2026, Megachem: "make it stand out,
+   so I can tell: oh, I've been pressed"). Closed = brand-tinted outline, so it reads as the way out
+   when a card says "Not found". Open (.on) = solid green, pressed-in shadow, chevron up. Click = a
+   short press-down so the tap itself is felt. */
+.btn.sm.search-toggle{background:var(--brand-soft);border:1.5px solid var(--brand);color:var(--brand);font-weight:700}
+.btn.sm.search-toggle:hover:not(:disabled){background:var(--brand-line);border-color:var(--brand)}
+.btn.sm.search-toggle.on{background:var(--brand);border-color:var(--brand-h);color:#fff;box-shadow:inset 0 2px 4px rgba(0,0,0,.25)}
+.btn.sm.search-toggle.on:hover:not(:disabled){background:var(--brand-h)}
+.btn.sm.search-toggle:active:not(:disabled){transform:scale(.96)}
+/* Document header actions (17 Nov 2026, Megachem): wrap instead of squeezing. With nowrap and
+   min-width:0 the buttons shrank below their own text, so on a narrow header (side-by-side document
+   view, small laptop) "Re-read Document", "Extracted Text", "Reading rules"... ran over each other.
+   Now every item keeps its full width and the group flows onto a second row when it has to. */
+.card-h-actions{flex-wrap:wrap;row-gap:var(--sp-2)}
+.card-h-actions>*{flex:0 0 auto}
+.card-h-actions>.btn{min-width:max-content}
+/* login: look restored to the pre-16-Nov design (see the sign-in block above); only the mobile
+   overflow fix is kept — it stops the form spilling past the screen at 420 px */
 .login-right{min-width:0}
 .login-card{width:100%;max-width:420px}
-.login-subtitle{margin:0 0 var(--sp-5)}

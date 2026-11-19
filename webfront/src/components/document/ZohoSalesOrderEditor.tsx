@@ -46,9 +46,9 @@ function DealOwnerPicker({ preview, salesUserId, onChange, posted }: {
   // Compact (12 Nov 2026): the Responsible Sales box with just a labelled dropdown, plus one short
   // red line when the Account Owner can't own the new Deal.
   return (
-    <div className="notice" style={{ margin: '12px 0', padding: 12 }}>
+    <div className="notice check-box" style={{ margin: '12px 0', padding: 12 }}>
       <div className="row" style={{ gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-        <b>Responsible Sales / Deal Owner:</b>
+        <b className="check-label">Responsible Sales / Deal Owner:</b>
         <div style={{ flex: '1 1 420px', maxWidth: 560 }}>
           <MaterialSearchSelect
             options={sales.map((u) => ({
@@ -103,8 +103,8 @@ function DealOwnerPreview({ preview }: { preview: ZohoSalesOrderPreview }) {
   }, [preview.dealOwnerName, preview.flow?.newDeal, preview.accountCode]);
   const name = preview.dealOwnerName || accountOwner;
   return (
-    <div className="notice" style={{ margin: '12px 0', padding: 12 }}>
-      <b>Responsible Sales / Deal Owner: </b>
+    <div className="notice check-box" style={{ margin: '12px 0', padding: 12 }}>
+      <b className="check-label">Responsible Sales / Deal Owner: </b>
       {name ? <strong>{name}</strong> : <span>{loading ? 'Reading Customer Account…' : error || preview.dealOwnerError || 'Could not determine the Deal owner. Please reload the preview.'}</span>}
       {preview.flow?.newDeal && name && <div className="hint">Sales Employee from Customer Account — assigned as owner of the new Deal</div>}
     </div>
@@ -147,6 +147,8 @@ export default function ZohoSalesOrderEditor({
   newDealForecast = {},
   onNewDealForecast,
   forecastMissing = false,
+  dealRemarks = {},
+  onDealRemarkChange,
   groupShipTo,
   salesUserId = '',
   onOwnerChange,
@@ -190,6 +192,9 @@ export default function ZohoSalesOrderEditor({
   onNewDealForecast?: (key: string, value: 'Yes' | 'No') => void;
   /** A new Deal still has no Forecast Status chosen -- Send stays disabled. */
   forecastMissing?: boolean;
+  /** Several Deals: Description typed per Deal key (a Deal not in it shows header.remarks). */
+  dealRemarks?: Record<string, string>;
+  onDealRemarkChange?: (key: string, value: string) => void;
   /** Per-SO-Group ship-to picker (Zoho ship-tos of the matched Account). */
   groupShipTo?: GroupShipToControl;
   /** New Deal: Ms_User.UserID of the Sales person picked as Deal Owner ('' = Account Owner). */
@@ -295,14 +300,46 @@ export default function ZohoSalesOrderEditor({
       lines.forEach((l) => used.add(String(l.itemNo)));
       return {
         key: g.key,
+        deal: g.deal as string | undefined,
         title: `Sales Order ${i + 1} of ${dateGroups.length}${multiDeal && g.deal ? ` · Deal ${dealLabel(g.deal)}` : ''} · Delivery ${g.date}${dateGroups.some((x) => x.soGroup !== '1') ? ` · SO ${g.soGroup}` : ''} · ${lines.length} item${lines.length === 1 ? '' : 's'}`,
         lines,
       };
     }).filter((g) => g.lines.length > 0);
     const rest = preview.lines.filter((l) => !used.has(String(l.itemNo)));
-    if (rest.length) out.push({ key: 'other', title: 'Other items', lines: rest });
+    if (rest.length) out.push({ key: 'other', deal: undefined, title: 'Other items', lines: rest });
     return out;
   })();
+
+  // Several Deals (19 Nov 2026): each Deal's Description sits under its first Sales Order in Ordered Items
+  // (Megachem: next to the order it goes to). A Deal's later Sales Orders say they share it.
+  const dealTitleOf = (key: string) => {
+    const deal = dealByKey?.(key) ?? null;
+    return deal
+      ? [deal.dealNumber, deal.deliveryDate && formatDate(deal.deliveryDate)].filter(Boolean).join(' · ') || dealLabel(key)
+      : dealLabel(key);
+  };
+  const perDealRemarks = multiDeal && !!onDealRemarkChange;
+  const firstGroupOfDeal = new Map<string, string>();
+  orderedItemGroups.forEach((g, i) => { if (g.deal && !firstGroupOfDeal.has(g.deal)) firstGroupOfDeal.set(g.deal, `Sales Order ${i + 1}`); });
+  const dealRemarkRow = (g: { key: string; deal?: string }) => {
+    if (!perDealRemarks || !g.deal) return null;
+    const first = orderedItemGroups.find((x) => x.deal === g.deal)?.key === g.key;
+    return (
+      <tr>
+        <td colSpan={7} style={{ padding: '8px 12px' }}>
+          {first ? (
+            <div className="f" style={{ margin: 0 }}>
+              <label>Description — {dealTitleOf(g.deal)}</label>
+              <textarea rows={2} value={dealRemarks[g.deal] ?? header.remarks} disabled={posted}
+                onChange={(e) => onDealRemarkChange!(g.deal!, e.target.value)} />
+            </div>
+          ) : (
+            <span className="hint">Description: same as {firstGroupOfDeal.get(g.deal)} (Deal {dealTitleOf(g.deal)})</span>
+          )}
+        </td>
+      </tr>
+    );
+  };
 
   const body = () => {
     if (!selectedDealId) return <p className="hint">Group the items into Deals on the Deal (Zoho) card in Step 2 — the Sales Orders to send will appear here.</p>;
@@ -353,7 +390,7 @@ export default function ZohoSalesOrderEditor({
             <label>Customer PO / Customer Ref.</label>
             <input type="text" value={header.customerRef} placeholder={preview.customerRef || ''} disabled={posted} onChange={(e) => onHeaderChange({ customerRef: e.target.value })} />
           </div>
-          <div className="f">
+          <div className="f f-check">
             <label>Delivery Date</label>
             {multiDate ? (
               // Each Sales Order is sent with its own group's date (see the group panel below).
@@ -397,13 +434,21 @@ export default function ZohoSalesOrderEditor({
             <label>Tax ID</label>
             <input type="text" value={header.taxId} placeholder={preview.taxId || ''} disabled={posted} onChange={(e) => onHeaderChange({ taxId: e.target.value })} />
           </div>
-          <div className="f" style={{ gridColumn: '1 / -1' }}>
+          {multiDeal && onDealRemarkChange ? (
+            // Several Deals: one Description per Deal, under its Sales Order in Ordered Items below.
+            <div className="f f-check" style={{ gridColumn: '1 / -1' }}>
+              <label>Description</label>
+              <span className="hint">Set per Deal under each Sales Order in Ordered Items below</span>
+            </div>
+          ) : (
+          <div className="f f-check" style={{ gridColumn: '1 / -1' }}>
             {/* Document Remark is sent to Zoho's Sales Order header Description. */}
             <label>Description</label>
             <textarea rows={2} value={header.remarks} disabled={posted} onChange={(e) => onHeaderChange({ remarks: e.target.value })} />
           </div>
+          )}
           {preview.accountCode && (
-            <div className="f">
+            <div className="f f-check">
               <label>Account Code (linked)</label>
               <input type="text" value={preview.accountCode} disabled readOnly />
             </div>
@@ -437,7 +482,7 @@ export default function ZohoSalesOrderEditor({
               <tbody>
                 {/* Several Sales Orders (SO Group / delivery date): the items are listed under the Sales
                     Order each one goes to, instead of as one combined list. */}
-                {(multiDate ? orderedItemGroups : [{ key: 'all', title: '', lines: preview.lines }]).map((g) => (
+                {(multiDate ? orderedItemGroups : [{ key: 'all', deal: undefined, title: '', lines: preview.lines }]).map((g) => (
                   <Fragment key={g.key}>
                     {g.title && (
                       <tr>
@@ -446,6 +491,7 @@ export default function ZohoSalesOrderEditor({
                         </td>
                       </tr>
                     )}
+                    {dealRemarkRow(g)}
                     {g.lines.map(renderItemRow)}
                   </Fragment>
                 ))}
@@ -514,24 +560,7 @@ export default function ZohoSalesOrderEditor({
           }} />
 
         <div className="so-send">
-          <div className="row" style={{ gap: 12 }}>
-            <button
-              className="btn success"
-              onClick={onSend}
-              disabled={SEND_DISABLED || sending || posted || shipToMissing || ownerMissing || forecastMissing || preview.lines.length === 0 || !!result?.success || remaining === 0}
-            >
-              {sending
-                ? 'Sending…'
-                : result?.success
-                  ? 'Sent ✓'
-                  : multiDate
-                    ? `Send ${remaining} Sales Order${remaining === 1 ? '' : 's'} to Zoho CRM`
-                    : 'Send to Zoho CRM'}
-            </button>
-            <button className="btn" onClick={onViewPayload} disabled={preview.lines.length === 0}>
-              {'{}'} View payload
-            </button>
-          </div>
+          {/* Status / reason on the left, actions on the right (Send last = primary at the end). */}
           {(result?.success || shipToMissing || ownerMissing || forecastMissing || multiDate || preview.lines.length === 0 || preview.skipped.length > 0 || allSent || SEND_DISABLED) && (
           <div className="so-send-status">
             <b>
@@ -576,6 +605,24 @@ export default function ZohoSalesOrderEditor({
             </div>
           </div>
           )}
+          <div className="row" style={{ gap: 12, marginLeft: 'auto' }}>
+            <button className="btn" onClick={onViewPayload} disabled={preview.lines.length === 0}>
+              {'{}'} View payload
+            </button>
+            <button
+              className="btn success"
+              onClick={onSend}
+              disabled={SEND_DISABLED || sending || posted || shipToMissing || ownerMissing || forecastMissing || preview.lines.length === 0 || !!result?.success || remaining === 0}
+            >
+              {sending
+                ? 'Sending…'
+                : result?.success
+                  ? 'Sent ✓'
+                  : multiDate
+                    ? `Send ${remaining} Sales Order${remaining === 1 ? '' : 's'} to Zoho CRM`
+                    : 'Send to Zoho CRM'}
+            </button>
+          </div>
         </div>
       </>
     );
@@ -671,7 +718,7 @@ function DealFlowTable({ parts, dealByKey, dealLabel, dateGroups, forecast, onFo
                     <span role="radiogroup" aria-label={`Forecast of ${title}`} style={{ display: 'inline-flex', gap: 4 }}>
                       {(['Yes', 'No'] as const).map((v) => (
                         <button key={v} type="button" role="radio" aria-checked={picked === v} disabled={disabled}
-                          className={'btn sm' + (picked === v ? ' primary' : '')}
+                          className={'btn sm' + (picked === v ? ' on' : '')}
                           style={!picked ? { borderColor: '#b91c1c' } : undefined}
                           onClick={() => onForecast(p.key, v)}>{v}</button>
                       ))}
@@ -706,7 +753,7 @@ function ZohoFlowSteps({ flow, dealName, salesOrders, forecast, onForecast, disa
     <div role="radiogroup" aria-label="Forecast Status of the new Deal" style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
       {(['Yes', 'No'] as const).map((v) => (
         <button key={v} type="button" role="radio" aria-checked={forecast === v} disabled={disabled}
-          className={'btn sm' + (forecast === v ? ' primary' : '')} onClick={() => onForecast(v)}>
+          className={'btn sm' + (forecast === v ? ' on' : '')} onClick={() => onForecast(v)}>
           <i className={forecast === v ? 'fa-solid fa-circle-dot' : 'fa-regular fa-circle'} />{' '}
           {v === 'Yes' ? 'Forecast (WCD) — Yes' : 'No forecast — No'}
         </button>

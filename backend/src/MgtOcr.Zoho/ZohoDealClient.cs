@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using Microsoft.Extensions.Logging;
 
 namespace MgtOcr.Zoho;
 
@@ -39,7 +40,10 @@ public record ZohoDeal(
     string? CreatedTime = null,
     // "Deal Number" (auto-number, e.g. DL-000305) -- tells apart Deals that share a name (16 Nov 2026:
     // two Deals of the same material, different delivery dates).
-    string? DealNumber = null)
+    string? DealNumber = null,
+    // false = only the Deal's header was read (19 Nov 2026 search speed-up: it holds none of the PO's
+    // materials), so Items is empty -- read it by id when its items are needed.
+    bool ItemsLoaded = true)
 {
     public bool IsWcd => string.Equals(ForecastStatus?.Trim(), "Yes", StringComparison.OrdinalIgnoreCase);
 }
@@ -79,7 +83,7 @@ public record ZohoNewDealLine(
 /// related-module discovery), falling back to the standard name only if that lookup comes up
 /// empty (e.g. a permissions gap on settings.modules).
 /// </summary>
-public class ZohoDealClient(ZohoClient zoho)
+public class ZohoDealClient(ZohoClient zoho, ILogger<ZohoDealClient> log)
 {
     // Verbatim from the manual's Deal Stage picklist (5.6.4.6 - 5.6.4.11) — every stage that
     // means the Deal is closed (won or lost). Anything else (Draft/Qualification, Meeting/Memo,
@@ -129,47 +133,173 @@ public class ZohoDealClient(ZohoClient zoho)
     /// lookup/link at all (unlike the Ship-to/Sold-to address panels, which do need a real Zoho
     /// Account id and can be broken by a Master Customer row whose linked id is stale/wrong).
     /// </summary>
-    public async Task<List<ZohoDeal>> FindOpenDealsByAccountCodeAsync(string accountCode, bool onlyOpenDraft = false)
+    public async Task<List<ZohoDeal>> FindOpenDealsByAccountCodeAsync(string accountCode, bool onlyOpenDraft = false,
+        IReadOnlyCollection<string>? materialCodes = null)
     {
+        // Speed (Megachem, 19 Nov 2026): customer first, then material, then the rest.
+        // 1) One COQL call: the customer's open Deals with their header fields (no items).
+        // 2) The PO's materials (when given): one COQL call on the Deal Items subform tells which of those
+        //    Deals hold any of them -- only those are read in full (their items; the page then checks
+        //    stage / qty / WCD). The others come back without items (ItemsLoaded = false): they hold none
+        //    of the PO's materials, but stay listed for CS to group items into by hand.
+        // 3) Reading full Deals runs a few at a time instead of one after another.
+        var clock = System.Diagnostics.Stopwatch.StartNew();
         var module = await ResolveModuleAsync();
-        var rows = await zoho.QueryCoqlAsync(
-            module,
-            "id, Deal_Name, Stage, Account_Code, Customer_Ref, Delivery_Date, Closing_Date",
-            $"Account_Code = '{Escape(accountCode)}'",
-            "Deal_Name");
-
-        var result = new List<ZohoDeal>();
-        foreach (var row in rows)
+        var byCustomer = $"Account_Code = '{Escape(accountCode)}'";
+        // Draft/Qualification only: asked of Zoho itself, so a customer's years of closed / later-stage
+        // Deals are not paged through. Nothing found that way -> the old unfiltered query (a stage
+        // spelled differently still turns up, filtered below).
+        var rows = onlyOpenDraft
+            ? await QueryDealHeadersAsync(module,
+                $"({byCustomer} and Stage in ('{ZohoDealStage.Draft}', 'Draft / Qualification'))", "Deal_Name")
+            : [];
+        if (rows.Count == 0) rows = await QueryDealHeadersAsync(module, byCustomer, "Deal_Name");
+        var coqlMs = clock.ElapsedMilliseconds;
+        rows = rows.Where(row =>
         {
             var stage = Str(row, "Stage") ?? "";
-            if (ClosedStages.Contains(stage)) continue;
-            if (onlyOpenDraft && !ZohoDealStage.IsOpenOrDraft(stage)) continue;
-            var id = Str(row, "id");
-            if (string.IsNullOrEmpty(id)) continue;
+            if (ClosedStages.Contains(stage)) return false;
+            return !onlyOpenDraft || ZohoDealStage.IsOpenOrDraft(stage);
+        }).Where(row => !string.IsNullOrEmpty(Str(row, "id"))).ToList();
 
-            // COQL cannot return subform data at all (a hard Zoho limitation, not a query
-            // mistake) — the Deal Items list only comes back on a per-record GET.
-            var full = await zoho.GetByIdAsync(module, id);
-            var items = full is null ? [] : ExtractDealItems(full);
+        HashSet<string>? withMaterial = null;
+        var codes = (materialCodes ?? []).Where(c => !string.IsNullOrWhiteSpace(c)).Select(c => c.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (codes.Count > 0 && rows.Count > 0)
+            withMaterial = await DealIdsWithMaterialsAsync(module, rows.Select(r => Str(r, "id")!).ToList(), codes);
+        var materialMs = clock.ElapsedMilliseconds - coqlMs;
 
-            result.Add(new ZohoDeal(
-                Id: id,
-                DealName: Str(row, "Deal_Name") ?? "",
-                Stage: stage,
-                AccountId: full is null ? null : LookupId(full["Account_Name"]),
-                AccountCode: Str(row, "Account_Code"),
-                CustomerRef: Str(row, "Customer_Ref"),
-                DeliveryDate: Str(row, "Delivery_Date"),
-                ClosingDate: Str(row, "Closing_Date"),
-                Items: items,
-                // Read from the full record (not selected in COQL, so an unexpected field name can
-                // never break the Deal lookup itself).
-                ForecastStatus: full is null ? null : PicklistStr(full, "Forecast_Status"),
-                CreatedTime: full?["Created_Time"]?.ToString(),
-                DealNumber: full is null ? null : Str(full, "Deal_Number")));
-        }
-        return result;
+        var toRead = rows.Select(r => Str(r, "id")!).Where(id => withMaterial is null || withMaterial.Contains(id)).ToList();
+        var fulls = await ReadFullAsync(module, toRead);
+        log.LogInformation(
+            "[ZOHO] Deal search {Code}: {Deals} open Deal(s) ({CoqlMs} ms); material check {Material} ({MaterialMs} ms); read {Read} in full ({ReadMs} ms); total {TotalMs} ms",
+            accountCode, rows.Count, coqlMs,
+            codes.Count == 0 ? "skipped (no codes)" : withMaterial is null ? "not available -> read all" : $"{withMaterial.Count} Deal(s) hold a PO material",
+            materialMs, toRead.Count, clock.ElapsedMilliseconds - coqlMs - materialMs, clock.ElapsedMilliseconds);
+        return rows.Select(row =>
+        {
+            var id = Str(row, "id")!;
+            return fulls.TryGetValue(id, out var full) && full is not null
+                ? FromRecords(id, row, full)
+                : FromHeader(id, row);
+        })
+        // Deals holding the PO's materials first.
+        .OrderByDescending(d => d.ItemsLoaded)
+        .ToList();
     }
+
+    // The header fields of the Deals the COQL query finds. Forecast Status / Deal Number / Created Time /
+    // Account are asked for too (so a Deal not read in full still shows them); if Zoho refuses one of
+    // those fields the query runs again with the basic set only.
+    private bool _extendedSelectFailed;
+    private async Task<List<JsonObject>> QueryDealHeadersAsync(string module, string where, string orderBy)
+    {
+        const string basic = "id, Deal_Name, Stage, Account_Code, Customer_Ref, Delivery_Date, Closing_Date";
+        if (!_extendedSelectFailed)
+        {
+            try
+            {
+                return await zoho.QueryCoqlAsync(module,
+                    basic + ", Forecast_Status, Deal_Number, Created_Time, Account_Name", where, orderBy);
+            }
+            catch
+            {
+                _extendedSelectFailed = true; // a field the org's COQL won't select -- keep to the basic set
+            }
+        }
+        return await zoho.QueryCoqlAsync(module, basic, where, orderBy);
+    }
+
+    // Ids of the Deals (among dealIds) whose Deal Items hold any of the material codes -- one COQL query
+    // per 50 Deals on the Deal Items subform. Null when the subform can't be queried (older API / no
+    // permission): the caller then reads every Deal in full, as before.
+    private string? _itemsModule;
+    private bool _subformQueryFailed;
+    private async Task<HashSet<string>?> DealIdsWithMaterialsAsync(string module, List<string> dealIds, List<string> codes)
+    {
+        if (_subformQueryFailed) return null;
+        try
+        {
+            _itemsModule ??= await ResolveItemsModuleAsync(module);
+            if (string.IsNullOrEmpty(_itemsModule)) { _subformQueryFailed = true; return null; }
+            var codeList = string.Join(", ", codes.Take(50).Select(c => $"'{Escape(c)}'"));
+            var hits = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var chunk in dealIds.Chunk(50))
+            {
+                var ids = string.Join(", ", chunk.Select(id => $"'{Escape(id)}'"));
+                var rows = await zoho.QueryCoqlAsync(_itemsModule, "id, Parent_Id, Material_Code",
+                    $"(Parent_Id in ({ids}) and Material_Code in ({codeList}))", "id");
+                foreach (var r in rows)
+                    if ((LookupId(r["Parent_Id"]) ?? Str(r, "Parent_Id")) is { Length: > 0 } parent) hits.Add(parent);
+            }
+            // More than 50 codes: the remainder is checked from the full records, so read every Deal.
+            return codes.Count > 50 ? null : hits;
+        }
+        catch (Exception e)
+        {
+            _subformQueryFailed = true; // remembered for this app run -- never slows the search down twice
+            log.LogWarning("[ZOHO] Deal Items subform query not usable ({Message}) -- Deals are read in full", e.Message);
+            return null;
+        }
+    }
+
+    // The Deal Items subform's own module api_name (settings/fields: the subform field's associated module,
+    // else the field's api_name, which Zoho uses for the subform module too).
+    private async Task<string?> ResolveItemsModuleAsync(string module)
+    {
+        var fieldApi = await ZohoRecordFields.ResolveSubformFieldAsync(zoho, module, "Deal Item");
+        if (string.IsNullOrEmpty(fieldApi)) return null;
+        foreach (var node in await zoho.GetFieldsAsync(module))
+        {
+            if (node is not JsonObject f || Str(f, "api_name") != fieldApi) continue;
+            if (f["associated_module"] is JsonObject am && (Str(am, "api_name") ?? Str(am, "module")) is { Length: > 0 } a) return a;
+            if (f["subform"] is JsonObject sf && sf["module"] is JsonObject sm && Str(sm, "api_name") is { Length: > 0 } b) return b;
+        }
+        return fieldApi;
+    }
+
+    // Full records (with the Deal Items subform, which COQL can't return), read MaxParallelReads at a time.
+    private const int MaxParallelReads = 6;
+    private async Task<Dictionary<string, JsonObject?>> ReadFullAsync(string module, List<string> ids)
+    {
+        var result = new System.Collections.Concurrent.ConcurrentDictionary<string, JsonObject?>(StringComparer.Ordinal);
+        if (ids.Count == 0) return new(result);
+        // The first read alone, so the access token is fetched once before the parallel reads.
+        result[ids[0]] = await zoho.GetByIdAsync(module, ids[0]);
+        await Parallel.ForEachAsync(ids.Skip(1), new ParallelOptions { MaxDegreeOfParallelism = MaxParallelReads },
+            async (id, _) => result[id] = await zoho.GetByIdAsync(module, id));
+        return new(result);
+    }
+
+    private static ZohoDeal FromRecords(string id, JsonObject row, JsonObject full) => new(
+        Id: id,
+        DealName: Str(row, "Deal_Name") ?? Str(full, "Deal_Name") ?? "",
+        Stage: Str(row, "Stage") ?? Str(full, "Stage") ?? "",
+        AccountId: LookupId(full["Account_Name"]),
+        AccountCode: Str(row, "Account_Code"),
+        CustomerRef: Str(row, "Customer_Ref"),
+        DeliveryDate: Str(row, "Delivery_Date"),
+        ClosingDate: Str(row, "Closing_Date"),
+        Items: ExtractDealItems(full),
+        ForecastStatus: PicklistStr(full, "Forecast_Status"),
+        CreatedTime: full["Created_Time"]?.ToString(),
+        DealNumber: Str(full, "Deal_Number"));
+
+    // A Deal not read in full (none of the PO's materials): header fields only, no items.
+    private static ZohoDeal FromHeader(string id, JsonObject row) => new(
+        Id: id,
+        DealName: Str(row, "Deal_Name") ?? "",
+        Stage: Str(row, "Stage") ?? "",
+        AccountId: LookupId(row["Account_Name"]),
+        AccountCode: Str(row, "Account_Code"),
+        CustomerRef: Str(row, "Customer_Ref"),
+        DeliveryDate: Str(row, "Delivery_Date"),
+        ClosingDate: Str(row, "Closing_Date"),
+        Items: [],
+        ForecastStatus: PicklistStr(row, "Forecast_Status"),
+        CreatedTime: row["Created_Time"]?.ToString(),
+        DealNumber: Str(row, "Deal_Number"),
+        ItemsLoaded: false);
 
     /// <summary>
     /// One Deal by its Zoho record id, with its Account link and Deal Items subform -- used by
@@ -302,10 +432,17 @@ public class ZohoDealClient(ZohoClient zoho)
 
     public static string BuildDealName(string accountName, IEnumerable<string?> materialCodes, DateTimeOffset? createdAt = null)
     {
-        var codes = materialCodes.ToList();
-        if (string.IsNullOrWhiteSpace(accountName) || codes.Count == 0)
+        var lines = materialCodes.ToList();
+        if (string.IsNullOrWhiteSpace(accountName) || lines.Count == 0)
             throw new InvalidOperationException("Account Name and at least one Material are required to name a Deal.");
-        var material = codes.Count > 1 ? "APPLICATION" : codes[0]?.Trim();
+        // Megachem, 19 Nov 2026: count DIFFERENT materials, not lines -- one material on several lines
+        // (e.g. several delivery dates) keeps its own code; only 2+ different materials become APPLICATION.
+        // A blank code on a multi-line Deal can't prove it is the same material, so that stays APPLICATION.
+        var codes = lines.Where(c => !string.IsNullOrWhiteSpace(c)).Select(c => c!.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var material = codes.Count > 1 || (lines.Count > 1 && lines.Any(string.IsNullOrWhiteSpace))
+            ? "APPLICATION"
+            : codes.FirstOrDefault();
         if (string.IsNullOrWhiteSpace(material))
             throw new InvalidOperationException("Material Code is required to name a single-material Deal.");
         // Thai local time, with the Gregorian calendar enforced by InvariantCulture below.
@@ -319,7 +456,8 @@ public class ZohoDealClient(ZohoClient zoho)
     /// (16 Nov 2026: most Deals are forecast, so CS picks Yes or No for every new Deal; it used to be
     /// always "No", the manual's instruction for a normal Deal, 5.6.3 step 6), Stage =
     /// NewDealStage, Closing_Date = Delivery_Date = the document's delivery date (both mandatory).
-    /// Deal_Name follows AccountName_MaterialCode_MMYY, or AccountName_APPLICATION_MMYY for multiple lines.
+    /// Deal_Name follows AccountName_MaterialCode_MMYY, or AccountName_APPLICATION_MMYY when the Deal has
+    /// two or more different materials (the same material on several lines still uses its code).
     /// The Deal Items subform's Quantity is "Number - 9" (whole numbers), so it is rounded here --
     /// the Quote and Sales Order still carry the document's exact quantity.
     /// </summary>
@@ -404,37 +542,20 @@ public class ZohoDealClient(ZohoClient zoho)
             where,
             "Deal_Name");
 
-        var result = new List<ZohoDeal>();
-        foreach (var row in rows
+        var picked = rows
             .OrderByDescending(r => string.Equals(Str(r, "Account_Code"), query, StringComparison.OrdinalIgnoreCase))
             .ThenByDescending(r => string.Equals(Str(r, "Deal_Name"), query, StringComparison.OrdinalIgnoreCase))
-            .Take(Math.Clamp(top, 1, 100)))
+            .Take(Math.Clamp(top, 1, 100))
+            .Where(r => !string.IsNullOrEmpty(Str(r, "id")))
+            .ToList();
+        // COQL cannot return subform data -- read each result in full (a few at a time) so a picked
+        // search result already carries its Deal Items.
+        var fulls = await ReadFullAsync(module, picked.Select(r => Str(r, "id")!).ToList());
+        return picked.Select(row =>
         {
-            var id = Str(row, "id");
-            if (string.IsNullOrEmpty(id)) continue;
-
-            // COQL cannot return subform data (see FindOpenDealsByAccountCodeAsync) -- fetch the
-            // full record so a picked search result already carries its Deal Items.
-            var full = await zoho.GetByIdAsync(module, id);
-            var items = full is null ? [] : ExtractDealItems(full);
-
-            result.Add(new ZohoDeal(
-                Id: id,
-                DealName: Str(row, "Deal_Name") ?? "",
-                Stage: Str(row, "Stage") ?? "",
-                AccountId: full is null ? null : LookupId(full["Account_Name"]),
-                AccountCode: Str(row, "Account_Code"),
-                CustomerRef: Str(row, "Customer_Ref"),
-                DeliveryDate: Str(row, "Delivery_Date"),
-                ClosingDate: Str(row, "Closing_Date"),
-                Items: items,
-                // Read from the full record (not selected in COQL, so an unexpected field name can
-                // never break the Deal lookup itself).
-                ForecastStatus: full is null ? null : PicklistStr(full, "Forecast_Status"),
-                CreatedTime: full?["Created_Time"]?.ToString(),
-                DealNumber: full is null ? null : Str(full, "Deal_Number")));
-        }
-        return result;
+            var id = Str(row, "id")!;
+            return fulls.TryGetValue(id, out var full) && full is not null ? FromRecords(id, row, full) : FromHeader(id, row);
+        }).ToList();
     }
 
     // The Deal Items subform's own container field is never given an "API Name" in the manual's

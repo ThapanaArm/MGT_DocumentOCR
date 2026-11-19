@@ -1,4 +1,4 @@
-﻿using MgtOcr.Core;
+﻿﻿using MgtOcr.Core;
 using MgtOcr.Data;
 using MgtOcr.Ocr;
 
@@ -27,6 +27,12 @@ public class DocumentIngestService(OcrEngine ocr, DocumentRepository repo, MgtOc
         var pd = await ocr.ExtractAsync(storedPath, mod, uploadEngine, password, salesOrg, hints);
         if (ReadHintService.NoteFor(hints) is { Length: > 0 } hintNote && pd.Provider == "gemini")
             pd.ConfidenceNote = pd.ConfidenceNote.Length > 0 ? $"{pd.ConfidenceNote} / {hintNote}" : hintNote;
+        // Same-place fill from this customer's rule boxes (Sold-to -> Ship-to etc.), no AI; also when the
+        // rules could not be sent (scanned PO: the customer is known only after the read).
+        if (pd.Provider == "gemini"
+            && ReadHintService.NoteForFilled(await readHints.ApplyRuleBoxesAsync(mod, salesOrg, pd.Header, pd.PositionsJson, hints))
+               is { Length: > 0 } boxNote)
+            pd.ConfidenceNote = pd.ConfidenceNote.Length > 0 ? $"{pd.ConfidenceNote} / {boxNote}" : boxNote;
         var durationMs = (int)(DateTime.UtcNow - t0).TotalMilliseconds;
         // Expense is always an Incoming Invoice (FB60, no PO). Its bundles carry a FORM SHIPPING
         // EXPENSE sheet whose "PO. NO." (the goods PO the costs relate to) would otherwise be read
@@ -62,7 +68,7 @@ public class DocumentIngestService(OcrEngine ocr, DocumentRepository repo, MgtOc
                 pd.Lines.Select(l => (string?)l.DueDate), fileName) ?? fileName
             : fileName;
         var docId = await repo.CreateDocumentAsync(mod, ext, docFileName, storedPath, size, user, apDocCategory, durationMs, salesOrg,
-            jobStartedAt: jobStart);
+            jobStartedAt: jobStart, noMemoryFields: hints?.FieldsSent);
         if (pd.Provider == "gemini") await readHints.SaveDocAsync(docId, mod, hints, pd.PositionsJson);
         return (docId, mod, pd.Note);
     }

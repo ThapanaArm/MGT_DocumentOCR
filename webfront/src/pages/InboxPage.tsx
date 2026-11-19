@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type MouseEvent } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useAppState } from '../state/AppState';
 import { useMeta } from '../state/MetaContext';
@@ -27,6 +27,27 @@ function docFormat(mod?: string | null): { label: string; cls: string } {
   if (mod === 'PODP') return { label: 'PO Down Payment', cls: 'b-idle' };
   if (mod === 'SO') return { label: 'Sales', cls: 'b-idle' };
   return { label: '—', cls: '' };
+}
+
+// Posted Doc No. column (Megachem, 19 Nov 2026): a document sent as several Sales Orders lists many numbers.
+// Show the first 2, then "+N more" to see the rest in place (and "Show less" to fold back). The whole list
+// is also in the tooltip. Clicks on the toggle don't open the document.
+const POSTED_SHOWN = 2;
+function PostedDocNos({ value }: { value?: string | null }) {
+  const [open, setOpen] = useState(false);
+  const nos = String(value || '').split(',').map((x) => x.trim()).filter(Boolean);
+  if (nos.length <= POSTED_SHOWN) return <>{nos.join(', ')}</>;
+  const toggle = (e: MouseEvent) => { e.stopPropagation(); setOpen((v) => !v); };
+  return (
+    <span title={nos.join('\n')}>
+      {(open ? nos : nos.slice(0, POSTED_SHOWN)).join(', ')}
+      {' '}
+      <button type="button" className="link-btn" onClick={toggle} aria-expanded={open}
+        style={{ background: 'none', border: 0, padding: 0, color: 'var(--brand)', fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap' }}>
+        {open ? 'Show less' : `… +${nos.length - POSTED_SHOWN} more`}
+      </button>
+    </span>
+  );
 }
 
 export default function InboxPage() {
@@ -327,7 +348,7 @@ export default function InboxPage() {
                           {OCR_PROVIDER_SHORT[r.OcrProvider ?? ''] || r.OcrProvider || '—'}
                         </span>
                       </td>
-                      <td className="reg-col-sap">{r.SapDocNo || ''}</td>
+                      <td className="reg-col-sap"><PostedDocNos value={r.SapDocNo} /></td>
                       <td className="hint reg-col-created">{dt(r.CreatedAt)}</td>
                       <td
                         className="reg-col-by"

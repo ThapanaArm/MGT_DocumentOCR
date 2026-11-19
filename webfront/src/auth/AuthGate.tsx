@@ -152,6 +152,11 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
   return (
     <div className="login-wrap">
       <div className="login-left">
+        <div className="login-blob b1" />
+        <div className="login-blob b2" />
+        <div className="login-dots d1" />
+        <div className="login-dots d2" />
+
         <div className="login-brand">
           <img src="/assets/logo.png" alt="MGT" className="login-logo" />
           <span className="login-sep" />
@@ -159,12 +164,7 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
         </div>
 
         <div className="login-head">
-          <h1>Read POs and invoices.<br /><span>Send them to SAP and Zoho.</span></h1>
-          <ol className="login-steps">
-            <li>Upload a PDF, image or Excel file.</li>
-            <li>Check the fields OCR read and fix what is wrong.</li>
-            <li>Create the Sales Order or Supplier Invoice.</li>
-          </ol>
+          <h1>Automate your<br /><span>document workflow</span></h1>
         </div>
 
         <LoginIllustration />
@@ -180,8 +180,8 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
             <p style={{ textAlign: 'center', color: '#5f6e64', fontSize: 14, margin: '8px 0' }}>Checking sign-in…</p>
           ) : (
             <>
-              <h2 className="login-title">Sign in</h2>
-              <p className="login-subtitle">Use your MGT account.</p>
+              <h2 className="login-title">Welcome</h2>
+              <p className="login-subtitle">Sign in to MGT Document OCR</p>
 
               <form onSubmit={submit}>
                 <label className="login-label" htmlFor="lg-user">Username or Email</label>
@@ -231,7 +231,7 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
                 {formError && <div className="login-error">{formError}</div>}
 
                 <button type="submit" className="login-signin" disabled={busy}>
-                  {busy ? 'Signing in…' : (<>Sign in <i className="fa-solid fa-arrow-right" style={{ fontSize: 14 }} /></>)}
+                  {busy ? 'Signing in…' : (<>Sign in <i className="fa-solid fa-arrow-right" style={{ fontSize: 13 }} /></>)}
                 </button>
               </form>
 
@@ -244,7 +244,7 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
                       either company. Only when the name says nothing does it ask, and then the
                       per-company buttons appear in place of this one. */}
                   {pickCompany && COMPANIES.length > 1 ? (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                       <div className="login-help" style={{ margin: 0 }}>Which company is your account with?</div>
                       {COMPANIES.map((c) => (
                         <button key={c.id} type="button" className="login-ms" onClick={() => void signIn(c.id, username)}>

@@ -10,7 +10,9 @@ export interface ReadRule {
   pageNo: number | null;
   box: Box | null;
   note: string | null;
-  source: 'AUTO' | 'CS';
+  /** 'AUTO' = learned from posted POs; anything else = set by a person, stored as their role
+   *  (Admin / Leader / Manager / user). Older rows may say 'CS'. */
+  source: string;
   status: 'ACTIVE' | 'DISABLED';
   confirmCount: number;
   useCount: number;
@@ -32,16 +34,24 @@ export interface ReadHintsInfo {
 }
 
 export const READ_FIELD_LABELS: Record<string, string> = {
+  docType: 'Document Type',
   poNo: 'PO No.',
   poDate: 'PO Date',
   quoteRef: 'Quote No.',
-  deliveryDate: 'Delivery Date',
   customerName: 'Customer Name',
   customerTaxId: 'Customer Tax ID',
+  customerAddress: 'Sold-to Address',
+  shipToCode: 'Ship-to Code',
   shipToName: 'Ship-to Name',
   shipToAddress: 'Ship-to Address',
+  deliveryDate: 'Delivery Date',
+  currency: 'Currency',
   paymentTerms: 'Payment Terms',
+  incoterms: 'Incoterms',
   remark: 'Remark',
+  subTotal: 'Amount before Tax',
+  vatAmount: 'VAT',
+  totalAmount: 'Grand Total',
   linesTable: 'Item table',
 };
 

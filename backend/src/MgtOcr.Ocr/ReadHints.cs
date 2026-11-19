@@ -22,10 +22,14 @@ public sealed record ReadHintRule(string Field, int? PageNo, int[]? Box, string?
 
 public static class ReadHints
 {
-    /// <summary>Fields a rule can point at, in the order the UI lists them. "linesTable" = the item table.</summary>
+    /// <summary>Fields a rule can point at, in the order the UI lists them (same order as the SO header on
+    /// the document page). "linesTable" = the item table. Every SO header field (Megachem, 17 Nov 2026:
+    /// "it should have every field" -- incl. the Sold-to address, so a PO that prints several addresses
+    /// can say which one is Sold-to and which one is Ship-to).</summary>
     public static readonly string[] Fields =
-        ["poNo", "poDate", "quoteRef", "deliveryDate", "customerName", "customerTaxId",
-         "shipToName", "shipToAddress", "paymentTerms", "remark", "linesTable"];
+        ["docType", "poNo", "poDate", "quoteRef", "customerName", "customerTaxId", "customerAddress",
+         "shipToCode", "shipToName", "shipToAddress", "deliveryDate", "currency", "paymentTerms", "incoterms",
+         "remark", "subTotal", "vatAmount", "totalAmount", "linesTable"];
 
     /// <summary>The text appended to the read prompt. Always asks for "_positions"; adds the rules when there are any.</summary>
     public static string BuildPrompt(IReadOnlyList<ReadHintRule> rules, string? customerLabel)
@@ -39,6 +43,16 @@ public static class ReadHints
 
         if (rules.Count > 0)
         {
+            // Precedence (Megachem, 17 Nov 2026, Toyo Ink): the base SO prompt says shipToAddress only when a
+            // separate "Ship To / Deliver To" heading exists and that an invoice address is customerAddress.
+            // A CS rule that points shipToAddress at a box printed "Invoice Address" lost to those general
+            // rules -- Gemini put the address in customerAddress and left shipToAddress empty (then the
+            // partner memory filled the HEAD OFFICE address). The customer's rules must win.
+            sb.Append("\n\n=== กฎการอ่านเฉพาะลูกค้ารายนี้ — ลำดับความสำคัญสูงสุด ===\n")
+              .Append("กฎชุดนี้มีผลเหนือคำอธิบายช่องและกติกาทั่วไปทั้งหมดด้านบน ถ้าขัดกันให้ทำตามกฎชุดนี้ ")
+              .Append("รวมถึงกติกาที่ว่า shipToAddress ใส่ได้เฉพาะเมื่อมีหัวข้อ Ship To/Deliver To และกติกาเรื่องที่อยู่สำหรับออกใบกำกับภาษี: ")
+              .Append("ถ้ามีกฎของช่อง shipToAddress ให้อ่านที่อยู่ในกรอบนั้นใส่ shipToAddress เสมอ แม้หัวข้อบนเอกสารจะเขียนว่า Invoice Address หรืออย่างอื่น ")
+              .Append("และแม้จะซ้ำกับที่อยู่อื่น ส่วน customerAddress ให้ใช้ที่อยู่อื่นที่ไม่ใช่กรอบนั้น (ถ้ามีกฎของ customerAddress ให้ใช้กรอบของกฎนั้น)");
             sb.Append("\n\nกฎการอ่านของลูกค้ารายนี้")
               .Append(string.IsNullOrWhiteSpace(customerLabel) ? "" : $" ({customerLabel})")
               .Append(" จากเอกสารของลูกค้ารายเดียวกันที่ตรวจแล้ว และที่พนักงานกำหนดไว้ ")
@@ -50,11 +64,13 @@ public static class ReadHints
                     sb.Append($" หน้า {p} กรอบ [{b[0]},{b[1]},{b[2]},{b[3]}]");
                 if (!string.IsNullOrWhiteSpace(r.Note))
                     sb.Append(" หมายเหตุจากพนักงาน: ").Append(r.Note!.Trim());
-                if (r.Source == "CS") sb.Append(" (พนักงานกำหนด — ให้ถือตามนี้ก่อน)");
+                if (!string.Equals(r.Source, "AUTO", StringComparison.OrdinalIgnoreCase)) sb.Append(" (พนักงานกำหนด — ให้ถือตามนี้ก่อน)");
                 sb.Append('\n');
             }
             sb.Append("วิธีใช้: ให้มองหาค่าของแต่ละช่องที่กรอบนั้นก่อน ตำแหน่งจริงอาจเลื่อนไปเล็กน้อย ")
               .Append("ถ้ามีหมายเหตุให้ทำตามหมายเหตุ ค่าต้องอ่านจากภาพของเอกสารนี้เสมอ ห้ามเดาหรือคัดลอกค่าจากที่อื่น ")
+              .Append("ชื่อช่องในกฎสำคัญกว่าหัวข้อที่พิมพ์บนเอกสาร เช่น กรอบที่พิมพ์ว่า Invoice Address แต่กฎบอกว่าเป็น shipToAddress ให้ใส่ค่านั้นใน shipToAddress ")
+              .Append("และค่าในกรอบของช่องหนึ่งห้ามนำไปใส่ช่องอื่น ยกเว้นกฎสองช่องชี้กรอบเดียวกัน (เช่น customerAddress กับ shipToAddress) ให้ใส่ค่าเดียวกันทั้งสองช่อง ไม่ต้องเว้นว่างเพราะซ้ำ ")
               .Append("ถ้าในกรอบนั้นไม่มีค่าที่ตรงกับช่อง ให้หาจากส่วนอื่นของเอกสารตามปกติ ")
               .Append("ถ้าเอกสารนี้ไม่ใช่ของลูกค้ารายนี้ ให้ข้ามกฎชุดนี้ทั้งหมด");
         }
@@ -84,6 +100,21 @@ public static class ReadHints
             return clean.Count == 0 ? null : JsonSerializer.Serialize(clean);
         }
         catch (JsonException) { return null; }
+    }
+
+    /// <summary>Fields that may share one printed value: when a rule's box sits on the same place as
+    /// another field of the same kind, that field's value is copied (address -> address, name -> name).</summary>
+    public static readonly string[][] SameKind =
+        [["customerAddress", "shipToAddress"], ["customerName", "shipToName"]];
+
+    /// <summary>How much two boxes overlap: intersection / the smaller box (0..1). 1 = one sits inside the other.</summary>
+    public static double Overlap(int[] a, int[] b)
+    {
+        var h = Math.Min(a[2], b[2]) - Math.Max(a[0], b[0]);
+        var w = Math.Min(a[3], b[3]) - Math.Max(a[1], b[1]);
+        if (h <= 0 || w <= 0) return 0;
+        var small = Math.Min((a[2] - a[0]) * (a[3] - a[1]), (b[2] - b[0]) * (b[3] - b[1]));
+        return small <= 0 ? 0 : (double)h * w / small;
     }
 
     /// <summary>[ymin,xmin,ymax,xmax] inside 0-1000 with a positive size.</summary>
