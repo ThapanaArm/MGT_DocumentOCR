@@ -400,16 +400,10 @@ public static partial class ChatFix
             // silently dropped and the original values kept. Same fix as OCR's maxOutputTokens.
             generationConfig = new { responseMimeType = "application/json", maxOutputTokens = 8192 },
         };
-        var url = $"https://generativelanguage.googleapis.com/v1beta/models/{config.GeminiModel}:generateContent?key={config.GeminiApiKey}";
-        using var req = new HttpRequestMessage(HttpMethod.Post, url)
-        {
-            Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json"),
-        };
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(90));
-        using var resp = await Http.SendAsync(req, cts.Token);
-        var respText = await resp.Content.ReadAsStringAsync(cts.Token);
-        if (!resp.IsSuccessStatusCode)
-            return (null, $"Gemini HTTP {(int)resp.StatusCode} (model={config.GeminiModel}): {Trunc(respText, 400)}");
+        var (status, respText) = await GeminiRequest.SendAsync(Http, config, JsonSerializer.Serialize(body), cts.Token, "chat.fix");
+        if (status is < 200 or >= 300)
+            return (null, $"Gemini HTTP {status} (model={config.GeminiModel})");
         using var doc = JsonDocument.Parse(respText);
         var sb = new StringBuilder();
         if (doc.RootElement.TryGetProperty("candidates", out var cands) && cands.ValueKind == JsonValueKind.Array)

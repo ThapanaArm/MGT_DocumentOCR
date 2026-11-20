@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using Dapper;
 using MgtOcr.Core;
 using MgtOcr.Core.Auth;
@@ -209,7 +209,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         // then route by PO number (poRef present -> Supplier Invoice / MIRO, still module "AP";
         // absent -> Incoming Invoice / FB60, module "II"). Both are separate SAP apps.
         var mod = ValidateModule(module);
-        var stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+        var stamp = Guid.NewGuid().ToString("N");
         var fname = ExtConversion.SafeName(file.FileName);
         var stored = Path.Combine(config.UploadDir, $"{stamp}_{fname}");
         await using (var fs = System.IO.File.Create(stored))
@@ -265,7 +265,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         var importCompany = mod == "SO" ? DeploymentCompany.SalesOrg(config) : await ImportCompanyAsync(company);
         foreach (var file in files)
         {
-            var stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
+            var stamp = Guid.NewGuid().ToString("N");
             var fname = ExtConversion.SafeName(file.FileName);
             var stored = Path.Combine(config.UploadDir, $"{stamp}_{fname}");
             await using (var fs = System.IO.File.Create(stored))
@@ -834,7 +834,10 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     }
 
     [HttpPost("api/documents/{docId:int}/reocr")]
-    public async Task<IActionResult> ReocrDocument(int docId, [FromBody] Dictionary<string, object?>? rawBody)
+    public Task<IActionResult> ReocrDocument(int docId, [FromBody] Dictionary<string, object?>? rawBody) =>
+        WithDocLockAsync("OCR", docId, "This document is already being re-read", () => ReocrDocumentCoreAsync(docId, rawBody));
+
+    private async Task<IActionResult> ReocrDocumentCoreAsync(int docId, Dictionary<string, object?>? rawBody)
     {
         var body = JsonBodyHelpers.Unwrap(rawBody ?? new());
         var docT = DocumentTables.ForId(docId).Doc;
@@ -872,6 +875,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         var reocrJobNumber = await jobLog.NextJobNumberAsync();
         var reocrJob = await jobLog.StartAsync(reocrJobNumber, "OCR", docId: docId, module: module,
             provider: reocrEngine, fileName: fileNameOnDisk, performedBy: await ActorAsync());
+        using var usage = GeminiRequest.Begin(reocrJob?.JobId, docId, module);
         ParsedDocument pd;
         try
         {
@@ -884,8 +888,9 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             throw;
         }
         var durationMs = (int)(DateTime.UtcNow - t0).TotalMilliseconds;
-        await jobLog.FinishAsync(reocrJob, "SUCCESS", tokensIn: pd.TokensIn, tokensOut: pd.TokensOut,
-            cost: pd.Cost, costCurrency: pd.CostCurrency, provider: pd.Provider);
+        await jobLog.FinishAsync(reocrJob, pd.Provider == "failed" ? "FAILED" : "SUCCESS", tokensIn: pd.TokensIn,
+            tokensOut: pd.TokensOut, cost: pd.Cost, costCurrency: pd.CostCurrency, provider: pd.Provider,
+            model: usage.Requests.FirstOrDefault()?.Model, message: pd.Note, pageCount: pd.Pages);
         var filled = await repo.ApplyVendorMemoryAsync(module, pd.Header);
         if (filled.Count > 0)
         {
@@ -1134,6 +1139,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             // On the last round, turn lookups off so the AI must give a final edit/answer (using
             // whatever it has already found) instead of asking to search yet again.
             var enableThisRound = lookupsEnabled && iter < maxRounds - 1;
+            using var chatUsage = GeminiRequest.Begin(docId: docId, module: module);
             (result, chatFixErr) = await ChatFix.ChatFixDocumentAsync(module, header, lines, history, promptMessage,
                 imageB64, imageMediaType, provider, config, materialOptions, shipToOptions, accountOptions,
                 enableThisRound, lookupLog.ToString(), actionsEnabled,
@@ -1317,11 +1323,17 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         var path = await LocalFileOf(docId);
         var jpeg = MgtOcr.Ocr.PdfRasterizer.RenderRegionToJpeg(path, page - 1, box)
             ?? throw new HttpApiException(400, "The frame is outside the page or too small");
-        const string module = "AP";
+        var document = await repo.GetDocumentAsync(docId);
+        var module = document.GetStr("module");
         var job = await jobLog.StartAsync(await jobLog.NextJobNumberAsync(), "OCR_REGION", docId: docId, module: module,
-            provider: "gemini", fileName: field, performedBy: await ActorAsync());
-        var (value, error, tin, tout) = await MgtOcr.Ocr.Providers.GeminiOcr.ReadRegionAsync(jpeg, field, config);
-        await jobLog.FinishAsync(job, error == null ? "SUCCESS" : "FAILED", message: error, tokensIn: tin, tokensOut: tout, provider: "gemini");
+            provider: "gemini", fileName: document.GetStr("fileName"), performedBy: await ActorAsync());
+        using var usage = GeminiRequest.Begin(job?.JobId, docId, module);
+        var (value, error, tin, tout) = await MgtOcr.Ocr.Providers.GeminiOcr.ReadRegionAsync(jpeg, field, config, page);
+        var request = usage.Requests.SingleOrDefault();
+        await jobLog.FinishAsync(job, error == null ? "SUCCESS" : "FAILED", message: error,
+            tokensIn: request?.Input ?? tin, tokensOut: request?.Output is int output ? output + (request.Thinking ?? 0) : tout,
+            provider: "gemini", model: request?.Model, cost: request?.Cost, costCurrency: request?.Cost != null ? "USD" : null,
+            pageCount: request?.PageNumbers.Length);
         if (error != null) throw new HttpApiException(502, "อ่านค่าจากกรอบไม่ได้: " + error);
         return Ok(new { value = value ?? "" });
     }

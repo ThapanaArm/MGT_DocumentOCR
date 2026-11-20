@@ -1,4 +1,4 @@
-﻿using System.Linq;
+using System.Linq;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -188,21 +188,21 @@ public static partial class GeminiOcr
             if (config.OcrRecordPositions && module is "AP" or "II") prompt += PositionInstructions();
             if (isPdf && imgs.Count > ChunkThreshold)
             {
-                var chunked = await ChunkedAsync(imgs, formCount, mime, prompt, module, config, dpi, salesOrg, apDocCategory);
-                if (chunked.Doc != null && module is "AP" or "II" && !isPoRead) await FixCustomsNumbersAsync(imgs, mime, chunked.Doc, config);
+                var chunked = await ChunkedAsync(imgs, pageNos, formCount, mime, prompt, module, config, dpi, salesOrg, apDocCategory);
+                if (chunked.Doc != null && module is "AP" or "II" && !isPoRead) await FixCustomsNumbersAsync(path, imgs, pageNos, mime, chunked.Doc, config);
                 return ShippingFormText.ApplyMultiForm(path, module, ApplyPositions(chunked, pageNos), isPoRead);
             }
 
             // A file short enough to read in one request still needs the customs rows pointed at the
             // customs vendor: the model fills vendorCode from the form when it can, but it leaves it
             // blank often enough that the tax would otherwise land on the shipping agent.
-            var oneShot = await OneShotAsync(imgs, mime, prompt, module, config, dpi, TimeoutFor(imgs.Count));
+            var oneShot = await OneShotAsync(imgs, mime, prompt, module, config, dpi, TimeoutFor(imgs.Count), pageNumbers: pageNos.ToArray());
             if (oneShot.Doc != null && module is "AP" or "II")
             {
                 AssignTaxRowVendors(oneShot.Doc);
                 VisionPrompt.FillLineVatFromSourceDocs(oneShot.Doc);
                 VisionPrompt.FillLineVatFromTaxRows(oneShot.Doc);
-                if (!isPoRead) await FixCustomsNumbersAsync(imgs, mime, oneShot.Doc, config);
+                if (!isPoRead) await FixCustomsNumbersAsync(path, imgs, pageNos, mime, oneShot.Doc, config);
             }
             return ShippingFormText.ApplyMultiForm(path, module, ApplyPositions(oneShot, pageNos), isPoRead);
         }
@@ -222,7 +222,7 @@ public static partial class GeminiOcr
     /// does, one small follow-up request asks for nothing but each receipt's pair of numbers and
     /// the long ones are swapped for the right ones, with the receipt's date. Any failure leaves
     /// the read as it was (ShippingFormText.CheckCustoms then marks it Needs Review).</summary>
-    private static async Task FixCustomsNumbersAsync(List<byte[]> imgs, string mime, ParsedDocument doc, AppConfig config)
+    private static async Task FixCustomsNumbersAsync(string path, List<byte[]> imgs, List<int> pageNos, string mime, ParsedDocument doc, AppConfig config)
     {
         var sourceDocs = doc.Header.TryGetValue("sourceDocs", out var sv) && sv is List<object?> sl
             ? sl.OfType<Dictionary<string, object?>>().ToList() : [];
@@ -237,44 +237,73 @@ public static partial class GeminiOcr
                      "แล้วตอบเฉพาะเลขสองตัวของแต่ละใบ: controlNo = เลขตัวเลขยาวที่มุมซ้ายบนของใบ (เช่น 69111750319500000142) " +
                      "และ paymentNo = ข้อความหลังคำว่า \"เลขที่ชำระอากร/วันเดือนปี\" ทางขวาของบรรทัดเลขที่ใบขนสินค้า ตามที่พิมพ์ทั้งหมดรวมวันที่ (เช่น 0321-090280/17-11-69) " +
                      "ตอบเป็น JSON เท่านั้น: {\"receipts\": [{\"controlNo\": \"...\", \"paymentNo\": \"...\"}]}";
-        var parts = new List<object> { new { text = prompt } };
-        foreach (var img in imgs) parts.Add(new { inline_data = new { mime_type = mime, data = Convert.ToBase64String(img) } });
-        var body = new
+        var map = new Dictionary<string, (string No, string Date)>();
+
+        async Task<bool> ReadReceiptsAsync(int[] indexes, string operation, int attempt)
         {
-            contents = new[] { new { role = "user", parts = (object)parts } },
-            generationConfig = new { temperature = 0, maxOutputTokens = 4096, responseMimeType = "application/json" },
-        };
-        try
-        {
-            var url = $"https://generativelanguage.googleapis.com/v1beta/models/{config.GeminiModel}:generateContent?key={config.GeminiApiKey}";
-            using var req = new HttpRequestMessage(HttpMethod.Post, url)
+            var parts = new List<object> { new { text = prompt } };
+            foreach (var index in indexes)
+                parts.Add(new { inline_data = new { mime_type = mime, data = Convert.ToBase64String(imgs[index]) } });
+            var body = new
             {
-                Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json"),
+                contents = new[] { new { role = "user", parts } },
+                generationConfig = new { temperature = 0, maxOutputTokens = 4096, responseMimeType = "application/json" },
             };
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(150));
-            using var resp = await Http.SendAsync(req, cts.Token);
-            var respText = await resp.Content.ReadAsStringAsync(cts.Token);
-            if (!resp.IsSuccessStatusCode) { Log($"Customs numbers: Gemini HTTP {(int)resp.StatusCode}"); return; }
-            var (tin, tout) = Usage(respText);
-            if (tin is { } a) doc.TokensIn = (doc.TokensIn ?? 0) + a;
-            if (tout is { } o) doc.TokensOut = (doc.TokensOut ?? 0) + o;
-            var raw = ExtractText(respText).Trim();
+            var (status, response) = await GeminiRequest.SendAsync(Http, config, JsonSerializer.Serialize(body), cts.Token,
+                operation, indexes.Select(i => pageNos[i]).ToArray(), attempt);
+            if (status is < 200 or >= 300)
+            {
+                Log($"Customs numbers: Gemini HTTP {status}");
+                return false;
+            }
+
+            var raw = ExtractText(response).Trim();
             var st = raw.IndexOf('{'); var en = raw.LastIndexOf('}');
-            if (st < 0 || en <= st) return;
+            if (st < 0 || en <= st) return true;
             using var j = JsonDocument.Parse(raw[st..(en + 1)]);
-            if (!j.RootElement.TryGetProperty("receipts", out var arr) || arr.ValueKind != JsonValueKind.Array) return;
-            var map = new Dictionary<string, (string No, string Date)>();
+            if (!j.RootElement.TryGetProperty("receipts", out var arr) || arr.ValueKind != JsonValueKind.Array) return true;
             foreach (var r in arr.EnumerateArray())
             {
                 var ctl = Regex.Replace(r.TryGetProperty("controlNo", out var c) ? c.ToString() : "", @"\s+", "");
                 var pay = Regex.Replace(r.TryGetProperty("paymentNo", out var p) ? p.ToString() : "", @"\s+", "");
                 var m = Regex.Match(pay, @"^(\d{4}-\d{6})(?:/(\d{1,2})-(\d{1,2})-(\d{2}))?$");
-                if (ctl.Length == 0 || !m.Success) continue;
+                if (!longNos.Contains(ctl) || !m.Success) continue;
                 var date = "";
                 if (m.Groups[2].Success && int.TryParse(m.Groups[2].Value, out var dd) && int.TryParse(m.Groups[3].Value, out var mm) && int.TryParse(m.Groups[4].Value, out var yy))
                     try { date = new DateTime(2500 + yy - 543, mm, dd).ToString("yyyy-MM-dd"); } catch { }
                 map[ctl] = (pay, date);
             }
+            return true;
+        }
+
+        try
+        {
+            var selected = Array.Empty<int>();
+            if (Path.GetExtension(path).Equals(".pdf", StringComparison.OrdinalIgnoreCase))
+            {
+                var matches = longNos.Select(no => PdfExtraction.FindPageIndexes(path, new Regex(
+                        @"(?<![0-9])" + string.Join(@"\s*", no.Select(c => c.ToString())) + @"(?![0-9])"))
+                    .Select(index => pageNos.IndexOf(index + 1)).Where(index => index >= 0).ToArray()).ToArray();
+                if (matches.All(pages => pages.Length > 0))
+                    selected = matches.SelectMany(pages => pages).Distinct().Order().ToArray();
+            }
+
+            var narrowed = selected.Length > 0 && selected.Length < imgs.Count;
+            var allPages = Enumerable.Range(0, imgs.Count).ToArray();
+            if (narrowed)
+            {
+                var received = false;
+                try { received = await ReadReceiptsAsync(selected, "ocr.customs.pages", 1); }
+                catch (JsonException) { received = true; }
+                if (received && longNos.Any(no => !map.ContainsKey(no)))
+                    await ReadReceiptsAsync(allPages, "ocr.customs.fallback_unresolved", 2);
+            }
+            else
+            {
+                await ReadReceiptsAsync(allPages, "ocr.customs.full", 1);
+            }
+
             var fixedNos = 0;
             foreach (var l in doc.Lines)
                 if (map.TryGetValue((l.TaxDocNo ?? "").Trim(), out var hit))
@@ -299,7 +328,7 @@ public static partial class GeminiOcr
     /// <summary>Reads ONE value from a cut-out of the page (a frame the person moved on "View
     /// document"). Small request: one picture of a few centimetres. Returns the value or an error.</summary>
     public static async Task<(string? Value, string? Error, int? TokensIn, int? TokensOut)> ReadRegionAsync(
-        byte[] jpeg, string field, AppConfig config)
+        byte[] jpeg, string field, AppConfig config, int? pageNumber = null)
     {
         if (string.IsNullOrEmpty(config.GeminiApiKey)) return (null, "GeminiApiKey is empty in config", null, null);
         var kind = field switch
@@ -318,19 +347,18 @@ public static partial class GeminiOcr
                 new { text = prompt },
                 new { inline_data = new { mime_type = "image/jpeg", data = Convert.ToBase64String(jpeg) } },
             } } },
-            generationConfig = new { temperature = 0, maxOutputTokens = 2048, responseMimeType = "application/json" },
+            generationConfig = config.GeminiReduceRegionThinking && config.GeminiModel == "gemini-2.5-flash"
+                && field is "invoiceDate" or "invoiceNo" or "vendorTaxId"
+                ? (object)new { temperature = 0, maxOutputTokens = 2048, responseMimeType = "application/json",
+                    thinkingConfig = new { thinkingBudget = 0 } }
+                : new { temperature = 0, maxOutputTokens = 2048, responseMimeType = "application/json" },
         };
         try
         {
-            var url = $"https://generativelanguage.googleapis.com/v1beta/models/{config.GeminiModel}:generateContent?key={config.GeminiApiKey}";
-            using var req = new HttpRequestMessage(HttpMethod.Post, url)
-            {
-                Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json"),
-            };
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
-            using var resp = await Http.SendAsync(req, cts.Token);
-            var respText = await resp.Content.ReadAsStringAsync(cts.Token);
-            if (!resp.IsSuccessStatusCode) return (null, $"Gemini HTTP {(int)resp.StatusCode}: {Trunc(respText, 300)}", null, null);
+            var (status, respText) = await GeminiRequest.SendAsync(Http, config, JsonSerializer.Serialize(body), cts.Token,
+                "ocr.region", pageNumber is int page ? [page] : []);
+            if (status is < 200 or >= 300) return (null, $"Gemini HTTP {status}", null, null);
             var (tin, tout) = Usage(respText);
             var raw = ExtractText(respText).Trim();
             var st = raw.IndexOf('{'); var en = raw.LastIndexOf('}');
@@ -425,7 +453,7 @@ public static partial class GeminiOcr
         if (string.IsNullOrWhiteSpace(text)) return (null, "No OCR text to send to Gemini");
         var prompt = VisionPrompt.Build(module, "text", salesOrg) + "\n\n--- ข้อความจาก OCR ---\n" +
                      (text.Length > 40000 ? text[..40000] : text) + "\n";
-        var res = await OneShotAsync([], "", prompt, module, config, 0, TimeSpan.FromSeconds(180), providerId, text);
+        var res = await OneShotAsync([], "", prompt, module, config, 0, TimeSpan.FromSeconds(180), providerId, text, operation: "ocr.text");
         if (res.Doc != null && module is "AP" or "II") AssignTaxRowVendors(res.Doc);
         return res;
     }
@@ -452,7 +480,7 @@ public static partial class GeminiOcr
 
     private static async Task<(ParsedDocument? Doc, string? Error)> OneShotAsync(
         List<byte[]> imgs, string mime, string prompt, string module, AppConfig config, int dpi, TimeSpan timeout,
-        string providerId = "gemini", string? rawTextForRecord = null)
+        string providerId = "gemini", string? rawTextForRecord = null, int[]? pageNumbers = null, string operation = "ocr.read")
     {
         try
         {
@@ -471,7 +499,6 @@ public static partial class GeminiOcr
                 // (Kanomwan, 0cd227c)
                 generationConfig = new { temperature = 0, maxOutputTokens = 16384, responseMimeType = "application/json" },
             };
-            var url = $"https://generativelanguage.googleapis.com/v1beta/models/{config.GeminiModel}:generateContent?key={config.GeminiApiKey}";
             var payload = JsonSerializer.Serialize(body);
 
             // Gemini's public endpoint frequently returns TRANSIENT errors — HTTP 503 (model
@@ -500,14 +527,9 @@ public static partial class GeminiOcr
             {
                 try
                 {
-                    using var req = new HttpRequestMessage(HttpMethod.Post, url)
-                    {
-                        Content = new StringContent(payload, Encoding.UTF8, "application/json"),
-                    };
                     using var cts = new CancellationTokenSource(timeout);
-                    using var resp = await Http.SendAsync(req, cts.Token);
-                    var respText = await resp.Content.ReadAsStringAsync(cts.Token);
-                    if (resp.IsSuccessStatusCode)
+                    var (status, respText) = await GeminiRequest.SendAsync(Http, config, payload, cts.Token, operation, pageNumbers, attempt);
+                    if (status is >= 200 and < 300)
                     {
                         var raw = ExtractText(respText);
                         var parsedDoc = VisionPrompt.ParseResponse(raw, module, providerId,
@@ -542,7 +564,6 @@ public static partial class GeminiOcr
                         Log(lastErr);
                         return (null, lastErr);
                     }
-                    var status = (int)resp.StatusCode;
                     var transient = status is 429 or 500 or 502 or 503 or 504;
                     lastErr = $"{engineName} HTTP {status} (model={model}"
                         + (transient ? $", attempt {attempt}/{maxAttempts}" : "")
@@ -598,7 +619,7 @@ public static partial class GeminiOcr
     /// one invoice's VAT, visibly, beats losing the document. Only the first request is fatal,
     /// since without it there is no document at all.</summary>
     private static async Task<(ParsedDocument? Doc, string? Error)> ChunkedAsync(
-        List<byte[]> imgs, int formCount, string mime, string mainPrompt,
+        List<byte[]> imgs, List<int> pageNos, int formCount, string mime, string mainPrompt,
         string module, AppConfig config, int dpi, string salesOrg = "", string apDocCategory = "")
     {
         // The form pages carry the cost table, but not the header: the vendor's tax id, invoice
@@ -621,7 +642,7 @@ public static partial class GeminiOcr
         Log($"Splitting a {imgs.Count}-page read into 1 + {(isPo ? 0 : (rest.Count + ChunkSize - 1) / ChunkSize)} request(s) "
             + $"({leadCount} {leadName} page(s) then {groupNote})");
 
-        var (doc, err) = await OneShotAsync(lead, mime, mainPrompt, module, config, dpi, TimeoutFor(lead.Count));
+        var (doc, err) = await OneShotAsync(lead, mime, mainPrompt, module, config, dpi, TimeoutFor(lead.Count), pageNumbers: pageNos.Take(leadCount).ToArray());
         if (doc == null) return (null, err);
 
         // Keyed against the purchase order the goods page IS the document: the VAT and the shipping
@@ -639,7 +660,8 @@ public static partial class GeminiOcr
         for (var i = 0; i < rest.Count; i += ChunkSize)
         {
             var chunk = rest.Skip(i).Take(ChunkSize).ToList();
-            var (part, perr) = await OneShotAsync(chunk, mime, supporting, module, config, dpi, TimeoutFor(chunk.Count));
+            var (part, perr) = await OneShotAsync(chunk, mime, supporting, module, config, dpi, TimeoutFor(chunk.Count),
+                pageNumbers: pageNos.Skip(leadCount + i).Take(chunk.Count).ToArray(), operation: "ocr.supporting");
             if (part == null)
             {
                 skipped++;

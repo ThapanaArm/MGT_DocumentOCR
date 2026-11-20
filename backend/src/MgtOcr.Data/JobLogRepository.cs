@@ -1,4 +1,6 @@
 using Dapper;
+using MgtOcr.Core.Config;
+using System.Text.Json;
 
 namespace MgtOcr.Data;
 
@@ -74,7 +76,7 @@ public class JobLogRepository(DbConnectionFactory factory)
     public async Task FinishAsync(
         JobHandle? handle, string status, int? docId = null, int? tokensIn = null, int? tokensOut = null,
         decimal? cost = null, string? costCurrency = null, string? provider = null, string? model = null,
-        string? sapDocNo = null, string? message = null, int? pageCount = null)
+        string? sapDocNo = null, string? message = null, int? pageCount = null, string? module = null)
     {
         if (handle is not { } h) return;
         try
@@ -86,6 +88,7 @@ public class JobLogRepository(DbConnectionFactory factory)
                        FinishedAt  = SYSDATETIME(),
                        DurationMs  = DATEDIFF(MILLISECOND, StartedAt, SYSDATETIME()),
                        DocId       = ISNULL(@docId, DocId),
+                       Module      = ISNULL(@module, Module),
                        TokensIn    = ISNULL(@tokensIn, TokensIn),
                        TokensOut   = ISNULL(@tokensOut, TokensOut),
                        Cost        = ISNULL(@cost, Cost),
@@ -97,11 +100,41 @@ public class JobLogRepository(DbConnectionFactory factory)
                        Message     = @message
                  WHERE JobId = @jobId
                 """, new { jobId = h.JobId, status, docId, tokensIn, tokensOut, cost, costCurrency,
-                           provider, model, pageCount, sapDocNo, message });
+                           provider, model, pageCount, sapDocNo, message, module });
         }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"[JobLog] finish {h.JobId} failed: {ex.Message}");
+        }
+    }
+
+    public async Task RecordGeminiRequestAsync(GeminiRequestUsage usage)
+    {
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            await using var conn = await factory.OpenAsync(timeout.Token);
+            await conn.ExecuteAsync(new CommandDefinition("""
+                INSERT ocr.GeminiRequestLog (
+                    RequestId, JobId, DocId, Module, EnvironmentName, KeyName, Model, Operation,
+                    Attempt, PageNumbers, StartedUtc, FinishedUtc, Outcome, HttpStatus, ResponseId,
+                    InputTokens, OutputTokens, ThinkingTokens, CachedInputTokens, InputRate, OutputRate, CachedRate, CostUsd_Stored
+                ) VALUES (
+                    @RequestId, @JobId, @DocId, @Module, @Environment, @KeyName, @Model, @Operation,
+                    @Attempt, @Pages, @StartedUtc, @FinishedUtc, @Outcome, @HttpStatus, @ResponseId,
+                    @Input, @Output, @Thinking, @CachedInput, @InputRate, @OutputRate, @CachedRate, @Cost
+                )
+                """, new
+            {
+                usage.RequestId, usage.JobId, usage.DocId, usage.Module, usage.Environment, usage.KeyName, usage.Model,
+                usage.Operation, usage.Attempt, Pages = JsonSerializer.Serialize(usage.PageNumbers), usage.StartedUtc,
+                usage.FinishedUtc, usage.Outcome, usage.HttpStatus, usage.ResponseId, usage.Input, usage.Output,
+                usage.Thinking, usage.CachedInput, usage.InputRate, usage.OutputRate, usage.CachedRate, usage.Cost
+            }, cancellationToken: timeout.Token));
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[GeminiUsage] request {usage.RequestId} could not be logged ({ex.GetType().Name})");
         }
     }
 

@@ -1,4 +1,4 @@
-﻿using MgtOcr.Api.Auth;
+using MgtOcr.Api.Auth;
 using MgtOcr.Core.Auth;
 using MgtOcr.Core.Json;
 using MgtOcr.Core.Config;
@@ -100,7 +100,9 @@ var appConfig = new AppConfig
     AnthropicModel = Get("Ocr:AnthropicModel", "claude-sonnet-5"),
     TyphoonApiKey = Get("Ocr:TyphoonApiKey"),
     TyphoonModel = Get("Ocr:TyphoonModel", "typhoon-ocr"),
-    GeminiApiKey = Get("Ocr:GeminiApiKey"),
+    GeminiApiKey = Get("Ocr:GreenleafchemicalGeminiApiKey"),
+    GeminiEnvironment = Get("Ocr:GeminiEnvironment", builder.Environment.EnvironmentName),
+    GeminiReduceRegionThinking = GetBool("Ocr:GeminiReduceRegionThinking", false),
     GeminiModel = Get("Ocr:GeminiModel", "gemini-2.5-flash"),
     OcrRecordPositions = GetBool("Ocr:Positions:Enabled", true),
     OpenAiApiKey = Get("Ocr:OpenAiApiKey"),
@@ -227,6 +229,8 @@ builder.Services.AddSingleton<MgtOcr.Api.Auth.SingleSessionService>();
 // thread (many files at once would otherwise time out the upload request and hit the OCR rate limit).
 builder.Services.AddSingleton<OcrJobRepository>();
 builder.Services.AddSingleton<JobLogRepository>();
+builder.Services.AddHttpClient(nameof(MgtOcr.Api.Services.BotUsdThbWorker));
+builder.Services.AddHostedService<MgtOcr.Api.Services.BotUsdThbWorker>();
 builder.Services.AddSingleton<MgtOcr.Api.Services.DocumentIngestService>();
 builder.Services.AddHostedService<MgtOcr.Api.Services.OcrQueueWorker>();
 // Step 3 send queue (sql/32_sap_post_queue.sql): one document to SAP at a time, first come first served.
@@ -282,6 +286,9 @@ builder.Services.AddCors(o => o.AddPolicy("frontend", p => p
 builder.WebHost.UseUrls($"http://{appConfig.AppHost}:{appConfig.AppPort}");
 
 var app = builder.Build();
+appConfig.GeminiUsageSink = app.Services.GetRequiredService<JobLogRepository>().RecordGeminiRequestAsync;
+if (string.IsNullOrWhiteSpace(appConfig.GeminiApiKey))
+    app.Logger.LogWarning("Gemini is disabled until Ocr:GreenleafchemicalGeminiApiKey is configured.");
 
 if (app.Environment.IsDevelopment())
 {

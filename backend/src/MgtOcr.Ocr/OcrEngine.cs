@@ -1,4 +1,4 @@
-﻿using System.Text.RegularExpressions;
+using System.Text.RegularExpressions;
 using MgtOcr.Core.Config;
 
 using MgtOcr.Ocr.Providers;
@@ -116,7 +116,7 @@ public class OcrEngine(AppConfig config)
     private static readonly Dictionary<string, (decimal In, decimal Out)> TokenPrice = new()
     {
         ["claude"] = (2.00m, 10.00m), ["claude_text"] = (2.00m, 10.00m),
-        ["gemini"] = (0.75m, 3.75m), ["paddle_gemini"] = (0.75m, 3.75m), ["openai"] = (2.50m, 10.00m),
+        ["openai"] = (2.50m, 10.00m),
     };
 
     // extract(): wraps ExtractDispatchAsync to add confidenceNote + estimated cost uniformly for
@@ -127,6 +127,7 @@ public class OcrEngine(AppConfig config)
     public async Task<ParsedDocument> ExtractAsync(string path, string module, string? providerOverride = null, string? password = null, string? salesOrg = null, string? apDocCategory = null)
     {
         PdfPassword.Current = password;
+        using var localUsage = GeminiRequest.BeginIfNeeded(module);
         var doc = await ExtractDispatchAsync(path, module, providerOverride, salesOrg ?? "", apDocCategory ?? "");
         doc.Note = doc.Provider switch
         {
@@ -141,7 +142,17 @@ public class OcrEngine(AppConfig config)
         if (doc.Header.TryGetValue("formTextNote", out var ft) && ft?.ToString() is { Length: > 0 } ftNote)
             doc.ConfidenceNote = doc.ConfidenceNote.Length > 0 ? $"{doc.ConfidenceNote} / {ftNote}" : ftNote;
 
-        if (TokenPrice.TryGetValue(doc.Provider, out var price) && doc.TokensIn is { } tin && doc.TokensOut is { } tout)
+        if (GeminiRequest.Active is { Requests.Count: > 0 } usage)
+        {
+            var requests = usage.Requests;
+            doc.TokensIn = requests.Any(r => r.Input.HasValue) ? requests.Sum(r => r.Input ?? 0) : null;
+            doc.TokensOut = requests.Any(r => r.Output.HasValue) ? requests.Sum(r => (r.Output ?? 0) + (r.Thinking ?? 0)) : null;
+            doc.CostIn = requests.All(r => r.InputCost.HasValue) ? requests.Sum(r => r.InputCost) : null;
+            doc.CostOut = requests.All(r => r.OutputCost.HasValue) ? requests.Sum(r => r.OutputCost) : null;
+            doc.Cost = doc.CostIn + doc.CostOut;
+            doc.CostCurrency = doc.Cost.HasValue ? "USD" : null;
+        }
+        else if (TokenPrice.TryGetValue(doc.Provider, out var price) && doc.TokensIn is { } tin && doc.TokensOut is { } tout)
         {
             var costIn = Math.Round(tin / 1_000_000m * price.In, 4);
             var costOut = Math.Round(tout / 1_000_000m * price.Out, 4);

@@ -125,15 +125,9 @@ public static partial class SearchAdvisor
             systemInstruction = new { parts = new[] { new { text = systemPrompt } } },
             generationConfig = new { responseMimeType = "application/json", maxOutputTokens = 500 },
         };
-        var url = $"https://generativelanguage.googleapis.com/v1beta/models/{config.GeminiModel}:generateContent?key={config.GeminiApiKey}";
-        using var req = new HttpRequestMessage(HttpMethod.Post, url)
-        {
-            Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json"),
-        };
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(45));
-        using var resp = await Http.SendAsync(req, cts.Token);
-        var respText = await resp.Content.ReadAsStringAsync(cts.Token);
-        if (!resp.IsSuccessStatusCode) return null;
+        var (status, respText) = await GeminiRequest.SendAsync(Http, config, JsonSerializer.Serialize(body), cts.Token, "search");
+        if (status is < 200 or >= 300) return null;
         using var doc = JsonDocument.Parse(respText);
         var sb = new StringBuilder();
         if (doc.RootElement.TryGetProperty("candidates", out var cands) && cands.ValueKind == JsonValueKind.Array)
