@@ -18,6 +18,21 @@ public static class PdfExtraction
     private static ParsingOptions PdfOpenOptions() =>
         new() { Password = PdfPassword.Current ?? string.Empty };
 
+    // Opens the file for reading WITHOUT asking for exclusive access: on Windows another reader of
+    // the same upload (the page rasterizer, the compression worker, a second request) could make
+    // PdfDocument.Open(path) throw, and every caller swallowed that as "no text" — a Re-read of
+    // TSH26207S1 then found 0 FORM SHIPPING EXPENSE pages in a file that has one on page 19.
+    private static PdfDocument OpenShared(string path)
+    {
+        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        using var ms = new MemoryStream();
+        fs.CopyTo(ms);
+        return PdfDocument.Open(ms.ToArray(), PdfOpenOptions());
+    }
+
+    private static void LogFail(string what, string path, Exception ex) =>
+        Console.Error.WriteLine($"[PdfExtraction] {DateTime.Now:HH:mm:ss} {what} failed for {Path.GetFileName(path)}: {ex.GetType().Name}: {ex.Message}");
+
     // Whether a PDF opens with the given password. Used at upload time to ask the user for the
     // password (or say it was wrong) instead of silently reading nothing from an encrypted file.
     public static PdfOpenStatus CheckPassword(string path, string? password)
@@ -60,7 +75,7 @@ public static class PdfExtraction
         var hits = new List<int>();
         try
         {
-            using var doc = PdfDocument.Open(path, PdfOpenOptions());
+            using var doc = OpenShared(path);
             var i = 0;
             foreach (var page in doc.GetPages())
             {
@@ -69,7 +84,7 @@ public static class PdfExtraction
                 i++;
             }
         }
-        catch { /* unreadable / encrypted without password — caller falls back to prompt-only */ }
+        catch (Exception ex) { LogFail("FindPageIndexes", path, ex); /* caller falls back to prompt-only */ }
         return hits;
     }
 
@@ -79,7 +94,7 @@ public static class PdfExtraction
     {
         try
         {
-            using var doc = PdfDocument.Open(path, PdfOpenOptions());
+            using var doc = OpenShared(path);
             var i = 0;
             foreach (var page in doc.GetPages())
             {
@@ -87,7 +102,7 @@ public static class PdfExtraction
                 i++;
             }
         }
-        catch { /* unreadable / encrypted without password — caller falls back to prompt-only */ }
+        catch (Exception ex) { LogFail("FindPageIndexes", path, ex); /* caller falls back to prompt-only */ }
         return -1;
     }
 
@@ -96,11 +111,12 @@ public static class PdfExtraction
     {
         try
         {
-            using var doc = PdfDocument.Open(path, PdfOpenOptions());
+            using var doc = OpenShared(path);
             return doc.GetPages().Select(ReconstructPageText).ToList();
         }
-        catch
+        catch (Exception ex)
         {
+            LogFail("PageTexts", path, ex);
             return [];
         }
     }
@@ -109,7 +125,7 @@ public static class PdfExtraction
     {
         try
         {
-            using var doc = PdfDocument.Open(path, PdfOpenOptions());
+            using var doc = OpenShared(path);
             var pages = doc.GetPages().Take(20).Select(ReconstructPageText);
             return string.Join("\n", pages);
         }
@@ -202,7 +218,7 @@ public static class PdfExtraction
         double pageWidth;
         try
         {
-            using var doc = PdfDocument.Open(path, PdfOpenOptions());
+            using var doc = OpenShared(path);
             var page = doc.GetPage(1);
             pageWidth = page.Width;
             // Same letter-level clustering as PdfText — page.GetWords() unreliably splits Thai

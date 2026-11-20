@@ -492,9 +492,18 @@ public static partial class VisionPrompt
         // and the input tax report shows — the "เลขที่ชำระอากร" (0152-090242, PRD 5100001208).
         " ใบเสร็จรับเงินกรมศุลกากร (กศก.123): taxDocNo และ docNo ใน sourceDocs = เลขในช่อง \"เลขที่ชำระอากร/วันเดือนปี\" " +
         "(รูปแบบ 0152-090242 คือตัวเลข 4 หลัก ขีด 6 หลัก ตอบเฉพาะเลข ไม่เอาวันที่ที่อยู่หลัง /) " +
-        "ห้ามใช้เลขยาวที่มุมซ้ายบนของใบ (เช่น 6908045016610000108) และห้ามใช้เลขที่ใบขนสินค้า (A004-…) " +
+        "ห้ามใช้เลขยาวที่มุมซ้ายบนของใบ (เช่น 6908045016610000108 หรือ 69111650364600000177 ซึ่งเป็นเลขควบคุมการชำระเงิน ไม่ใช่เลขที่ใบเสร็จ) และห้ามใช้เลขที่ใบขนสินค้า (A004-… / A016-…) " +
+        "เลขที่ถูกต้องอยู่ทางขวาของบรรทัด \"เลขที่ใบขนสินค้า\" หลังคำว่า \"เลขที่ชำระอากร/วันเดือนปี\" เสมอ ถ้าตอบเป็นตัวเลขล้วนยาวกว่า 12 หลักถือว่าผิด " +
         "taxDocDate = วันที่หลัง / ในช่องเดียวกัน (04-08-69 คือ พ.ศ. 2569 = 2026-08-04) " +
-        "แถว DUTY ของใบเสร็จเดียวกันใช้ taxDocNo เดียวกันนี้";
+        "แถว DUTY ของใบเสร็จเดียวกันใช้ taxDocNo เดียวกันนี้" +
+        // AP, 2026-11-19: the insurer's premium invoice (Bangkok Insurance, ใบแจ้งเบี้ยประกันภัย PREMIUM
+        // INVOICE) is posted under the number after "เลขที่" (2405991) and the date after "วันที่"
+        // (11/11/2026), both top right — not the policy number (826-01221-42201) or the code in
+        // brackets above them ((8144 03)). They become the SAP Reference and Document Date.
+        " ใบแจ้งเบี้ยประกันภัย (PREMIUM INVOICE) ของบริษัทประกันภัย: docNo ใน sourceDocs และ taxDocNo ของแถว VAT = เลขหลังคำว่า \"เลขที่\" มุมขวาบน (เช่น 2405991) " +
+        "docDate และ taxDocDate = วันที่หลังคำว่า \"วันที่\" ใต้เลขที่นั้น (เช่น 11/11/2026 = 2026-11-11) " +
+        "ห้ามใช้เลขกรมธรรม์ (Policy No. เช่น 826-01221-42201) และห้ามใช้เลขในวงเล็บเหนือเลขที่ (เช่น (8144 03)) " +
+        "costType ของแถวนี้ = Insurance";
 
     // GLC is the default: everything written before MGT came into scope was GLC's rules, and a
     // document with no company stamped on it keeps reading exactly as it did before.
@@ -588,6 +597,15 @@ public static partial class VisionPrompt
         "header.poTotalAmount = ยอดเดียวกับ totalAmount และ header.paymentTerms = Payment Terms ที่หัวหน้านั้น" +
         "\n- header.vendorName / vendorTaxId = ผู้ขายสินค้า (ช่อง Supplier ของใบสั่งซื้อ) ไม่ใช่ GREEN LEAF / MEGACHEM ที่เป็นผู้ซื้อ " +
         "และ header.invoiceNo = เลขที่ใบแจ้งหนี้ของผู้ขายสินค้า (INVOICE NO.) ถ้าในไฟล์มีใบแจ้งหนี้นั้นอยู่ด้วย" +
+        // The goods invoice's Document Date is the supplier's invoice date, and on GLC PRD the tax
+        // dates must equal it (FF/785). It is printed only on the page titled Commercial Invoice /
+        // Proforma Invoice; the PO date, the MatDoc (GR) date, the B/L or loading date and the
+        // import entry's own date are all different days (AP, 2026-11-19).
+        "\n- header.invoiceDate = วันที่ของใบแจ้งหนี้ผู้ขายสินค้า ให้อ่านจากหน้าที่มีหัวเอกสารว่า \"COMMERCIAL INVOICE\" หรือ \"PROFORMA INVOICE\" " +
+        "(หรือ PRO FORMA / PRO-FORMA INVOICE) เท่านั้น จากช่อง Date / Dated / Dated from / Invoice Date ของหน้านั้น ตอบ YYYY-MM-DD " +
+        "ถ้ามีทั้งสองแบบให้ใช้ของ COMMERCIAL INVOICE; ห้ามใช้วันที่ของใบสั่งซื้อ (PO Date), ใบรับสินค้า/MatDoc, B/L, Loading date, " +
+        "ETD/ETA หรือวันที่ของใบขนสินค้า; ถ้าในไฟล์ไม่มีหน้า Commercial/Proforma Invoice ให้ใช้วันที่ที่พิมพ์ต่อจากเลข INVNO. " +
+        "ในช่อง \"เลขที่บัญชีราคาสินค้า\" ของใบขนสินค้าขาเข้า ถ้าไม่มีทั้งสองอย่างให้ใส่สตริงว่าง" +
         "\n- ใบสั่งซื้อต่างประเทศมักไม่มีภาษีมูลค่าเพิ่มไทย ถ้าในหน้านั้นระบุ VAT 0% ให้ vatAmount = 0 และไม่ต้องสร้างแถว VAT/WHT " +
         "ส่วนภาษีและอากรขาเข้าเป็นของเอกสารค่าขนส่งคนละใบ ห้ามนำมารวมที่นี่" +
         "\n- header.documentType = \"PURCHASE ORDER\" เสมอ ห้ามตอบว่า Shipping Expense Form หรือชื่อเอกสารค่าขนส่ง" +

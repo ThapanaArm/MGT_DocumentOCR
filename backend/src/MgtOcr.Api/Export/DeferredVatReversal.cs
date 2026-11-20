@@ -184,6 +184,14 @@ public static class DeferredVatReversal
             if (t.GetStr("vendorCode").Trim().Length == 0
                 && vendorOfDoc.TryGetValue(t.GetStr("taxDocNo").Trim().ToUpperInvariant(), out var v))
                 t = new Dictionary<string, object?>(t) { ["vendorCode"] = v };
+            // The tax invoice number the VAT row carries does not always match the one in the
+            // document list (the insurer's premium invoice read as 2405991 on one, the policy
+            // number on the other), and then the insurance VAT (35.21) stayed on the agent's DO
+            // invoice (AP, 2026-11-19). The issuer's name and the VAT amount find the same
+            // document; a row tagged with a supplier that has no cost under that heading moves too.
+            else if (InsuranceOrFeeVendor(doc, t) is { } v2
+                     && !string.Equals(t.GetStr("vendorCode").Trim(), v2, StringComparison.OrdinalIgnoreCase))
+                t = new Dictionary<string, object?>(t) { ["vendorCode"] = v2 };
             var code = t.GetStr("taxCode").Trim().ToUpperInvariant();
             if (code.Length == 2 && code[0] == 'V' && code[1] != 'X' && !IsImportVat(t))
                 result.Add(new Dictionary<string, object?>(t)
@@ -195,6 +203,42 @@ public static class DeferredVatReversal
             else result.Add(t);
         }
         return result;
+    }
+
+    /// <summary>The supplier a VAT row belongs to when the bundle's document list files its tax
+    /// invoice under Insurance / Fee / Overseas (matched by number, else by issuer and VAT amount)
+    /// and exactly one supplier has costs under that heading — unless the row's own supplier has
+    /// costs there too. Null when nothing says so.</summary>
+    private static string? InsuranceOrFeeVendor(Dictionary<string, object?> doc, Dictionary<string, object?> t)
+    {
+        var header = doc.Get("header") as Dictionary<string, object?> ?? doc;
+        static string Heading(string? v)
+        {
+            var s = (v ?? "").Trim().ToLowerInvariant();
+            return s.StartsWith("ins") ? "INSURANCE" : s.StartsWith("fee") ? "FEE" : s.StartsWith("over") ? "OVERSEAS" : "";
+        }
+        static string Key(string? no) { var v = (no ?? "").Trim(); var i = v.IndexOf('/'); return (i > 0 ? v[..i] : v).Trim().ToUpperInvariant(); }
+        var amt = Num(t.Get("docCurrencyAmt"));
+        var issuer = t.GetStr("issuerName");
+        var docs = ReadRows(header, "sourceDocs").Where(d => Heading(d.GetStr("costType")).Length > 0).ToList();
+        var hit = docs.FirstOrDefault(d => Key(d.GetStr("docNo")).Length > 0 && Key(d.GetStr("docNo")) == Key(t.GetStr("taxDocNo")))
+            ?? docs.FirstOrDefault(d => Math.Abs(Num(d.Get("vatAmount")) - amt) <= 0.01 && amt != 0
+                && issuer.Length > 0 && MgtOcr.Ocr.VisionPrompt.IsSameVendor(issuer, d.GetStr("issuerName")));
+        if (hit == null) return null;
+        var heading = Heading(hit.GetStr("costType"));
+        var vendors = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (doc.Get("lines") is System.Collections.IEnumerable lines)
+            foreach (var raw in lines)
+            {
+                if (raw is not Dictionary<string, object?> l) continue;
+                if (l.GetStr("extCode").Trim().ToUpperInvariant() is "VAT" or "WHT" or "DUTY") continue;
+                var extra = l.Get("extra") as Dictionary<string, object?>;
+                var vc = (extra?.GetStr("vendorCode") ?? "").Trim();
+                if (vc.Length > 0 && Heading(extra?.GetStr("costType")) == heading) vendors.Add(vc);
+            }
+        if (vendors.Count != 1) return null;
+        var own = t.GetStr("vendorCode").Trim();
+        return own.Length > 0 && vendors.Contains(own) ? null : vendors.First();
     }
 
     /// <summary>Tax-invoice number → the supplier code of the form's cost lines filed under the same

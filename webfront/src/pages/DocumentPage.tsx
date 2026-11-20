@@ -42,8 +42,9 @@ import {
 } from '../constants/fields';
 import { SEND_DISABLED_AP } from '../constants/flags';
 import { dt, fileRetention, fmt, fmtAmt, fmtCost, intFmt, moduleLabel, statusBadge } from '../utils/format';
-import ShippingCheck from '../components/document/ShippingCheck';
+import ShippingCheck, { vendorInvoiceTotals } from '../components/document/ShippingCheck';
 import { findDupes } from '../utils/dupes';
+import { isVatTaxRow, linkedGlTaxCodes } from '../utils/glTaxCodes';
 import Steps from '../components/Steps';
 import Modal, { ModalHeader } from '../components/Modal';
 import OcrProviderSelect, { AP_READ_ENGINE_IDS, READ_ENGINE_IDS } from '../components/OcrProviderSelect';
@@ -231,17 +232,9 @@ function seedGlItems(d: DocModel): DocModel {
     const gl = ((doc.header.glItems as Array<Record<string, any>>) || []).slice();
     const tax = (doc.header.taxItems as Array<Record<string, any>>) || [];
     const amt = (v: unknown) => Number(v) || 0;
-    // What may stay on the Tax tab is decided by the TAX CODE, not by the row's wording. Only the
-    // real input-VAT codes are a tax SAP posts from that tab: V0/V1/V2 claimable and D0/D1/D2
-    // deferred. Anything carrying VX is exempt — duty, excise, interior tax, a customs fee — and
-    // belongs in G/L Account Items. Matching on the label failed here: the duty word list has no
-    // "Customs Fee" in it, so that row kept its seat on the tab through two attempted fixes.
-    const isVatRow = (t: Record<string, any>) => {
-      const code = String(t.taxCode ?? '').trim().toUpperCase();
-      const kind = String(t.taxKind ?? '').trim().toUpperCase();
-      return /^[VD][012]$/.test(code) || kind === 'INPUT' || kind === 'DEFERRED';
-    };
-    const isDutyTax = (t: Record<string, any>) => !isVatRow(t) && amt(t.docCurrencyAmt) !== 0;
+    // Duty, excise, and fees belong in G/L. VAT stays on the Tax tab so its Tax Code can also
+    // drive any matching G/L row.
+    const isDutyTax = (t: Record<string, any>) => !isVatTaxRow(t) && amt(t.docCurrencyAmt) !== 0;
     // Either side may carry no vendor on an older row, so a blank matches anything.
     const sameVendor = (a: unknown, b: unknown) => {
       const x = String(a ?? '').trim();
@@ -285,6 +278,9 @@ function seedGlItems(d: DocModel): DocModel {
         itemText: String(l.desc ?? '').slice(0, 50),
         costCenter: '',
         vendorCode: vendor,
+        ...(String(l.extCode ?? '').trim().toUpperCase() === 'VAT'
+          ? { taxDocNo: l.extra?.taxDocNo, issuerName: l.extra?.issuerName }
+          : {}),
       });
     });
 
@@ -1228,7 +1224,9 @@ export default function DocumentPage() {
       }
       // Re-reading always uses Gemini (ChatGPT Vision removed 4 Nov 2026), whatever read the document first.
       setReocrEngine('gemini');
-      setDoc(seedHeaderText(seedDeliveryConditions(seedPoItems(seedRefDocument(seedHeaderTaxCode(seedGlItems(seedTaxItems(seedWhtItems(d)))))))));
+      const withTax = seedGlItems(seedTaxItems(seedWhtItems(d)));
+      const seeded = seedHeaderText(seedDeliveryConditions(seedPoItems(seedRefDocument(seedHeaderTaxCode(withTax)))));
+      setDoc(seeded);
       if (d.module === 'AP') loadApDocCategories();
       try {
         const chat = await getChat(d.docId);
@@ -1236,7 +1234,7 @@ export default function DocumentPage() {
       } catch {
         /* ignore */
       }
-      if (d.mapStatus) runMap(true, d);
+      if (d.mapStatus) runMap(true, seeded);
     })();
     return () => {
       alive = false;
@@ -1693,12 +1691,17 @@ export default function DocumentPage() {
   const confirmPost = () =>
     guard(async () => {
       setPosting(true);
+      setPostError(null);
       try {
         // The post endpoint builds its payload from the DATABASE, not from this screen, and the
         // only thing that writes the screen back is the mapping call. A PO item or GR item typed
         // here and sent straight away would never reach SAP — it would post whatever was stored
         // last. So the current lines are saved first, every time.
-        await runMap(true);
+        const saved = await runMap(true);
+        if (!saved) {
+          setPostError('บันทึกข้อมูลล่าสุดไม่สำเร็จ กรุณาบันทึกใหม่ก่อนส่ง SAP');
+          return;
+        }
         // Through the send queue: SAP takes one document at a time, oldest first, so two people
         // pressing Step 3 on the same purchase order no longer collide (ME/006).
         let toldPosition = -1;
@@ -2739,11 +2742,7 @@ export default function DocumentPage() {
   };
 
   // ---- derived render pieces ----
-  // Totals follow the vendor lookup: picking a vendor in the DETAIL table shows what that
-  // vendor's own MIRO run is worth, so the figures can be keyed straight into SAP. VAT and
-  // withholding tax sit on the main vendor's invoices (the shipping agent that re-bills the
-  // rest), so they only show up when that vendor is the one selected. Read-only while filtered —
-  // the stored header totals still cover the whole document.
+  // The vendor lookup shows read-only totals for the selected supplier.
   // The vendor carrying the largest cost total is the one the bundle is paid to — the shipping
   // agent that re-bills everything else. A tax row with no vendor code of its own belongs to it:
   // the supporting pages of a long bundle are read without the form in view, so their VAT rows
@@ -2760,85 +2759,45 @@ export default function DocumentPage() {
     return [...totals.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? '';
   })();
 
-  /* What the Send will actually create: ONE SAP supplier invoice per supplier on the bundle.
-     The form carries the agent's, the port authority's and the broker's invoices together, and
-     SAP takes one invoicing party per document — so the confirmation lists them rather than
-     showing the bundle's own total, which belongs to nobody. */
+  const headerVendor = String(doc.partnerCode ?? '').trim() || String(h.vendorCode ?? '').trim();
+  const invoiceMainVendor = mainVendorCode || headerVendor;
+  const totalsByVendor = doc.module === 'AP' || doc.module === 'II'
+    ? vendorInvoiceTotals(doc, invoiceMainVendor)
+    : new Map<string, never>();
+
+  // The confirmation and the document tabs show the same on-screen totals per supplier.
   const sendBreakdown = (() => {
     if (doc.module !== 'AP' && doc.module !== 'II') return [];
-    const codeOf = (l: DocLine) => String(l.extra?.vendorCode ?? '').trim();
-    const isTax = (l: DocLine) => ['VAT', 'WHT', 'DUTY'].includes(String(l.extCode ?? ''));
-    const main = mainVendorCode;
-    const rows = new Map<string, { cost: number; vat: number; duty: number; wht: number; lines: number; invoiceNo: string }>();
-    const of = (code: string) => {
-      const key = code || main;
-      if (!rows.has(key)) rows.set(key, { cost: 0, vat: 0, duty: 0, wht: 0, lines: 0, invoiceNo: '' });
-      return rows.get(key)!;
-    };
+    const main = invoiceMainVendor;
+    const counts = new Map<string, number>();
     for (const l of doc.lines || []) {
-      const amt = Number(l.amount) || 0;
-      const r = of(codeOf(l));
-      if (!isTax(l)) { r.cost += amt; r.lines += 1; continue; }
-      if (l.extCode === 'VAT') r.vat += amt;
-      else if (l.extCode === 'DUTY') r.duty += amt;
-      else r.wht += amt;
+      if (['VAT', 'WHT', 'DUTY'].includes(String(l.extCode ?? '').trim().toUpperCase())) continue;
+      const code = String(l.extra?.vendorCode ?? '').trim() || main;
+      counts.set(code, (counts.get(code) ?? 0) + 1);
     }
-    // Each supplier's own invoice number comes off its tax row (Tax Invoice No.).
+    const references = new Map<string, string>();
     for (const t of (h.taxItems as Record<string, any>[] | undefined) || []) {
-      const r = of(String(t.vendorCode ?? '').trim());
-      if (!r.invoiceNo) r.invoiceNo = String(t.taxDocNo ?? '').trim();
+      const code = String(t.vendorCode ?? '').trim() || main;
+      const reference = String(t.taxDocNo ?? '').trim();
+      if (reference && !references.has(code)) references.set(code, reference);
     }
-    return [...rows.entries()]
-      .filter(([, r]) => r.cost !== 0 || r.vat !== 0 || r.duty !== 0)
-      .map(([code, r]) => ({
-        code,
-        name: code === main ? String(map?.header.vendor.text ?? '') : '',
-        invoiceNo: r.invoiceNo || (code === main ? String(h.invoiceNo ?? '') : ''),
-        lines: r.lines,
-        total: r.cost + r.vat + r.duty,
-      }));
+    const vendors = new Set([...counts.keys(), ...totalsByVendor.keys()]);
+    return [...vendors]
+      .flatMap((code) => {
+        const total = totalsByVendor.get(code);
+        if (!total || !(total.totalAmount || total.subTotal || total.vatAmount)) return [];
+        return [{
+          code,
+          name: code === main ? String(map?.header.vendor.text ?? '') : '',
+          invoiceNo: (code === main ? String(h.invoiceNo ?? '').trim() : '') || references.get(code) || '',
+          lines: counts.get(code) ?? 0,
+          total: total.totalAmount,
+        }];
+      });
   })();
 
-  const vendorTotals = (() => {
-    if (!vendorFilter || (doc.module !== 'AP' && doc.module !== 'II')) return null;
-    const codeOf = (l: DocLine) => String(l.extra?.vendorCode ?? '').trim();
-    const isTax = (l: DocLine) =>
-      l.extCode === 'WHT' || l.extCode === 'VAT' || l.extCode === 'DUTY';
-    const costByVendor = new Map<string, number>();
-    for (const l of doc.lines) {
-      if (isTax(l)) continue;
-      const c = codeOf(l);
-      if (!c) continue;
-      costByVendor.set(c, (costByVendor.get(c) ?? 0) + (Number(l.amount) || 0));
-    }
-    const mainVendor = mainVendorCode;
-    const subTotal = costByVendor.get(vendorFilter) ?? 0;
-    // A tax row carries its own vendor code when the read could match it to a form row; one that
-    // does not belongs to the main vendor. Deciding this row by row — rather than letting a
-    // single tagged row decide it for all of them — is what keeps these totals and the Tax tab
-    // showing the same thing: a bundle whose duty rows were tagged and whose VAT rows were not
-    // put the whole VAT here and nothing at all in the tab.
-    const taxSum = (code: string) =>
-      doc.lines
-        .filter((l) => l.extCode === code)
-        .filter((l) => (codeOf(l) || mainVendor) === vendorFilter)
-        .reduce((a, l) => a + (Number(l.amount) || 0), 0);
-    const vatAmount = taxSum('VAT');
-    // Customs duty is not billed as an item but it is still paid to this vendor, so it counts
-    // towards the net total even though it sits in the Tax tab.
-    const dutyAmount = taxSum('DUTY');
-    // Rounded to the satang, because these are added up from the lines and binary floating point
-    // does not add money cleanly: 13,751.73 + 745.62 came out as 14497.349999999999 and the
-    // Amount box on Basic Data showed it exactly like that, digits and all.
-    const money = (v: number) => Math.round((Number(v) || 0) * 100) / 100;
-    return {
-      ...h,
-      subTotal: money(subTotal),
-      vatAmount: money(vatAmount),
-      whtAmount: money(taxSum('WHT')),
-      totalAmount: money(subTotal + vatAmount + dutyAmount),
-    };
-  })();
+  const selectedVendorTotals = vendorFilter ? totalsByVendor.get(vendorFilter) : undefined;
+  const vendorTotals = selectedVendorTotals ? { ...h, ...selectedVendorTotals } : null;
 
   const totalsFields =
     doc.module === 'AP' ? (
@@ -2846,7 +2805,9 @@ export default function DocumentPage() {
         // The numeric inputs are uncontrolled (defaultValue, so typing is not fought by a
         // re-render), which means switching vendors would leave the old figures on screen —
         // remount the grid when the lookup changes.
-        key={vendorFilter || 'all'}
+        key={vendorTotals
+          ? [vendorFilter, vendorTotals.subTotal, h.vatRate, vendorTotals.vatAmount, vendorTotals.whtAmount, vendorTotals.totalAmount].join('|')
+          : 'all'}
         fields={AP_TOTALS_H}
         values={vendorTotals ?? h}
         posted={locked || !!vendorTotals}
@@ -2947,6 +2908,13 @@ export default function DocumentPage() {
       const pos = (s: unknown) => String(s ?? '').match(/\d{10}/g) ?? [];
       if (pos(v).length <= 1 && pos(h[other]).length <= 1 && String(h[other] ?? '').trim() !== v.trim())
         editHeader(other, v.trim());
+      return;
+    }
+    // The Tax tab's three dates ARE the document date: GLC PRD refuses anything else with FF/785
+    // (AP, 2026-11-19), and the payload sends the document date regardless — so the tab shows it.
+    if (k === 'invoiceDate') {
+      for (const t of ['taxReportingDate', 'taxFulfillDate', 'taxDate'])
+        if (String(h[t] ?? '') !== v) editHeader(t, v);
       return;
     }
     if (k !== 'invoiceNo') return;
@@ -3173,9 +3141,11 @@ export default function DocumentPage() {
   // left every tax row in the G/L table — a GLC bundle showed the Customs Department's duty and VAT
   // under the shipping agent, and the exported file posted them there too.
   const glRows = forVendor<Record<string, any>>(glItems);
+  const glTaxCodes = linkedGlTaxCodes(glItems, h.taxItems || []);
   const glProps = {
     module: doc.module,
     items: glRows.items,
+    linkedTaxRows: glRows.at.map((i) => glTaxCodes.has(i)),
     posted: locked,
     onEdit: (i: number, k: string, v: string) => editGlItem(glRows.at[i], k, v),
     onAdd: addGlItem,
@@ -3516,6 +3486,25 @@ export default function DocumentPage() {
               </a>
             </div>
           )}
+          {/* FORM SHIPPING EXPENSE could not be trusted (no form, PO missing, rows missing or the rows
+              not adding up to the form's TOTAL): the cost rows are the AI's and must be checked
+              against the form before sending to SAP (AP, 2026-11-19). */}
+          {!!doc.header?.customsReview && (
+            <div
+              className="hint"
+              style={{ margin: '-6px 0 10px', padding: '8px 12px', background: 'var(--orange-bg)', color: 'var(--orange)', borderRadius: 'var(--r2)', fontWeight: 600 }}
+            >
+              <i className="fa-solid fa-flag" /> Needs Review: {String(doc.header.customsReview)} — แก้เป็นเลขที่ชำระอากรของใบเสร็จกรมศุลกากรก่อนส่ง SAP
+            </div>
+          )}
+          {!!doc.header?.formTextReview && (
+            <div
+              className="hint"
+              style={{ margin: '-6px 0 10px', padding: '8px 12px', background: 'var(--orange-bg)', color: 'var(--orange)', borderRadius: 'var(--r2)', fontWeight: 600 }}
+            >
+              <i className="fa-solid fa-flag" /> Needs Review: {String(doc.header.formTextReview)} — ตรวจรายการค่าขนส่งกับ FORM SHIPPING EXPENSE ก่อนส่ง SAP
+            </div>
+          )}
           {doc.confidenceNote && (
             <div
               className="hint"
@@ -3650,14 +3639,19 @@ export default function DocumentPage() {
                         key={doc.docId}
                         docId={doc.docId}
                         onReference={posted ? undefined : (idx, value) => idx.forEach((i) => editLineExtra(i, 'sapRef', value))}
+                        onDocDate={posted ? undefined : (idx, value) => idx.forEach((i) => editLineExtra(i, 'sapDocDate', value))}
                         fromScreen={screenTabs({
                           lines: doc.lines || [],
-                          mainVendor: String((doc as Record<string, any>).partnerCode ?? h.vendorCode ?? '').trim(),
+                          mainVendor: poKeyed ? headerVendor : invoiceMainVendor,
                           po,
                           invoiceNo: inv,
                           text: String(h.headerText ?? '').trim() || itemTextFor(h),
+                          totalsByVendor,
                           singleDoc: poKeyed,
+                          singleDocTotal: (vendorTotals ?? h).totalAmount,
                           goodsReference: (!looksPo(inv) && inv) || (!looksPo(goodsInv) && goodsInv) || po,
+                          invoiceDate: String(h.invoiceDate ?? '').trim(),
+                          sourceDocs: Array.isArray(h.sourceDocs) ? (h.sourceDocs as Array<Record<string, any>>) : [],
                         })}
                       />
                     );

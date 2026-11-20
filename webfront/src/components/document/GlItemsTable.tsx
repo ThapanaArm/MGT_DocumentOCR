@@ -7,6 +7,7 @@ export type GlItem = Record<string, any>;
 export default function GlItemsTable({
   module,
   items,
+  linkedTaxRows,
   posted,
   onEdit,
   onAdd,
@@ -15,6 +16,7 @@ export default function GlItemsTable({
 }: {
   module: string;
   items: GlItem[];
+  linkedTaxRows?: boolean[];
   posted: boolean;
   onEdit: (i: number, key: string, value: string) => void;
   onAdd: () => void;
@@ -89,11 +91,11 @@ export default function GlItemsTable({
                     </td>
                     <td>
                       {/* A picker, not free text: the code decides the tax SAP calculates, and a
-                          typo here is silently wrong money. The row arrives with a suggestion
-                          (services 7%, duty exempt) that anyone can change. */}
+                          typo here is silently wrong money. Linked VAT rows follow Tax Data. */}
                       <select
                         value={g.taxCode || ''}
-                        disabled={posted}
+                        disabled={posted || linkedTaxRows?.[i]}
+                        title={linkedTaxRows?.[i] ? 'แก้ Tax Code ของรายการนี้ใน Tax Data' : undefined}
                         onChange={(e) => onEdit(i, 'taxCode', e.target.value)}
                       >
                         <option value="">— Select —</option>

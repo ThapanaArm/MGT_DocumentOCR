@@ -3,6 +3,7 @@ import { useAppState } from '../../../state/AppState';
 import { mapDocument, type DocModel, type MapResult } from '../../../api/documents';
 import { num } from '../../../utils/format';
 import { WHT_CODE_RATE } from '../../../constants/fields';
+import { syncGlTaxCodes } from '../../../utils/glTaxCodes';
 
 /* =====================================================================
    useDocumentEditor — the provider-agnostic core of the document editor.
@@ -27,7 +28,10 @@ export function useDocumentEditor(user: string) {
   // a response that does carry them (the reload after posting) still replaces them.
   const setDoc = useCallback((next: SetStateAction<DocModel | null>) => {
     setDocState((prev) => {
-      const n = typeof next === 'function' ? (next as (p: DocModel | null) => DocModel | null)(prev) : next;
+      const updated = typeof next === 'function' ? (next as (p: DocModel | null) => DocModel | null)(prev) : next;
+      const n = updated && (updated.header.glItems !== prev?.header.glItems || updated.header.taxItems !== prev?.header.taxItems)
+        ? syncGlTaxCodes(updated)
+        : updated;
       if (!n || !prev || n.docId !== prev.docId) return n;
       if (n.sapDocNos !== undefined && n.deferredJvs !== undefined) return n;
       return {
@@ -46,7 +50,8 @@ export function useDocumentEditor(user: string) {
 
   const runMap = useCallback(
     async (silent: boolean, forDoc?: DocModel) => {
-      const d = forDoc || doc;
+      const current = forDoc || doc;
+      const d = current && syncGlTaxCodes(current);
       if (!d) return;
       const res = await guard(() =>
         mapDocument(d.docId, {
@@ -69,6 +74,7 @@ export function useDocumentEditor(user: string) {
           document.querySelector('.content')?.scrollTo({ top: 0, behavior: 'smooth' }); window.scrollTo({ top: 0, behavior: 'smooth' });
         }
       }
+      return res;
     },
     [doc, guard, showToast, user],
   );

@@ -89,8 +89,7 @@ public static partial class GeminiOcr
                 // A bundle can hold one FORM per PO, so every form page is pulled to the front —
                 // including any that sits beyond the page cap (rendered on its own, replacing the
                 // last and least useful page).
-                var formSheet = new System.Text.RegularExpressions.Regex(@"FORM\s*SHIPPING\s*EXPENSE",
-                    System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                var formSheet = ShippingFormText.FormSheet; // letters may be spaced apart (Windows host)
                 // The title is a heading in a large font, and the layout-aware text reconstruction
                 // can split a heading into single letters, so whitespace is allowed between every
                 // letter — "PURCHASE ORDER" and "P U R C H A S E  O R D E R" both have to match.
@@ -120,6 +119,24 @@ public static partial class GeminiOcr
                 }
                 else if (isPoRead)
                     Log($"PO read: purchase order page(s) {string.Join(", ", formIdxs.Select(i => i + 1))}");
+                // The goods invoice's date is printed only on the supplier's COMMERCIAL / PROFORMA
+                // INVOICE page (AP, 2026-11-19). A PO read's lead request carries the purchase order
+                // pages alone, so that page rides along right behind them — otherwise the header is
+                // read without it and picks up the PO, GR or B/L date instead.
+                var poPageCount = formIdxs.Count;
+                if (isPoRead && formIdxs.Count > 0)
+                {
+                    var invoiceSheet = new System.Text.RegularExpressions.Regex(
+                        @"C\s*O\s*M\s*M\s*E\s*R\s*C\s*I\s*A\s*L\s*I\s*N\s*V\s*O\s*I\s*C\s*E|P\s*R\s*O\s*-?\s*F\s*O\s*R\s*M\s*A\s*I\s*N\s*V\s*O\s*I\s*C\s*E",
+                        System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                    var ciIdxs = PdfExtraction.FindPageIndexes(path, invoiceSheet, formSheet)
+                        .Where(i => !formIdxs.Contains(i)).Take(2).ToList();
+                    if (ciIdxs.Count > 0)
+                    {
+                        Log($"PO read: commercial/proforma invoice page(s) {string.Join(", ", ciIdxs.Select(i => i + 1))} read with the purchase order");
+                        formIdxs = formIdxs.Concat(ciIdxs).ToList();
+                    }
+                }
                 var formPageNos = formIdxs.Select(i => i + 1).ToList();
                 var formPages = new List<byte[]>();
                 var formPagesNo = new List<int>();
@@ -136,11 +153,15 @@ public static partial class GeminiOcr
                     pageNos.InsertRange(0, formPagesNo);
                     formCount = formPages.Count;
                     prompt = isPoRead
-                        ? $"สำคัญ: {formPages.Count} ภาพแรกคือหน้า PURCHASE ORDER (หน้า {string.Join(", ", formPageNos)} ของไฟล์) " +
+                        ? $"สำคัญ: {poPageCount} ภาพแรกคือหน้า PURCHASE ORDER (หน้า {string.Join(", ", formPageNos.Take(poPageCount))} ของไฟล์) " +
+                          (formPages.Count > poPageCount
+                             ? $"ภาพถัดไป {formPages.Count - poPageCount} ภาพคือหน้า COMMERCIAL / PROFORMA INVOICE ของผู้ขายสินค้า " +
+                               $"(หน้า {string.Join(", ", formPageNos.Skip(poPageCount))} ของไฟล์) ใช้อ่าน header.invoiceDate และ header.invoiceNo เท่านั้น ห้ามนำรายการในหน้านี้มาเป็น lines "
+                             : "") +
                           "lines ต้องมาจากตารางรายการสินค้า (Item / Description / Quantity / Unit Price / Amount) ในภาพเหล่านี้เท่านั้น " +
                           "ห้ามใช้รายการจากหน้า FORM SHIPPING EXPENSE หรือใบแจ้งหนี้ค่าขนส่ง/ใบเสร็จในภาพอื่นเป็น lines " +
                           "totalAmount ต้องเป็นยอด Total Amount ของหน้า PURCHASE ORDER ไม่ใช่ยอดรวมค่าขนส่ง " +
-                          (formPages.Count > 1
+                          (poPageCount > 1
                              ? "หน้า PURCHASE ORDER มีหลายหน้า (Page 1 of 2, 2 of 2) — ให้รวมรายการสินค้าจากทุกหน้าเรียงต่อกันตามเลข Item "
                              : "") +
                           "ภาพที่เหลือเป็นเอกสารประกอบ ใช้เพื่ออ้างอิงเท่านั้น ห้ามนำมาเป็น lines\n\n" + prompt
@@ -166,8 +187,11 @@ public static partial class GeminiOcr
             // "View document" (Ocr:Positions:Enabled, default on).
             if (config.OcrRecordPositions && module is "AP" or "II") prompt += PositionInstructions();
             if (isPdf && imgs.Count > ChunkThreshold)
-                return ShippingFormText.ApplyMultiForm(path, module,
-                    ApplyPositions(await ChunkedAsync(imgs, formCount, mime, prompt, module, config, dpi, salesOrg, apDocCategory), pageNos));
+            {
+                var chunked = await ChunkedAsync(imgs, formCount, mime, prompt, module, config, dpi, salesOrg, apDocCategory);
+                if (chunked.Doc != null && module is "AP" or "II" && !isPoRead) await FixCustomsNumbersAsync(imgs, mime, chunked.Doc, config);
+                return ShippingFormText.ApplyMultiForm(path, module, ApplyPositions(chunked, pageNos), isPoRead);
+            }
 
             // A file short enough to read in one request still needs the customs rows pointed at the
             // customs vendor: the model fills vendorCode from the form when it can, but it leaves it
@@ -178,13 +202,98 @@ public static partial class GeminiOcr
                 AssignTaxRowVendors(oneShot.Doc);
                 VisionPrompt.FillLineVatFromSourceDocs(oneShot.Doc);
                 VisionPrompt.FillLineVatFromTaxRows(oneShot.Doc);
+                if (!isPoRead) await FixCustomsNumbersAsync(imgs, mime, oneShot.Doc, config);
             }
-            return ShippingFormText.ApplyMultiForm(path, module, ApplyPositions(oneShot, pageNos));
+            return ShippingFormText.ApplyMultiForm(path, module, ApplyPositions(oneShot, pageNos), isPoRead);
         }
         catch (Exception ex)
         {
             return (null, $"Gemini request failed: {ex.GetType().Name}: {ex.Message}");
         }
+    }
+
+    private static readonly Regex LongCustomsNo = new(@"^\d{15,}$");
+    private static readonly Regex CustomsWord = new(@"CUSTOMS|ศุลกากร", RegexOptions.IgnoreCase);
+
+    /// <summary>The Customs Department's receipt (กศก.123) carries two numbers: the long payment
+    /// control number at the top left (69111750319500000142) and the "เลขที่ชำระอากร/วันเดือนปี"
+    /// on the right (0321-090280/17-11-69) — the one Accounting posts (Reference / Assignment).
+    /// The read keeps returning the long one however the prompt says it (AP, 2026-11-19). When it
+    /// does, one small follow-up request asks for nothing but each receipt's pair of numbers and
+    /// the long ones are swapped for the right ones, with the receipt's date. Any failure leaves
+    /// the read as it was (ShippingFormText.CheckCustoms then marks it Needs Review).</summary>
+    private static async Task FixCustomsNumbersAsync(List<byte[]> imgs, string mime, ParsedDocument doc, AppConfig config)
+    {
+        var sourceDocs = doc.Header.TryGetValue("sourceDocs", out var sv) && sv is List<object?> sl
+            ? sl.OfType<Dictionary<string, object?>>().ToList() : [];
+        var longNos = doc.Lines.Where(l => CustomsWord.IsMatch((l.IssuerName ?? "") + " " + (l.Desc ?? "")) && LongCustomsNo.IsMatch((l.TaxDocNo ?? "").Trim()))
+            .Select(l => l.TaxDocNo.Trim())
+            .Concat(sourceDocs.Where(d => CustomsWord.IsMatch(d.GetValueOrDefault("issuerName")?.ToString() ?? "")
+                    && LongCustomsNo.IsMatch((d.GetValueOrDefault("docNo")?.ToString() ?? "").Trim()))
+                .Select(d => (d.GetValueOrDefault("docNo")?.ToString() ?? "").Trim()))
+            .Distinct().ToList();
+        if (longNos.Count == 0 || imgs.Count == 0 || string.IsNullOrEmpty(config.GeminiApiKey)) return;
+        var prompt = "ภาพเหล่านี้มีใบเสร็จรับเงินของกรมศุลกากร (กศก.123) อยู่ในบางหน้า ให้หาใบเสร็จกรมศุลกากรทุกใบ " +
+                     "แล้วตอบเฉพาะเลขสองตัวของแต่ละใบ: controlNo = เลขตัวเลขยาวที่มุมซ้ายบนของใบ (เช่น 69111750319500000142) " +
+                     "และ paymentNo = ข้อความหลังคำว่า \"เลขที่ชำระอากร/วันเดือนปี\" ทางขวาของบรรทัดเลขที่ใบขนสินค้า ตามที่พิมพ์ทั้งหมดรวมวันที่ (เช่น 0321-090280/17-11-69) " +
+                     "ตอบเป็น JSON เท่านั้น: {\"receipts\": [{\"controlNo\": \"...\", \"paymentNo\": \"...\"}]}";
+        var parts = new List<object> { new { text = prompt } };
+        foreach (var img in imgs) parts.Add(new { inline_data = new { mime_type = mime, data = Convert.ToBase64String(img) } });
+        var body = new
+        {
+            contents = new[] { new { role = "user", parts = (object)parts } },
+            generationConfig = new { temperature = 0, maxOutputTokens = 4096, responseMimeType = "application/json" },
+        };
+        try
+        {
+            var url = $"https://generativelanguage.googleapis.com/v1beta/models/{config.GeminiModel}:generateContent?key={config.GeminiApiKey}";
+            using var req = new HttpRequestMessage(HttpMethod.Post, url)
+            {
+                Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json"),
+            };
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(150));
+            using var resp = await Http.SendAsync(req, cts.Token);
+            var respText = await resp.Content.ReadAsStringAsync(cts.Token);
+            if (!resp.IsSuccessStatusCode) { Log($"Customs numbers: Gemini HTTP {(int)resp.StatusCode}"); return; }
+            var (tin, tout) = Usage(respText);
+            if (tin is { } a) doc.TokensIn = (doc.TokensIn ?? 0) + a;
+            if (tout is { } o) doc.TokensOut = (doc.TokensOut ?? 0) + o;
+            var raw = ExtractText(respText).Trim();
+            var st = raw.IndexOf('{'); var en = raw.LastIndexOf('}');
+            if (st < 0 || en <= st) return;
+            using var j = JsonDocument.Parse(raw[st..(en + 1)]);
+            if (!j.RootElement.TryGetProperty("receipts", out var arr) || arr.ValueKind != JsonValueKind.Array) return;
+            var map = new Dictionary<string, (string No, string Date)>();
+            foreach (var r in arr.EnumerateArray())
+            {
+                var ctl = Regex.Replace(r.TryGetProperty("controlNo", out var c) ? c.ToString() : "", @"\s+", "");
+                var pay = Regex.Replace(r.TryGetProperty("paymentNo", out var p) ? p.ToString() : "", @"\s+", "");
+                var m = Regex.Match(pay, @"^(\d{4}-\d{6})(?:/(\d{1,2})-(\d{1,2})-(\d{2}))?$");
+                if (ctl.Length == 0 || !m.Success) continue;
+                var date = "";
+                if (m.Groups[2].Success && int.TryParse(m.Groups[2].Value, out var dd) && int.TryParse(m.Groups[3].Value, out var mm) && int.TryParse(m.Groups[4].Value, out var yy))
+                    try { date = new DateTime(2500 + yy - 543, mm, dd).ToString("yyyy-MM-dd"); } catch { }
+                map[ctl] = (pay, date);
+            }
+            var fixedNos = 0;
+            foreach (var l in doc.Lines)
+                if (map.TryGetValue((l.TaxDocNo ?? "").Trim(), out var hit))
+                {
+                    l.Desc = (l.Desc ?? "").Replace(l.TaxDocNo!.Trim(), hit.No);
+                    l.TaxDocNo = hit.No;
+                    if (hit.Date.Length > 0) l.TaxDocDate = hit.Date;
+                    fixedNos++;
+                }
+            foreach (var d in sourceDocs)
+                if (map.TryGetValue((d.GetValueOrDefault("docNo")?.ToString() ?? "").Trim(), out var hit))
+                {
+                    d["docNo"] = hit.No;
+                    if (hit.Date.Length > 0) d["docDate"] = hit.Date;
+                    fixedNos++;
+                }
+            Log($"Customs numbers: {longNos.Count} long control number(s), {map.Count} receipt(s) read, {fixedNos} value(s) replaced");
+        }
+        catch (Exception ex) { Log($"Customs numbers not fixed: {ex.GetType().Name}: {ex.Message}"); }
     }
 
     /// <summary>Reads ONE value from a cut-out of the page (a frame the person moved on "View

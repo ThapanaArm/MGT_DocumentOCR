@@ -250,8 +250,11 @@ public static class SupplierInvoicePayload
         // VAT no longer sits on the Tax tab at all. Solving it here anyway only refused documents
         // the later step books fine (FF812 "D1 17,633.00 … ไม่มีรายการในใบนี้ให้ผูก Tax Code" on a
         // PILOT bundle whose lines are all a different code).
-        var vatAsGlLines = !isPoKeyed && !calcTax
-            && purOrdRef.Any(i => ((Dictionary<string, object?>)i).Get("_deliveryCost") is true);
+        // A supplier in the split may have only G/L charges (for example the 200.00 customs
+        // fee). Those charges stay on VX, while VAT uses the base printed on the receipt.
+        var glOnlyCharges = purOrdRef.Count == 0 && glAccountItems.Count > 0
+            && (customsParty || DeferredVatReversal.IsShippingBundle(doc));
+        var vatAsGlLines = !isPoKeyed && !calcTax && (deliveryCosts.Count > 0 || glOnlyCharges);
         if (!isPoKeyed && !vatAsGlLines)
         {
             double BaseCarried(string code) =>
@@ -293,7 +296,12 @@ public static class SupplierInvoicePayload
                     var taxOfCode = taxRows.Where(t => t.GetStr("taxCode").Trim().Equals(code, StringComparison.OrdinalIgnoreCase))
                         .Sum(t => Num(t.Get("docCurrencyAmt")));
                     var lineBase = free.Sum(r => Num(r.Get("SupplierInvoiceItemAmount"))) + BaseCarried(code);
-                    if (free.Count > 0 && taxOfCode > lineBase + 0.009)
+                    // No line on this invoice is free to carry the code at all (FF812 "ภาษี D1 4699.99
+                    // (TR115972, N261108120, R2611-2315) ไม่มีรายการในใบนี้ให้ผูก Tax Code", AP,
+                    // 2026-11-19): the VAT goes in the way Accounting books a shipping bundle's tax
+                    // anyway — one G/L line per tax invoice on its tax account (D1 → 11730000,
+                    // V1 → 11720000) with its own base — instead of refusing the document.
+                    if ((free.Count > 0 && taxOfCode > lineBase + 0.009) || free.Count == 0)
                     {
                         // Accounting's way for a receipt whose VAT is larger than its lines — posted
                         // document 5105604031 (THE CUSTOMS DEPARTMENT, 0152-091171, PO 2230000565:
@@ -542,7 +550,12 @@ public static class SupplierInvoicePayload
                 ((Dictionary<string, object?>)purOrdRef[pi])["SupplierInvoiceItem"] = (pi + 1).ToString();
             // Tax tab: the lines' VX base with no tax (5105604031: VX, base 200.00, tax 0.00).
             taxItems.Clear();
-            var vxBase = Math.Round(purOrdRef.Sum(PoAmount), 2);
+            var vxGlBase = glOnlyCharges
+                ? glAccountItems.Cast<Dictionary<string, object?>>()
+                    .Where(g => g.GetStr("TaxCode").Trim().Equals("VX", StringComparison.OrdinalIgnoreCase))
+                    .Sum(g => IsCredit(g) ? -ItemAmount(g) : ItemAmount(g))
+                : 0;
+            var vxBase = Math.Round(purOrdRef.Sum(PoAmount) + vxGlBase, 2);
             if (vxBase > 0)
                 taxItems.Add(new Dictionary<string, object?>
                 {
@@ -610,15 +623,69 @@ public static class SupplierInvoicePayload
             .Where(l => l.Get("extra") is Dictionary<string, object?> ex && Mine(ex))
             .Select(l => ((Dictionary<string, object?>)l["extra"]!).GetStr("sapRef").Trim())
             .FirstOrDefault(r => r.Length > 0) ?? "";
+        // The Customs Department's document: its Reference is the เลขที่ชำระอากร of the receipt
+        // for the FEE this document charges — 0152-091679 for the 200.00 processing fee — without
+        // the "/16-11-69" date (AP, 2026-11-19). The import VAT receipt (0152-091678) stays on the
+        // Input tax line's Assignment. Picked from the bundle's customs receipts by the fee amount.
+        var myCosts = ((doc.Get("lines") as System.Collections.IEnumerable)?.OfType<Dictionary<string, object?>>() ?? [])
+            .Where(l => l.Get("extra") is Dictionary<string, object?> ex && Mine(ex)
+                && l.GetStr("extCode").Trim().ToUpperInvariant() is not ("VAT" or "WHT"))
+            .ToList();
+        static double Amt(object? v) => double.TryParse(v?.ToString(), System.Globalization.NumberStyles.Any,
+            System.Globalization.CultureInfo.InvariantCulture, out var d) ? d : 0;
+        var customsDoc = customsParty || myCosts.Any(l => l.GetStr("desc").Contains("CUSTOMS", StringComparison.OrdinalIgnoreCase));
+        var customsFeeRef = "";
+        if (customsDoc && vendor.Length > 0)
+        {
+            var fee = Math.Round(myCosts.Sum(l => Amt(l.Get("amount"))), 2);
+            var receipts = ((header.Get("sourceDocs") as System.Collections.IEnumerable)?.OfType<Dictionary<string, object?>>() ?? [])
+                .Where(d => System.Text.RegularExpressions.Regex.IsMatch(d.GetStr("issuerName"), "CUSTOMS|ศุลกากร", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+                    && Amt(d.Get("nonVatAmount")) > 0)
+                .ToList();
+            var hit = receipts.FirstOrDefault(d => Math.Abs(Amt(d.Get("nonVatAmount")) - fee) <= 0.01)
+                ?? (receipts.Count == 1 ? receipts[0] : null);
+            if (hit != null) customsFeeRef = DocNoKey(hit.GetStr("docNo"));
+        }
+        // The insurer's document: its Reference is the premium invoice's own number (เลขที่ 2405991,
+        // Bangkok Insurance) and its Document Date the date beside it (AP, 2026-11-19). The read
+        // often leaves the insurance VAT row without a supplier, so it is not among this
+        // document's tax rows; the bundle's Insurance source document is taken instead (by amount
+        // when there are several).
+        if (customsFeeRef.Length == 0 && vendor.Length > 0 && myCosts.Count > 0
+            && myCosts.All(l => (l.Get("extra") as Dictionary<string, object?>)?.GetStr("costType").Trim().Equals("Insurance", StringComparison.OrdinalIgnoreCase) == true))
+        {
+            var cost = Math.Round(myCosts.Sum(l => Amt(l.Get("amount"))), 2);
+            var ins = ((header.Get("sourceDocs") as System.Collections.IEnumerable)?.OfType<Dictionary<string, object?>>() ?? [])
+                .Where(d => d.GetStr("costType").Trim().Equals("Insurance", StringComparison.OrdinalIgnoreCase) && d.GetStr("docNo").Trim().Length > 0)
+                .ToList();
+            var hit = ins.FirstOrDefault(d => Math.Abs(Amt(d.Get("amountBeforeVat")) - cost) <= 0.01 || Math.Abs(Amt(d.Get("totalAmount")) - cost) <= 0.01)
+                ?? (ins.Count == 1 ? ins[0] : null);
+            if (hit != null) customsFeeRef = DocNoKey(hit.GetStr("docNo"));
+        }
         var supplierRef = manualRef.Length > 0 ? manualRef
+            : customsFeeRef.Length > 0 ? customsFeeRef
             : isPoKeyed && poRef.Length > 0 ? GoodsReference(header, poRef) : Or(vendor.Length > 0 ? DocNoKey(InvoiceNoOf(taxRows)) : "",
             Or(header.GetStr("invoiceNo").Trim(),
                Or(header.GetStr("goodsInvoiceNo").Trim(), poRef)));
+        // Each SAP document of a bundle carries ITS OWN document date (AP, 2026-11-19): the customs
+        // receipt (16-11-69) and the insurance invoice are dated differently from the shipping
+        // agent's invoice. A date typed in the document's tab on Basic Data (extra.sapDocDate on
+        // its rows) wins; else the date of the bundle's source document whose number is this
+        // document's Reference; else the invoice date, as before. The tax dates follow it (GLC
+        // PRD refuses a tax date other than the document date, FF/785).
+        var manualDocDate = ((doc.Get("lines") as System.Collections.IEnumerable)?.OfType<Dictionary<string, object?>>() ?? [])
+            .Where(l => l.Get("extra") is Dictionary<string, object?> ex && Mine(ex))
+            .Select(l => ((Dictionary<string, object?>)l["extra"]!).GetStr("sapDocDate").Trim())
+            .FirstOrDefault(r => r.Length > 0) ?? "";
+        var sourceDocDate = isPoKeyed ? "" : (header.Get("sourceDocs") as System.Collections.IEnumerable)?.OfType<Dictionary<string, object?>>()
+            .Where(d => supplierRef.Length > 0 && DocNoKey(d.GetStr("docNo")).Equals(DocNoKey(supplierRef), StringComparison.OrdinalIgnoreCase))
+            .Select(d => d.GetStr("docDate").Trim()).FirstOrDefault(v => v.Length > 0) ?? "";
+        var docDate = Or(manualDocDate, Or(sourceDocDate, header.GetStr("invoiceDate").Trim()));
         var payload = new Dictionary<string, object?>
         {
             ["_target"] = Endpoint,
             ["CompanyCode"] = companyCode,
-            ["DocumentDate"] = SapPayloadBuilder.ODataDate(header.Get("invoiceDate")),
+            ["DocumentDate"] = SapPayloadBuilder.ODataDate(docDate),
             ["PostingDate"] = SapPayloadBuilder.ODataDate(header.Get("postingDate"))
                 ?? SapPayloadBuilder.ODataDate(header.Get("invoiceDate")),
             ["InvoicingParty"] = invoicingParty,
@@ -668,12 +735,13 @@ public static class SupplierInvoicePayload
             // on the document header (BKTXT) and leaves the line's own Text (BSEG-SGTXT) empty,
             // which is what Finance reads in the open-item list. 50 characters.
             ["SupplierPostingLineItemText"] = Cut(itemText, 50),
-            ["TaxDeterminationDate"] = SapPayloadBuilder.ODataDate(header.Get("taxDate"))
-                ?? SapPayloadBuilder.ODataDate(header.Get("invoiceDate")),
-            ["TaxReportingDate"] = SapPayloadBuilder.ODataDate(header.Get("taxReportingDate"))
-                ?? SapPayloadBuilder.ODataDate(header.Get("invoiceDate")),
-            ["TaxFulfillmentDate"] = SapPayloadBuilder.ODataDate(header.Get("taxFulfillDate"))
-                ?? SapPayloadBuilder.ODataDate(header.Get("invoiceDate")),
+            // GLC PRD (CC 2000) refuses a tax date that differs from the DOCUMENT date with FF/785
+            // "Error when checking tax reporting date": tax dates 11.09.2026 and 17.11.2026 on an
+            // invoice dated 16.10.2026 were both refused; it went through once all three = the
+            // document date (AP, 2026-11-19). So all three follow the document (invoice) date.
+            ["TaxDeterminationDate"] = SapPayloadBuilder.ODataDate(docDate),
+            ["TaxReportingDate"] = SapPayloadBuilder.ODataDate(docDate),
+            ["TaxFulfillmentDate"] = SapPayloadBuilder.ODataDate(docDate),
             ["_source"] = source ?? new Dictionary<string, object?>(),
         };
         // SAP normally takes the payment terms off the purchase order. When the PO does not carry

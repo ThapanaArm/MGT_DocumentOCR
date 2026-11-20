@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { getPayload } from '../../api/documents';
 import type { DocLine } from '../../api/documents';
-import { fmtAmt } from '../../utils/format';
+import { fmtAmt, num } from '../../utils/format';
 
 /* GLC copy of MGT's SapDocTabs (AP, 2026-11-18). MGT (AP, 2026-11-16): what each SAP document of this bundle will carry, one TAB per document —
    a shipping bundle becomes one document per supplier invoice (PRD 5100000595 FLS Freight
@@ -24,7 +24,16 @@ export interface SapDocTab {
   lineIdx?: number[];
   /** The Reference was typed by hand (extra.sapRef). */
   manualRef?: boolean;
+  /** Document Date of this SAP document, yyyy-MM-dd (the tax dates follow it). */
+  docDate?: string;
+  /** The Document Date was typed by hand (extra.sapDocDate). */
+  manualDate?: boolean;
 }
+
+/** "0152-091678/16-11-69" -> "0152-091678" — as the backend's DocNoKey. */
+const docNoKey = (v: string) => { const s = String(v ?? '').trim(); const i = s.indexOf('/'); return (i > 0 ? s.slice(0, i) : s).trim().toUpperCase(); };
+/** "/Date(1792108800000)/" -> "2026-10-16". */
+const fromOData = (v: unknown) => { const m = /\/Date\((\d+)\)\//.exec(String(v ?? '')); return m ? new Date(Number(m[1])).toISOString().slice(0, 10) : ''; };
 
 type Payload = Record<string, any>;
 const listOf = (v: unknown): Payload[] =>
@@ -44,13 +53,20 @@ export function screenTabs(args: {
   po: string;
   invoiceNo: string;
   text: string;
+  /** Same net amounts as the vendor-filtered Totals card. */
+  totalsByVendor: ReadonlyMap<string, { totalAmount: number }>;
   /** Goods keyed against the PO: every row is one document of the main supplier. */
   singleDoc?: boolean;
+  singleDocTotal?: number | string;
   /** The Reference a goods document carries (the supplier's invoice, else the PO). */
   goodsReference?: string;
+  /** The document's invoice date (yyyy-MM-dd) — the default Document Date. */
+  invoiceDate?: string;
+  /** header.sourceDocs — each supplier document's own date, found by its number. */
+  sourceDocs?: Array<Record<string, any>>;
 }): SapDocTab[] {
-  const { lines, mainVendor, po, invoiceNo, text, singleDoc, goodsReference } = args;
-  const groups = new Map<string, { vendor: string; manual: string; costs: string[]; amount: number; idx: number[] }>();
+  const { lines, mainVendor, po, invoiceNo, text, totalsByVendor, singleDoc, singleDocTotal, goodsReference, invoiceDate, sourceDocs } = args;
+  const groups = new Map<string, { vendor: string; manual: string; manualDate: string; costs: string[]; costTypes: string[]; amount: number; idx: number[] }>();
   const taxNoOf = new Map<string, string>();
   lines.forEach((l, li) => {
     const ext = String(l.extCode ?? '').trim().toUpperCase();
@@ -61,29 +77,56 @@ export function screenTabs(args: {
       if (ext === 'VAT' && no && !taxNoOf.has(vendor)) taxNoOf.set(vendor, no);
       return;
     }
-    const amount = Number(l.amount) || 0;
+    const amount = num(l.amount);
     if (!amount) return;
-    const g = groups.get(vendor) ?? { vendor, manual: '', costs: [], amount: 0, idx: [] };
+    const g = groups.get(vendor) ?? { vendor, manual: '', manualDate: '', costs: [], costTypes: [], amount: 0, idx: [] };
     g.costs.push(String(l.desc ?? '').trim());
+    g.costTypes.push(String(x.costType ?? '').trim().toUpperCase());
     g.amount = Math.round((g.amount + amount) * 100) / 100;
     g.idx.push(li);
     if (!g.manual) g.manual = String(x.sapRef ?? '').trim();
+    if (!g.manualDate) g.manualDate = String(x.sapDocDate ?? '').trim();
     groups.set(vendor, g);
   });
   return [...groups.values()].map((g, i) => {
-    const auto = singleDoc ? (goodsReference || invoiceNo || po) : (taxNoOf.get(g.vendor) || invoiceNo || po);
+    // The Customs Department's document: the เลขที่ชำระอากร of the receipt for the fee it charges
+    // (0152-091679 for the 200.00 fee), without the "/16-11-69" date (AP, 2026-11-19) — found among
+    // the bundle's customs receipts by the fee amount, as the backend does.
+    const isCustoms = g.costs.some((c) => /CUSTOMS/i.test(c))
+      || (sourceDocs ?? []).some((d) => /CUSTOMS|ศุลกากร/i.test(String(d.issuerName ?? '')) && docNoKey(d.docNo) === docNoKey(taxNoOf.get(g.vendor) ?? ''));
+    const feeReceipts = isCustoms && !singleDoc
+      ? (sourceDocs ?? []).filter((d) => /CUSTOMS|ศุลกากร/i.test(String(d.issuerName ?? '')) && Number(d.nonVatAmount) > 0)
+      : [];
+    const feeReceipt = feeReceipts.find((d) => Math.abs(Number(d.nonVatAmount) - g.amount) <= 0.01) ?? (feeReceipts.length === 1 ? feeReceipts[0] : undefined);
+    const plain = (v: string) => { const t = String(v ?? '').trim(); const i = t.indexOf('/'); return i > 0 ? t.slice(0, i).trim() : t; };
+    // The insurer's document: the premium invoice's own number (เลขที่ 2405991) — the bundle's
+    // Insurance source document, by amount when there are several (AP, 2026-11-19).
+    const insDocs = !singleDoc && !feeReceipt && g.costTypes.length > 0 && g.costTypes.every((c) => c === 'INSURANCE')
+      ? (sourceDocs ?? []).filter((d) => String(d.costType ?? '').trim().toUpperCase() === 'INSURANCE' && String(d.docNo ?? '').trim())
+      : [];
+    const insDoc = insDocs.find((d) => Math.abs(Number(d.amountBeforeVat) - g.amount) <= 0.01 || Math.abs(Number(d.totalAmount) - g.amount) <= 0.01)
+      ?? (insDocs.length === 1 ? insDocs[0] : undefined);
+    const auto = singleDoc ? (goodsReference || invoiceNo || po)
+      : feeReceipt ? plain(feeReceipt.docNo) : insDoc ? plain(insDoc.docNo) : (plain(taxNoOf.get(g.vendor) ?? '') || invoiceNo || po);
     const reference = g.manual || auto;
+    // Document Date (AP, 2026-11-19): typed in the tab, else the date of the bundle's document
+    // whose number is this Reference (the customs receipt, the insurance invoice), else the
+    // invoice date — as the backend builds it.
+    const srcDate = singleDoc ? '' : String((sourceDocs ?? []).find((d) => reference && docNoKey(d.docNo) === docNoKey(reference))?.docDate ?? '').trim();
+    const docDate = g.manualDate || srcDate || String(invoiceDate ?? '').trim();
     return {
       key: `s${i}`,
       vendor: g.vendor,
       costs: singleDoc ? [`${g.costs.length} รายการ`] : g.costs,
-      amount: g.amount,
+      amount: (singleDoc ? singleDocTotal : totalsByVendor.get(g.vendor)?.totalAmount) ?? g.amount,
       reference,
       vendorAssignment: singleDoc ? po : reference,
       lineAssignment: po,
       text,
       lineIdx: g.idx,
       manualRef: !!g.manual,
+      docDate,
+      manualDate: !!g.manualDate,
       note: g.manual ? 'Reference แก้เอง — ลบให้ว่างเพื่อกลับไปใช้ค่าที่ระบบหาให้' : undefined,
     };
   });
@@ -106,16 +149,19 @@ function payloadTabs(docs: Payload[]): SapDocTab[] {
       vendorAssignment: String(p.AssignmentReference ?? ''),
       lineAssignment: lineAsg,
       text: String(p.SupplierPostingLineItemText ?? p.DocumentHeaderText ?? ''),
+      docDate: fromOData(p.DocumentDate),
       note: estimates.length ? `ยอดตามประมาณการใน PO: ${estimates.join(', ')}` : undefined,
     };
   });
 }
 
-export default function SapDocTabs({ docId, fromScreen, onReference }: {
+export default function SapDocTabs({ docId, fromScreen, onReference, onDocDate }: {
   docId: number;
   fromScreen: SapDocTab[];
   /** Writes a typed Reference onto the rows of one document (extra.sapRef); '' clears it. */
   onReference?: (lineIdx: number[], value: string) => void;
+  /** Writes a Document Date onto the rows of one document (extra.sapDocDate); '' clears it. */
+  onDocDate?: (lineIdx: number[], value: string) => void;
 }) {
   const [fromSap, setFromSap] = useState<SapDocTab[] | null>(null);
   const [errors, setErrors] = useState<string[]>([]);
@@ -168,6 +214,13 @@ export default function SapDocTabs({ docId, fromScreen, onReference }: {
     // Back to the screen's values, which now carry the edit; "ตรวจกับ SAP" shows SAP's again.
     if (fromSap) setFromSap(null);
   };
+  const setDocDate = (value: string) => {
+    const target = screenFor(curIdx);
+    if (!onDocDate || !target?.lineIdx?.length) return;
+    onDocDate(target.lineIdx, value);
+    if (fromSap) setFromSap(null);
+  };
+  const dateEditable = !!onDocDate && !!screenFor(curIdx)?.lineIdx?.length;
   // TEST adds "-T{docId}" when it sends; the box edits the Reference itself.
   const refShown = (t: SapDocTab) => (fromSap ? t.reference.replace(/-T\d+[A-Z]?$/, '') : t.reference);
 
@@ -243,6 +296,17 @@ export default function SapDocTabs({ docId, fromScreen, onReference }: {
                   )}
                 </div>
               )}
+              <div className="f" key="docDate">
+                <label>Document Date → SAP{dateEditable ? ' (แก้ได้)' : ''}</label>
+                <input
+                  type="date"
+                  value={cur.docDate || ''}
+                  readOnly={!dateEditable}
+                  onChange={(e) => setDocDate(e.target.value)}
+                  title="วันที่เอกสารของใบนี้ — Tax Reporting / Fulfill / Tax Date ใช้วันเดียวกัน"
+                  style={!dateEditable ? { background: 'var(--bg-subtle, #f5f5f5)' } : cur.manualDate ? { borderColor: 'var(--warn, #c08000)' } : undefined}
+                />
+              </div>
               {box('Assignment — บรรทัดผู้ขาย', cur.vendorAssignment)}
               {box('Assignment — บรรทัดค่าใช้จ่าย', cur.lineAssignment)}
               {box('Text — ทุกบรรทัด', cur.text)}

@@ -145,6 +145,88 @@ const ROLE_BADGE: Record<IssuerRole, { label: string; cls: string; tip: string }
   thirdIncluded: { label: 'Third party · รวมในใบตัวแทน', cls: 'b-idle', tip: 'ตัวแทนจ่ายแทนแล้วเรียกเก็บรวมในใบแจ้งหนี้ของตัวเอง — ไม่นับยอดซ้ำ' },
 };
 
+function countedSourceDocs(doc: DocModel): SourceDoc[] {
+  const docs: SourceDoc[] = Array.isArray(doc.header.sourceDocs) ? doc.header.sourceDocs : [];
+  return docs.filter((d) => !String(d.includedIn ?? '').trim() && issuerRoleOf(doc, d) !== 'shipper');
+}
+
+function vendorVatTotals(doc: DocModel, mainVendor: string) {
+  const totals = new Map<string, number>();
+  const addVat = (vendor: string, amount: number) => totals.set(vendor, (totals.get(vendor) ?? 0) + amount);
+  const vendorOf = (line: DocModel['lines'][number]) => String(line.extra?.vendorCode ?? '').trim();
+  const vatLines = doc.lines.filter((line) => String(line.extCode ?? '').trim().toUpperCase() === 'VAT');
+  const insurers = new Set(doc.lines
+    .filter((line) => !TAX_ROW.test(String(line.extCode ?? '').trim()) && norm(line.extra?.costType) === 'Insurance')
+    .map(vendorOf)
+    .filter(Boolean));
+  const [insurer] = insurers;
+  const matched = new Set<DocModel['lines'][number]>();
+
+  if (insurers.size === 1) {
+    const sources = countedSourceDocs(doc);
+    const docNo = (value: unknown) => String(value ?? '').split('/')[0].trim();
+    const sameVat = (a: unknown, b: unknown) => Math.round(num(a) * 100) === Math.round(num(b) * 100);
+    const issuerOf = (line: DocModel['lines'][number]) =>
+      firstWord(line.extra?.issuerName || String(line.desc ?? '').replace(/^VAT\s*[\d.]*%?\s*/i, ''));
+
+    for (const source of sources) {
+      const vat = num(source.vatAmount);
+      if (norm(source.costType) !== 'Insurance' || !vat) continue;
+
+      // Older OCR reads may put insurer VAT on the agent or use the policy number on one copy.
+      const available = vatLines.filter((line) => !matched.has(line));
+      const sameAmount = available.filter((line) => sameVat(line.amount, vat));
+      const issuer = firstWord(source.issuerName);
+      const [onlyAmountMatch] = sameAmount;
+      const unlabelled = onlyAmountMatch && !onlyAmountMatch.extra?.taxDocNo && !issuerOf(onlyAmountMatch)
+        && ['', mainVendor].includes(vendorOf(onlyAmountMatch));
+      const match = available.find((line) => sameNo(docNo(line.extra?.taxDocNo), docNo(source.docNo)))
+        ?? sameAmount.find((line) => issuer && issuer === issuerOf(line))
+        ?? (sameAmount.length === 1 && sources.filter((d) => sameVat(d.vatAmount, vat)).length === 1
+          && (vendorOf(onlyAmountMatch) === insurer || unlabelled) ? onlyAmountMatch : undefined);
+      if (match) matched.add(match);
+      addVat(insurer, vat);
+    }
+  }
+
+  for (const line of vatLines) {
+    if (!matched.has(line)) addVat(vendorOf(line) || mainVendor, num(line.amount));
+  }
+  return totals;
+}
+
+export function vendorInvoiceTotals(doc: DocModel, mainVendor: string) {
+  const totals = new Map<string, { subTotal: number; vatAmount: number; whtAmount: number; totalAmount: number }>();
+  const vatByVendor = vendorVatTotals(doc, mainVendor);
+  const forVendor = (vendor: string) => {
+    const total = totals.get(vendor) ?? { subTotal: 0, vatAmount: vatByVendor.get(vendor) ?? 0, whtAmount: 0, totalAmount: 0 };
+    totals.set(vendor, total);
+    return total;
+  };
+
+  for (const vendor of vatByVendor.keys()) forVendor(vendor);
+  for (const line of doc.lines) {
+    const code = String(line.extCode ?? '').trim().toUpperCase();
+    if (code === 'VAT') continue;
+    const vendor = String(line.extra?.vendorCode ?? '').trim() || mainVendor;
+    const total = forVendor(vendor);
+    const amount = num(line.amount);
+    if (code === 'WHT') total.whtAmount += amount;
+    else if (code === 'DUTY') total.totalAmount += amount;
+    else total.subTotal += amount;
+  }
+
+  const money = (amount: number) => Math.round(amount * 100) / 100;
+  for (const total of totals.values()) {
+    // Net Total includes customs duty and VAT. Withholding is shown separately.
+    total.totalAmount = money(total.totalAmount + total.subTotal + total.vatAmount);
+    total.subTotal = money(total.subTotal);
+    total.vatAmount = money(total.vatAmount);
+    total.whtAmount = money(total.whtAmount);
+  }
+  return totals;
+}
+
 export function shippingCheckRows(doc: DocModel) {
   const form: Record<string, number> = {};
   for (const l of doc.lines || []) {
@@ -153,13 +235,8 @@ export function shippingCheckRows(doc: DocModel) {
     if (!t) continue;
     form[t] = (form[t] ?? 0) + num(l.amount);
   }
-  const docs: SourceDoc[] = Array.isArray(doc.header.sourceDocs) ? doc.header.sourceDocs : [];
   const counted: Record<string, { nonVat: number; before: number; vat: number; total: number; n: number }> = {};
-  for (const d of docs) {
-    if (String(d.includedIn ?? '').trim()) continue;
-    // The goods supplier's own commercial invoice (KCCCI…) is the goods, not a shipping cost: the
-    // form never carries it, so counting it only made Overseas show -25,834.00.
-    if (issuerRoleOf(doc, d) === 'shipper') continue;
+  for (const d of countedSourceDocs(doc)) {
     const t = norm(d.costType);
     if (!t) continue;
     const c = (counted[t] ??= { nonVat: 0, before: 0, vat: 0, total: 0, n: 0 });
