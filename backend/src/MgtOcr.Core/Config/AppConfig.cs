@@ -16,17 +16,11 @@ public class AppConfig
     public string[] OwnCompanyKeywords { get; init; } = ["MEGACHEM"];
     public string OwnTaxId { get; init; } = "";
 
-    public string OcrProvider { get; init; } = "auto";
-    public string TesseractCmd { get; init; } = "";
-    public string TessdataPrefix { get; init; } = "";
-    public string AzureDiEndpoint { get; init; } = "";
-    public string AzureDiKey { get; init; } = "";
+    public string OcrProvider { get; init; } = "gemini";
     public string AnthropicApiKey { get; init; } = "";
     public string AnthropicModel { get; init; } = "claude-sonnet-5";
-    public string TyphoonApiKey { get; init; } = "";
-    public string TyphoonModel { get; init; } = "typhoon-ocr";
-    // New in the .NET port (no Python equivalent) — same raw-HTTP, no-SDK pattern as the
-    // existing Claude/Azure/Typhoon clients.
+    // Gemini is the only reading engine. Anthropic / OpenAI keys above/below are used only by the
+    // AI chat / Compare / Search helpers, not for reading.
     public string GeminiApiKey { get; init; } = "";
     public string GeminiEnvironment { get; init; } = "";
     public bool GeminiReduceRegionThinking { get; init; }
@@ -37,13 +31,6 @@ public class AppConfig
     public bool OcrRecordPositions { get; init; } = true;
     public string OpenAiApiKey { get; init; } = "";
     public string OpenAiModel { get; init; } = "gpt-4o";
-    // PaddleOCR-Standalone (local exe). Blank Cmd = look in C:\Program Files\PaddleOCR-CPU|GPU.
-    // Lang "th" = PP-OCRv5 Thai model (also reads English/digits). Device blank = exe default ("cpu" / "gpu:0").
-    public string PaddleOcrCmd { get; init; } = "";
-    public string PaddleOcrLang { get; init; } = "th";
-    public string PaddleOcrDevice { get; init; } = "";
-    public int PaddleOcrMaxPages { get; init; } = 10;
-    public int PaddleOcrTimeoutSec { get; init; } = 300;
 
     public string SapBaseUrl { get; init; } = "";
     public string SapUser { get; init; } = "";

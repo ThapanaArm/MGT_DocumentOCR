@@ -915,12 +915,8 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             if (pdfStatus != PdfExtraction.PdfOpenStatus.Ok)
                 throw new HttpApiException(400, pdfStatus == PdfExtraction.PdfOpenStatus.PasswordRequired ? "PDF_PASSWORD_REQUIRED" : "PDF_PASSWORD_WRONG");
         }
-        // AP invoices may be re-read with ChatGPT Vision. Keep the existing Gemini-only behavior
-        // for Sales Orders and other modules, regardless of a client-supplied engine.
-        var requestedEngine = body.GetStr("ocr");
-        var reocrEngine = module is "AP" or "II"
-            ? Services.DocumentIngestService.UploadEngineFor(module, requestedEngine)
-            : "gemini";
+        // Gemini is the only reading engine, whatever the client sends in "ocr".
+        var reocrEngine = Services.DocumentIngestService.UploadEngineFor(module, body.GetStr("ocr"));
         // Re-reading follows the company the document is already filed under, so a second read
         // never silently swaps MGT's rules for GLC's (CompanyRules treats an empty value as GLC).
         var docCompany = await repo.GetCompanyAsync(docId);

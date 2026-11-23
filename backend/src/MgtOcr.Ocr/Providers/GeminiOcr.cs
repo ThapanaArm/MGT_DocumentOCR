@@ -7,7 +7,7 @@ using MgtOcr.Core.Config;
 namespace MgtOcr.Ocr.Providers;
 
 // New in the .NET port (no Python equivalent) — Google Gemini Vision, same raw-HTTP/no-SDK
-// pattern as the existing Claude/Azure/Typhoon clients. Uses the Generative Language API's
+// pattern as the other HTTP clients in this project. Uses the Generative Language API's
 // generateContent endpoint with inline base64 image parts.
 public static partial class GeminiOcr
 {
@@ -442,22 +442,6 @@ public static partial class GeminiOcr
         }
         catch (JsonException) { /* positions are a display aid; a bad answer never fails the read */ }
         return read;
-    }
-
-    /// <summary>Text-only structuring: another OCR engine (PaddleOCR) has already read the characters,
-    /// so only the text goes to Gemini — no images — with the same JSON schema/rules as the Vision read.
-    /// Much smaller request than Vision, so it is cheaper and faster.</summary>
-    public static async Task<(ParsedDocument? Doc, string? Error)> TextExtractAsync(
-        string module, string text, AppConfig config, string salesOrg = "", string providerId = "paddle_gemini")
-    {
-        if (string.IsNullOrEmpty(config.GeminiApiKey))
-            return (null, GeminiRequest.MissingKeyMessage);
-        if (string.IsNullOrWhiteSpace(text)) return (null, "No OCR text to send to Gemini");
-        var prompt = VisionPrompt.Build(module, "text", salesOrg) + "\n\n--- ข้อความจาก OCR ---\n" +
-                     (text.Length > 40000 ? text[..40000] : text) + "\n";
-        var res = await OneShotAsync([], "", prompt, module, config, 0, TimeSpan.FromSeconds(180), providerId, text, operation: "ocr.text");
-        if (res.Doc != null && module is "AP" or "II") AssignTaxRowVendors(res.Doc);
-        return res;
     }
 
     /// <summary>Pages per request once a file is split. Eight A4 pages answer comfortably inside

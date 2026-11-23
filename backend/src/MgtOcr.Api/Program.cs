@@ -36,11 +36,6 @@ var startupLog = startupLoggerFactory.CreateLogger("MgtOcr.Startup");
 // filtering, so appsettings.json can carry a placeholder row for the company that is not live yet.
 var authTenants = cfg.GetSection("AzureAd:Tenants").Get<AuthTenant[]>() ?? [];
 
-// Auto-detection: if Ocr:TesseractCmd / Ocr:TessdataPrefix aren't set explicitly, fall back to
-// the well-known local install path this project already ships with.
-var defaultTesseractCmd = @"C:\Program Files\Tesseract-OCR\tesseract.exe";
-var tesseractCmd = Get("Ocr:TesseractCmd");
-if (tesseractCmd == "" && File.Exists(defaultTesseractCmd)) tesseractCmd = defaultTesseractCmd;
 // Where uploaded documents are kept. On a developer machine this is the repo's own uploads
 // folder, which is why it was hard-coded — but a deployment publishes the app somewhere else
 // entirely and that folder does not travel with it, so a published site would quietly write the
@@ -49,10 +44,6 @@ if (tesseractCmd == "" && File.Exists(defaultTesseractCmd)) tesseractCmd = defau
 // the server; the repo folder stays the fallback so nothing changes for local work.
 var uploadDir = Get("Storage:UploadDir");
 uploadDir = uploadDir.Length > 0 ? Path.GetFullPath(uploadDir) : Path.Combine(repoRoot, "uploads");
-
-var defaultTessdata = Path.Combine(repoRoot, "tessdata");
-var tessdataPrefix = Get("Ocr:TessdataPrefix");
-if (tessdataPrefix == "" && Directory.Exists(defaultTessdata)) tessdataPrefix = defaultTessdata;
 
 // Sap:BusinessPartner, Sap:SalesOrder, Sap:Product and ZohoConfig each carry a "dev"/"prod"
 // (Sap) or "sandbox"/"prod" (Zoho) pair of value sets plus their own switch key, so flipping ONE
@@ -96,26 +87,15 @@ var appConfig = new AppConfig
     AppPort = int.TryParse(Get("App:Port", "8091"), out var p) ? p : 8091,
     OwnCompanyKeywords = Get("App:OwnCompanyKeywords", "MEGACHEM").Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries),
     OwnTaxId = Get("App:OwnTaxId"),
-    OcrProvider = Get("Ocr:Provider", "auto"),
-    TesseractCmd = tesseractCmd,
-    TessdataPrefix = tessdataPrefix,
-    AzureDiEndpoint = Get("Ocr:AzureDiEndpoint"),
-    AzureDiKey = Get("Ocr:AzureDiKey"),
+    OcrProvider = "gemini", // Gemini is the only reading engine
     AnthropicApiKey = Get("Ocr:AnthropicApiKey"),
     AnthropicModel = Get("Ocr:AnthropicModel", "claude-sonnet-5"),
-    TyphoonApiKey = Get("Ocr:TyphoonApiKey"),
-    TyphoonModel = Get("Ocr:TyphoonModel", "typhoon-ocr"),
     GeminiApiKey = Get("Ocr:GreenleafchemicalGeminiApiKey"),
     GeminiEnvironment = Get("Ocr:GeminiEnvironment", builder.Environment.EnvironmentName),
     GeminiReduceRegionThinking = GetBool("Ocr:GeminiReduceRegionThinking", false),
     OcrRecordPositions = GetBool("Ocr:Positions:Enabled", true),
     OpenAiApiKey = Get("Ocr:OpenAiApiKey"),
     OpenAiModel = Get("Ocr:OpenAiModel", "gpt-4o"),
-    PaddleOcrCmd = Get("Ocr:PaddleOcrCmd"),
-    PaddleOcrLang = Get("Ocr:PaddleOcrLang", "th"),
-    PaddleOcrDevice = Get("Ocr:PaddleOcrDevice"),
-    PaddleOcrMaxPages = int.TryParse(Get("Ocr:PaddleOcrMaxPages", "10"), out var pdMax) ? pdMax : 10,
-    PaddleOcrTimeoutSec = int.TryParse(Get("Ocr:PaddleOcrTimeoutSec", "300"), out var pdTo) ? pdTo : 300,
     SapBaseUrl = Get("Sap:BaseUrl"),
     SapUser = Get("Sap:User"),
     SapPassword = cfg["Sap:Password"] ?? "",
