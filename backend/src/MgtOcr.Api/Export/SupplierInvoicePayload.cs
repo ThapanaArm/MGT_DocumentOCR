@@ -623,10 +623,13 @@ public static class SupplierInvoicePayload
             .Where(l => l.Get("extra") is Dictionary<string, object?> ex && Mine(ex))
             .Select(l => ((Dictionary<string, object?>)l["extra"]!).GetStr("sapRef").Trim())
             .FirstOrDefault(r => r.Length > 0) ?? "";
-        // The Customs Department's document: its Reference is the เลขที่ชำระอากร of the receipt
-        // for the FEE this document charges — 0152-091679 for the 200.00 processing fee — without
-        // the "/16-11-69" date (AP, 2026-11-19). The import VAT receipt (0152-091678) stays on the
-        // Input tax line's Assignment. Picked from the bundle's customs receipts by the fee amount.
+        // The Customs Department's document: its Reference is the เลขที่ชำระอากร of the receipt that
+        // carries the IMPORT VAT (0152-091678), without the "/16-11-69" date (AP, 2026-11-23). The
+        // input tax report prints a document's Reference as its tax invoice number, and with the FEE
+        // receipt there (0152-091679, 200.00, no VAT) it showed a number that does not carry the VAT.
+        // A customs document with no import VAT receipt (a fee on its own) still takes the receipt of
+        // the fee it charges, picked from the bundle's customs receipts by amount (AP, 2026-11-19).
+        // The import VAT receipt also stays on the Input tax line's Assignment.
         var myCosts = ((doc.Get("lines") as System.Collections.IEnumerable)?.OfType<Dictionary<string, object?>>() ?? [])
             .Where(l => l.Get("extra") is Dictionary<string, object?> ex && Mine(ex)
                 && l.GetStr("extCode").Trim().ToUpperInvariant() is not ("VAT" or "WHT"))
@@ -636,6 +639,20 @@ public static class SupplierInvoicePayload
         var customsDoc = customsParty || myCosts.Any(l => l.GetStr("desc").Contains("CUSTOMS", StringComparison.OrdinalIgnoreCase));
         var customsFeeRef = "";
         if (customsDoc && vendor.Length > 0)
+            customsFeeRef = DocNoKey(taxRows.Where(DeferredVatReversal.IsImportVat)
+                .Select(t => t.GetStr("taxDocNo").Trim()).FirstOrDefault(v => v.Length > 0));
+        // The import VAT row can come back without its number. A customs bundle always carries two
+        // receipts, the VAT one and the fee one (AP, 2026-11-23), so the VAT receipt is the customs
+        // receipt of the bundle that has VAT on it. Only when there is none (a fee on its own) does the
+        // fee receipt below take over, so the fee receipt is never picked while a VAT receipt exists.
+        if (customsDoc && customsFeeRef.Length == 0 && vendor.Length > 0)
+        {
+            var vatReceipt = ((header.Get("sourceDocs") as System.Collections.IEnumerable)?.OfType<Dictionary<string, object?>>() ?? [])
+                .FirstOrDefault(d => System.Text.RegularExpressions.Regex.IsMatch(d.GetStr("issuerName"), "CUSTOMS|ศุลกากร", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+                    && Amt(d.Get("vatAmount")) > 0 && d.GetStr("docNo").Trim().Length > 0);
+            if (vatReceipt != null) customsFeeRef = DocNoKey(vatReceipt.GetStr("docNo"));
+        }
+        if (customsDoc && customsFeeRef.Length == 0 && vendor.Length > 0)
         {
             var fee = Math.Round(myCosts.Sum(l => Amt(l.Get("amount"))), 2);
             var receipts = ((header.Get("sourceDocs") as System.Collections.IEnumerable)?.OfType<Dictionary<string, object?>>() ?? [])

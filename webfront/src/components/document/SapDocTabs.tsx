@@ -89,9 +89,10 @@ export function screenTabs(args: {
     groups.set(vendor, g);
   });
   return [...groups.values()].map((g, i) => {
-    // The Customs Department's document: the เลขที่ชำระอากร of the receipt for the fee it charges
-    // (0152-091679 for the 200.00 fee), without the "/16-11-69" date (AP, 2026-11-19) — found among
-    // the bundle's customs receipts by the fee amount, as the backend does.
+    // The Customs Department's document: the เลขที่ชำระอากร of the receipt that carries the import
+    // VAT (0152-091678), without the "/16-11-69" date (AP, 2026-11-23) — the input tax report prints
+    // the Reference as the tax invoice number. Only a document with no import VAT receipt takes the
+    // receipt of the fee it charges (AP, 2026-11-19), found by the fee amount. As the backend does.
     const isCustoms = g.costs.some((c) => /CUSTOMS/i.test(c))
       || (sourceDocs ?? []).some((d) => /CUSTOMS|ศุลกากร/i.test(String(d.issuerName ?? '')) && docNoKey(d.docNo) === docNoKey(taxNoOf.get(g.vendor) ?? ''));
     const feeReceipts = isCustoms && !singleDoc
@@ -106,7 +107,11 @@ export function screenTabs(args: {
       : [];
     const insDoc = insDocs.find((d) => Math.abs(Number(d.amountBeforeVat) - g.amount) <= 0.01 || Math.abs(Number(d.totalAmount) - g.amount) <= 0.01)
       ?? (insDocs.length === 1 ? insDocs[0] : undefined);
+    const vatReceipt = isCustoms && !singleDoc
+      ? (sourceDocs ?? []).find((d) => /CUSTOMS|ศุลกากร/i.test(String(d.issuerName ?? '')) && Number(d.vatAmount) > 0 && String(d.docNo ?? '').trim())
+      : undefined;
     const auto = singleDoc ? (goodsReference || invoiceNo || po)
+      : vatReceipt ? plain(vatReceipt.docNo)
       : feeReceipt ? plain(feeReceipt.docNo) : insDoc ? plain(insDoc.docNo) : (plain(taxNoOf.get(g.vendor) ?? '') || invoiceNo || po);
     const reference = g.manual || auto;
     // Document Date (AP, 2026-11-19): typed in the tab, else the date of the bundle's document
@@ -120,7 +125,9 @@ export function screenTabs(args: {
       costs: singleDoc ? [`${g.costs.length} รายการ`] : g.costs,
       amount: (singleDoc ? singleDocTotal : totalsByVendor.get(g.vendor)?.totalAmount) ?? g.amount,
       reference,
-      vendorAssignment: singleDoc ? po : reference,
+      // The Customs Department's vendor line carries the PO like every other line (AP, 2026-11-16);
+      // every other supplier's carries its own invoice number.
+      vendorAssignment: singleDoc ? po : vatReceipt ? (po || reference) : reference,
       lineAssignment: po,
       text,
       lineIdx: g.idx,

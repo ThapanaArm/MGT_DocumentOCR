@@ -29,7 +29,10 @@ public sealed class GeminiRequestTests
         Assert.Equal(new[] { 3, 4 }, usage.PageNumbers);
         Assert.Equal(2, usage.Attempt);
         Assert.Equal("response-1", usage.ResponseId);
-        Assert.Equal(0.0005585m, usage.Cost);
+        Assert.Equal("gemini-3.6-flash", usage.Model);
+        var billingTime = TimeZoneInfo.ConvertTimeBySystemTimeZoneId(usage.StartedUtc, "Pacific Standard Time");
+        var expectedCost = billingTime.Year < 2027 ? 0.00108375m : 0.00216750m;
+        Assert.Equal(expectedCost, usage.Cost);
     }
 
     [Fact]
@@ -49,6 +52,7 @@ public sealed class GeminiRequestTests
         {
             Assert.Equal("unit-test-key", Assert.Single(request.Headers.GetValues("x-goog-api-key")));
             Assert.Equal("", request.RequestUri!.Query);
+            Assert.Equal("/v1beta/models/gemini-3.6-flash:generateContent", request.RequestUri.AbsolutePath);
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body) });
         }
     }

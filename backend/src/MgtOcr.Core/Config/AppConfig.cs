@@ -31,7 +31,7 @@ public class AppConfig
     public string GeminiEnvironment { get; init; } = "";
     public bool GeminiReduceRegionThinking { get; init; }
     public Func<GeminiRequestUsage, Task>? GeminiUsageSink { get; set; }
-    public string GeminiModel { get; init; } = "gemini-2.5-flash";
+    public string GeminiModel => "gemini-3.6-flash";
     // Ocr:Positions:Enabled (default true): the main Gemini read also reports WHERE it found each
     // header value and each line (boxes 0-1000 per page), shown as frames on "View document".
     public bool OcrRecordPositions { get; init; } = true;

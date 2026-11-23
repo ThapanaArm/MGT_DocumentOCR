@@ -10,7 +10,11 @@ public sealed class BotUsdThbWorker(IConfiguration config, IHttpClientFactory cl
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var key = config["Ocr:BotApiKey"]?.Trim();
-        if (string.IsNullOrEmpty(key)) return;
+        if (string.IsNullOrEmpty(key))
+        {
+            logger.LogWarning("BOT reference-rate sync is disabled. Set Ocr:BotApiKey (environment variable Ocr__BotApiKey) and restart the API.");
+            return;
+        }
 
         using var interval = new PeriodicTimer(TimeSpan.FromHours(1));
         do
@@ -21,6 +25,10 @@ public sealed class BotUsdThbWorker(IConfiguration config, IHttpClientFactory cl
                 await SyncAsync(key, today.AddDays(-29), today, stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { return; }
+            catch (HttpRequestException error) when (error.StatusCode.HasValue)
+            {
+                logger.LogWarning("BOT reference-rate API returned HTTP {StatusCode}.", (int)error.StatusCode.Value);
+            }
             catch (Exception error)
             {
                 logger.LogWarning("Unable to refresh BOT reference rates ({ErrorType}).", error.GetType().Name);
@@ -52,13 +60,16 @@ public sealed class BotUsdThbWorker(IConfiguration config, IHttpClientFactory cl
         if (rates.Count == 0) return;
 
         var rows = JsonSerializer.Serialize(rates.Select(pair => new { date = pair.Key, rate = pair.Value }));
-        await db.ExecuteAsync("""
-            INSERT ocr.BotUsdThbReferenceRate (RateDate, ThbPerUsd)
-            SELECT r.RateDate, r.ThbPerUsd
-            FROM OPENJSON(@rows) WITH (RateDate date '$.date', ThbPerUsd decimal(12,6) '$.rate') r
-            WHERE NOT EXISTS (
-                SELECT 1 FROM ocr.BotUsdThbReferenceRate WITH (UPDLOCK, HOLDLOCK) WHERE RateDate = r.RateDate
-            )
+        var changed = await db.ExecuteAsync("""
+            MERGE ocr.BotUsdThbReferenceRate WITH (HOLDLOCK) AS existing
+            USING OPENJSON(@rows) WITH (RateDate date '$.date', ThbPerUsd decimal(12,6) '$.rate') AS published
+                ON existing.RateDate = published.RateDate
+            WHEN MATCHED AND existing.ThbPerUsd <> published.ThbPerUsd THEN
+                UPDATE SET ThbPerUsd = published.ThbPerUsd
+            WHEN NOT MATCHED BY TARGET THEN
+                INSERT (RateDate, ThbPerUsd) VALUES (published.RateDate, published.ThbPerUsd);
             """, new { rows }, ct);
+        if (changed > 0)
+            logger.LogInformation("Synced {ChangedCount} BOT USD reference rate(s).", changed);
     }
 }

@@ -2796,6 +2796,16 @@ export default function DocumentPage() {
       });
   })();
 
+  // Dev tenant only: the server swaps these vendor codes when it sends (Sap:SupplierInvoice:VendorMap_Dev),
+  // so the box names the code that really goes to SAP instead of the one on the document.
+  const vendorSwapMap = doc.sapVendorMap ?? {};
+  const vendorSwapActive = (doc.module === 'AP' || doc.module === 'II') && Object.keys(vendorSwapMap).length > 0;
+  const vendorSwapped = (code?: string) => {
+    const from = String(code ?? '').trim();
+    const to = vendorSwapActive ? vendorSwapMap[from] : undefined;
+    return to && to !== from ? <b style={{ color: '#9C0006' }}> → {to} (TEST)</b> : null;
+  };
+
   const selectedVendorTotals = vendorFilter ? totalsByVendor.get(vendorFilter) : undefined;
   const vendorTotals = selectedVendorTotals ? { ...h, ...selectedVendorTotals } : null;
 
@@ -4183,6 +4193,14 @@ export default function DocumentPage() {
               <p>
                 The system will create a <b>{moduleLabel(doc.module)}</b> document in SAP
               </p>
+              {vendorSwapActive && (
+                <div
+                  className="hint"
+                  style={{ margin: '0 0 12px', padding: '8px 12px', borderRadius: 8, background: 'rgba(255,170,0,.14)', color: '#7A4B00' }}
+                >
+                  ระบบทดสอบ (dev): รหัสผู้ขายบางตัวจะถูกแปลงก่อนส่งเข้า SAP ตามที่แสดงเป็นสีแดงด้านล่าง
+                </div>
+              )}
               <div className="tw">
                 <table style={{ minWidth: 'auto' }}>
                   <tbody>
@@ -4221,7 +4239,7 @@ export default function DocumentPage() {
                             <tbody>
                               {sendBreakdown.map((v) => (
                                 <tr key={v.code}>
-                                  <td>{v.code}{v.name ? ` — ${v.name}` : ''}</td>
+                                  <td>{v.code}{v.name ? ` — ${v.name}` : ''}{vendorSwapped(v.code)}</td>
                                   <td>{v.invoiceNo || <span className="hint">—</span>}</td>
                                   <td style={{ textAlign: 'right' }}>{v.lines}</td>
                                   <td style={{ textAlign: 'right' }}>{fmt(v.total)}</td>
@@ -4243,7 +4261,7 @@ export default function DocumentPage() {
                       <>
                         <tr>
                           <th>Vendor</th>
-                          <td>{map?.header.vendor.code} — {map?.header.vendor.text}</td>
+                          <td>{map?.header.vendor.code} — {map?.header.vendor.text}{vendorSwapped(map?.header.vendor.code)}</td>
                         </tr>
                         <tr>
                           <th>Invoice No.</th>

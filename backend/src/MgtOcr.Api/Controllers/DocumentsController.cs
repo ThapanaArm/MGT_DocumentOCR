@@ -203,6 +203,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         [FromForm(Name = "apDocCategory")] string? apDocCategory, [FromForm] IFormFile file, [FromForm] string? password,
         [FromForm(Name = "company")] string? company = null)
     {
+        EnsureGeminiConfigured();
         var jobStartedAt = DateTime.Now; // Job Tasktime starts here: the upload reached the server
         var user = await ActorAsync();
         // AP = the single liability-recording (การตั้งหนี้) reading page: read the document first,
@@ -251,6 +252,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         [FromForm(Name = "apDocCategory")] string? apDocCategory, [FromForm] List<IFormFile> files,
         [FromForm(Name = "company")] string? company = null)
     {
+        EnsureGeminiConfigured();
         var mod = ValidateModule(module);
         var user = await ActorAsync();
         if (files is null || files.Count == 0) throw new HttpApiException(400, "No files were uploaded");
@@ -337,6 +339,9 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
                 "SELECT SapDocNo FROM ocr.PostLog WHERE DocId=@docId AND Module IN ('AP','II') AND Success=1 AND ISNULL(SapDocNo,'')<>'' ORDER BY LogId",
                 new { docId });
             d["sapDocNos"] = numbers.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            // The vendor codes the server swaps at send time (dev tenant only; empty otherwise), so the
+            // "Confirm send" box can show the code that actually goes to SAP.
+            d["sapVendorMap"] = config.SapSupplierInvoiceVendorMap;
 
             // Deferred VAT JVs posted from this document (button "Post Deferred VAT JV to SAP"), so
             // anyone opening the document can find them: one row per tax invoice -> journal entry.
@@ -576,11 +581,59 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
                 logger.LogWarning(ex, "[AP] BP lookup by Tax ID {TaxId} failed (deferred VAT JV)", taxId);
             }
         }
+        // The deferred input tax (D1) line of each JV carries the text the supplier invoice's own D1
+        // line went out with (AP, 2026-11-23: "PROMPT,INV.PI-2611082" on both of its D1 lines), so the
+        // JV matches it in 11730000; the V1 line keeps the issuer's name for the input tax report.
+        // Read back from what was sent, by invoicing party: a split bundle has one invoice per
+        // supplier, each with its own text. None found (the VAT went on the Tax tab, not as G/L
+        // lines): the JV keeps the issuer's name on both lines, as before.
+        var d1TextByParty = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        {
+            List<string> d1Sent;
+            await using (var d1Conn = await GetDbAsync())
+            {
+                d1Sent = (await d1Conn.QueryAsync<string>("""
+                    SELECT PayloadJson FROM ocr.PostLog
+                     WHERE DocId=@docId AND Module IN ('AP','II') AND Success=1 AND ISNULL(SapDocNo,'')<>''
+                     ORDER BY LogId
+                    """, new { docId })).ToList();
+            }
+            var d1Acct = Export.DeferredVatReversal.GlDeferredInputTax.TrimStart('0');
+            foreach (var d1Json in d1Sent)
+            {
+                try
+                {
+                    using var d1Doc = System.Text.Json.JsonDocument.Parse(string.IsNullOrWhiteSpace(d1Json) ? "{}" : d1Json);
+                    var d1Root = d1Doc.RootElement;
+                    if (d1Root.ValueKind != System.Text.Json.JsonValueKind.Object
+                        || !d1Root.TryGetProperty("to_SupplierInvoiceItemGLAcct", out var d1Items)
+                        || d1Items.ValueKind != System.Text.Json.JsonValueKind.Array) continue;
+                    var d1Party = d1Root.TryGetProperty("InvoicingParty", out var d1Ip) ? d1Ip.ToString().Trim() : "";
+                    foreach (var d1Item in d1Items.EnumerateArray())
+                    {
+                        if (d1Item.ValueKind != System.Text.Json.JsonValueKind.Object) continue;
+                        var d1Gl = d1Item.TryGetProperty("GLAccount", out var d1A) ? d1A.ToString().Trim().TrimStart('0') : "";
+                        var d1Txt = d1Item.TryGetProperty("SupplierInvoiceItemText", out var d1T) ? d1T.ToString().Trim() : "";
+                        if (d1Gl == d1Acct && d1Txt.Length > 0) { d1TextByParty.TryAdd(d1Party, d1Txt); break; }
+                    }
+                }
+                catch (System.Text.Json.JsonException) { /* an unreadable log row just gives no text */ }
+            }
+        }
+        string D1TextOf(string d1Vendor)
+        {
+            var d1V = (d1Vendor ?? "").Trim();
+            if (d1TextByParty.TryGetValue(d1V, out var d1Found)) return d1Found;
+            // The test tenant's vendor map renames the supplier on the way out.
+            return config.SapSupplierInvoiceVendorMap.TryGetValue(d1V, out var d1To)
+                && d1TextByParty.TryGetValue(d1To, out d1Found) ? d1Found : "";
+        }
         var entries = batches.Select(b => new MgtOcr.Sap.SapClient.DeferredVatJv(
             b.Reference, b.Text, b.Assignment,
             Math.Round((decimal)b.Amount, 2), Math.Round((decimal)b.Base, 2), b.TaxDate,
             partnerByTaxId.GetValueOrDefault(Digits(b.TaxId), ""),
-            Export.DeferredVatReversal.GlInputTax, b.InputTaxAssignment)).ToList();
+            Export.DeferredVatReversal.GlInputTax, b.InputTaxAssignment,
+            DeferredAccount: Export.DeferredVatReversal.GlDeferredInputTax, DeferredText: D1TextOf(b.Vendor))).ToList();
         var results = await sap.PostDeferredVatJournalEntriesAsync(entries, company?.CompanyCode ?? "2000",
             postingDate, Export.DeferredVatReversal.Reference(header),
             header.GetStr("currency").Trim() is { Length: > 0 } c ? c : "THB");
@@ -839,6 +892,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
 
     private async Task<IActionResult> ReocrDocumentCoreAsync(int docId, Dictionary<string, object?>? rawBody)
     {
+        EnsureGeminiConfigured();
         var body = JsonBodyHelpers.Unwrap(rawBody ?? new());
         var docT = DocumentTables.ForId(docId).Doc;
         dynamic? row = await GetDbInstance().QueryOneAsync($"SELECT Module, StoredPath, FileName, FileExpiredAt FROM {docT} WHERE DocId=@docId", new { docId });
@@ -1296,6 +1350,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     [HttpPost("api/documents/{docId:int}/read-region")]
     public async Task<IActionResult> ReadRegion(int docId, [FromBody] Dictionary<string, object?> body)
     {
+        EnsureGeminiConfigured();
         var field = body.GetStr("field").Trim();
         var page = 0;
         // The body arrives as JSON elements: "box" is a JsonElement array, not a .NET list (casting
@@ -2830,7 +2885,11 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
                 {
                     docId, module, sapDocNo = one.SapDocNo, endpoint = one.Endpoint,
                     payloadJson = JsonSerializer.Serialize(p, PyJson.Options),
-                    success = one.Success ? 1 : 0, message = one.Message, user,
+                    // An invoice this send created and then cancelled again (the rollback above) is no longer in
+                    // SAP. Success=0 keeps the row (number + "ROLLED BACK" note) as history, but keeps the number
+                    // out of the document's SAP numbers and out of the "already created" check on the next send.
+                    // A rollback that FAILED stays Success=1: that invoice is still in SAP and must be cancelled by hand.
+                    success = one.Success && !rolledBack.Contains(p) ? 1 : 0, message = one.Message, user,
                     // Which company's submission history this belongs to — the poster's own, Admin
                     // included, for the same reason a document is filed under the importer's company.
                     salesOrg = ownCompany,
@@ -3202,6 +3261,12 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     }
 
     // ---- small local helpers (avoid threading Db through every method signature) ----
+    private void EnsureGeminiConfigured()
+    {
+        if (string.IsNullOrWhiteSpace(config.GeminiApiKey))
+            throw new HttpApiException(503, GeminiRequest.MissingKeyMessage);
+    }
+
     private Db GetDbInstance() => HttpContext.RequestServices.GetRequiredService<Db>();
     private Task<Microsoft.Data.SqlClient.SqlConnection> GetDbAsync() => GetDbInstance().OpenAsync();
 

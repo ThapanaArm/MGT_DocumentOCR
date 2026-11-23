@@ -89,14 +89,14 @@ public static class JournalEntryAccruedExcel
     /// Text = its issuer, Assignment = the PO. Shared by the Excel upload file and the direct post
     /// (DocumentsController.PostDeferredVatJv) so the two can never send different entries.</summary>
     public static List<(string Reference, string Text, string Assignment, double Amount, double Base, DateTime? TaxDate, string TaxId,
-        string InputTaxAssignment)> Batches(
+        string InputTaxAssignment, string Vendor)> Batches(
         Dictionary<string, object?> doc)
     {
         var header = (Dictionary<string, object?>)doc["header"]!;
         var reference = Or(header.GetStr("invoiceNo").Trim(), header.GetStr("poRef").Trim());
         return BatchRows(doc)
             .Select(r => (Cut(Or(r.DocNo, reference), 16), r.Text, r.Assignment, r.Amount, r.Base, r.TaxDate, r.TaxId,
-                r.InputTaxAssignment))
+                r.InputTaxAssignment, r.Vendor))
             .ToList();
     }
 
@@ -250,12 +250,17 @@ public static class JournalEntryAccruedExcel
     }
 
     private sealed record DeferredRow(string Text, string Assignment, double Amount, double Base, DateTime? TaxDate, string DocNo,
-        string TaxId = "", string InputTaxAssignment = "");
+        string TaxId = "", string InputTaxAssignment = "",
+        // The SAP supplier whose invoice this tax row was booked on (the row's own vendorCode, else the
+        // document's main supplier): the Deferred (D1) line of its JV takes the text that invoice's D1 line carries.
+        string Vendor = "");
 
     /// <summary>The deferred (D-code) tax rows of the document, one per tax invoice.</summary>
     private static List<DeferredRow> DeferredRows(Dictionary<string, object?> doc)
     {
         var list = new List<DeferredRow>();
+        var mainVendor = Or(doc.GetStr("partnerCode").Trim(),
+            (doc.Get("header") as Dictionary<string, object?>)?.GetStr("vendorCode").Trim() ?? "");
         foreach (var t in DeferredVatReversal.EffectiveTaxRows(doc))
         {
             var amount = Num(t.Get("docCurrencyAmt"));
@@ -278,7 +283,8 @@ public static class JournalEntryAccruedExcel
             list.Add(new DeferredRow(
                 Text: Or(issuer, docNo),
                 Assignment: Or(taxId, docNo),
-                Amount: amount, Base: baseAmt, TaxDate: taxDate, DocNo: docNo, TaxId: taxId));
+                Amount: amount, Base: baseAmt, TaxDate: taxDate, DocNo: docNo, TaxId: taxId,
+                Vendor: Or(t.GetStr("vendorCode").Trim(), mainVendor)));
         }
         return list;
     }

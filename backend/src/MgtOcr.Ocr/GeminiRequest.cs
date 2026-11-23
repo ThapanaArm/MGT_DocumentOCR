@@ -6,7 +6,12 @@ namespace MgtOcr.Ocr;
 
 public static class GeminiRequest
 {
+    public const string MissingKeyMessage =
+        "Gemini is not configured. Set Ocr:GreenleafchemicalGeminiApiKey (or Ocr__GreenleafchemicalGeminiApiKey) and restart the API.";
+
     private static readonly AsyncLocal<Scope?> Current = new();
+    private static readonly TimeZoneInfo BillingTimeZone = TimeZoneInfo.FindSystemTimeZoneById("Pacific Standard Time");
+    private static readonly DateOnly StandardRateChange = new(2027, 1, 1);
 
     public sealed class Scope : IDisposable
     {
@@ -37,7 +42,7 @@ public static class GeminiRequest
         string payload, CancellationToken ct, string operation, int[]? pages = null, int attempt = 1)
     {
         if (string.IsNullOrWhiteSpace(config.GeminiApiKey))
-            throw new InvalidOperationException("The Greenleafchemical Gemini key is not configured.");
+            throw new InvalidOperationException(MissingKeyMessage);
 
         var started = DateTime.UtcNow;
         var requestId = Guid.NewGuid();
@@ -67,8 +72,10 @@ public static class GeminiRequest
         finally
         {
             var (input, output, thinking, cached, responseId) = ReadUsage(body);
-            var (inputRate, outputRate, cachedRate) = config.GeminiModel == "gemini-2.5-flash"
-                ? (0.30m, 2.50m, 0.03m) : ((decimal?)null, (decimal?)null, (decimal?)null);
+            // Gemini 3.6 Flash Standard Paid Tier, USD per million tokens.
+            var billingDate = DateOnly.FromDateTime(TimeZoneInfo.ConvertTimeFromUtc(started, BillingTimeZone));
+            var (inputRate, outputRate, cachedRate) = billingDate < StandardRateChange
+                ? (0.75m, 3.75m, 0.075m) : (1.50m, 7.50m, 0.15m);
             var usage = new GeminiRequestUsage(requestId, scope?.JobId, scope?.DocId, scope?.Module,
                 config.GeminiEnvironment, "Api OCR Greenleafchemical", config.GeminiModel, operation, attempt,
                 pages ?? [], started, DateTime.UtcNow, outcome, status, responseId,

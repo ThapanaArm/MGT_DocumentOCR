@@ -33,7 +33,7 @@ public static partial class GeminiOcr
     public static async Task<(ParsedDocument? Doc, string? Error)> VisionExtractAsync(string path, string module, AppConfig config, string salesOrg = "", string apDocCategory = "")
     {
         if (string.IsNullOrEmpty(config.GeminiApiKey))
-            return (null, "GeminiApiKey is empty in config \u2014 appsettings Ocr:GeminiApiKey was not loaded by the running app (check which appsettings.json/appsettings.{Env}.json the process reads, and that it was restarted)");
+            return (null, GeminiRequest.MissingKeyMessage);
         try
         {
             var ext = Path.GetExtension(path).ToLowerInvariant();
@@ -330,7 +330,7 @@ public static partial class GeminiOcr
     public static async Task<(string? Value, string? Error, int? TokensIn, int? TokensOut)> ReadRegionAsync(
         byte[] jpeg, string field, AppConfig config, int? pageNumber = null)
     {
-        if (string.IsNullOrEmpty(config.GeminiApiKey)) return (null, "GeminiApiKey is empty in config", null, null);
+        if (string.IsNullOrEmpty(config.GeminiApiKey)) return (null, GeminiRequest.MissingKeyMessage, null, null);
         var kind = field switch
         {
             "invoiceDate" => "วันที่ ตอบรูปแบบ YYYY-MM-DD (ปี พ.ศ. ให้แปลงเป็น ค.ศ.)",
@@ -347,10 +347,10 @@ public static partial class GeminiOcr
                 new { text = prompt },
                 new { inline_data = new { mime_type = "image/jpeg", data = Convert.ToBase64String(jpeg) } },
             } } },
-            generationConfig = config.GeminiReduceRegionThinking && config.GeminiModel == "gemini-2.5-flash"
+            generationConfig = config.GeminiReduceRegionThinking
                 && field is "invoiceDate" or "invoiceNo" or "vendorTaxId"
                 ? (object)new { temperature = 0, maxOutputTokens = 2048, responseMimeType = "application/json",
-                    thinkingConfig = new { thinkingBudget = 0 } }
+                    thinkingConfig = new { thinkingLevel = "minimal" } }
                 : new { temperature = 0, maxOutputTokens = 2048, responseMimeType = "application/json" },
         };
         try
@@ -449,7 +449,7 @@ public static partial class GeminiOcr
         string module, string text, AppConfig config, string salesOrg = "", string providerId = "paddle_gemini")
     {
         if (string.IsNullOrEmpty(config.GeminiApiKey))
-            return (null, "GeminiApiKey is empty in config \u2014 cannot structure the OCR text with Gemini");
+            return (null, GeminiRequest.MissingKeyMessage);
         if (string.IsNullOrWhiteSpace(text)) return (null, "No OCR text to send to Gemini");
         var prompt = VisionPrompt.Build(module, "text", salesOrg) + "\n\n--- ข้อความจาก OCR ---\n" +
                      (text.Length > 40000 ? text[..40000] : text) + "\n";

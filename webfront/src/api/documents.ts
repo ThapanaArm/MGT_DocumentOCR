@@ -40,6 +40,8 @@ export interface DocModel {
   partnerCode?: string;
   sapDocNo?: string;
   sapDocNos?: string[];
+  /** Vendor codes the server swaps when it sends (dev tenant only): code on the document -> code sent to SAP. */
+  sapVendorMap?: Record<string, string>;
   /** Deferred VAT JVs posted from this document: one per tax invoice. */
   deferredJvs?: { reference: string; journalEntry: string; postedAt?: string; postedBy?: string }[];
   postedAt?: string;

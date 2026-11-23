@@ -312,13 +312,14 @@ public class SapClient(AppConfig config, HttpClient httpClient)
     /// with Journal Entry - Post, whose tax lines have no Assignment field).</summary>
     public Task<(bool Ok, string Message)> FillAccountingDocumentLinesAsync(
         string accountingDocument, string fiscalYear, string companyCode, string text, string assignment,
-        string accountOverride = "", string assignmentOverride = "")
+        string accountOverride = "", string assignmentOverride = "", string deferredAccount = "", string deferredText = "")
         => FillJournalEntryLinesAsync(accountingDocument, fiscalYear, companyCode, text, assignment, byAccountingDocument: true,
-            accountOverride, assignmentOverride);
+            accountOverride, assignmentOverride, deferredAccount, deferredText);
 
     private async Task<(bool Ok, string Message)> FillJournalEntryLinesAsync(
         string supplierInvoice, string fiscalYear, string companyCode, string text, string assignment,
-        bool byAccountingDocument, string accountOverride = "", string assignmentOverride = "")
+        bool byAccountingDocument, string accountOverride = "", string assignmentOverride = "",
+        string deferredAccount = "", string deferredText = "")
     {
         // One G/L account whose lines take a different Assignment (the deferred VAT JV's input tax
         // line: a third party's Tax ID). Compared without leading zeros.
@@ -326,6 +327,11 @@ public class SapClient(AppConfig config, HttpClient httpClient)
         accountOverride = Acct(accountOverride);
         assignmentOverride = (assignmentOverride ?? "").Trim();
         if (assignmentOverride.Length > 18) assignmentOverride = assignmentOverride[..18];
+        // One G/L account whose lines take a different Text: the deferred input tax (D1) line of the
+        // deferred VAT JV carries the supplier invoice's D1 text, not the issuer's name.
+        deferredAccount = Acct(deferredAccount);
+        deferredText = (deferredText ?? "").Trim();
+        if (deferredText.Length > 50) deferredText = deferredText[..50];
         var baseUrl = config.SapSupplierInvoiceBaseUrl;
         if (string.IsNullOrWhiteSpace(baseUrl)) return (false, "Sap:SupplierInvoice base URL is not configured");
         text = (text ?? "").Trim();
@@ -376,15 +382,17 @@ public class SapClient(AppConfig config, HttpClient httpClient)
                 var curText = (TryGetString(it, "DocumentItemText") ?? "").Trim();
                 var curAssign = (TryGetString(it, "AssignmentReference") ?? "").Trim();
                 // Empty, or the "<payables text> <what it is>" stand-in the invoice was created with.
-                var fixText = text.Length > 0 && (curText.Length == 0
-                    || curText.StartsWith(text + " ", StringComparison.OrdinalIgnoreCase));
+                var lineText = deferredAccount.Length > 0 && deferredText.Length > 0
+                    && Acct(TryGetString(it, "GLAccount")) == deferredAccount ? deferredText : text;
+                var fixText = lineText.Length > 0 && (curText.Length == 0
+                    || curText.StartsWith(lineText + " ", StringComparison.OrdinalIgnoreCase));
                 var lineAssignment = accountOverride.Length > 0 && assignmentOverride.Length > 0
                     && Acct(TryGetString(it, "GLAccount")) == accountOverride
                         ? assignmentOverride : assignment;
                 var fixAssign = lineAssignment.Length > 0 && curAssign.Length == 0;
                 if (!int.TryParse(TryGetString(it, "AccountingDocumentItem"), out var itemNo)) continue;
                 lines.Add((TryGetString(it, "AccountingDocument") ?? "", TryGetString(it, "FiscalYear") ?? fiscalYear,
-                    itemNo, fixText || fixAssign, fixText ? text : "", fixAssign ? lineAssignment : ""));
+                    itemNo, fixText || fixAssign, fixText ? lineText : "", fixAssign ? lineAssignment : ""));
             }
         }
         catch (Exception e)
@@ -461,8 +469,13 @@ public class SapClient(AppConfig config, HttpClient httpClient)
     /// <param name="InputTaxAccount">The input tax (V1) G/L account, and <paramref name="InputTaxAssignment"/>
     /// what its line carries as Assignment: a third party's Tax ID (AP, 2026-11-12). Every other
     /// line gets <paramref name="Assignment"/> (the PO).</param>
+    /// <param name="DeferredAccount">The deferred input tax (D1) G/L account, and <paramref name="DeferredText"/>
+    /// the Item Text its line carries: the text the supplier invoice's own D1 line went out with
+    /// (AP, 2026-11-23: "PROMPT,INV.PI-2611082"), so the JV line matches it in that account. Every
+    /// other line keeps <paramref name="Text"/>, the issuer's name the input tax report shows. "" = same text.</param>
     public record DeferredVatJv(string Reference, string Text, string Assignment, decimal Amount, decimal Base, DateTime? TaxDate,
-        string TaxPartner = "", string InputTaxAccount = "", string InputTaxAssignment = "", bool Counter = false);
+        string TaxPartner = "", string InputTaxAccount = "", string InputTaxAssignment = "", bool Counter = false,
+        string DeferredAccount = "", string DeferredText = "");
 
     /// <summary>Posts each entry with Journal Entry - Post (Synchronous), SAP_COM_0002
     /// (journalentrycreaterequestconfi), the same entry the "Journal Entry (Deferred VAT)" Excel
@@ -523,16 +536,25 @@ public class SapClient(AppConfig config, HttpClient httpClient)
             if (headerText.Length > 0) sb.Append($"<DocumentHeaderText>{X(Cut(headerText, 25))}</DocumentHeaderText>");
             sb.Append($"<CreatedByUser>{X(user)}</CreatedByUser>");
             sb.Append($"<CompanyCode>{X(Cut(companyCode, 4))}</CompanyCode>");
-            sb.Append($"<DocumentDate>{D(postingDate)}</DocumentDate>");
+            // Document and Tax Reporting date are the tax invoice's own date (AP, 2026-11-23): with the
+            // day this was sent in both, the input tax report's Date column showed 20.11 for invoices
+            // dated 16.11 and 11.11. They stay equal to each other (on a supplier invoice PRD refuses a
+            // tax reporting date that differs from the document date, FF/785). The posting date stays
+            // the send day, so the period and the report's selection by posting date do not move.
+            // An invoice with no date falls back to the posting date.
+            sb.Append($"<DocumentDate>{D(taxDate)}</DocumentDate>");
             sb.Append($"<PostingDate>{D(postingDate)}</PostingDate>");
-            sb.Append($"<TaxReportingDate>{D(postingDate)}</TaxReportingDate>");
+            sb.Append($"<TaxReportingDate>{D(taxDate)}</TaxReportingDate>");
             sb.Append($"<TaxDeterminationDate>{D(taxDate)}</TaxDeterminationDate>");
             // Country/Region-specific Business Partner 1, which the Thai reports use for a
             // document without a supplier line: the tax invoice's issuer.
             if (e.TaxPartner.Trim().Length > 0)
                 sb.Append($"<JrnlEntryCntrySpecificBp1>{X(Cut(e.TaxPartner, 10))}</JrnlEntryCntrySpecificBp1>");
+            // The D1 line carries the supplier invoice's own D1 text when there is one; V1 keeps the issuer's name.
+            var deferredText = (e.DeferredText ?? "").Trim();
             void TaxItem(string code, decimal amount, decimal taxBase, string dc)
             {
+                var itemText = code == "D1" && deferredText.Length > 0 ? deferredText : e.Text;
                 sb.Append("<ProductTaxItem>");
                 sb.Append($"<TaxCode>{code}</TaxCode>");
                 // KSCHL / KTOSL of this tax code (Sap:JournalEntry:TaxConditionType / TaxItemClassification):
@@ -545,7 +567,7 @@ public class SapClient(AppConfig config, HttpClient httpClient)
                 sb.Append("<IsDirectTaxPosting>true</IsDirectTaxPosting>");
                 sb.Append($"<AmountInTransactionCurrency currencyCode=\"{cur}\">{Amt(amount)}</AmountInTransactionCurrency>");
                 sb.Append($"<DebitCreditCode>{dc}</DebitCreditCode>");
-                if (e.Text.Length > 0) sb.Append($"<ProductiveTaxText>{X(Cut(e.Text, 50))}</ProductiveTaxText>");
+                if (itemText.Length > 0) sb.Append($"<ProductiveTaxText>{X(Cut(itemText, 50))}</ProductiveTaxText>");
                 sb.Append($"<TaxBaseAmountInTransCrcy currencyCode=\"{cur}\">{Amt(taxBase)}</TaxBaseAmountInTransCrcy>");
                 sb.Append("</ProductTaxItem>");
             }
@@ -597,7 +619,7 @@ public class SapClient(AppConfig config, HttpClient httpClient)
             }
             var year = postingDate.Year;   // calendar fiscal year (GLC / MGT)
             var fill = await FillAccountingDocumentLinesAsync(docNo, year.ToString(inv), companyCode, e.Text, e.Assignment,
-                e.InputTaxAccount, e.InputTaxAssignment);
+                e.InputTaxAccount, e.InputTaxAssignment, e.DeferredAccount, e.DeferredText);
             // SAP answers with the 10-digit key (0100000755); people read and search it as 100000755.
             var shown = docNo.TrimStart('0');
             results.Add((e.Reference, true, shown,

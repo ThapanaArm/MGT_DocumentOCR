@@ -27,6 +27,9 @@ public class DocumentIngestService(OcrEngine ocr, DocumentRepository repo, JobLo
         string apDocCategory, string user, string? password = null, string? salesOrg = null,
         DateTime? jobStartedAt = null)
     {
+        if (string.IsNullOrWhiteSpace(config.GeminiApiKey))
+            throw new HttpApiException(503, GeminiRequest.MissingKeyMessage);
+
         // Job Tasktime starts when the upload started (passed in by the caller); fall back to now.
         var jobStart = jobStartedAt ?? DateTime.Now;
         var mod = module.ToUpperInvariant();

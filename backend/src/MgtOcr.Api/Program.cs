@@ -71,6 +71,11 @@ var sapPurchaseOrderEnv = Get("Sap:PurchaseOrder:ActiveEnvironment", sapSupplier
 var zohoEnv = Get("ZohoConfig:ActiveEnvironment", "sandbox");
 startupLog.LogInformation("[CONFIG] Sap active environment (BusinessPartner/SalesOrder/Product/Billing) = {Env}", sapBpEnv);
 startupLog.LogInformation("[CONFIG] Sap SupplierInvoice environment (documents CREATED in SAP) = {Env}", sapSupplierInvoiceEnv);
+// The vendor map translates production supplier codes into the TEST tenant's numbers, so it is read
+// in dev only. Under any other environment it is ignored, and a map left in the file is reported.
+if (!string.Equals(sapSupplierInvoiceEnv, "dev", StringComparison.OrdinalIgnoreCase)
+    && cfg.GetSection($"Sap:SupplierInvoice:VendorMap_{Cap(sapSupplierInvoiceEnv)}").GetChildren().Any(c => !string.IsNullOrWhiteSpace(c.Value)))
+    startupLog.LogWarning("[CONFIG] Sap:SupplierInvoice:VendorMap_{Env} has entries, but vendor codes are only translated in dev - ignored. Remove them.", Cap(sapSupplierInvoiceEnv));
 startupLog.LogInformation("[CONFIG] Sap WRITE environment (documents posted to SAP) = {Env}{Note}",
     sapWriteEnv,
     string.Equals(sapWriteEnv, sapBpEnv, StringComparison.OrdinalIgnoreCase)
@@ -103,7 +108,6 @@ var appConfig = new AppConfig
     GeminiApiKey = Get("Ocr:GreenleafchemicalGeminiApiKey"),
     GeminiEnvironment = Get("Ocr:GeminiEnvironment", builder.Environment.EnvironmentName),
     GeminiReduceRegionThinking = GetBool("Ocr:GeminiReduceRegionThinking", false),
-    GeminiModel = Get("Ocr:GeminiModel", "gemini-2.5-flash"),
     OcrRecordPositions = GetBool("Ocr:Positions:Enabled", true),
     OpenAiApiKey = Get("Ocr:OpenAiApiKey"),
     OpenAiModel = Get("Ocr:OpenAiModel", "gpt-4o"),
@@ -142,10 +146,12 @@ var appConfig = new AppConfig
     SapBillingAuthHeader = Get("Sap:Billing:AuthHeader"),
     SapSupplierInvoiceBaseUrl = Get($"Sap:SupplierInvoice:BaseUrl_{Cap(sapSupplierInvoiceEnv)}"),
     SapSupplierInvoiceAuthHeader = Get("Sap:SupplierInvoice:AuthHeader", Get("Sap:BusinessPartner:AuthHeader")),
-    SapSupplierInvoiceVendorMap = cfg.GetSection($"Sap:SupplierInvoice:VendorMap_{Cap(sapSupplierInvoiceEnv)}")
-        .GetChildren()
-        .Where(c => !string.IsNullOrWhiteSpace(c.Value))
-        .ToDictionary(c => c.Key.Trim(), c => c.Value!.Trim(), StringComparer.OrdinalIgnoreCase),
+    SapSupplierInvoiceVendorMap = !string.Equals(sapSupplierInvoiceEnv, "dev", StringComparison.OrdinalIgnoreCase)
+        ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        : cfg.GetSection($"Sap:SupplierInvoice:VendorMap_{Cap(sapSupplierInvoiceEnv)}")
+            .GetChildren()
+            .Where(c => !string.IsNullOrWhiteSpace(c.Value))
+            .ToDictionary(c => c.Key.Trim(), c => c.Value!.Trim(), StringComparer.OrdinalIgnoreCase),
     SapSupplierInvoiceTaxBaseClearingAccount = Get("Sap:SupplierInvoice:TaxBaseClearingAccount"),
     SapSupplierInvoiceTestReferenceSuffix = string.Equals(Get("Sap:SupplierInvoice:TestReferenceSuffix"), "true", StringComparison.OrdinalIgnoreCase),
     SapSupplierInvoiceMatDocMap = cfg.GetSection($"Sap:SupplierInvoice:MatDocMap_{Cap(sapSupplierInvoiceEnv)}")

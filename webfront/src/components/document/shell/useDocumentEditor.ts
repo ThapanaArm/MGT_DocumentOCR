@@ -33,11 +33,12 @@ export function useDocumentEditor(user: string) {
         ? syncGlTaxCodes(updated)
         : updated;
       if (!n || !prev || n.docId !== prev.docId) return n;
-      if (n.sapDocNos !== undefined && n.deferredJvs !== undefined) return n;
+      if (n.sapDocNos !== undefined && n.deferredJvs !== undefined && n.sapVendorMap !== undefined) return n;
       return {
         ...n,
         sapDocNos: n.sapDocNos ?? prev.sapDocNos,
         deferredJvs: n.deferredJvs ?? prev.deferredJvs,
+        sapVendorMap: n.sapVendorMap ?? prev.sapVendorMap,
       };
     });
   }, []);

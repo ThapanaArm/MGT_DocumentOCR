@@ -379,7 +379,7 @@ public static partial class ChatFix
         string message, string? imageB64, string imageMediaType, AppConfig config)
     {
         if (string.IsNullOrEmpty(config.GeminiApiKey))
-            return (null, "GeminiApiKey is empty in config — appsettings Ocr:GeminiApiKey was not loaded by the running app (check which appsettings.json/appsettings.{Env}.json the process reads, and that it was restarted)");
+            return (null, GeminiRequest.MissingKeyMessage);
         var contents = new List<object>();
         foreach (var h in history.TakeLast(12))
         {
