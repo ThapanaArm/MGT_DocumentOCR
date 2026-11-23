@@ -62,8 +62,7 @@ const TAX_ROW = /^(VAT|WHT|DUTY)$/i;
 /* Before VAT of one document = มูลค่าไม่มีหรือยกเว้นภาษี + มูลค่าที่คำนวณภาษี 7% (the whole figure
    before VAT); else total − VAT. Total = Before VAT + VAT. */
 const beforeVat = (d: SourceDoc) => {
-  const b = num(d.amountBeforeVat);
-  if (b) return b;
+  if (String(d.amountBeforeVat ?? '').trim() !== '') return num(d.amountBeforeVat);
   return Math.round((num(d.totalAmount) - num(d.vatAmount)) * 100) / 100;
 };
 
@@ -148,6 +147,22 @@ const ROLE_BADGE: Record<IssuerRole, { label: string; cls: string; tip: string }
 function countedSourceDocs(doc: DocModel): SourceDoc[] {
   const docs: SourceDoc[] = Array.isArray(doc.header.sourceDocs) ? doc.header.sourceDocs : [];
   return docs.filter((d) => !String(d.includedIn ?? '').trim() && issuerRoleOf(doc, d) !== 'shipper');
+}
+
+export function missingRecalAmount(doc: DocModel): string | undefined {
+  const hasAmount = (value: unknown) => {
+    const text = String(value ?? '').trim().replace(/[, ]/g, '');
+    return text !== '' && Number.isFinite(Number(text));
+  };
+  const line = doc.lines.find((row) => !hasAmount(row.amount));
+  if (line) return `Enter a valid Amount for line ${line.itemNo}.`;
+  const source = countedSourceDocs(doc).find((row) => norm(row.costType)
+    && !hasAmount(row.amountBeforeVat)
+    && !(String(row.amountBeforeVat ?? '').trim() === '' && hasAmount(row.totalAmount) && hasAmount(row.vatAmount)));
+  if (source) {
+    const label = source.docNo || source.issuerName || source.costType;
+    return `Check the amount before VAT on supporting document ${label}. Use Re-read Document if OCR missed it.`;
+  }
 }
 
 function vendorVatTotals(doc: DocModel, mainVendor: string) {

@@ -42,7 +42,7 @@ import {
 } from '../constants/fields';
 import { SEND_DISABLED_AP } from '../constants/flags';
 import { dt, fileRetention, fmt, fmtAmt, fmtCost, intFmt, moduleLabel, statusBadge } from '../utils/format';
-import ShippingCheck, { vendorInvoiceTotals } from '../components/document/ShippingCheck';
+import ShippingCheck, { missingRecalAmount, shippingCheckRows, vendorInvoiceTotals } from '../components/document/ShippingCheck';
 import { findDupes } from '../utils/dupes';
 import { isVatTaxRow, linkedGlTaxCodes } from '../utils/glTaxCodes';
 import Steps from '../components/Steps';
@@ -1057,6 +1057,8 @@ export default function DocumentPage() {
   const [chatImage, setChatImage] = useState<string | null>(null);
   const [chatProvider, setChatProvider] = useState('gemini');
   const [reocrEngine, setReocrEngine] = useState('gemini');
+  const [recalculated, setRecalculated] = useState<DocModel | null>(null);
+  const recalBaseline = useRef<DocModel | null>(null);
   // "Split Sales Order" board (SO only) and the ship-to list its cards pick from.
   const [splitOpen, setSplitOpen] = useState(false);
   const splitShipTos = useSoShipToOptions({
@@ -1226,6 +1228,8 @@ export default function DocumentPage() {
       setReocrEngine('gemini');
       const withTax = seedGlItems(seedTaxItems(seedWhtItems(d)));
       const seeded = seedHeaderText(seedDeliveryConditions(seedPoItems(seedRefDocument(seedHeaderTaxCode(withTax)))));
+      recalBaseline.current = seeded;
+      setRecalculated(null);
       setDoc(seeded);
       if (d.module === 'AP') loadApDocCategories();
       try {
@@ -1654,7 +1658,11 @@ export default function DocumentPage() {
   const doReocr = () =>
     guard(async () => {
       const d = await reocrDocument(doc.docId, reocrEngine, USER);
-      setDoc(seedHeaderText(seedDeliveryConditions(seedPoItems(seedRefDocument(seedHeaderTaxCode(seedGlItems(seedTaxItems(seedWhtItems(d)))))))));
+      const withTax = seedGlItems(seedTaxItems(seedWhtItems(d)));
+      const seeded = seedHeaderText(seedDeliveryConditions(seedPoItems(seedRefDocument(seedHeaderTaxCode(withTax)))));
+      recalBaseline.current = seeded;
+      setRecalculated(null);
+      setDoc(seeded);
       setMap(null);
       manual.current = { header: {}, lines: {} };
       if (d.provider === 'failed')
@@ -2764,6 +2772,57 @@ export default function DocumentPage() {
   const totalsByVendor = doc.module === 'AP' || doc.module === 'II'
     ? vendorInvoiceTotals(doc, invoiceMainVendor)
     : new Map<string, never>();
+  const canRecal = (doc.module === 'AP' || doc.module === 'II') && !locked && !posting;
+  const recalRequested = canRecal && recalculated?.docId === doc.docId;
+  const recalCurrent = recalRequested && recalculated.header === doc.header && recalculated.lines === doc.lines;
+  const recalChanges: Array<{ field: string; before: string; after: string }> = [];
+  if (recalCurrent && recalBaseline.current?.docId === doc.docId) {
+    const original = recalBaseline.current;
+    const compare = (field: string, oldValue: unknown, newValue: unknown) => {
+      const before = String(oldValue ?? '').trim();
+      const after = String(newValue ?? '').trim();
+      if (before !== after) recalChanges.push({ field, before, after });
+    };
+    const numericValue = (value: unknown) => {
+      const amount = String(value ?? '').trim();
+      return amount === '' ? '' : Number(amount.replace(/[, ]/g, ''));
+    };
+    for (const [key, label] of [
+      ['invoiceNo', 'Invoice No.'], ['vendorName', 'Vendor Name'], ['vendorCode', 'Vendor Code'],
+      ['goodsSupplier', 'Goods Supplier'], ['goodsInvoiceNo', 'Goods Invoice No.'],
+      ['poRef', 'PO Reference'], ['headerText', 'Header Text'], ['taxCode', 'Tax Code'],
+      ['paymentTerms', 'Payment Terms'], ['branch', 'Branch'], ['vendorTaxId', 'Tax ID'],
+    ]) compare(label, original.header[key], h[key]);
+    const originalLines = new Map(original.lines.map((line) => [line.itemNo, line]));
+    for (const line of doc.lines) {
+      const before = originalLines.get(line.itemNo);
+      if (!before) {
+        compare(`Line ${line.itemNo} added`, '', line.desc || line.extCode || line.itemNo);
+        continue;
+      }
+      originalLines.delete(line.itemNo);
+      for (const [key, label] of [['desc', 'Description'], ['extCode', 'Item Code'], ['uom', 'Unit']]) {
+        compare(`Line ${line.itemNo} · ${label}`, before[key], line[key]);
+      }
+      for (const [key, label] of [['qty', 'Quantity'], ['price', 'Unit Price'], ['amount', 'Amount']]) {
+        compare(`Line ${line.itemNo} · ${label}`, numericValue(before[key]), numericValue(line[key]));
+      }
+      for (const [key, label] of [['vendorCode', 'Vendor'], ['costType', 'Cost Type'], ['sapPoItem', 'PO Item'], ['taxCode', 'Tax Code'], ['itemNote1', 'Item Note']]) {
+        compare(`Line ${line.itemNo} · ${label}`, before.extra?.[key], line.extra?.[key]);
+      }
+    }
+    for (const line of originalLines.values()) compare(`Line ${line.itemNo} removed`, line.desc || line.extCode || line.itemNo, '');
+  }
+  const recalShippingRows = recalCurrent ? shippingCheckRows(doc) : [];
+  const runRecal = () => {
+    if (!canRecal) return;
+    const error = doc.lines.length ? missingRecalAmount(doc) : 'Add at least one line item before recalculating.';
+    if (error) {
+      showToast(error, 'error');
+      return;
+    }
+    setRecalculated(doc);
+  };
 
   // The confirmation and the document tabs show the same on-screen totals per supplier.
   const sendBreakdown = (() => {
@@ -3419,6 +3478,12 @@ export default function DocumentPage() {
           >
             <i className="fa-solid fa-arrow-rotate-right" /> Re-read Document
           </button>
+          {(doc.module === 'AP' || doc.module === 'II') && (
+            <button className="btn sm ghost" onClick={runRecal} disabled={!canRecal}
+              title="Calculate from the current entries without reading the PDF or using AI">
+              <i className="fa-solid fa-calculator" /> Recal
+            </button>
+          )}
           <button className="btn sm ghost" onClick={openRaw}>
             <i className="fa-solid fa-file-lines" /> Extracted Text
           </button>
@@ -3469,6 +3534,61 @@ export default function DocumentPage() {
           </div>
         </div>
         <div className="card-b">
+          {recalRequested && (
+            <div className="card" id="recal-preview">
+              <div className="card-h"><h2>Recal Preview</h2></div>
+              <div className="card-b">
+                {!recalCurrent ? (
+                  <p role="status">Document changed. Click Recal again to calculate from the latest entries.</p>
+                ) : (
+                  <>
+                    <p role="status">
+                      {recalChanges.length ? `${recalChanges.length} field change(s) since opening or re-reading the document.` : 'No changes in the compared fields. Recalculated from the current entries.'}
+                    </p>
+                    {recalChanges.length > 0 && (
+                      <details open>
+                        <summary>Before and after</summary>
+                        <div className="tw">
+                          <table>
+                            <thead><tr><th>Field</th><th>Before</th><th>Current</th></tr></thead>
+                            <tbody>{recalChanges.map(({ field, before, after }) => (
+                              <tr key={field}><td>{field}</td><td>{before || '—'}</td><td>{after || '—'}</td></tr>
+                            ))}</tbody>
+                          </table>
+                        </div>
+                      </details>
+                    )}
+                    <p className="hint">Calculated vendor totals</p>
+                    <div className="tw">
+                      <table>
+                        <thead>
+                          <tr><th>Vendor</th><th>Before VAT</th><th>VAT</th><th>WHT</th><th>Total before WHT</th></tr>
+                        </thead>
+                        <tbody>
+                          {[...totalsByVendor].map(([vendor, total]) => (
+                            <tr key={vendor}>
+                              <td>{vendor || 'Unassigned'}</td><td>{fmt(total.subTotal)}</td><td>{fmt(total.vatAmount)}</td>
+                              <td>{fmt(total.whtAmount)}</td><td>{fmt(total.totalAmount)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    {!!h.formTextReview && (
+                      <p className="hint">Shipping Check needs review: {String(h.formTextReview)}</p>
+                    )}
+                    {recalShippingRows.length > 0 && (
+                      <p className="hint">
+                        Shipping Check DIFF (Form − Documents){' · '}
+                        {recalShippingRows.map((row) => `${row.type}: ${row.docCount > 0 ? fmt(row.diff) : 'Supporting documents missing'}`).join(' · ')}
+                      </p>
+                    )}
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* Shown for both invoice modules: picking "Expense" moves the document from AP (MIRO,
               matched against materials) to II (FB60, posted to G/L accounts), so the dropdown has
               to stay reachable afterwards to move it back. */}
