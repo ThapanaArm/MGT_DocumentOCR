@@ -272,7 +272,9 @@ public static partial class GeminiOcr
                 var date = "";
                 if (m.Groups[2].Success && int.TryParse(m.Groups[2].Value, out var dd) && int.TryParse(m.Groups[3].Value, out var mm) && int.TryParse(m.Groups[4].Value, out var yy))
                     try { date = new DateTime(2500 + yy - 543, mm, dd).ToString("yyyy-MM-dd"); } catch { }
-                map[ctl] = (pay, date);
+                // The number alone: the date after the "/" already went to the date column (AP, 2026-11-23:
+                // the Tax tab showed "0152-091678/16-11-69" where the first read gives "0152-091678").
+                map[ctl] = (m.Groups[1].Value, date);
             }
             return true;
         }
