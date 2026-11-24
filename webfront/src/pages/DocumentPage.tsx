@@ -1479,6 +1479,77 @@ export default function DocumentPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [doc?.docId, doc?.header.invoiceNo, doc?.header.glItems, doc?.header.headerText]);
 
+  /* Posting Date follows the goods receipt (AP, 2026-11-24).
+
+     Basic Data Posting Date used to be the day the file was uploaded, so a goods invoice for a
+     receipt booked earlier showed a date that matched neither the receipt nor the supplier's
+     invoice (doc 982: invoice 20.10, upload 18.11). Accounting wants it read from the GR: the
+     receipt's posting date is taken from SAP's material document - the same list the PO Reference
+     tab offers - and written to Posting Date. Only Posting Date moves; Document Date and the tax
+     dates stay on the supplier's invoice date (FF/785).
+
+     Which receipt: the one named in Goods Receipt (Material Doc.); with none named, the latest
+     receipt of the PO that has not been reversed (once only). header.postingDateGr remembers which
+     receipt was applied, so a date typed afterwards is not written over, and picking another
+     receipt applies that receipt's date. A document without the mark whose Posting Date is already
+     more than a day from the day it was created counts as typed by hand and is left alone. Nothing
+     changes when SAP cannot be reached, the PO has no receipt or the receipt was reversed - the
+     upload date stays. For an overseas PO the Due Calculation Base Date was seeded from the same
+     Posting Date: while it still equals the old Posting Date it moves with it, and the due date by
+     the same number of days. A posted document is never touched. */
+  const grPoNo = doc ? poNumberOf(doc.header as Record<string, any>).split(/[,\s]+/)[0] || '' : '';
+  const grMatDoc = String(doc?.header.refMatDoc ?? '').trim();
+  const grDone = useRef('');
+  useEffect(() => {
+    if (!doc || (doc.module !== 'AP' && doc.module !== 'II') || !isInventoryPoDoc(doc)) return;
+    if (['POSTED', 'SPLIT', 'PARTIAL', 'POSTING'].includes(String(doc.status))) return;
+    if (!/^\d{10}$/.test(grPoNo)) return;
+    const mark = String((doc.header as Record<string, any>).postingDateGr ?? '');
+    if (grMatDoc ? mark === grMatDoc : mark !== '') return;
+    const runKey = `${doc.docId}|${grPoNo}|${grMatDoc}`;
+    if (grDone.current === runKey) return;
+    let cancelled = false;
+    void (async () => {
+      type GrRow = { matDoc: string; year: string; postingDate: string; reversed: boolean };
+      let receipts: GrRow[] = [];
+      try {
+        const r = await apiClient.get<{ configured: boolean; receipts: GrRow[] }>(
+          `/api/sap/po/${encodeURIComponent(grPoNo)}/goods-receipts`);
+        receipts = r.configured ? r.receipts : [];
+      } catch { /* SAP cannot be reached: the upload date stays */ }
+      if (cancelled) return;
+      grDone.current = runKey;
+      const gr = grMatDoc ? receipts.find((x) => x.matDoc === grMatDoc) : receipts.find((x) => !x.reversed);
+      if (!gr || gr.reversed || !/^\d{4}-\d{2}-\d{2}$/.test(gr.postingDate)) return;
+      const day = (s: string) => Date.parse(`${s.slice(0, 10)}T00:00:00Z`);
+      setDoc((cur) => {
+        if (!cur || cur.docId !== doc.docId) return cur;
+        const c = cur.header as Record<string, any>;
+        if (String(c.postingDateGr ?? '') === gr.matDoc) return cur;
+        const oldPd = String(c.postingDate ?? '').trim();
+        const created = String(cur.createdAt ?? '');
+        const typedByHand = !String(c.postingDateGr ?? '')
+          && /^\d{4}-\d{2}-\d{2}/.test(created) && /^\d{4}-\d{2}-\d{2}/.test(oldPd)
+          && Math.abs(day(oldPd) - day(created)) > 86400000;
+        const next: Record<string, any> = { postingDateGr: gr.matDoc };
+        if (!typedByHand && oldPd !== gr.postingDate) {
+          next.postingDate = gr.postingDate;
+          const vendorCode = String(map?.header.vendor?.code ?? cur.partnerCode ?? '').trim();
+          const oldBase = String(c.baselineDate ?? '').trim();
+          if (/^2\d/.test(vendorCode) && oldPd && oldBase === oldPd) {
+            next.baselineDate = gr.postingDate;
+            const due = String(c.dueDate ?? '').trim();
+            if (/^\d{4}-\d{2}-\d{2}$/.test(due))
+              next.dueDate = new Date(day(due) + (day(gr.postingDate) - day(oldBase))).toISOString().slice(0, 10);
+          }
+        }
+        return { ...cur, header: { ...c, ...next } };
+      });
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doc?.docId, doc?.status, grPoNo, grMatDoc]);
+
   if (failed)
     return (
       <div className="card">
