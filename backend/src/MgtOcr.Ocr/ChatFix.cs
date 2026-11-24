@@ -92,7 +92,8 @@ public static partial class ChatFix
         // When true (a GLC SO document), extra.itemNote1 belongs to the CS (26 Oct 2026): the AI is
         // told not to fill/change it, and whatever it returns is replaced by the line's current value
         // unless the person's own message asks about Item Note 1 (ItemNoteRequested).
-        bool protectItemNote1 = false)
+        bool protectItemNote1 = false,
+        bool invoiceDraft = false)
     {
         var itemNote1Locked = protectItemNote1 && !ItemNoteRequested(message);
         var materialBlock = "";
@@ -198,6 +199,24 @@ public static partial class ChatFix
             (accountBlock.Length > 0 ? ", \"customerCode\": \"...รหัส SAP Business Partner ตามกติกาด้านบน หรือค่าว่าง...\"" : "") +
             "}";
 
+        if (invoiceDraft)
+            systemPrompt = $$"""
+                Correct the current OCR invoice draft using only the user's request and evidence.
+                Draft header: {{JsonSerializer.Serialize(header, PyJson.Options)}}
+                Draft lines in screen order: {{JsonSerializer.Serialize(lines, PyJson.Options)}}
+                Return only a JSON object with reply, headerEdits and lineEdits. Answer in the user's language.
+                headerEdits is an object containing only requested header keys. The header collections
+                sourceDocs, taxItems, whtItems and glItems can be edited: return the full collection in its
+                original order including untouched rows and fields. Use the form's existing field names.
+                lineEdits is an array of objects like {"row":2,"fields":{"amount":1200,"extra":{"sapPoItem":"10"} } }.
+                Row is the 1-based position in the supplied lines. Allowed line fields: extCode, desc,
+                qty, uom, price, amount, extra. Use extra for vendorCode, sapPoItem, sapGrItem, taxCode,
+                costType and other existing per-row fields. Keep IDs and row order. Do not add or delete rows.
+                When a target or value is ambiguous, set needsClarification to true, ask the user to identify
+                it in reply, and return no edits. For a question return no edits. Do not invent values or
+                calculate derived totals. Say that the requested changes are ready for Recal if edits exist.
+                """;
+
         try
         {
             var (raw, callErr) = provider switch
@@ -220,6 +239,52 @@ public static partial class ChatFix
                 var replyText = raw.Trim();
                 if (replyText.Length == 0) return (null, "AI provider returned an empty reply");
                 return (new ChatFixResult(replyText, new Dictionary<string, object?>(header), lines.Select(l => new Dictionary<string, object?>(l)).ToList(), new Dictionary<int, string>(), null, null, new List<ChatLookup>(), null), null);
+            }
+            if (invoiceDraft)
+            {
+                var draftHeader = new Dictionary<string, object?>(header);
+                var draftLines = lines.Select(line => new Dictionary<string, object?>(line)).ToList();
+                if (parsed.Get("needsClarification") is not true)
+                {
+                    var knownHeader = HeaderParser.BlankHeader(module);
+                    if (parsed.Get("headerEdits") is Dictionary<string, object?> edits)
+                        foreach (var (key, value) in edits)
+                        {
+                            if (key is "sourceDocs" or "taxItems" or "whtItems" or "glItems")
+                            {
+                                if (header.Get(key) is not List<object?> current || value is not List<object?> proposed ||
+                                    current.Count != proposed.Count || proposed.Any(row => row is not Dictionary<string, object?>)) continue;
+                                draftHeader[key] = current.Zip(proposed, (oldRow, newRow) =>
+                                {
+                                    var merged = new Dictionary<string, object?>(oldRow as Dictionary<string, object?> ?? new());
+                                    foreach (var (field, corrected) in (Dictionary<string, object?>)newRow!)
+                                        if (corrected is null or string or bool or long or double) merged[field] = corrected;
+                                    return (object?)merged;
+                                }).ToList();
+                            }
+                            else if ((header.ContainsKey(key) || knownHeader.ContainsKey(key)) && value is null or string or bool or long or double)
+                                draftHeader[key] = value;
+                        }
+                    if (parsed.Get("lineEdits") is List<object?> rowEdits)
+                        foreach (var edit in rowEdits.OfType<Dictionary<string, object?>>())
+                        {
+                            if (!int.TryParse(edit.GetStr("row"), out var row) || row < 1 || row > lines.Count ||
+                                edit.Get("fields") is not Dictionary<string, object?> fields) continue;
+                            var line = draftLines[row - 1];
+                            foreach (var (key, value) in fields)
+                            {
+                                if (key is ("extCode" or "desc" or "qty" or "uom" or "price" or "amount") && value is null or string or long or double)
+                                    line[key] = value;
+                                if (key != "extra" || value is not Dictionary<string, object?> extra) continue;
+                                var currentExtra = line.Get("extra") as Dictionary<string, object?> ?? new();
+                                var mergedExtra = new Dictionary<string, object?>(currentExtra);
+                                foreach (var (field, corrected) in extra)
+                                    if (corrected is null or string or long or double) mergedExtra[field] = corrected;
+                                line[key] = mergedExtra;
+                            }
+                        }
+                }
+                return (new ChatFixResult(parsed.GetStr("reply"), draftHeader, draftLines, new(), null, null, new(), null), null);
             }
 
             // Read-only lookup request? Collect it (validated to material/customer + a real query) so

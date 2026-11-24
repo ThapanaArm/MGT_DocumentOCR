@@ -888,9 +888,13 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
 
     [HttpPost("api/documents/{docId:int}/reocr")]
     public Task<IActionResult> ReocrDocument(int docId, [FromBody] Dictionary<string, object?>? rawBody) =>
-        WithDocLockAsync("OCR", docId, "This document is already being re-read", () => ReocrDocumentCoreAsync(docId, rawBody));
+        WithDocLockAsync("OCR", docId, "This document is already being re-read", () => ReocrDocumentCoreAsync(docId, rawBody, false));
 
-    private async Task<IActionResult> ReocrDocumentCoreAsync(int docId, Dictionary<string, object?>? rawBody)
+    [HttpPost("api/documents/{docId:int}/reocr-missing")]
+    public Task<IActionResult> ReocrMissingInvoiceFields(int docId, [FromBody] Dictionary<string, object?>? rawBody) =>
+        WithDocLockAsync("OCR", docId, "This document is already being re-read", () => ReocrDocumentCoreAsync(docId, rawBody, true));
+
+    private async Task<IActionResult> ReocrDocumentCoreAsync(int docId, Dictionary<string, object?>? rawBody, bool previewMissing)
     {
         EnsureGeminiConfigured();
         var body = JsonBodyHelpers.Unwrap(rawBody ?? new());
@@ -899,6 +903,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         if (row == null) throw new HttpApiException(404, "Document not found");
         string storedPath = row.StoredPath ?? ""; string module = row.Module; string fileNameOnDisk = row.FileName ?? "";
         object? fileExpiredAt = row.FileExpiredAt;
+        if (previewMissing && module is not ("AP" or "II")) throw new HttpApiException(400, "Missing-field review is for invoice documents");
 
         var doc = await repo.GetDocumentAsync(docId);
         if (doc.GetStr("status") is "POSTED" or "PARTIAL" or "POSTING") throw new HttpApiException(400, "This document has been posted (fully or partly), or is being sent right now, and cannot be re-read");
@@ -945,6 +950,21 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         await jobLog.FinishAsync(reocrJob, pd.Provider == "failed" ? "FAILED" : "SUCCESS", tokensIn: pd.TokensIn,
             tokensOut: pd.TokensOut, cost: pd.Cost, costCurrency: pd.CostCurrency, provider: pd.Provider,
             model: usage.Requests.FirstOrDefault()?.Model, message: pd.Note, pageCount: pd.Pages);
+        if (previewMissing)
+        {
+            var itemNote = ExtConversion.OcrPrefillsItemNote(module, config, docCompany);
+            doc["provider"] = pd.Provider;
+            doc["confidenceNote"] = pd.ConfidenceNote;
+            doc["ocrNote"] = pd.Note;
+            doc["header"] = pd.Header;
+            doc["lines"] = pd.Lines.Select((line, index) =>
+            {
+                var fields = ExtConversion.ToLineDict(line, null, itemNote);
+                fields["itemNo"] = (index + 1) * 10;
+                return fields;
+            }).ToList();
+            return Ok(doc);
+        }
         var filled = await repo.ApplyVendorMemoryAsync(module, pd.Header);
         if (filled.Count > 0)
         {
@@ -1014,7 +1034,14 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     }
 
     [HttpPost("api/documents/{docId:int}/chat-fix")]
-    public async Task<IActionResult> ChatFixDocument(int docId, [FromBody] Dictionary<string, object?> rawBody)
+    public Task<IActionResult> ChatFixDocument(int docId, [FromBody] Dictionary<string, object?> rawBody) =>
+        ChatFixDocumentAsync(docId, rawBody, false);
+
+    [HttpPost("api/documents/{docId:int}/chat-fix-draft")]
+    public Task<IActionResult> ChatFixInvoiceDraft(int docId, [FromBody] Dictionary<string, object?> rawBody) =>
+        ChatFixDocumentAsync(docId, rawBody, true);
+
+    private async Task<IActionResult> ChatFixDocumentAsync(int docId, Dictionary<string, object?> rawBody, bool draft)
     {
         var body = JsonBodyHelpers.Unwrap(rawBody);
         var message = body.GetStr("message").Trim();
@@ -1022,6 +1049,11 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         var user = await ActorAsync();
         if (message.Length == 0 && imageDataUrl.Length == 0) throw new HttpApiException(400, "Please type a message or attach an image");
         var doc = await repo.GetDocumentAsync(docId);
+        var module = doc.GetStr("module");
+        var draftData = body.Get("draft") as Dictionary<string, object?>;
+        if (draft && (module is not ("AP" or "II") || draftData?.Get("header") is not Dictionary<string, object?> ||
+            draftData.Get("lines") is not List<object?>))
+            throw new HttpApiException(400, "Provide the current invoice draft header and lines");
         if (doc.GetStr("status") is "POSTED" or "PARTIAL" or "POSTING") throw new HttpApiException(400, "This document has been posted (fully or partly), or is being sent right now, and cannot be edited");
         if (doc.GetStr("status") == "SPLIT") throw new HttpApiException(400, "This document was split into separate documents and cannot be edited");
 
@@ -1040,9 +1072,10 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         await repo.SaveChatMessageAsync(docId, "user", message, imageBytes, imageMediaType, user);
 
         var promptMessage = message.Length > 0 ? message : "Look at the attached image and correct the document data to match what is shown in the image";
-        var module = doc.GetStr("module");
-        var header = (Dictionary<string, object?>)doc["header"]!;
-        var lines = (List<Dictionary<string, object?>>)doc["lines"]!;
+        var header = (draft ? draftData?.Get("header") as Dictionary<string, object?> : null) ?? (Dictionary<string, object?>)doc["header"]!;
+        var lines = draft && draftData?.Get("lines") is List<object?> draftLines
+            ? draftLines.OfType<Dictionary<string, object?>>().ToList()
+            : (List<Dictionary<string, object?>>)doc["lines"]!;
 
         // SO documents can also have a line's Material changed, and the document's Ship-to selected,
         // straight from the chat -- give the AI real options to pick from instead of letting it
@@ -1198,7 +1231,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
                 imageB64, imageMediaType, provider, config, materialOptions, shipToOptions, accountOptions,
                 enableThisRound, lookupLog.ToString(), actionsEnabled,
                 // GLC: Item Note 1 is the CS's own entry -- the AI keeps its hands off it.
-                protectItemNote1: module == "SO" && isGlc);
+                protectItemNote1: module == "SO" && isGlc, invoiceDraft: draft);
             if (result == null)
             {
                 var (label, envVar) = ChatFixProviderLabel[provider];
@@ -1261,6 +1294,12 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         if (result is null) throw new HttpApiException(500, "AI chat produced no result"); // unreachable: the loop always runs and assigns
 
         await repo.SaveChatMessageAsync(docId, "assistant", result.Reply, null, null, "AI");
+        if (draft)
+        {
+            doc["header"] = result.Header;
+            doc["lines"] = result.Lines;
+            return Ok(new { reply = result.Reply, document = doc });
+        }
         // A front-end action turn (e.g. "search Zoho") is NOT an edit: it must not write the document
         // or reset its mapping status. Only persist header/lines when the AI actually made an edit.
         if (result.Action is null)
@@ -2446,10 +2485,25 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     }
 
     [HttpGet("api/documents/{docId:int}/payload")]
-    public async Task<IActionResult> PreviewPayload(int docId)
+    public Task<IActionResult> PreviewPayload(int docId) => PreviewPayloadAsync(docId, null);
+
+    [HttpPost("api/documents/{docId:int}/payload")]
+    public Task<IActionResult> PreviewDraftPayload(int docId, [FromBody] Dictionary<string, object?> rawBody) =>
+        PreviewPayloadAsync(docId, JsonBodyHelpers.Unwrap(rawBody));
+
+    private async Task<IActionResult> PreviewPayloadAsync(int docId, Dictionary<string, object?>? draft)
     {
         var doc = await repo.GetDocumentAsync(docId);
-        var (payloads, res) = await PayloadForAsync(doc);
+        if (draft is not null)
+        {
+            if (doc.GetStr("module") is not ("AP" or "II") ||
+                draft.Get("header") is not Dictionary<string, object?> header ||
+                draft.Get("lines") is not List<object?> lines)
+                throw new HttpApiException(400, "Provide invoice header and lines for the draft preview");
+            doc["header"] = header;
+            doc["lines"] = lines.OfType<Dictionary<string, object?>>().ToList();
+        }
+        var (payloads, res) = await PayloadForAsync(doc, draft?.Get("manual") as Dictionary<string, object?>);
         // One payload stays one object, so the existing viewer is unchanged; a bundle that splits
         // into several supplier invoices shows them all.
         return Ok(new

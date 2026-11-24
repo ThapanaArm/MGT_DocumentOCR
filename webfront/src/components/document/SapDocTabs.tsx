@@ -1,6 +1,5 @@
 import { useState } from 'react';
-import { getPayload } from '../../api/documents';
-import type { DocLine } from '../../api/documents';
+import type { DocLine, DocModel } from '../../api/documents';
 import { fmtAmt, num } from '../../utils/format';
 
 /* GLC copy of MGT's SapDocTabs (AP, 2026-11-18). MGT (AP, 2026-11-16): what each SAP document of this bundle will carry, one TAB per document —
@@ -162,22 +161,25 @@ function payloadTabs(docs: Payload[]): SapDocTab[] {
   });
 }
 
-export default function SapDocTabs({ docId, fromScreen, onReference, onDocDate }: {
-  docId: number;
+export default function SapDocTabs({ draft, loadPayload, fromScreen, onReference, onDocDate }: {
+  draft: DocModel;
+  loadPayload: () => Promise<{ payload: Record<string, any>; errors?: unknown }>;
   fromScreen: SapDocTab[];
   /** Writes a typed Reference onto the rows of one document (extra.sapRef); '' clears it. */
   onReference?: (lineIdx: number[], value: string) => void;
   /** Writes a Document Date onto the rows of one document (extra.sapDocDate); '' clears it. */
   onDocDate?: (lineIdx: number[], value: string) => void;
 }) {
-  const [fromSap, setFromSap] = useState<SapDocTab[] | null>(null);
-  const [errors, setErrors] = useState<string[]>([]);
+  const [checked, setChecked] = useState<{ draft: DocModel; tabs: SapDocTab[]; errors: string[] } | null>(null);
   const [loading, setLoading] = useState(false);
   const [failed, setFailed] = useState('');
   const [active, setActive] = useState(0);
   // What the Reference box shows while it is being typed in: emptying it clears the hand-typed
   // Reference, and without this the box would jump straight back to the derived one mid-edit.
   const [refDraft, setRefDraft] = useState<string | null>(null);
+  const currentCheck = checked?.draft.header === draft.header && checked.draft.lines === draft.lines ? checked : null;
+  const fromSap = currentCheck?.tabs;
+  const errors = currentCheck?.errors ?? [];
   const tabs = fromSap ?? fromScreen;
   const cur = tabs[Math.min(active, Math.max(tabs.length - 1, 0))];
   // Two documents of one supplier with the same Reference: SAP refuses the second (M8/804), and
@@ -190,10 +192,9 @@ export default function SapDocTabs({ docId, fromScreen, onReference, onDocDate }
     setLoading(true);
     setFailed('');
     try {
-      const r = (await getPayload(docId)) as { payload: Payload | Payload[]; errors?: unknown };
+      const r = await loadPayload();
       const docs = Array.isArray(r.payload) ? r.payload : r.payload ? [r.payload] : [];
-      setFromSap(payloadTabs(docs));
-      setErrors(Array.isArray(r.errors) ? (r.errors as unknown[]).map(String) : []);
+      setChecked({ draft, tabs: payloadTabs(docs), errors: Array.isArray(r.errors) ? r.errors.map(String) : [] });
       setActive(0);
     } catch (e) {
       setFailed(e instanceof Error ? e.message : String(e));
@@ -219,13 +220,13 @@ export default function SapDocTabs({ docId, fromScreen, onReference, onDocDate }
     if (!onReference || !target?.lineIdx?.length) return;
     onReference(target.lineIdx, value);
     // Back to the screen's values, which now carry the edit; "ตรวจกับ SAP" shows SAP's again.
-    if (fromSap) setFromSap(null);
+    if (fromSap) setChecked(null);
   };
   const setDocDate = (value: string) => {
     const target = screenFor(curIdx);
     if (!onDocDate || !target?.lineIdx?.length) return;
     onDocDate(target.lineIdx, value);
-    if (fromSap) setFromSap(null);
+    if (fromSap) setChecked(null);
   };
   const dateEditable = !!onDocDate && !!screenFor(curIdx)?.lineIdx?.length;
   // TEST adds "-T{docId}" when it sends; the box edits the Reference itself.
@@ -248,7 +249,7 @@ export default function SapDocTabs({ docId, fromScreen, onReference, onDocDate }
           <i className="fa-solid fa-magnifying-glass" /> {loading ? 'กำลังตรวจ…' : 'ตรวจกับ SAP'}
         </button>
         {fromSap && (
-          <button className="btn sm" type="button" onClick={() => { setFromSap(null); setActive(0); }}>
+          <button className="btn sm" type="button" onClick={() => { setChecked(null); setActive(0); }}>
             กลับไปค่าจากหน้าจอ
           </button>
         )}

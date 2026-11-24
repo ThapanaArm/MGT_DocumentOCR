@@ -132,8 +132,13 @@ export const sampleDocument = (body: {
 
 export const getDocument = (id: number) => api.get<DocModel>('/api/documents/' + id);
 
-export const reocrDocument = (id: number, ocr: string, user: string) =>
-  api.post<DocModel>('/api/documents/' + id + '/reocr', { ocr, user });
+type DocumentDraft = Pick<DocModel, 'header' | 'lines'>;
+
+export const saveDocumentDraft = (id: number, draft: DocumentDraft) =>
+  api.put<DocModel>('/api/documents/' + id, { header: draft.header, lines: draft.lines });
+
+export const reocrDocument = (id: number, ocr: string, user: string, fillMissing = false) =>
+  api.post<DocModel>('/api/documents/' + id + (fillMissing ? '/reocr-missing' : '/reocr'), { ocr, user });
 
 export const getRawText = (id: number) =>
   api.get<{ text: string }>('/api/documents/' + id + '/rawtext');
@@ -150,6 +155,11 @@ export const learnMaterial = (
 
 export const getPayload = (id: number) =>
   api.get<{ payload: Record<string, any> }>('/api/documents/' + id + '/payload');
+
+export const previewDraftPayload = (id: number, draft: DocumentDraft, manual: unknown) =>
+  api.post<{ payload: Record<string, any>; errors?: unknown }>('/api/documents/' + id + '/payload', {
+    header: draft.header, lines: draft.lines, manual,
+  });
 
 /* The post endpoint answers 200 even when SAP REFUSED the document: the attempt is logged either
    way and `success` is what says whether a document now exists in SAP. `message` carries SAP's own
@@ -330,6 +340,7 @@ export const chatFix = (
     image: string | null;
     user: string;
     provider: string;
+    draft?: DocumentDraft;
     // The currently-selected Zoho Deal's own Ordered Items (isMgt SO documents only, once a Deal is
     // picked) -- backend has no visibility into which Deal is selected (pure frontend state), so it
     // rides along here to give the chat real Material options for the Zoho send path too, not just
@@ -345,7 +356,7 @@ export const chatFix = (
     customerCode?: string;
     // A front-end action the AI asked to run (currently only { type: 'searchZoho', query }).
     action?: { type: string; query: string } | null;
-  }>('/api/documents/' + id + '/chat-fix', body);
+  }>('/api/documents/' + id + (body.draft ? '/chat-fix-draft' : '/chat-fix'), body);
 
 export interface InboxRow {
   DocId: number;

@@ -9,6 +9,7 @@ import {
   getChat,
   getDocument,
   getPayload,
+  previewDraftPayload,
   getRawText,
   learnMaterial,
   postToSapQueued,
@@ -17,6 +18,7 @@ import {
   fillJournalEntryTexts,
   postDeferredVatJv,
   reocrDocument,
+  saveDocumentDraft,
   setDocCategory,
   type ChatMessage,
   type DocModel,
@@ -44,7 +46,9 @@ import { SEND_DISABLED_AP } from '../constants/flags';
 import { dt, fileRetention, fmt, fmtAmt, fmtCost, intFmt, moduleLabel, statusBadge } from '../utils/format';
 import ShippingCheck, { missingRecalAmount, shippingCheckRows, vendorInvoiceTotals } from '../components/document/ShippingCheck';
 import { findDupes } from '../utils/dupes';
-import { isVatTaxRow, linkedGlTaxCodes } from '../utils/glTaxCodes';
+import { isVatTaxRow, linkedGlTaxCodes, syncGlTaxCodes } from '../utils/glTaxCodes';
+import { applyInvoiceChanges, invalidInvoiceChange, invoiceChanges, invoiceRecalTotals, missingInvoiceFields, recalculateInvoice } from '../utils/invoiceRecal';
+import type { InvoiceChange } from '../utils/invoiceRecal';
 import Steps from '../components/Steps';
 import Modal, { ModalHeader } from '../components/Modal';
 import OcrProviderSelect, { AP_READ_ENGINE_IDS, READ_ENGINE_IDS } from '../components/OcrProviderSelect';
@@ -1026,6 +1030,52 @@ function customerMaterialCoversLine(m: Record<string, any>, line: { extCode?: st
   return !!desc && normItemText(m.MaterialCodeName) === desc;
 }
 
+function InvoiceChangesTable({ changes }: { changes: InvoiceChange[] }) {
+  const display = (value: unknown) => value == null || value === '' ? '—'
+    : typeof value === 'object' ? JSON.stringify(value) : String(value);
+  const label = (path: InvoiceChange['path']) => path.map(part => typeof part === 'number' ? part + 1 : part).join(' › ');
+  return (
+    <div className="tw">
+      <table>
+        <thead><tr><th>Field</th><th>Before</th><th>New value</th></tr></thead>
+        <tbody>{changes.map(({ path, before, after }) => (
+          <tr key={JSON.stringify(path)}><td>{label(path)}</td><td>{display(before)}</td><td>{display(after)}</td></tr>
+        ))}</tbody>
+      </table>
+    </div>
+  );
+}
+
+function syncInvoiceHeaderEdits(doc: DocModel, previous: DocModel): DocModel {
+  const before = previous.header;
+  const header = { ...doc.header };
+  for (const [field, related] of [['poRef', 'PurchasingOrder'], ['PurchasingOrder', 'poRef']]) {
+    if (header[field] === before[field] || header[related] !== before[related]) continue;
+    const references = (value: unknown) => String(value ?? '').match(/\d{10}/g) ?? [];
+    if (references(header[field]).length <= 1 && references(before[related]).length <= 1) {
+      header[related] = String(header[field] ?? '').trim();
+      const oldPo = references(before[field])[0] ?? references(before[related])[0];
+      const newPo = references(header[field])[0];
+      if (oldPo && newPo && docPosOf(before).length <= 1) {
+        if (Array.isArray(header.poOrder)) header.poOrder = header.poOrder.map(value => value === oldPo ? newPo : value);
+        if (Array.isArray(header.poList)) header.poList = header.poList.map(entry => entry?.po === oldPo ? { ...entry, po: newPo } : entry);
+        doc = { ...doc, lines: doc.lines.map(line => line.extra?.poRef === oldPo
+          ? { ...line, extra: { ...line.extra, poRef: newPo } } : line) };
+      }
+    }
+  }
+  if (header.invoiceDate !== before.invoiceDate) {
+    for (const field of ['taxReportingDate', 'taxFulfillDate', 'taxDate']) {
+      if (header[field] === before[field]) header[field] = header.invoiceDate;
+    }
+  }
+  if (header.invoiceNo !== before.invoiceNo && header.headerText === before.headerText) {
+    const current = String(before.headerText ?? '').trim();
+    if (!current || current === itemTextFor(before).slice(0, 25)) header.headerText = itemTextFor(header).slice(0, 25);
+  }
+  return { ...doc, header };
+}
+
 export default function DocumentPage() {
   const { docId } = useParams<{ docId: string }>();
   const id = Number(docId);
@@ -1059,6 +1109,12 @@ export default function DocumentPage() {
   const [reocrEngine, setReocrEngine] = useState('gemini');
   const [recalculated, setRecalculated] = useState<DocModel | null>(null);
   const recalBaseline = useRef<DocModel | null>(null);
+  const [pendingAiEdit, setPendingAiEdit] = useState<{ base: DocModel; changes: InvoiceChange[] } | null>(null);
+  const [pendingRead, setPendingRead] = useState<{ base: DocModel; changes: InvoiceChange[] } | null>(null);
+  const [invoiceBusy, setInvoiceBusy] = useState(false);
+  const [invoiceFormVersion, setInvoiceFormVersion] = useState(0);
+  const activeDocument = useRef(id);
+  activeDocument.current = id;
   // "Split Sales Order" board (SO only) and the ship-to list its cards pick from.
   const [splitOpen, setSplitOpen] = useState(false);
   const splitShipTos = useSoShipToOptions({
@@ -1196,6 +1252,9 @@ export default function DocumentPage() {
   useEffect(() => {
     let alive = true;
     setDoc(null);
+    setPendingAiEdit(null);
+    setPendingRead(null);
+    setInvoiceBusy(false);
     setMap(null);
     setFailed(false);
     setPendingMatch(null);
@@ -1655,8 +1714,29 @@ export default function DocumentPage() {
       await runMap(true);
     });
 
+  const isInvoice = doc.module === 'AP' || doc.module === 'II';
   const doReocr = () =>
     guard(async () => {
+      if (isInvoice) {
+        if (invoiceBusy || locked || posting) return;
+        setInvoiceBusy(true);
+        try {
+          const read = await reocrDocument(doc.docId, reocrEngine, USER, true);
+          if (activeDocument.current !== doc.docId) return;
+          if (read.provider === 'failed') {
+            showToast(read.confidenceNote || 'Could not re-read the document.', 'error');
+            return;
+          }
+          const edited = recalBaseline.current?.docId === doc.docId ? invoiceChanges(recalBaseline.current, doc) : [];
+          const changes = invoiceChanges(doc, missingInvoiceFields(doc, seedTaxItems(read))).filter(({ path }) =>
+            !edited.some(edit => edit.path.every((part, index) => part === path[index])));
+          setPendingRead(changes.length ? { base: doc, changes } : null);
+          showToast(changes.length ? 'Review the values found by Re-read Document.' : 'Re-read found no new values for empty fields.');
+        } finally {
+          if (activeDocument.current === doc.docId) setInvoiceBusy(false);
+        }
+        return;
+      }
       const d = await reocrDocument(doc.docId, reocrEngine, USER);
       const withTax = seedGlItems(seedTaxItems(seedWhtItems(d)));
       const seeded = seedHeaderText(seedDeliveryConditions(seedPoItems(seedRefDocument(seedHeaderTaxCode(withTax)))));
@@ -1690,9 +1770,12 @@ export default function DocumentPage() {
       const r = await getRawText(doc.docId);
       setRawText(r.text || '(No text — this is a scanned file or generated from sample data)');
     });
+  const readCurrentPayload = () => isInvoice && !locked
+    ? previewDraftPayload(doc.docId, syncGlTaxCodes(doc), manual.current)
+    : getPayload(doc.docId);
   const openPayload = () =>
     guard(async () => {
-      const r = await getPayload(doc.docId);
+      const r = await readCurrentPayload();
       setPayload(r.payload);
     });
 
@@ -2654,6 +2737,15 @@ export default function DocumentPage() {
       sendMatchChat(pendingMatch, message);
       return;
     }
+    if (isInvoice && (invoiceBusy || posting || locked)) return;
+    const invoiceDraft = isInvoice && pendingAiEdit
+      ? applyInvoiceChanges(doc, pendingAiEdit.base, pendingAiEdit.changes)
+      : { doc, conflicts: [] };
+    if (invoiceDraft.conflicts.length) {
+      showToast('An AI correction conflicts with an edit on the form. Discard the proposal and send the correction again.', 'error');
+      return;
+    }
+    if (isInvoice) setInvoiceBusy(true);
     const image = chatImage;
     setChatHistory((hist) => [...hist, { role: 'user', text: message, image: image || undefined }]);
     setChatImage(null);
@@ -2664,6 +2756,7 @@ export default function DocumentPage() {
           image,
           user: USER,
           provider: chatProvider,
+          draft: isInvoice ? { header: invoiceDraft.doc.header, lines: invoiceDraft.doc.lines } : undefined,
           // Give the chat the current Deal's own Ordered Items so it can also pick a Material for
           // the Zoho Sales Order editor's lines (matched separately from Step 2 Data Mapping) --
           // backend has no visibility into which Deal is picked, that's pure page state.
@@ -2675,6 +2768,13 @@ export default function DocumentPage() {
               }))
             : undefined,
         });
+        if (activeDocument.current !== doc.docId) return;
+        if (isInvoice) {
+          const changes = invoiceChanges(doc, r.document);
+          setPendingAiEdit(changes.length ? { base: doc, changes } : null);
+          if (changes.length) showToast('AI corrections are ready. Click Recal to apply them to the form.');
+          return;
+        }
         setDoc(r.document);
         // The AI can add or remove lines (e.g. "it's 2 lines, not 1"). The old mapping result still
         // has the OLD line count until the re-map below returns, and every card/table indexes
@@ -2741,10 +2841,12 @@ export default function DocumentPage() {
         showToast(e instanceof Error ? e.message : String(e));
       } finally {
         try {
-          setChatHistory(await getChat(doc.docId));
+          const history = await getChat(doc.docId);
+          if (activeDocument.current === doc.docId) setChatHistory(history);
         } catch {
           /* ignore */
         }
+        if (isInvoice && activeDocument.current === doc.docId) setInvoiceBusy(false);
       }
     })();
   };
@@ -2769,59 +2871,93 @@ export default function DocumentPage() {
 
   const headerVendor = String(doc.partnerCode ?? '').trim() || String(h.vendorCode ?? '').trim();
   const invoiceMainVendor = mainVendorCode || headerVendor;
-  const totalsByVendor = doc.module === 'AP' || doc.module === 'II'
-    ? vendorInvoiceTotals(doc, invoiceMainVendor)
+  const canRecal = isInvoice && !locked && !posting && !invoiceBusy;
+  const recalRequested = isInvoice && recalculated?.docId === doc.docId;
+  const recalCurrent = recalRequested && !pendingAiEdit && !pendingRead
+    && recalculated.header === doc.header && recalculated.lines === doc.lines;
+  const recalBlocked = isInvoice && (invoiceBusy || !!pendingAiEdit || !!pendingRead || (recalRequested && !recalCurrent));
+  const totalsByVendor = isInvoice
+    ? (recalCurrent ? invoiceRecalTotals : vendorInvoiceTotals)(doc, invoiceMainVendor)
     : new Map<string, never>();
-  const canRecal = (doc.module === 'AP' || doc.module === 'II') && !locked && !posting;
-  const recalRequested = canRecal && recalculated?.docId === doc.docId;
-  const recalCurrent = recalRequested && recalculated.header === doc.header && recalculated.lines === doc.lines;
-  const recalChanges: Array<{ field: string; before: string; after: string }> = [];
-  if (recalCurrent && recalBaseline.current?.docId === doc.docId) {
-    const original = recalBaseline.current;
-    const compare = (field: string, oldValue: unknown, newValue: unknown) => {
-      const before = String(oldValue ?? '').trim();
-      const after = String(newValue ?? '').trim();
-      if (before !== after) recalChanges.push({ field, before, after });
-    };
-    const numericValue = (value: unknown) => {
-      const amount = String(value ?? '').trim();
-      return amount === '' ? '' : Number(amount.replace(/[, ]/g, ''));
-    };
-    for (const [key, label] of [
-      ['invoiceNo', 'Invoice No.'], ['vendorName', 'Vendor Name'], ['vendorCode', 'Vendor Code'],
-      ['goodsSupplier', 'Goods Supplier'], ['goodsInvoiceNo', 'Goods Invoice No.'],
-      ['poRef', 'PO Reference'], ['headerText', 'Header Text'], ['taxCode', 'Tax Code'],
-      ['paymentTerms', 'Payment Terms'], ['branch', 'Branch'], ['vendorTaxId', 'Tax ID'],
-    ]) compare(label, original.header[key], h[key]);
-    const originalLines = new Map(original.lines.map((line) => [line.itemNo, line]));
-    for (const line of doc.lines) {
-      const before = originalLines.get(line.itemNo);
-      if (!before) {
-        compare(`Line ${line.itemNo} added`, '', line.desc || line.extCode || line.itemNo);
-        continue;
-      }
-      originalLines.delete(line.itemNo);
-      for (const [key, label] of [['desc', 'Description'], ['extCode', 'Item Code'], ['uom', 'Unit']]) {
-        compare(`Line ${line.itemNo} · ${label}`, before[key], line[key]);
-      }
-      for (const [key, label] of [['qty', 'Quantity'], ['price', 'Unit Price'], ['amount', 'Amount']]) {
-        compare(`Line ${line.itemNo} · ${label}`, numericValue(before[key]), numericValue(line[key]));
-      }
-      for (const [key, label] of [['vendorCode', 'Vendor'], ['costType', 'Cost Type'], ['sapPoItem', 'PO Item'], ['taxCode', 'Tax Code'], ['itemNote1', 'Item Note']]) {
-        compare(`Line ${line.itemNo} · ${label}`, before.extra?.[key], line.extra?.[key]);
-      }
-    }
-    for (const line of originalLines.values()) compare(`Line ${line.itemNo} removed`, line.desc || line.extCode || line.itemNo, '');
-  }
+  const recalChanges = recalCurrent && recalBaseline.current?.docId === doc.docId
+    ? invoiceChanges(recalBaseline.current, doc) : [];
   const recalShippingRows = recalCurrent ? shippingCheckRows(doc) : [];
+
+  const acceptReRead = () => {
+    if (!canRecal || !pendingRead) return;
+    const filled = applyInvoiceChanges(doc, pendingRead.base, pendingRead.changes);
+    if (filled.conflicts.length) {
+      showToast('Some fields changed after the read. Discard these suggestions or re-read the current document.', 'error');
+      return;
+    }
+    setDoc(filled.doc);
+    setPendingRead(null);
+    setMap(null);
+    setInvoiceFormVersion(version => version + 1);
+    showToast('Missing values were filled on the form. Click Recal to update totals.');
+  };
+
   const runRecal = () => {
     if (!canRecal) return;
-    const error = doc.lines.length ? missingRecalAmount(doc) : 'Add at least one line item before recalculating.';
+    if (pendingRead) {
+      showToast('Accept or discard the Re-read suggestions first.', 'info');
+      return;
+    }
+    const applied = pendingAiEdit ? applyInvoiceChanges(doc, pendingAiEdit.base, pendingAiEdit.changes) : { doc, conflicts: [] };
+    if (applied.conflicts.length) {
+      showToast('An AI correction conflicts with an edit on the form. Discard the proposal and send the correction again.', 'error');
+      return;
+    }
+    const previous = recalculated ?? recalBaseline.current ?? doc;
+    const invalid = invalidInvoiceChange(invoiceChanges(previous, applied.doc));
+    if (invalid) {
+      showToast(invalid, 'error');
+      return;
+    }
+    const synced = syncInvoiceHeaderEdits(applied.doc, previous);
+    const next = recalculateInvoice(synced, previous, invoiceMainVendor);
+    const error = next.lines.length ? missingRecalAmount(next) : 'Add at least one line item before recalculating.';
     if (error) {
+      // Keep the correction visible on the form so the user can fix other incomplete fields.
+      if (pendingAiEdit) {
+        setDoc(applied.doc);
+        setMap(null);
+        setPendingAiEdit(null);
+        setInvoiceFormVersion(version => version + 1);
+      }
       showToast(error, 'error');
       return;
     }
-    setRecalculated(doc);
+    const changed = invoiceChanges(doc, next).length > 0;
+    const updated = changed ? next : doc;
+    if (changed) {
+      setDoc(updated);
+      setMap(null);
+      setInvoiceFormVersion(version => version + 1);
+    }
+    setPendingAiEdit(null);
+    setRecalculated(updated);
+  };
+
+  const saveRecal = async () => {
+    if (!canRecal || !recalCurrent) return;
+    setInvoiceBusy(true);
+    try {
+      const saved = await guard(() => saveDocumentDraft(doc.docId, doc));
+      if (saved && activeDocument.current === doc.docId) {
+        setDoc(current => current?.docId === doc.docId && current.header === doc.header && current.lines === doc.lines ? saved : current);
+        setMap(null);
+        setRecalculated(saved);
+        showToast('Recal changes saved.', 'success');
+      }
+    } finally {
+      if (activeDocument.current === doc.docId) setInvoiceBusy(false);
+    }
+  };
+
+  const mapCurrentDocument = async () => {
+    const result = await runMap(false);
+    if (result && recalCurrent && activeDocument.current === doc.docId) setRecalculated(result.document);
   };
 
   // The confirmation and the document tabs show the same on-screen totals per supplier.
@@ -2876,7 +3012,7 @@ export default function DocumentPage() {
         // remount the grid when the lookup changes.
         key={vendorTotals
           ? [vendorFilter, vendorTotals.subTotal, h.vatRate, vendorTotals.vatAmount, vendorTotals.whtAmount, vendorTotals.totalAmount].join('|')
-          : 'all'}
+          : `all-${invoiceFormVersion}`}
         fields={AP_TOTALS_H}
         values={vendorTotals ?? h}
         posted={locked || !!vendorTotals}
@@ -3473,14 +3609,14 @@ export default function DocumentPage() {
           <button
             className="btn sm primary"
             onClick={doReocr}
-            disabled={posted || isSplit || !!doc.sourceDocId || fileExpired}
+            disabled={locked || posting || invoiceBusy || !!doc.sourceDocId || fileExpired}
             title={fileExpired ? 'The original file was removed after the retention period' : undefined}
           >
             <i className="fa-solid fa-arrow-rotate-right" /> Re-read Document
           </button>
           {(doc.module === 'AP' || doc.module === 'II') && (
             <button className="btn sm ghost" onClick={runRecal} disabled={!canRecal}
-              title="Calculate from the current entries without reading the PDF or using AI">
+              title="Apply proposed AI corrections and calculate from the current entries">
               <i className="fa-solid fa-calculator" /> Recal
             </button>
           )}
@@ -3534,6 +3670,18 @@ export default function DocumentPage() {
           </div>
         </div>
         <div className="card-b">
+          {pendingRead && (
+            <div className="card">
+              <div className="card-h"><h2>Re-read suggestions</h2></div>
+              <div className="card-b">
+                <InvoiceChangesTable changes={pendingRead.changes} />
+                <div className="row">
+                  <button className="btn primary" disabled={!canRecal} onClick={acceptReRead}>Fill empty fields</button>
+                  <button className="btn ghost" disabled={invoiceBusy} onClick={() => setPendingRead(null)}>Discard</button>
+                </div>
+              </div>
+            </div>
+          )}
           {recalRequested && (
             <div className="card" id="recal-preview">
               <div className="card-h"><h2>Recal Preview</h2></div>
@@ -3543,19 +3691,12 @@ export default function DocumentPage() {
                 ) : (
                   <>
                     <p role="status">
-                      {recalChanges.length ? `${recalChanges.length} field change(s) since opening or re-reading the document.` : 'No changes in the compared fields. Recalculated from the current entries.'}
+                      {recalChanges.length ? `${recalChanges.length} field change(s) since opening the document.` : 'Recalculated from the current entries.'}
                     </p>
                     {recalChanges.length > 0 && (
                       <details open>
                         <summary>Before and after</summary>
-                        <div className="tw">
-                          <table>
-                            <thead><tr><th>Field</th><th>Before</th><th>Current</th></tr></thead>
-                            <tbody>{recalChanges.map(({ field, before, after }) => (
-                              <tr key={field}><td>{field}</td><td>{before || '—'}</td><td>{after || '—'}</td></tr>
-                            ))}</tbody>
-                          </table>
-                        </div>
+                        <InvoiceChangesTable changes={recalChanges} />
                       </details>
                     )}
                     <p className="hint">Calculated vendor totals</p>
@@ -3583,6 +3724,7 @@ export default function DocumentPage() {
                         {recalShippingRows.map((row) => `${row.type}: ${row.docCount > 0 ? fmt(row.diff) : 'Supporting documents missing'}`).join(' · ')}
                       </p>
                     )}
+                    <button className="btn primary" disabled={!canRecal} onClick={saveRecal}>Save</button>
                   </>
                 )}
               </div>
@@ -3721,6 +3863,7 @@ export default function DocumentPage() {
           in red. Shown only when the bundle has form lines or supporting documents. */}
       {(doc.module === 'AP' || doc.module === 'II') && (
         <ShippingCheck
+          key={invoiceFormVersion}
           doc={doc}
           posted={posted}
           // header values are plain JSON; editHeader is typed for strings only
@@ -3744,7 +3887,7 @@ export default function DocumentPage() {
             // Amount / tax figures follow the vendor lookup so the MIRO tabs show exactly what
             // this vendor's run is worth; remount on change because the numeric inputs are
             // uncontrolled (see the Totals card).
-            key={vendorFilter || 'all'}
+            key={`${vendorFilter || 'all'}-${invoiceFormVersion}`}
             groups={AP_TRADE_GROUPS}
             values={vendorTotals ?? h}
             posted={posted}
@@ -3767,7 +3910,8 @@ export default function DocumentPage() {
                     return (
                       <SapDocTabs
                         key={doc.docId}
-                        docId={doc.docId}
+                        draft={doc}
+                        loadPayload={readCurrentPayload}
                         onReference={posted ? undefined : (idx, value) => idx.forEach((i) => editLineExtra(i, 'sapRef', value))}
                         onDocDate={posted ? undefined : (idx, value) => idx.forEach((i) => editLineExtra(i, 'sapDocDate', value))}
                         fromScreen={screenTabs({
@@ -4073,7 +4217,7 @@ export default function DocumentPage() {
           which is how switching to the customs vendor showed the customs rows' assignment and tax
           code beside the PREVIOUS vendor's amounts. */}
       {showGlItems && (
-        <GlItemsTable key={`${vendorFilter || 'all'}-${glRows.items.length}`} {...glProps} />
+        <GlItemsTable key={`${vendorFilter || 'all'}-${glRows.items.length}-${invoiceFormVersion}`} {...glProps} />
       )}
 
       {/* Chat fix -- hidden on every locked document (posted, partly posted, split): the chat
@@ -4088,6 +4232,9 @@ export default function DocumentPage() {
           setChatProvider={setChatProvider}
           providers={providers}
           onSend={sendChat}
+          busy={invoiceBusy}
+          pendingEdits={pendingAiEdit?.changes.length}
+          onDiscardEdits={() => setPendingAiEdit(null)}
         />
       )}
 
@@ -4148,7 +4295,7 @@ export default function DocumentPage() {
       {/* Action bar */}
       <div className="card">
         <div className="card-b row">
-          <button className="btn primary" onClick={() => runMap(false)} disabled={posted || isSplit}>
+          <button className="btn primary" onClick={mapCurrentDocument} disabled={posted || isSplit || recalBlocked}>
             <i className="fa-solid fa-magnifying-glass" /> Step 2 — Data Mapping
           </button>
           {/* MGT/Zoho Step 3: reveal the Sales Order editor above (mirrors how Step 2 reveals the
@@ -4178,7 +4325,7 @@ export default function DocumentPage() {
             <button
               className="btn success"
               onClick={() => setPostOpen(true)}
-              disabled={!(map && map.pass && !posted && !isSplit)}
+              disabled={!(map && map.pass && !posted && !isSplit) || recalBlocked}
             >
               ⎋ Step 3 · Review and send to SAP
             </button>
@@ -4461,7 +4608,7 @@ export default function DocumentPage() {
                 <button
                   className="btn success"
                   onClick={confirmPost}
-                  disabled={sendBlockers.length > 0 || posting}
+                  disabled={sendBlockers.length > 0 || posting || recalBlocked}
                   title={sendBlockers.join(' · ')}
                 >
                   {posting ? 'Sending…' : 'Confirm send to SAP'}
