@@ -75,6 +75,9 @@ export default function ChatFixCard({
   setChatProvider,
   providers,
   onSend,
+  busy = false,
+  pendingEdits,
+  onDiscardEdits,
 }: {
   docId: number;
   history: ChatMessage[];
@@ -84,6 +87,9 @@ export default function ChatFixCard({
   setChatProvider: (v: string) => void;
   providers: OcrProvider[];
   onSend: (message: string) => void;
+  busy?: boolean;
+  pendingEdits?: number;
+  onDiscardEdits?: () => void;
 }) {
   const [text, setText] = useState('');
   const [zoomUrl, setZoomUrl] = useState<string | null>(null);
@@ -97,6 +103,7 @@ export default function ChatFixCard({
   }
 
   function send() {
+    if (busy) return;
     const message = text.trim();
     if (!message && !chatImage) return;
     onSend(message);
@@ -150,6 +157,12 @@ export default function ChatFixCard({
             </p>
           )}
         </div>
+        {!!pendingEdits && (
+          <div className="row">
+            <span role="status">{pendingEdits} proposed change(s). Click Recal to apply them to the form.</span>
+            <button className="btn sm ghost" disabled={busy} onClick={onDiscardEdits}>Discard changes</button>
+          </div>
+        )}
         {chatImage && (
           <div className="chat-attach-preview">
             <img src={chatImage} alt="" className="zoomable" title="Click to enlarge" onClick={() => setZoomUrl(chatImage)} />
@@ -195,7 +208,7 @@ export default function ChatFixCard({
               if (f) setChatImage(await readImageFile(f));
             }}
           />
-          <button className="btn primary" onClick={send} disabled={!ready}>
+          <button className="btn primary" onClick={send} disabled={!ready || busy}>
             <i className="fa-solid fa-paper-plane" /> Send to AI
           </button>
         </div>

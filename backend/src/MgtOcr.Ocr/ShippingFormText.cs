@@ -38,6 +38,17 @@ public static class ShippingFormText
     // amount can land on the next line when the bold row sits a little off the amount's baseline).
     private static readonly Regex TotalLoose = new(@"\bTOTAL\b[^\d]{0,80}?(\d[\d,]*\.\d{2})", RegexOptions.IgnoreCase);
     private static readonly Regex Money = new(@"\d[\d,]*\.\d{2}");
+    // The form's EXCISE FEE row (excise tax + interior tax). Accounting (2026-11-24): it is printed in
+    // the table but left out of the form's TOTAL, because the tax goes into each item's cost like the
+    // import duty. The row is kept, but it is not counted when the rows are compared with TOTAL.
+    private static readonly Regex ExciseRow = new(@"EXCISE|สรรพสามิต", RegexOptions.IgnoreCase);
+    private static readonly Regex ExciseOrInteriorDuty = new(@"EXCISE|INTERIOR|สรรพสามิต|มหาดไทย", RegexOptions.IgnoreCase);
+    /// <summary>The form's rows without its EXCISE FEE row: what the TOTAL row adds up when the form leaves excise out.</summary>
+    private static double SumWithoutExcise(IEnumerable<FormRow> rows) =>
+        rows.Where(r => !ExciseRow.IsMatch(r.Desc ?? "")).Sum(r => r.Amount);
+    /// <summary>True when the rows add up to the form's TOTAL, with or without the EXCISE FEE row.</summary>
+    private static bool TotalAgrees(Form f) =>
+        f.Total is { } t && (Math.Abs(f.Rows.Sum(r => r.Amount) - t) <= 0.01 || Math.Abs(SumWithoutExcise(f.Rows) - t) <= 0.01);
     // "DO 4000358 17,276.11 Local" · "OTHER : Oversea Charge (USD) 2000267 70.14 Overseas". After
     // Normalize the vendor and the amount run together ("400035817,276.11"): the vendor column is
     // always a 7-digit code, so it is split off the front (see SplitVendor).
@@ -110,18 +121,19 @@ public static class ShippingFormText
             static double? Num(string v) =>
                 double.TryParse(v.Replace(",", ""), NumberStyles.Any, CultureInfo.InvariantCulture, out var d) ? d : null;
             var rowSum = Math.Round(rows.Sum(r => r.Amount), 2);
+            var rowSumNoExcise = Math.Round(SumWithoutExcise(rows), 2);
             // The form's TOTAL: the TOTAL row; else TOTAL with its amount further along (or on the
             // next line) when that amount is the rows' sum; else the rows' sum printed anywhere
             // below the last row — on the Windows host the TOTAL row of TSH26207S1 (17,397.78) was
             // not found as one line (AP, 2026-11-19). Anything else stays "not found" -> Needs Review.
             double? total = TotalRow.Match(text) is { Success: true } tm ? Num(tm.Groups[1].Value) : null;
             if (total == null && TotalLoose.Match(text) is { Success: true } tl && Num(tl.Groups[1].Value) is { } lv
-                && Math.Abs(lv - rowSum) <= 0.01) total = lv;
+                && (Math.Abs(lv - rowSum) <= 0.01 || Math.Abs(lv - rowSumNoExcise) <= 0.01)) total = lv;
             if (total == null && rows.Count > 0)
             {
                 var lastRow = Row.Matches(text).Cast<Match>().LastOrDefault();
                 var below = lastRow == null ? text : text[(lastRow.Index + lastRow.Length)..];
-                if (Money.Matches(below).Select(m => Num(m.Value)).FirstOrDefault(v => v is { } x && Math.Abs(x - rowSum) <= 0.01) is { } found)
+                if (Money.Matches(below).Select(m => Num(m.Value)).FirstOrDefault(v => v is { } x && (Math.Abs(x - rowSum) <= 0.01 || Math.Abs(x - rowSumNoExcise) <= 0.01)) is { } found)
                     total = found;
             }
             forms.Add(new Form(i, po, InvoiceNo.Match(text).Groups[1].Value,
@@ -257,9 +269,10 @@ public static class ShippingFormText
             Review($"TOTAL row not found on the FORM of PO {noTotal.Po} ({Pg(noTotal)})");
             return read;
         }
-        if (forms.FirstOrDefault(f => Math.Abs(f.Rows.Sum(r => r.Amount) - f.Total!.Value) > 0.01) is { } off)
+        if (forms.FirstOrDefault(f => !TotalAgrees(f)) is { } off)
         {
-            Review($"FORM of PO {off.Po} ({Pg(off)}): rows add up to {off.Rows.Sum(r => r.Amount):N2} but TOTAL is {off.Total:N2}");
+            var exNote = off.Rows.Any(r => ExciseRow.IsMatch(r.Desc ?? "")) ? $" ({SumWithoutExcise(off.Rows):N2} without EXCISE FEE)" : "";
+            Review($"FORM of PO {off.Po} ({Pg(off)}): rows add up to {off.Rows.Sum(r => r.Amount):N2}{exNote} but TOTAL is {off.Total:N2}");
             return read;
         }
 
@@ -278,14 +291,26 @@ public static class ShippingFormText
             (l.ExtCode ?? "").Trim().ToUpperInvariant() is "VAT" or "WHT" or "DUTY";
         // Only the receipts' VAT, withholding and duty rows stay; every cost row comes from the forms.
         var kept = doc.Lines.Where(IsTaxOrDuty).ToList();
+        // The read splits the form's EXCISE FEE row into the receipts' Excise Tax and Interior Tax duty
+        // rows (extCode DUTY). Those rows already carry the excise, so adding the form's own row as
+        // well would count it twice; it is left out then. With no such duty row it stays a cost row.
+        var dutyCoversExcise = kept.Any(l => (l.ExtCode ?? "").Trim().Equals("DUTY", StringComparison.OrdinalIgnoreCase)
+            && ExciseOrInteriorDuty.IsMatch(l.Desc ?? ""));
         foreach (var f in forms)
             foreach (var r in f.Rows)
+            {
+                if (dutyCoversExcise && ExciseRow.IsMatch(r.Desc ?? ""))
+                {
+                    Console.Error.WriteLine($"[ShippingForm] FORM row \"{r.Desc}\" {r.Amount:N2} not added: the Excise Tax / Interior Tax duty rows already stand for it");
+                    continue;
+                }
                 kept.Add(new LineItem
                 {
                     ExtCode = "COST", Desc = r.Desc, Qty = 1, Uom = "EA",
                     Price = r.Amount, Amount = r.Amount,
                     VendorCode = r.Vendor, CostType = r.CostType, PoRef = f.Po,
                 });
+            }
         // The import duty on the customs receipt belongs to the PO whose form's MEMO carries it
         // (Import Tax 8,415.77 on PO 2230000604; PRD books ZIM1 8,415.75 on that PO).
         foreach (var l in kept.Where(l => (l.ExtCode ?? "").Trim().Equals("DUTY", StringComparison.OrdinalIgnoreCase)))

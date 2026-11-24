@@ -1528,8 +1528,14 @@ public static class SupplierInvoicePayload
                 .ToList();
             if (holders.Count == 0)
             {
+                // "No conditions at all" has two different causes, and the screen used to say the first
+                // for both: SAP gave no PO item back (read failed or not configured: the preview
+                // swallows that and logs it), or the PO was read but holds no delivery-cost condition.
                 var reason = poConds.Count == 0
-                    ? "อ่าน PO จาก SAP ไม่ได้ จึงตรวจ condition ของ PO ไม่ได้"
+                    ? (poItems is null || poItems.Count == 0
+                        ? "อ่าน PO จาก SAP ไม่ได้ (ไม่ได้ PO item กลับมาเลย — ตรวจ Sap:PurchaseOrder:BaseUrl และสิทธิ์ "
+                          + "API_PURCHASEORDER_PROCESS_SRV แล้วดู log \"[AP] Purchase-order lookup failed\") จึงตรวจ condition ของ PO ไม่ได้"
+                        : $"อ่าน PO จาก SAP ได้ {poItems.Count} item แต่ PO ไม่มี condition ค่าขนส่งตั้งค้างไว้เลย (เช่น ZLH1, ZFE2, ZED1)")
                     : matchingConditions.Count == 0
                         ? $"เลือก {cond} ใน invoice แล้ว แต่ PO {poRef} ไม่มี condition {cond} ตั้งค้างไว้"
                         : conditionHolders.Count == 0

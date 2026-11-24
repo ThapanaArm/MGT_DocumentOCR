@@ -58,12 +58,13 @@ const norm = (v: unknown): string => {
 };
 
 const TAX_ROW = /^(VAT|WHT|DUTY)$/i;
+/* The form's EXCISE FEE row is read as two duty rows, Excise Tax + Interior Tax. */
+const EXCISE_DUTY = /EXCISE|INTERIOR|สรรพสามิต|มหาดไทย/i;
 
 /* Before VAT of one document = มูลค่าไม่มีหรือยกเว้นภาษี + มูลค่าที่คำนวณภาษี 7% (the whole figure
    before VAT); else total − VAT. Total = Before VAT + VAT. */
 const beforeVat = (d: SourceDoc) => {
-  const b = num(d.amountBeforeVat);
-  if (b) return b;
+  if (String(d.amountBeforeVat ?? '').trim() !== '') return num(d.amountBeforeVat);
   return Math.round((num(d.totalAmount) - num(d.vatAmount)) * 100) / 100;
 };
 
@@ -150,6 +151,22 @@ function countedSourceDocs(doc: DocModel): SourceDoc[] {
   return docs.filter((d) => !String(d.includedIn ?? '').trim() && issuerRoleOf(doc, d) !== 'shipper');
 }
 
+export function missingRecalAmount(doc: DocModel): string | undefined {
+  const hasAmount = (value: unknown) => {
+    const text = String(value ?? '').trim().replace(/[, ]/g, '');
+    return text !== '' && Number.isFinite(Number(text));
+  };
+  const line = doc.lines.find((row) => !hasAmount(row.amount));
+  if (line) return `Enter a valid Amount for line ${line.itemNo}.`;
+  const source = countedSourceDocs(doc).find((row) => norm(row.costType)
+    && !hasAmount(row.amountBeforeVat)
+    && !(String(row.amountBeforeVat ?? '').trim() === '' && hasAmount(row.totalAmount) && hasAmount(row.vatAmount)));
+  if (source) {
+    const label = source.docNo || source.issuerName || source.costType;
+    return `Check the amount before VAT on supporting document ${label}. Use Re-read Document if OCR missed it.`;
+  }
+}
+
 function vendorVatTotals(doc: DocModel, mainVendor: string) {
   const totals = new Map<string, number>();
   const addVat = (vendor: string, amount: number) => totals.set(vendor, (totals.get(vendor) ?? 0) + amount);
@@ -230,7 +247,14 @@ export function vendorInvoiceTotals(doc: DocModel, mainVendor: string) {
 export function shippingCheckRows(doc: DocModel) {
   const form: Record<string, number> = {};
   for (const l of doc.lines || []) {
-    if (TAX_ROW.test(String(l.extCode ?? '').trim())) continue;
+    if (TAX_ROW.test(String(l.extCode ?? '').trim())) {
+      // The form prints EXCISE FEE as a Fee row (it only leaves it out of its own TOTAL), and the
+      // Customs receipt that carries the tax sits in the Documents column. The two duty rows it was
+      // split into stand for that Fee row on this side, so the receipt is not reported as a difference.
+      if (/^DUTY$/i.test(String(l.extCode ?? '').trim()) && EXCISE_DUTY.test(String(l.desc ?? '')))
+        form.Fee = (form.Fee ?? 0) + num(l.amount);
+      continue;
+    }
     const t = norm((l.extra as Record<string, unknown> | undefined)?.costType);
     if (!t) continue;
     form[t] = (form[t] ?? 0) + num(l.amount);
