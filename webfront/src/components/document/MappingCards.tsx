@@ -182,6 +182,7 @@ function SapCustomerPanel({
   onProposeMatch,
   onClearMatch,
   partyLabel = 'Customer',
+  hideCodes,
 }: {
   customerName?: string;
   taxId?: string;
@@ -198,6 +199,11 @@ function SapCustomerPanel({
   /** What this party is called on screen. A supplier is a Business Partner in S/4HANA exactly
    *  like a customer, so the Vendor card reuses this panel with partyLabel="Vendor". */
   partyLabel?: string;
+  /** Business Partner codes left out of the results. On the dev tenant that is the test
+   *  counterpart of the vendor already chosen (VendorMap_Dev: 4000357 -> 1000134): listing it next
+   *  to the real code only confuses "real" with "test", and its Use & Save would write the test code
+   *  into the master (AP, 2026-11-24). */
+  hideCodes?: string[];
 }) {
   const [results, setResults] = useState<SapBusinessPartner[]>([]);
   const [loading, setLoading] = useState(false);
@@ -206,6 +212,7 @@ function SapCustomerPanel({
 
   const docName = (customerName || '').trim();
   const tax = (taxId || '').trim();
+  const hide = new Set((hideCodes ?? []).map((c) => String(c).trim()).filter(Boolean));
 
   // The first lookup uses the name read from the document. If it is not useful, the person can
   // enter a different term and explicitly search again.
@@ -239,15 +246,16 @@ function SapCustomerPanel({
           setError('Unexpected response from the server (is the backend up to date?)');
           return;
         }
+        const found = hide.size ? r.results.filter((bp) => !hide.has(String(bp.businessPartnerId).trim())) : r.results;
         setResults(r.results);
-        if (r.results.length > 1) {
+        if (found.length > 1) {
           onProposeMatch?.({
             docFields: [
               { label: `${partyLabel} Name`, value: name },
               { label: 'Tax ID', value: tax },
               { label: `${partyLabel} Address (from document)`, value: address },
             ],
-            candidates: r.results.map((bp) => ({
+            candidates: found.map((bp) => ({
               id: bp.businessPartnerId,
               label: bp.businessPartnerId,
               fields: [
@@ -268,7 +276,7 @@ function SapCustomerPanel({
               ],
             })),
             onSelect: (id) => {
-              const bp = r.results.find((x) => x.businessPartnerId === id);
+              const bp = found.find((x) => x.businessPartnerId === id);
               if (bp) onUse(bp);
             },
           });
@@ -315,23 +323,30 @@ function SapCustomerPanel({
     </div>
   );
 
+  // What the person sees: the results without the hidden test codes.
+  const visible = hide.size ? results.filter((bp) => !hide.has(String(bp.businessPartnerId).trim())) : results;
+  const hiddenCount = results.length - visible.length;
   if (!name && !tax)
     return <div className="hint" style={{ padding: '6px 0' }}><div>Enter a search term to look up the {partyLabel.toLowerCase()} in SAP</div>{renderManualSearchBox()}</div>;
   if (loading) return hint('Searching SAP…');
   if (error)
     return <div className="hint" style={{ padding: '6px 0' }}><div>SAP search is temporarily unavailable.</div>{renderManualSearchBox()}</div>;
-  if (searched && results.length === 0)
+  if (searched && visible.length === 0)
     return (
       <div className="hint" style={{ padding: '6px 0' }}>
-        <div>No match found in SAP — use "+ Add New {partyLabel}" to enter it manually</div>
+        <div>
+          {hiddenCount > 0
+            ? 'SAP (test) พบเฉพาะรหัสทดสอบของผู้ขายที่เลือกไว้แล้ว — ไม่ต้องเลือกซ้ำ'
+            : <>No match found in SAP — use "+ Add New {partyLabel}" to enter it manually</>}
+        </div>
         {renderManualSearchBox()}
       </div>
     );
 
-  const sorted = [...results].sort(
+  const sorted = [...visible].sort(
     (a, b) => Number(!!a.businessPartnerIsBlocked) - Number(!!b.businessPartnerIsBlocked),
   );
-  const aiCandidates: CompareCandidateItem<SapBusinessPartner>[] = results.map((bp) => ({
+  const aiCandidates: CompareCandidateItem<SapBusinessPartner>[] = visible.map((bp) => ({
     id: bp.businessPartnerId,
     label: bp.businessPartnerId,
     fields: [
@@ -355,9 +370,9 @@ function SapCustomerPanel({
 
   return (
     <>
-      {results.length > 1 && (
+      {visible.length > 1 && (
         <div className="hint" style={{ padding: '6px 0', display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span>Found {results.length} matches in SAP — ask AI, ask in the chat box below, or pick one directly:</span>
+          <span>Found {visible.length} matches in SAP — ask AI, ask in the chat box below, or pick one directly:</span>
           <button className="btn sm" onClick={() => setAiOpen(true)}>
             <i className="fa-solid fa-wand-magic-sparkles" /> Ask AI to match
           </button>
@@ -2981,6 +2996,11 @@ export default function MappingCards({
           vendorSapOpen ? (
             <SapCustomerPanel
               partyLabel="Vendor"
+              hideCodes={(() => {
+                // dev tenant only: the test counterpart of the vendor already chosen
+                const test = doc.sapVendorMap?.[String(r.code ?? '').trim()];
+                return test ? [test] : [];
+              })()}
               customerName={doc.header.vendorName}
               taxId={doc.header.vendorTaxId}
               companyCode={companyCode}

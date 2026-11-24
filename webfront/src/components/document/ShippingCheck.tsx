@@ -58,6 +58,8 @@ const norm = (v: unknown): string => {
 };
 
 const TAX_ROW = /^(VAT|WHT|DUTY)$/i;
+/* The form's EXCISE FEE row is read as two duty rows, Excise Tax + Interior Tax. */
+const EXCISE_DUTY = /EXCISE|INTERIOR|สรรพสามิต|มหาดไทย/i;
 
 /* Before VAT of one document = มูลค่าไม่มีหรือยกเว้นภาษี + มูลค่าที่คำนวณภาษี 7% (the whole figure
    before VAT); else total − VAT. Total = Before VAT + VAT. */
@@ -245,7 +247,14 @@ export function vendorInvoiceTotals(doc: DocModel, mainVendor: string) {
 export function shippingCheckRows(doc: DocModel) {
   const form: Record<string, number> = {};
   for (const l of doc.lines || []) {
-    if (TAX_ROW.test(String(l.extCode ?? '').trim())) continue;
+    if (TAX_ROW.test(String(l.extCode ?? '').trim())) {
+      // The form prints EXCISE FEE as a Fee row (it only leaves it out of its own TOTAL), and the
+      // Customs receipt that carries the tax sits in the Documents column. The two duty rows it was
+      // split into stand for that Fee row on this side, so the receipt is not reported as a difference.
+      if (/^DUTY$/i.test(String(l.extCode ?? '').trim()) && EXCISE_DUTY.test(String(l.desc ?? '')))
+        form.Fee = (form.Fee ?? 0) + num(l.amount);
+      continue;
+    }
     const t = norm((l.extra as Record<string, unknown> | undefined)?.costType);
     if (!t) continue;
     form[t] = (form[t] ?? 0) + num(l.amount);

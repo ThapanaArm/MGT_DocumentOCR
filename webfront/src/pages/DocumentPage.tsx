@@ -666,7 +666,9 @@ function conditionFromDocument(l: DocLine): string {
   const extra = (l.extra ?? {}) as Record<string, unknown>;
   const desc = String(l.desc ?? '').toUpperCase();
   if (/^\s*(VAT|WITHHOLDING)/.test(desc)) return '';
-  if (/EXCISE|สรรพสามิต/.test(desc)) return 'ZED1';
+  // Excise and the interior ("มหาดไทย") tax are one condition: the PO accrues them together as ZED1
+  // (PO 2230000714: 17 ZED1 rows add up to 92,236.00 + 9,223.60, and the PO has no ZIM1 at all).
+  if (/EXCISE|INTERIOR|สรรพสามิต|มหาดไทย/.test(desc)) return 'ZED1';
   if (ext === 'DUTY' || /IMPORT\s*DUTY|อากรขาเข้า/.test(desc)) return 'ZIM1';
   if (/INSURANCE|ประกัน/.test(desc)) return 'ZINS';
   const byHeading = COST_TYPE_CONDITION[String(extra.costType ?? '').trim().toUpperCase()];
