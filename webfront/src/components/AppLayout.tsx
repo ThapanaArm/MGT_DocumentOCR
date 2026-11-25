@@ -123,11 +123,27 @@ function StatusLine() {
   else if (health)
     text = `${health.db?.db ?? 'DB'} · SAP ${health.sapMode === 'live' ? 'Live' : 'Sim'} · ${health.ocrProvider ?? 'OCR'}`;
 
+  // Build stamps: when this page's bundle and the server's DLLs were built, so a deploy that did not
+  // take effect shows at a glance (AP, 2026-11-24).
+  const fe = typeof __BUILD_TIME__ === 'string' ? __BUILD_TIME__.slice(5, 16).replace('T', ' ') + 'Z' : '';
+  const be = health?.buildOcr ? String(health.buildOcr).slice(5) : '';
+  const buildText = `FE ${fe || '—'} · BE ${be || '—'}`;
+  const buildTitle = [
+    `Frontend bundle built ${typeof __BUILD_TIME__ === 'string' ? __BUILD_TIME__ : '—'}`,
+    `Backend MgtOcr.Ocr.dll ${health?.buildOcr ?? '—'} (${health?.ocrBytes ?? '?'} bytes)`,
+    `Backend MgtOcr.Api.dll ${health?.buildApi ?? '—'}`,
+  ].join('\n');
+
   return (
-    <div className="status-line lbl" title={health?.db?.srv ?? text}>
-      <span className="dot" style={{ background: bad ? 'var(--red)' : ok ? 'var(--brand)' : 'var(--g500)' }} />
-      <span className="status-text">{text}</span>
-    </div>
+    <>
+      <div className="status-line lbl" title={health?.db?.srv ?? text}>
+        <span className="dot" style={{ background: bad ? 'var(--red)' : ok ? 'var(--brand)' : 'var(--g500)' }} />
+        <span className="status-text">{text}</span>
+      </div>
+      <div className="status-line lbl" style={{ fontSize: 10, opacity: 0.75 }} title={buildTitle}>
+        <span className="status-text">{buildText}</span>
+      </div>
+    </>
   );
 }
 

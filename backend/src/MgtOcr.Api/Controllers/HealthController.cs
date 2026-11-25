@@ -13,6 +13,29 @@ namespace MgtOcr.Api.Controllers;
 [Route("api/health")]
 public class HealthController(Db db, AppConfig config) : ControllerBase
 {
+    // System.IO is spelled out: inside a controller a bare "File" is ControllerBase.File(...).
+    private static string? BuiltAt(string dll)
+    {
+        try
+        {
+            var path = System.IO.Path.Combine(AppContext.BaseDirectory, dll);
+            return System.IO.File.Exists(path)
+                ? System.IO.File.GetLastWriteTimeUtc(path).ToString("yyyy-MM-dd HH:mm") + "Z"
+                : null;
+        }
+        catch { return null; }
+    }
+
+    private static long? SizeOf(string dll)
+    {
+        try
+        {
+            var path = System.IO.Path.Combine(AppContext.BaseDirectory, dll);
+            return System.IO.File.Exists(path) ? new System.IO.FileInfo(path).Length : (long?)null;
+        }
+        catch { return null; }
+    }
+
     [HttpGet]
     public async Task<IActionResult> Get()
     {
@@ -37,6 +60,11 @@ public class HealthController(Db db, AppConfig config) : ControllerBase
                 db = pingInfo,
                 counts = new { customers, vendors, materials, documents },
                 ocrProvider = config.OcrProvider,
+                // Which binaries are running (file time of the DLLs next to the app) — shown under the
+                // sidebar status line so a deploy that did not take effect is visible (AP, 2026-11-24).
+                buildApi = BuiltAt("MgtOcr.Api.dll"),
+                buildOcr = BuiltAt("MgtOcr.Ocr.dll"),
+                ocrBytes = SizeOf("MgtOcr.Ocr.dll"),
                 sapMode = string.IsNullOrEmpty(config.SapWriteBaseUrl) && string.IsNullOrEmpty(config.SapSalesOrderWriteBaseUrl)
                     ? "not-configured" : "live",
             });

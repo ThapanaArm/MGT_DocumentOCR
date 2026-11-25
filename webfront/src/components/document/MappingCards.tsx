@@ -76,6 +76,17 @@ function SideList({ items, side }: { items?: MapField[]; side: 'doc' | 'sap' }) 
   );
 }
 
+/** Dev tenant only (Sap:SupplierInvoice:VendorMap_Dev maps real -> test). The vendor master there holds
+ *  the TEST code the SAP test tenant answered with, but people know the supplier by its real code, so
+ *  the card shows the real code with the test one beside it. Display only: the stored code and what is
+ *  sent to SAP are not touched. Anything that is not a mapped test code comes back unchanged. */
+function withRealVendorCode(code: unknown, swap?: Record<string, string>): string {
+  const c = String(code ?? '').trim();
+  if (!c || !swap) return c;
+  const real = Object.keys(swap).find((k) => k.trim() !== c && String(swap[k]).trim() === c);
+  return real ? `${real.trim()} (TEST ${c})` : c;
+}
+
 function StatusChip({ st }: { st: string }) {
   if (st === 'ok') return <span className="badge b-ok"><i className="fa-solid fa-check" /> Auto-matched</span>;
   // GLC ship-to optional: the person explicitly chose a "no ship-to" fallback (use sold-to / omit) —
@@ -96,6 +107,7 @@ function CmpCard({
   sapSlot,
   sapExtra,
   sourceLabel,
+  sapCodeText,
   children,
 }: {
   no: string | number;
@@ -111,6 +123,8 @@ function CmpCard({
   /** Label for the right-hand column when it isn't SAP — e.g. "Data from Zoho CRM" for an
    *  MGT-opened Sales Order's Customer card. Defaults to "Data from SAP". */
   sourceLabel?: string;
+  /** Replaces the code in the "SAP: ..." chip (dev tenant: the real code with the test code beside it). */
+  sapCodeText?: string;
   children?: React.ReactNode;
 }) {
   const st = r.status || 'idle';
@@ -122,7 +136,7 @@ function CmpCard({
         <StatusChip st={st} />
         {r.sapCode && (
           <span className="badge b-ok" title="Matched SAP master code — posted to SAP only after you submit">
-            SAP: {r.sapCode}
+            SAP: {sapCodeText ?? r.sapCode}
           </span>
         )}
         <span className="hint">{r.method || ''}</span>
@@ -2837,7 +2851,7 @@ export default function MappingCards({
         // manual mapping pick an arbitrary row, so expose each usable customer code only once.
         .filter((o) => !!o.v && !seen.has(o.v) && !!seen.add(o.v));
     } else if (kind === 'vendors')
-      opts = masters.vendors.map((c) => ({ v: String(c.VendorCode ?? '').trim(), name: String(c.VendorName ?? ''), t: `${c.VendorCode ?? ''} — ${c.VendorName ?? ''}` })).filter((o) => !!o.v);
+      opts = masters.vendors.map((c) => ({ v: String(c.VendorCode ?? '').trim(), name: String(c.VendorName ?? ''), t: `${withRealVendorCode(c.VendorCode, doc.sapVendorMap)} — ${c.VendorName ?? ''}` })).filter((o) => !!o.v);
     else if (kind === 'shiptos') {
       const cc = map.header.customer?.code || '';
       const seen = new Set<string>();
@@ -2909,13 +2923,21 @@ export default function MappingCards({
   let n = 0;
   if (doc.module !== 'SO') {
     const r = map.header.vendor;
+    // Dev tenant: show the real supplier code with the test code beside it (see withRealVendorCode).
+    const shownCode = (c: unknown) => withRealVendorCode(c, doc.sapVendorMap);
+    const rShown = {
+      ...r,
+      sap: r.sap?.map((f) =>
+        /^(SAP Code \(Supplier\)|Vendor Code \(internal\))$/i.test(String(f.label)) ? { ...f, value: shownCode(f.value) } : f),
+    };
     n++;
     headerCards.push(
       <CmpCard
         key="vendor"
         no={n}
         title="Vendor / Supplier"
-        r={r}
+        r={rShown}
+        sapCodeText={r.sapCode ? shownCode(r.sapCode) : undefined}
         picker={
           <>
             {headerSel('vendors', 'vendor', r.code)}
@@ -2997,9 +3019,13 @@ export default function MappingCards({
             <SapCustomerPanel
               partyLabel="Vendor"
               hideCodes={(() => {
-                // dev tenant only: the test counterpart of the vendor already chosen
-                const test = doc.sapVendorMap?.[String(r.code ?? '').trim()];
-                return test ? [test] : [];
+                // dev tenant only: the test code of the vendor already chosen — whether the card
+                // holds the real code (its test counterpart is hidden) or the test code itself
+                const map = doc.sapVendorMap ?? {};
+                const code = String(r.code ?? '').trim();
+                const test = map[code];
+                if (test) return [test];
+                return code && Object.values(map).some((v) => String(v).trim() === code) ? [code] : [];
               })()}
               customerName={doc.header.vendorName}
               taxId={doc.header.vendorTaxId}

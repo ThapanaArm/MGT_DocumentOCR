@@ -25,6 +25,10 @@ export interface HealthStatus {
   counts?: Record<string, number>;
   ocrProvider?: string;
   sapMode?: string;
+  /** When the server's MgtOcr.Api.dll / MgtOcr.Ocr.dll were built (file time, UTC) and the Ocr one's size. */
+  buildApi?: string;
+  buildOcr?: string;
+  ocrBytes?: number;
   error?: string;
   [k: string]: unknown;
 }

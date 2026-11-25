@@ -4,6 +4,9 @@ import { defineConfig } from 'vite'
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react()],
+  // When this bundle was built — shown under the sidebar status line so a deploy that did not
+  // take effect is visible at a glance (AP, 2026-11-24).
+  define: { __BUILD_TIME__: JSON.stringify(new Date().toISOString()) },
   server: {
     // Dev server default; proxy /api to the ASP.NET Core backend (MgtOcr.Api, see Program.cs)
     // so the React app can call same-origin relative paths ("/api/...") in both dev and prod.
