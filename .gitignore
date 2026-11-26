@@ -16,7 +16,8 @@ _to_delete/
 
 # scratch / build output (not part of the app)
 tmp/
-/sql
+/sql/*
+!/sql/50_sap_usd_thb_rate.sql
 /Claude outputs
 
 # Real API keys live here and must never be committed — GitHub push protection

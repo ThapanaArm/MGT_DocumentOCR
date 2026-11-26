@@ -308,6 +308,8 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     {
         var d = await repo.GetDocumentAsync(docId);
         d["retentionHours"] = config.DraftRetentionHoursFor(d.GetStr("module"));   // UI: "file will be removed in ..." warning
+        if (d.GetStr("module") == "AP")
+            d["supplierInvoiceCompanyCode"] = (await ExportCompanyAsync(docId))?.CompanyCode ?? config.SapCompanyCode;
         if (d.GetStr("module") is "AP" or "II")
         {
             // One AP bundle can create one SAP invoice per supplier. Keep the compact legacy
@@ -357,15 +359,11 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     {
         var body = JsonBodyHelpers.Unwrap(rawBody);
         var doc = await repo.GetDocumentAsync(docId);
-        if (doc.GetStr("status") is "POSTED" or "PARTIAL") throw new HttpApiException(400, "This document has been posted (fully or partly) and cannot be edited");
         var module = doc.GetStr("module");
-        var docT = DocumentTables.For(module).Doc;
         var header = body.Get("header") as Dictionary<string, object?> ?? (Dictionary<string, object?>)doc["header"]!;
-        await repo.UpdateHeaderAsync(docId, module, header);
-        if (body.Get("lines") is List<object?> linesRaw)
-            await repo.SaveLinesAsync(module, docId, linesRaw.OfType<Dictionary<string, object?>>().ToList());
-        await using (var conn = await GetDbAsync())
-            await conn.ExecuteAsync($"UPDATE {docT} SET Status=CASE WHEN Status='POSTED' THEN Status ELSE 'NEW' END, MapStatus=NULL, MapMessage=NULL WHERE DocId=@docId", new { docId });
+        var lines = (body.Get("lines") as List<object?>)?.OfType<Dictionary<string, object?>>().ToList();
+        if (!await repo.SaveDraftAsync(docId, module, header, lines))
+            throw new HttpApiException(409, "This document is no longer editable");
         await repo.LogAuditAsync(docId, module, "UPDATE", await ActorAsync(),
             detail: "Edited document data", fileName: doc.GetStr("fileName"));
         return Ok(await repo.GetDocumentAsync(docId));
@@ -462,6 +460,11 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         if (doc.GetStr("status") is not ("POSTED" or "PARTIAL"))
             throw new HttpApiException(400, "Post the supplier invoice to SAP first — the deferred VAT this entry transfers is booked by that invoice");
 
+        var company = await ExportCompanyAsync(docId);
+        var companyCode = (company?.CompanyCode ?? "").Trim();
+        if (Export.SupplierInvoicePayload.UsesVxForDeliveryCosts(doc, companyCode))
+            throw new HttpApiException(400, Export.SupplierInvoicePayload.VxDeferredVatMessage);
+
         var postingDate = DateTime.Today;
         if (body.GetStr("postingDate").Trim() is { Length: > 0 } pd)
         {
@@ -533,10 +536,8 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
                     + " — ถ้าเป็นเอกสารที่อัปโหลดซ้ำ ไม่ต้องส่ง JV อีก; ถ้าต้องส่งจริง ให้กลับรายการ JV เดิมใน SAP ก่อนแล้วยืนยันส่ง");
         }
 
-        var company = await ExportCompanyAsync(docId);
         // The document's own company (MGT 1000 / GLC 2000). Never guess one: a JV in the wrong
         // company code would move another company's input tax.
-        var companyCode = (company?.CompanyCode ?? "").Trim();
         if (companyCode.Length == 0)
             throw new HttpApiException(400, "ไม่พบ Company Code ของเอกสารนี้ — ตรวจการตั้งค่าบริษัทของผู้ใช้/เอกสารก่อนส่ง JV");
         var header = (Dictionary<string, object?>)doc["header"]!;
@@ -1478,6 +1479,8 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             throw new HttpApiException(400, "The journal-entry file is only produced for supplier invoices");
 
         var company = await ExportCompanyAsync(docId);
+        if (Export.SupplierInvoicePayload.UsesVxForDeliveryCosts(doc, (company?.CompanyCode ?? "").Trim()))
+            return BadRequest(new { detail = Export.SupplierInvoicePayload.VxDeferredVatMessage });
         await ApplyShortNamesAsync(doc);
         var bytes = Export.JournalEntryAccruedExcel.Build(
             doc,
@@ -2364,9 +2367,64 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         return Ok(new
         {
             payload = payloads.Count == 1 ? payloads[0] : (object)payloads,
+            invoiceReview = doc.GetStr("module") == "AP"
+                ? payloads.Select(Export.SupplierInvoicePayload.ReviewTotals).ToArray() : [],
             pass = res.Get("pass"),
             errors = res["errors"],
         });
+    }
+
+    [HttpGet("api/documents/{docId:int}/supplier-invoice-payment")]
+    public async Task<IActionResult> ReadSupplierInvoicePayment(int docId)
+    {
+        var doc = await repo.GetDocumentAsync(docId);
+        if (doc.GetStr("module") != "AP")
+            throw new HttpApiException(400, "Payment readback only applies to supplier invoices.");
+
+        await using var conn = await GetDbAsync();
+        var posted = await conn.QueryAsync<PostedBefore>(
+            "SELECT PayloadJson, SapDocNo FROM ocr.PostLog WHERE DocId=@docId AND Module='AP' AND Success=1 AND ISNULL(SapDocNo,'')<>'' ORDER BY LogId DESC",
+            new { docId });
+        var payments = new List<object>();
+        foreach (var row in posted.DistinctBy(p => p.SapDocNo))
+        {
+            try
+            {
+                using var sent = JsonDocument.Parse(row.PayloadJson ?? "{}");
+                var reference = row.SapDocNo!.Split('/', 2, StringSplitOptions.TrimEntries);
+                var year = reference.Length == 2 ? reference[1] : JsonString(sent.RootElement, "_supplierInvoiceFiscalYear");
+                if (year.Length == 0)
+                {
+                    var postingDate = SapClient.SapDateIso(JsonString(sent.RootElement, "PostingDate"));
+                    if (postingDate.Length == 0) continue;
+                    year = postingDate[..4];
+                }
+
+                var (ok, body) = await sap.GetSupplierInvoiceAsync(reference[0], year);
+                if (!ok) continue;
+                using var response = JsonDocument.Parse(body);
+                var header = response.RootElement.TryGetProperty("d", out var d) ? d : response.RootElement;
+                if (JsonString(header, "SupplierInvoiceStatus") == "2" || JsonString(header, "ReverseDocument").Length > 0
+                    || (header.ValueKind == JsonValueKind.Object && header.TryGetProperty("SupplierInvoiceIsReversed", out var reversed)
+                        && reversed.ValueKind == JsonValueKind.True)) continue;
+                var dueDate = SapClient.SapDateIso(JsonString(header, "NetDueDate"));
+                var dueDates = dueDate.Length > 0 ? new[] { dueDate } :
+                    await sap.GetSupplierInvoiceDueDatesAsync(reference[0], year, JsonString(header, "CompanyCode"));
+                payments.Add(new
+                {
+                    supplierInvoice = reference[0],
+                    paymentTerms = JsonString(header, "PaymentTerms"),
+                    baselineDate = SapClient.SapDateIso(JsonString(header, "DueCalculationBaseDate")),
+                    dueDates,
+                });
+            }
+            catch (JsonException) { /* A bad log or response cannot confirm payment details. */ }
+        }
+        return Ok(new { payments });
+
+        static string JsonString(JsonElement element, string field) =>
+            element.ValueKind == JsonValueKind.Object && element.TryGetProperty(field, out var value)
+                && value.ValueKind == JsonValueKind.String ? value.GetString() ?? "" : "";
     }
 
     // GET /api/documents/123/sap-check
@@ -2736,6 +2794,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
                 if (one.Raw is System.Text.Json.JsonElement raw && raw.ValueKind == System.Text.Json.JsonValueKind.Object
                     && raw.TryGetProperty("FiscalYear", out var fy) && fy.ValueKind == System.Text.Json.JsonValueKind.String)
                     year = fy.GetString() ?? "";
+                if (year.Length > 0) p["_supplierInvoiceFiscalYear"] = year;
                 if (year.Length == 0) year = DateTime.Today.Year.ToString(System.Globalization.CultureInfo.InvariantCulture);
                 var fill = await sap.FillJournalEntryTextsAsync(one.SapDocNo, year,
                     p.GetStr("CompanyCode"), p.GetStr("SupplierPostingLineItemText"),

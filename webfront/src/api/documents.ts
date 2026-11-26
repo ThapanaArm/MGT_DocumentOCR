@@ -37,6 +37,7 @@ export interface DocModel {
   costOut?: number | null;
   costCurrency?: string;
   apDocCategory?: string;
+  supplierInvoiceCompanyCode?: string;
   partnerCode?: string;
   sapDocNo?: string;
   sapDocNos?: string[];
@@ -128,6 +129,9 @@ export const sampleDocument = (body: {
 
 export const getDocument = (id: number) => api.get<DocModel>('/api/documents/' + id);
 
+export const saveDocumentDraft = (id: number, { header, lines }: Pick<DocModel, 'header' | 'lines'>) =>
+  api.put<DocModel>('/api/documents/' + id, { header, lines });
+
 export const reocrDocument = (id: number, ocr: string, user: string) =>
   api.post<DocModel>('/api/documents/' + id + '/reocr', { ocr, user });
 
@@ -144,8 +148,29 @@ export const learnMaterial = (
   body: { partnerCode?: string; extCode: string; extDesc: string; materialCode: string },
 ) => api.post('/api/documents/' + id + '/learn', body);
 
+export type SupplierInvoiceReview = {
+  reference: string;
+  currency: string;
+  gross: number;
+  vat: number;
+  balance: number;
+  taxMode: string;
+  paymentTerms: string;
+  baselineDate: string;
+};
+
+export type SupplierInvoicePaymentReadback = {
+  supplierInvoice: string;
+  paymentTerms: string;
+  baselineDate: string;
+  dueDates: string[];
+};
+
+export const getSupplierInvoicePayment = (id: number) =>
+  api.get<{ payments: SupplierInvoicePaymentReadback[] }>(`/api/documents/${id}/supplier-invoice-payment`);
+
 export const getPayload = (id: number) =>
-  api.get<{ payload: Record<string, any> }>('/api/documents/' + id + '/payload');
+  api.get<{ payload: Record<string, any>; invoiceReview?: SupplierInvoiceReview[] }>('/api/documents/' + id + '/payload');
 
 /* The post endpoint answers 200 even when SAP REFUSED the document: the attempt is logged either
    way and `success` is what says whether a document now exists in SAP. `message` carries SAP's own

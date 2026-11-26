@@ -118,6 +118,49 @@ public class SapClient(AppConfig config, HttpClient httpClient)
         }
     }
 
+    public async Task<string[]> GetSupplierInvoiceDueDatesAsync(string supplierInvoice, string fiscalYear, string companyCode)
+    {
+        var baseUrl = config.SapSupplierInvoiceBaseUrl;
+        if (string.IsNullOrWhiteSpace(baseUrl) || !baseUrl.Contains("API_SUPPLIERINVOICE_PROCESS_SRV", StringComparison.OrdinalIgnoreCase)
+            || companyCode.Length == 0) return [];
+        static string Q(string value) => value.Replace("'", "''");
+        var cube = baseUrl.Replace("API_SUPPLIERINVOICE_PROCESS_SRV", "API_OPLACCTGDOCITEMCUBE_SRV", StringComparison.OrdinalIgnoreCase);
+        var filter = Uri.EscapeDataString($"CompanyCode eq '{Q(companyCode)}' and OriginalReferenceDocument eq '{Q(supplierInvoice + fiscalYear)}' and FinancialAccountType eq 'K'");
+        var url = $"{cube.TrimEnd('/')}/A_OperationalAcctgDocItemCube?$filter={filter}&$select=NetDueDate&$format=json&sap-client={config.SapClient}";
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            var auth = string.IsNullOrWhiteSpace(config.SapJournalEntryAuthHeader)
+                ? config.SapSupplierInvoiceAuthHeader : config.SapJournalEntryAuthHeader;
+            if (!string.IsNullOrWhiteSpace(auth)) request.Headers.TryAddWithoutValidation("Authorization", auth);
+            using var response = await httpClient.SendAsync(request, cts.Token);
+            if (!response.IsSuccessStatusCode) return [];
+            using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cts.Token));
+            var data = json.RootElement.TryGetProperty("d", out var d) ? d : json.RootElement;
+            if (!data.TryGetProperty("results", out var rows) || rows.ValueKind != JsonValueKind.Array) return [];
+            return rows.EnumerateArray()
+                .Select(row => SapDateIso(TryGetString(row, "NetDueDate")))
+                .Where(date => date.Length > 0).Distinct().Order().ToArray();
+        }
+        catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or JsonException)
+        {
+            return [];
+        }
+    }
+
+    public static string SapDateIso(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return "";
+        var match = System.Text.RegularExpressions.Regex.Match(value, @"^/Date\((-?\d+)(?:[+-]\d{4})?\)/$");
+        if (match.Success && long.TryParse(match.Groups[1].Value, out var ms)
+            && ms >= -62135596800000L && ms <= 253402300799999L)
+            return DateTimeOffset.FromUnixTimeMilliseconds(ms).ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+        return value.Length >= 10 && DateOnly.TryParseExact(value[..10], "yyyy-MM-dd",
+            System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var date)
+            ? date.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture) : "";
+    }
+
     /// <summary>Every supplier-invoice line booked against a purchase order (goods and planned
     /// delivery costs alike), raw JSON of A_SuplrInvcItemPurOrdRef. (false, message) on failure.</summary>
     public async Task<(bool Ok, string Body)> GetInvoiceLinesForPoAsync(string purchaseOrder)

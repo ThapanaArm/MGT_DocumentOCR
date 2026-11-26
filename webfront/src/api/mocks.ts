@@ -10,6 +10,7 @@
    ===================================================================== */
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
+import type { DocModel } from './documents';
 
 const providers = [
   { id: 'auto', label: 'Automatic (Recommended)', desc: 'Reads the text in the file first; for scanned files it automatically uses Tesseract OCR', ready: true },
@@ -318,11 +319,35 @@ export function getMock(method: string, url: string, body?: unknown): unknown {
     return inbox.filter((r) => r.Module === m[1]);
   }
   if (method === 'GET' && /^\/api\/documents\/\d+$/.test(clean)) return getDoc(idOf(clean));
+  if (method === 'PUT' && /^\/api\/documents\/\d+$/.test(clean)) {
+    const doc = getDoc(idOf(clean));
+    const draft = body as Pick<DocModel, 'header' | 'lines'>;
+    doc.header = draft.header;
+    doc.lines = draft.lines;
+    doc.status = 'NEW';
+    doc.mapStatus = null;
+    return doc;
+  }
   if (method === 'GET' && /^\/api\/documents\/\d+\/chat$/.test(clean)) return [];
   if (method === 'GET' && /^\/api\/documents\/\d+\/rawtext$/.test(clean))
     return { text: '(mock) Sample text extracted from the file\nINVOICE No. INV-2024-0042\nMEK 99.5 PCT  200 L  600  120,000' };
-  if (method === 'GET' && /^\/api\/documents\/\d+\/payload$/.test(clean))
-    return { payload: { _target: 'API_SUPPLIERINVOICE_PROCESS_SRV', CompanyCode: '1000', DocumentDate: '2026-08-30', _mock: true } };
+  if (method === 'GET' && /^\/api\/documents\/\d+\/payload$/.test(clean)) {
+    const { header } = getDoc(idOf(clean));
+    const vx = header.supplierInvoiceTaxMode === 'VX';
+    return {
+      payload: { _target: 'API_SUPPLIERINVOICE_PROCESS_SRV', CompanyCode: '1000', DocumentDate: '2026-08-30', _mock: true },
+      invoiceReview: [{
+        reference: String(header.invoiceNo ?? ''),
+        currency: String(header.currency ?? 'THB'),
+        gross: Number(header.totalAmount) || 0,
+        vat: vx ? 0 : Number(header.vatAmount) || 0,
+        balance: 0,
+        taxMode: vx ? 'VX' : '',
+        paymentTerms: String(header.paymentTermsCode ?? ''),
+        baselineDate: String(header.baselineDate ?? ''),
+      }],
+    };
+  }
 
   // POST — attach / actions
   if (method === 'POST' && clean === '/api/documents/upload') {

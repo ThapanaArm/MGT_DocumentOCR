@@ -1,6 +1,12 @@
 {
   "Ocr": {
     "GeminiApiKey": "",
+    "SapExchangeRate": {
+      "Enabled": false,
+      "ServiceUrl": "",
+      "AuthHeader": "",
+      "RateType": ""
+    },
     "OpenAiApiKey": "",
     "AnthropicApiKey": "",
     "TyphoonApiKey": "",

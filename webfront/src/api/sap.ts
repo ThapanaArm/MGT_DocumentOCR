@@ -320,6 +320,7 @@ export interface SapPurchaseOrderHead {
   companyCode: string;
   purchasingOrganization: string;
   currency: string;
+  paymentTerms?: string;
 }
 
 export const getSapPurchaseOrder = (purchaseOrder: string) =>

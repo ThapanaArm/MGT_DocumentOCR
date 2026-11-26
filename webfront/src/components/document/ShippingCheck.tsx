@@ -1,5 +1,6 @@
 import type { DocModel } from '../../api/documents';
 import { fmt, num } from '../../utils/format';
+import { invoiceNumber } from '../../utils/invoiceRecal';
 
 /* Shipping cost check — FORM SHIPPING EXPENSE vs the documents behind it.
 
@@ -62,9 +63,11 @@ const TAX_ROW = /^(VAT|WHT|DUTY)$/i;
 /* Before VAT of one document = มูลค่าไม่มีหรือยกเว้นภาษี + มูลค่าที่คำนวณภาษี 7% (the whole figure
    before VAT); else total − VAT. Total = Before VAT + VAT. */
 const beforeVat = (d: SourceDoc) => {
-  const b = num(d.amountBeforeVat);
-  if (b) return b;
-  return Math.round((num(d.totalAmount) - num(d.vatAmount)) * 100) / 100;
+  const before = invoiceNumber(d.amountBeforeVat);
+  if (before !== undefined) return before;
+  const total = invoiceNumber(d.totalAmount);
+  const vat = invoiceNumber(d.vatAmount);
+  return total === undefined || vat === undefined ? undefined : Math.round((total - vat) * 100) / 100;
 };
 
 /* Who issued each document of the bundle, worked out from what the read already has — nothing to
@@ -145,6 +148,17 @@ const ROLE_BADGE: Record<IssuerRole, { label: string; cls: string; tip: string }
   thirdIncluded: { label: 'Third party · รวมในใบตัวแทน', cls: 'b-idle', tip: 'ตัวแทนจ่ายแทนแล้วเรียกเก็บรวมในใบแจ้งหนี้ของตัวเอง — ไม่นับยอดซ้ำ' },
 };
 
+function countedSourceDocs(doc: DocModel): SourceDoc[] {
+  const docs: SourceDoc[] = Array.isArray(doc.header.sourceDocs) ? doc.header.sourceDocs : [];
+  return docs.filter(d => !String(d.includedIn ?? '').trim() && issuerRoleOf(doc, d) !== 'shipper' && norm(d.costType));
+}
+
+export function missingShippingAmount(doc: DocModel): string | undefined {
+  const source = countedSourceDocs(doc).find(d => beforeVat(d) === undefined
+    || (String(d.amountBeforeVat ?? '').trim() !== '' && invoiceNumber(d.amountBeforeVat) === undefined));
+  if (source) return `Check the amount before VAT on supporting document ${source.docNo || source.issuerName || source.costType}.`;
+}
+
 export function shippingCheckRows(doc: DocModel) {
   const form: Record<string, number> = {};
   for (const l of doc.lines || []) {
@@ -153,18 +167,12 @@ export function shippingCheckRows(doc: DocModel) {
     if (!t) continue;
     form[t] = (form[t] ?? 0) + num(l.amount);
   }
-  const docs: SourceDoc[] = Array.isArray(doc.header.sourceDocs) ? doc.header.sourceDocs : [];
   const counted: Record<string, { nonVat: number; before: number; vat: number; total: number; n: number }> = {};
-  for (const d of docs) {
-    if (String(d.includedIn ?? '').trim()) continue;
-    // The goods supplier's own commercial invoice (KCCCI…) is the goods, not a shipping cost: the
-    // form never carries it, so counting it only made Overseas show -25,834.00.
-    if (issuerRoleOf(doc, d) === 'shipper') continue;
+  for (const d of countedSourceDocs(doc)) {
     const t = norm(d.costType);
-    if (!t) continue;
     const c = (counted[t] ??= { nonVat: 0, before: 0, vat: 0, total: 0, n: 0 });
     c.nonVat += num(d.nonVatAmount);
-    c.before += beforeVat(d);
+    c.before += beforeVat(d) ?? num(d.totalAmount) - num(d.vatAmount);
     c.vat += num(d.vatAmount);
     c.total += num(d.totalAmount);
     c.n += 1;
@@ -311,7 +319,7 @@ export default function ShippingCheck({ doc, onDocsChange, posted }: {
                         ) : norm(d.costType) || '—'}
                       </td>
                       <td style={{ textAlign: 'right' }}>{fmt(d.nonVatAmount)}</td>
-                      <td style={{ textAlign: 'right' }}>{fmt(beforeVat(d))}</td>
+                      <td style={{ textAlign: 'right' }}>{fmt(beforeVat(d) ?? num(d.totalAmount) - num(d.vatAmount))}</td>
                       <td style={{ textAlign: 'right' }}>{fmt(d.vatAmount)}</td>
                       <td style={{ textAlign: 'right' }}>{fmt(d.totalAmount)}</td>
                       <td>

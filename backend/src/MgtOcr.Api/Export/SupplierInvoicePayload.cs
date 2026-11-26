@@ -24,6 +24,18 @@ namespace MgtOcr.Api.Export;
 /// </summary>
 public static class SupplierInvoicePayload
 {
+    internal const string VxDeferredVatMessage =
+        "Supplier Invoice แบบ VX ไม่ได้ลง Deferred VAT จากใบกำกับแนบ กรุณาตรวจบัญชีคู่รายการก่อนทำ JV ภาษีซื้อ";
+
+    internal static bool UsesVxForDeliveryCosts(Dictionary<string, object?> doc, string companyCode)
+    {
+        var header = doc.Get("header") as Dictionary<string, object?>;
+        return companyCode == "1000" && doc.GetStr("module") == "AP"
+            && header.GetStr("refDocType").Trim() == "2"
+            && header.GetStr("supplierInvoiceTaxMode") == "VX"
+            && !SapImportSupplierInvoiceExcel.IsPoKeyed(doc);
+    }
+
     public const string Endpoint = "API_SUPPLIERINVOICE_PROCESS_SRV/A_SupplierInvoice";
     private const string HeadOffice = "0000";
 
@@ -103,6 +115,9 @@ public static class SupplierInvoicePayload
             ? taxRows.Where(DeferredVatReversal.IsImportVat).ToList()
             : taxRows.Where(t => !DeferredVatReversal.IsImportVat(t)
                 && t.GetStr("taxCode").Trim().ToUpperInvariant() is { Length: > 0 } tc && tc != "VX").ToList();
+        var invoiceVx = UsesVxForDeliveryCosts(doc, companyCode) && !customsCostsOnly && !customsParty;
+        var referenceTaxRows = taxRows;
+        if (invoiceVx) taxRows = [];
 
         // Goods-receipt reference. A PO item flagged for GR-based invoice verification (the
         // default on a stock PO) can only be invoiced against the material document the goods
@@ -236,6 +251,8 @@ public static class SupplierInvoicePayload
             deliveryCosts = DeliveryCostItems(doc, poRef, currency, header.GetStr("taxCode").Trim(),
                 invoicingParty, itemText, Mine, purOrdRef.Count, poItems, goodsReceiptItems, taxRows);
         purOrdRef.AddRange(deliveryCosts);
+        if (invoiceVx && deliveryCosts.Count == 0)
+            throw new MgtOcr.Core.HttpApiException(400, "กรุณาระบุรายการ Planned Delivery Costs ก่อนเลือกส่ง Supplier Invoice แบบ VX");
 
         // Costs only: the VAT rows go to to_SupplierInvoiceTax below (sending them as G/L lines as well
         // would book the tax twice), and the withholding row is not a G/L line at all.
@@ -277,6 +294,10 @@ public static class SupplierInvoicePayload
             var amount = Math.Abs(Num(g.Get("amount")));
             if (acct.Length == 0 || amount == 0) continue;
             var code = Or(g.GetStr("taxCode").Trim().ToUpperInvariant(), "VX");
+            if (invoiceVx && (code != "VX" ||
+                acct.TrimStart('0') is DeferredVatReversal.GlInputTax or DeferredVatReversal.GlDeferredInputTax))
+                throw new MgtOcr.Core.HttpApiException(400,
+                    $"Supplier Invoice แบบ VX มีรายการ G/L {acct} ที่ลงบัญชีภาษีหรือใช้ Tax Code {code} กรุณาตรวจรายการ G/L หรือเลือกตามรายการภาษี");
             var row = new Dictionary<string, object?>
             {
                 ["SupplierInvoiceItem"] = (++itemNo).ToString(),
@@ -312,7 +333,7 @@ public static class SupplierInvoicePayload
         // node — sending one then is what SAP rejects as "Property 'to_SupplierInvoiceTax' is invalid".
         // Unticked (the default here), the amounts we read off the tax invoices are sent as they
         // were reviewed, which is what a Thai input-VAT document needs: one row per tax invoice.
-        var calcTax = header.GetStr("calculateTax").Trim() is { Length: > 0 } ct
+        var calcTax = !invoiceVx && header.GetStr("calculateTax").Trim() is { Length: > 0 } ct
             && !string.Equals(ct, "false", StringComparison.OrdinalIgnoreCase) && ct != "0";
 
         // One row per tax invoice, carrying its own code and base — what the Tax tab holds after
@@ -486,7 +507,6 @@ public static class SupplierInvoicePayload
         // D1 → 11730000 Deferred input tax, V1 → 11720000 Input tax — with its own base. Before, a
         // condition billed under two tax codes (PROMPT's D1 service next to VX advances) had to go
         // out as two documents (M8/321 / FF812), which is not how Accounting books it.
-        double accrualDelta = 0;
         if (vatAsGlLines)
         {
             // The invoicing party's own tax invoice keeps a line of its own; the receipts it paid on
@@ -604,49 +624,19 @@ public static class SupplierInvoicePayload
                 }
                 merged.Add(first);
             }
-            // Line = what the PO accrued, Gross = what the invoice says, the satang in between is
-            // SAP's to book as Purchase Variance — Accounting's way (PRD 5100001132: Fee accrued
-            // 200.05, receipt 200.00 → line 200.05, Purchase Variance 0.05 Cr). With the line at the
-            // receipt's 200.00 instead, SAP took the difference as a price change of the goods and
-            // put it on Stock in Trade (TEST 5100000074: accrued 199.71, 0.29 to 11511001).
-            // Only a small difference is treated this way; a bigger one is a real price difference
-            // and the line keeps the invoice's amount.
+            // Report discrepancies with the PO accrual. SAP determines the offset account
+            // from the invoice amount and PO history when the document is posted.
             foreach (var line in merged.Cast<Dictionary<string, object?>>().Where(l => l.Get("_deliveryCost") is true))
             {
                 var accrued = Num(line.Get("_accrued"));
                 var amount = Num(line.Get("SupplierInvoiceItemAmount"));
                 var diff = Math.Round(accrued - amount, 2);
-                if (accrued > 0 && Math.Abs(diff) > AccrualVarianceTolerance)
+                if (accrued > 0 && Math.Abs(diff) > RoundingTolerance)
                     line["_accrualUnknown"] =
                         $"{line.GetStr("SuplrInvcDeliveryCostCndnType")} PO {line.GetStr("PurchaseOrder")}/{line.GetStr("PurchaseOrderItem")} "
-                        + $"ค้างไว้ {F2(accrued)} แต่ใบเรียกเก็บ {F2(amount)} (ต่าง {F2(-diff)}) — ส่วนต่างจะเข้าต้นทุนสินค้า (Stock in Trade) "
+                        + $"ค้างไว้ {F2(accrued)} แต่ใบเรียกเก็บ {F2(amount)} (ต่าง {F2(-diff)}) — "
                         + "ตรวจยอด condition ใน PO ก่อน Post";
-                if (accrued <= 0 || diff == 0 || Math.Abs(diff) > AccrualVarianceTolerance) continue;
-                line["SupplierInvoiceItemAmount"] = F2(accrued);
-                line["_accrualAdjusted"] = F2(diff);
-                accrualDelta = Math.Round(accrualDelta + diff, 2);
             }
-            // The difference goes on a Purchase Variance G/L item of our own, exactly as Accounting
-            // keys it (5105604031, G/L Account Items: H 52110001 Purchase Variance 0.05, VX,
-            // Assignment 2230000565). Left to SAP's automatic small-difference posting, the TEST
-            // tenant's account determination pointed at 52060000, which its chart of accounts does
-            // not have. With the line here the document also opens Balance 0.
-            if (accrualDelta != 0)
-                glAccountItems.Add(new Dictionary<string, object?>
-                {
-                    ["SupplierInvoiceItem"] = "0",
-                    ["CompanyCode"] = companyCode,
-                    ["GLAccount"] = PurchaseVarianceAccount,
-                    ["DocumentCurrency"] = currency,
-                    ["SupplierInvoiceItemAmount"] = F2(Math.Abs(accrualDelta)),
-                    // Lines raised to the accrual → credit the variance; lowered → debit it.
-                    ["DebitCreditCode"] = accrualDelta > 0 ? "H" : "S",
-                    ["TaxCode"] = "VX",
-                    // Same Assignment and Text as the payables line, as Accounting keys them.
-                    ["AssignmentReference"] = Cut(assignment, 18),
-                    ["SupplierInvoiceItemText"] = Cut(DistinctText(itemText, "PURCHASE VARIANCE", "PURCHASE VARIANCE"), 50),
-                    ["_purchaseVariance"] = true,
-                });
             purOrdRef.Clear();
             purOrdRef.AddRange(merged);
             for (var pi = 0; pi < purOrdRef.Count; pi++)
@@ -694,21 +684,16 @@ public static class SupplierInvoicePayload
             gross = Math.Round(gross + taxRows
                 .Where(t => t.GetStr("taxCode").Trim().Length > 0)
                 .Sum(t => Num(t.Get("docCurrencyAmt"))), 2);
-        // A document whose own total was read and reviewed wins over the sum of its parts: the
-        // difference is the rounding SAP books as Purchase Variance, and it can only do that if we
-        // state the real invoice total.
+        // Use the reviewed invoice total when available.
         // Only when the whole document is being posted: header.totalAmount is the bundle's total,
         // so using it for one supplier's share would bill that supplier for everybody's costs.
         var stated = vendor.Length == 0 ? Num(header.Get("totalAmount")) : 0;
         if (stated > 0)
         {
-            // A parked document must open in SAP with Balance 0 — nobody posts it here, so there is
-            // no Purchase Variance to soak up the difference. Satang rounding is moved onto the
-            // largest line; anything bigger is a real mismatch and is refused before sending.
-            // Lines set to the accrual on purpose leave that difference for Purchase Variance —
-            // balancing them back onto a line would undo it.
-            gross = park && accrualDelta == 0 ? BalanceToStated(stated, gross, purOrdRef, glAccountItems, taxItems) : stated;
+            gross = park ? BalanceToStated(stated, gross, purOrdRef, glAccountItems, taxItems) : stated;
         }
+        if (invoiceVx && taxItems.SingleOrDefault() is Dictionary<string, object?> vxTax)
+            vxTax["TaxBaseAmountInTransCrcy"] = F2(gross);
 
         // The invoicing party's own invoice number (its tax invoice), else the document's, else
         // the PO. Reference of the SAP invoice, and the payables line's Assignment on a shipping
@@ -732,7 +717,7 @@ public static class SupplierInvoicePayload
         var supplierRef = refManual ? invoiceRef
             : (insuranceOnly || customsCostsOnly) && poRef.Length > 0 ? poRef
             : invoiceRef.Length > 0 && !isPoKeyed ? invoiceRef
-            : isPoKeyed && poRef.Length > 0 ? GoodsReference(header, poRef) : Or(vendor.Length > 0 ? DocNoKey(MainSupplierInvoice(header, vendor, mainVendor, Party, taxRows)) : "",
+            : isPoKeyed && poRef.Length > 0 ? GoodsReference(header, poRef) : Or(vendor.Length > 0 ? DocNoKey(MainSupplierInvoice(header, vendor, mainVendor, Party, referenceTaxRows)) : "",
             Or(header.GetStr("invoiceNo").Trim(),
                Or(header.GetStr("goodsInvoiceNo").Trim(), poRef)));
         // MGT Accounting (AP, 2026-11-17): a domestic supplier's invoice is dated as printed
@@ -874,6 +859,7 @@ public static class SupplierInvoicePayload
         // code, and a second code on an already-used payment type moves to the next one of the
         // family Accounting uses for this -- OA, OB, OC ("WHT Type for Payment Posting 1/2/3",
         // all three on the supplier, PRD 5105603148). More codes than types is refused here, named.
+        string[] paymentPostingTypes = ["OA", "OB", "OC"];
         var whtSums = new List<(string Type, string Code, double Base, double Amt)>();
         foreach (var w in ReadWhtRows(header).Where(Mine))
         {
@@ -892,8 +878,8 @@ public static class SupplierInvoicePayload
             }
             if (whtSums.Any(x => x.Type == type))
             {
-                string[] family = ["OA", "OB", "OC"];
-                var free = family.Contains(type) ? family.FirstOrDefault(t => whtSums.All(x => x.Type != t)) : null;
+                var free = paymentPostingTypes.Contains(type)
+                    ? paymentPostingTypes.FirstOrDefault(t => whtSums.All(x => x.Type != t)) : null;
                 if (free == null)
                     throw new MgtOcr.Core.HttpApiException(400,
                         $"Withholding Tax: ประเภท {type} ใช้ได้ครั้งเดียวต่อใบแจ้งหนี้ (SAP M8_2/152) แต่มีหลายรหัส "
@@ -906,6 +892,11 @@ public static class SupplierInvoicePayload
         var whtNode = new List<object>();
         foreach (var (type, code, baseFc, amtFc) in whtSums)
         {
+            var atPayment = paymentPostingTypes.Contains(type);
+            if (atPayment && baseFc <= 0)
+                throw new MgtOcr.Core.HttpApiException(400,
+                    $"Withholding Tax {type}/{code}: กรุณากรอกฐานภาษีมากกว่า 0 เพื่อให้ SAP คำนวณภาษีตอนจ่าย");
+
             var row = new Dictionary<string, object?>
             {
                 ["WithholdingTaxType"] = type,
@@ -917,7 +908,7 @@ public static class SupplierInvoicePayload
                 row["WithholdingTaxBaseAmount"] = F2(Math.Round(baseFc, 2));
                 row["WhldgTaxBaseIsEnteredManually"] = true;
             }
-            if (amtFc > 0)
+            if (!atPayment && amtFc > 0)
             {
                 row["ManuallyEnteredWhldgTaxAmount"] = F2(Math.Round(amtFc, 2));
                 row["WhldgTaxIsEnteredManually"] = true;
@@ -926,6 +917,7 @@ public static class SupplierInvoicePayload
         }
         if (whtNode.Count > 0) payload["to_SupplierInvoiceWhldgTax"] = whtNode;
         if (calcTax) payload["_calcTaxByCode"] = calcTaxByCode;
+        if (invoiceVx) payload["_supplierInvoiceTaxMode"] = "VX";
         return payload;
     }
 
@@ -1003,6 +995,8 @@ public static class SupplierInvoicePayload
 
             var gross = SumOfParts(lines, partGl, partTaxes)
                 + codes.Sum(c => calcByCode.TryGetValue(c, out var v) ? v : 0);
+            if (calcByCode.Count > 0)
+                part["_calcTaxByCode"] = calcByCode.Where(t => codes.Contains(t.Key)).ToDictionary();
             part["InvoiceGrossAmount"] = F2(Math.Round(gross, 2));
             if (k > 0)
             {
@@ -1036,6 +1030,30 @@ public static class SupplierInvoicePayload
             + taxItems.Sum(i => Num(((Dictionary<string, object?>)i).Get("TaxAmount"))),
             2);
 
+    internal static object ReviewTotals(Dictionary<string, object?> payload)
+    {
+        List<object> Rows(string key) => payload.Get(key) as List<object> ?? [];
+        var po = Rows("to_SuplrInvcItemPurOrdRef");
+        var gl = Rows("to_SupplierInvoiceItemGLAcct");
+        var taxes = Rows("to_SupplierInvoiceTax");
+        var calculatedVat = (payload.Get("_calcTaxByCode") as Dictionary<string, double>)?.Values.Sum() ?? 0;
+        var vat = calculatedVat + taxes.Cast<Dictionary<string, object?>>().Sum(t => Num(t.Get("TaxAmount")))
+            + gl.Where(g => ((Dictionary<string, object?>)g).GetStr("_vatAsGlLine").Length > 0)
+                .Sum(g => IsCredit(g) ? -ItemAmount(g) : ItemAmount(g));
+        var gross = Num(payload.Get("InvoiceGrossAmount"));
+        return new
+        {
+            reference = payload.GetStr("SupplierInvoiceIDByInvcgParty"),
+            currency = payload.GetStr("DocumentCurrency"),
+            gross,
+            vat = Math.Round(vat, 2),
+            balance = Math.Round(gross - SumOfParts(po, gl, taxes) - calculatedVat, 2),
+            taxMode = payload.GetStr("_supplierInvoiceTaxMode"),
+            paymentTerms = payload.GetStr("PaymentTerms"),
+            baselineDate = SapClient.SapDateIso(payload.GetStr("DueCalculationBaseDate")),
+        };
+    }
+
     /// <summary>Makes the lines add up to the stated total so the parked draft opens with
     /// Balance 0. A difference within <see cref="RoundingTolerance"/> is added to the largest
     /// debit line; a bigger one is refused with the figures, before anything reaches SAP.</summary>
@@ -1067,14 +1085,6 @@ public static class SupplierInvoicePayload
         row["_roundingAdjusted"] = F2(diff);   // "_" keys are stripped before the POST
         return stated;
     }
-
-    /// <summary>Largest gap between an invoice line and the PO's accrual that is still rounding
-    /// (left to Purchase Variance) rather than a price difference.</summary>
-    private const double AccrualVarianceTolerance = 1.00;
-
-    /// <summary>Purchase Variance (YCOA, Primary Costs) — where Accounting books the satang between
-    /// the PO's accrual and the invoice.</summary>
-    private const string PurchaseVarianceAccount = "52110001";
 
     private static string PriceUnitOf(SapPurchaseOrderItem? pi, string orderUnit) =>
         pi != null && pi.PriceUnit.Trim().Length > 0 ? pi.PriceUnit.Trim() : orderUnit;

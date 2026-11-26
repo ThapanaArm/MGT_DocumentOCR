@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { useNavigate, useOutletContext, useParams } from 'react-router-dom';
 import { useAppState } from '../state/AppState';
 import CategoryOptions from '../components/CategoryOptions';
@@ -9,6 +9,7 @@ import {
   getChat,
   getDocument,
   getPayload,
+  type SupplierInvoiceReview,
   getRawText,
   learnMaterial,
   postToSapQueued,
@@ -17,6 +18,7 @@ import {
   fillJournalEntryTexts,
   postDeferredVatJv,
   reocrDocument,
+  saveDocumentDraft,
   setDocCategory,
   type ChatMessage,
   type DocModel,
@@ -42,7 +44,8 @@ import {
 } from '../constants/fields';
 import { SEND_DISABLED_AP } from '../constants/flags';
 import { dt, fileRetention, fmt, fmtAmt, fmtCost, intFmt, moduleLabel, statusBadge } from '../utils/format';
-import ShippingCheck from '../components/document/ShippingCheck';
+import ShippingCheck, { missingShippingAmount, shippingCheckRows } from '../components/document/ShippingCheck';
+import { invoiceNumber, invoiceRecalTotals, recalculateInvoice } from '../utils/invoiceRecal';
 import { findDupes } from '../utils/dupes';
 import Steps from '../components/Steps';
 import Modal, { ModalHeader } from '../components/Modal';
@@ -54,6 +57,8 @@ import PoReferenceTable from '../components/document/PoReferenceTable';
 import GlItemsTable from '../components/document/GlItemsTable';
 import GoodsReceiptPicker from '../components/document/GoodsReceiptPicker';
 import TaxDataTable from '../components/document/TaxDataTable';
+import SupplierInvoicePayment from '../components/document/SupplierInvoicePayment';
+import { expectedPaymentDueDate, paymentDateForDisplay, paymentTermOptions } from '../utils/supplierInvoicePayment';
 import WhtTable from '../components/document/WhtTable';
 import IncomingInvoiceCard from '../components/document/IncomingInvoiceCard';
 import SapDocTabs, { screenTabs } from '../components/document/SapDocTabs';
@@ -1088,8 +1093,9 @@ function customerMaterialCoversLine(m: Record<string, any>, line: { extCode?: st
 export default function DocumentPage() {
   const { docId } = useParams<{ docId: string }>();
   const id = Number(docId);
+  const activeDocumentId = useRef(id);
   const navigate = useNavigate();
-  const { guard, showToast } = useAppState();
+  const { guard, showToast, busy } = useAppState();
   const { ocrProviders, loadOcrProviders, apDocCategories, loadApDocCategories, masters, loadMasters } =
     useMeta();
   const { me } = useOutletContext<{ me: Me | null }>();
@@ -1116,6 +1122,10 @@ export default function DocumentPage() {
   const [chatImage, setChatImage] = useState<string | null>(null);
   const [chatProvider, setChatProvider] = useState('gemini');
   const [reocrEngine, setReocrEngine] = useState('gemini');
+  const recalBaseline = useRef<DocModel | null>(null);
+  const [recalculated, setRecalculated] = useState<DocModel | null>(null);
+  const [recalVersion, setRecalVersion] = useState(0);
+  const [savingRecal, setSavingRecal] = useState(false);
 
   // Keep the working document's salesOrg in step with the active company view. The /map, /payload
   // and /post requests all send doc.header, and the backend resolves the company from
@@ -1219,6 +1229,7 @@ export default function DocumentPage() {
   const [selectedPo, setSelectedPo] = useState('');
   const [lineExtraIdx, setLineExtraIdx] = useState<number | null>(null);
   const [postOpen, setPostOpen] = useState(false);
+  const [supplierInvoiceReview, setSupplierInvoiceReview] = useState<SupplierInvoiceReview[] | null>(null);
   // SAP's own words when it refused the document, shown inside the confirmation dialog.
   const [postError, setPostError] = useState<string | null>(null);
   const [posting, setPosting] = useState(false);
@@ -1246,6 +1257,10 @@ export default function DocumentPage() {
   // Load document on mount / id change.
   useEffect(() => {
     let alive = true;
+    activeDocumentId.current = id;
+    recalBaseline.current = null;
+    setRecalculated(null);
+    setSavingRecal(false);
     setDoc(null);
     setMap(null);
     setFailed(false);
@@ -1277,7 +1292,9 @@ export default function DocumentPage() {
       }
       // Re-reading always uses Gemini (ChatGPT Vision removed 4 Nov 2026), whatever read the document first.
       setReocrEngine('gemini');
-      setDoc(seedHeaderText(seedDeliveryConditions(seedPoItems(seedRefDocument(seedHeaderTaxCode(seedGlItems(seedTaxItems(seedWhtItems(d)))))))));
+      const seeded = seedHeaderText(seedDeliveryConditions(seedPoItems(seedRefDocument(seedHeaderTaxCode(seedGlItems(seedTaxItems(seedWhtItems(d))))))));
+      recalBaseline.current = seeded;
+      setDoc(seeded);
       if (d.module === 'AP') loadApDocCategories();
       try {
         const chat = await getChat(d.docId);
@@ -1411,8 +1428,10 @@ export default function DocumentPage() {
     const next: Record<string, any> = {};
     if (!String(hh.paymentTermsCode ?? '').trim()) {
       const txt = norm(hh.paymentTerms);
-      const hits = txt ? terms.filter((t) => norm(t.Text) === txt || norm(t.Code) === txt) : [];
-      const code = hits.length === 1 ? String(hits[0].Code ?? '').trim() : vendorTermsCode;
+      const choices = paymentTermOptions(terms);
+      const exactCode = txt ? choices.find(t => norm(t.code) === txt) : undefined;
+      const hits = txt ? choices.filter(t => norm(t.description) === txt) : [];
+      const code = exactCode?.code ?? (hits.length === 1 ? hits[0].code : vendorTermsCode);
       if (code) next.paymentTermsCode = code;
     }
     const vendorCode = String(map?.header.vendor?.code ?? (doc as Record<string, any>).partnerCode ?? '').trim();
@@ -1424,7 +1443,7 @@ export default function DocumentPage() {
     }
     const base = String(next.baselineDate ?? hh.baselineDate ?? '').trim();
     const code = String(next.paymentTermsCode ?? hh.paymentTermsCode ?? '').trim();
-    if (!String(hh.dueDate ?? '').trim() && /^\d{4}-\d{2}-\d{2}$/.test(base) && code) {
+    if (doc.module !== 'AP' && !String(hh.dueDate ?? '').trim() && /^\d{4}-\d{2}-\d{2}$/.test(base) && code) {
       const text = String(terms.find((t) => String(t.Code ?? '').trim() === code)?.Text ?? '');
       const m = /^\s*(?:within\s+)?(\d{1,3})\s*days?(?:\s+(?:net|due\s+net))?\s*$/i.exec(text);
       if (m) {
@@ -1521,6 +1540,14 @@ export default function DocumentPage() {
     ? (isMgt ? '1000' : '2000')
     : (h.salesOrg || me?.salesOrganization || (isMgt ? '1000' : '2000'));
   const companyCode = doc.module === 'SO' ? salesOrg : (me?.sapCompanyCode || salesOrg);
+  const invoiceCompanyCode = doc.supplierInvoiceCompanyCode ?? (h.salesOrg || companyCode);
+  const canChooseInvoiceTax = doc.module === 'AP' && String(invoiceCompanyCode).trim() === '1000'
+    && !isInventoryPoDoc(doc) && String(h.refDocType ?? '').trim() === '2';
+  const supplierInvoiceVx = canChooseInvoiceTax && h.supplierInvoiceTaxMode === 'VX';
+  const reviewSupplierInvoice = doc.module === 'AP';
+  const invoicePaymentTerms = paymentTermOptions(masters?.paymentterms);
+  const checkingInvoiceReview = reviewSupplierInvoice && postOpen && supplierInvoiceReview === null;
+  const formatInvoiceReviewAmount = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const posted = doc.status === 'POSTED';
   const isSplit = doc.status === 'SPLIT';
   // Some of this document's delivery-date Sales Orders are already in SAP/Zoho: locked like a posted
@@ -1606,7 +1633,10 @@ export default function DocumentPage() {
   const doReocr = () =>
     guard(async () => {
       const d = await reocrDocument(doc.docId, reocrEngine, USER);
-      setDoc(seedHeaderText(seedDeliveryConditions(seedPoItems(seedRefDocument(seedHeaderTaxCode(seedGlItems(seedTaxItems(seedWhtItems(d)))))))));
+      const seeded = seedHeaderText(seedDeliveryConditions(seedPoItems(seedRefDocument(seedHeaderTaxCode(seedGlItems(seedTaxItems(seedWhtItems(d))))))));
+      recalBaseline.current = seeded;
+      setRecalculated(null);
+      setDoc(seeded);
       setMap(null);
       manual.current = { header: {}, lines: {} };
       if (d.provider === 'failed')
@@ -1636,9 +1666,27 @@ export default function DocumentPage() {
     });
   const openPayload = () =>
     guard(async () => {
+      if (reviewSupplierInvoice && !(await runMap(true))?.pass) return;
       const r = await getPayload(doc.docId);
       setPayload(r.payload);
     });
+
+  const openPostReview = async () => {
+    setPostError(null);
+    setSupplierInvoiceReview(null);
+    setPostOpen(true);
+    if (!reviewSupplierInvoice) return;
+    try {
+      const saved = await runMap(true);
+      if (!saved?.pass) throw new Error('บันทึกข้อมูลไม่สำเร็จ กรุณาตรวจผล Data Mapping');
+      const review = (await getPayload(doc.docId)).invoiceReview;
+      if (!review?.length) throw new Error('ไม่พบรายการ Supplier Invoice สำหรับตรวจสอบ');
+      setSupplierInvoiceReview(review);
+    } catch (error) {
+      setSupplierInvoiceReview([]);
+      setPostError(error instanceof Error ? error.message : String(error));
+    }
+  };
 
   const confirmPost = () =>
     guard(async () => {
@@ -1648,7 +1696,11 @@ export default function DocumentPage() {
         // only thing that writes the screen back is the mapping call. A PO item or GR item typed
         // here and sent straight away would never reach SAP — it would post whatever was stored
         // last. So the current lines are saved first, every time.
-        await runMap(true);
+        const saved = await runMap(true);
+        if (reviewSupplierInvoice && !saved?.pass) {
+          setPostError('บันทึกข้อมูลไม่สำเร็จ กรุณาตรวจผล Data Mapping');
+          return;
+        }
         // Through the send queue: SAP takes one document at a time, oldest first, so two people
         // pressing Step 3 on the same purchase order no longer collide (ME/006).
         let toldPosition = -1;
@@ -2043,7 +2095,7 @@ export default function DocumentPage() {
   // on the Tax tab, which a shipping bundle posts deferred (D1) first. A row chosen as D1 stays
   // deferred and is not reversed; the Customs Department's import VAT goes straight to V1.
   const isShippingBundleDoc = !isInventoryPoDoc(doc) && ['2', '3'].includes(String(h.refDocType ?? '').trim());
-  const deferredTaxCount = !isShippingBundleDoc ? 0 : ((h.taxItems as Array<Record<string, any>>) || []).filter((t) => {
+  const deferredTaxCount = !isShippingBundleDoc || supplierInvoiceVx ? 0 : ((h.taxItems as Array<Record<string, any>>) || []).filter((t) => {
     if ((Number(t.docCurrencyAmt) || 0) === 0) return false;
     const code = String(t.taxCode ?? '').trim().toUpperCase();
     const issuer = String(t.issuerName ?? '');
@@ -2725,10 +2777,49 @@ export default function DocumentPage() {
       if (l.extCode === 'WHT' || l.extCode === 'VAT' || l.extCode === 'DUTY') continue;
       const c = String(l.extra?.vendorCode ?? '').trim();
       if (!c) continue;
-      totals.set(c, (totals.get(c) ?? 0) + (Number(l.amount) || 0));
+      totals.set(c, (totals.get(c) ?? 0) + (invoiceNumber(l.amount) ?? 0));
     }
     return [...totals.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? '';
   })();
+
+  const canRecal = doc.module === 'AP' && !locked && !posting && doc.status !== 'POSTING' && !savingRecal && !busy;
+  const recalCurrent = recalculated?.docId === doc.docId && recalculated.header === doc.header && recalculated.lines === doc.lines;
+  const recalVendor = mainVendorCode || String(h.vendorCode || doc.partnerCode || '').trim();
+  const recalTotals = recalCurrent ? invoiceRecalTotals(doc, recalVendor) : null;
+  const recalShippingRows = recalCurrent ? shippingCheckRows(doc) : [];
+
+  const runRecal = () => {
+    if (!canRecal || recalCurrent) return;
+    const previous = recalculated?.docId === doc.docId ? recalculated : recalBaseline.current ?? doc;
+    const result = recalculateInvoice(doc, previous, recalVendor);
+    const error = 'error' in result ? result.error : missingShippingAmount(result.document);
+    if (error) {
+      showToast(error, 'error');
+      return;
+    }
+    if ('document' in result) {
+      setDoc(result.document);
+      setMap(null);
+      setRecalculated(result.document);
+      setRecalVersion(version => version + 1);
+      showToast('Recal complete. Review the totals and DIFF before saving.', 'success');
+    }
+  };
+
+  const saveRecal = async () => {
+    if (!canRecal || !recalCurrent) return;
+    setSavingRecal(true);
+    try {
+      const saved = await guard(() => saveDocumentDraft(doc.docId, doc));
+      if (!saved || activeDocumentId.current !== doc.docId) return;
+      setDoc(current => current?.docId === doc.docId && current.header === doc.header && current.lines === doc.lines ? saved : current);
+      setMap(null);
+      setRecalculated(saved);
+      showToast('Recal changes saved.', 'success');
+    } finally {
+      if (activeDocumentId.current === doc.docId) setSavingRecal(false);
+    }
+  };
 
   /* What the Send will actually create: ONE SAP supplier invoice per supplier on the bundle.
      The form carries the agent's, the port authority's and the broker's invoices together, and
@@ -2788,6 +2879,8 @@ export default function DocumentPage() {
 
   const vendorTotals = (() => {
     if (!vendorFilter || (doc.module !== 'AP' && doc.module !== 'II')) return null;
+    const recalTotal = recalTotals?.get(vendorFilter);
+    if (recalTotal) return { ...h, ...recalTotal };
     const codeOf = (l: DocLine) => String(l.extra?.vendorCode ?? '').trim();
     const isTax = (l: DocLine) =>
       l.extCode === 'WHT' || l.extCode === 'VAT' || l.extCode === 'DUTY';
@@ -2833,7 +2926,7 @@ export default function DocumentPage() {
         // The numeric inputs are uncontrolled (defaultValue, so typing is not fought by a
         // re-render), which means switching vendors would leave the old figures on screen —
         // remount the grid when the lookup changes.
-        key={vendorFilter || 'all'}
+        key={`${vendorFilter || 'all'}-${recalVersion}`}
         fields={AP_TOTALS_H}
         values={vendorTotals ?? h}
         posted={locked || !!vendorTotals}
@@ -3319,9 +3412,10 @@ export default function DocumentPage() {
                   <button className="btn" onClick={fillJeTexts}>
                     <i className="fa-solid fa-pen-to-square" /> Fill Assignment/Text in SAP
                   </button>
-                  <button className="btn" onClick={postDeferredJv} disabled={jvPosting}>
+                  <button className="btn" onClick={postDeferredJv} disabled={jvPosting || supplierInvoiceVx}>
                     <i className="fa-solid fa-file-invoice" /> {jvPosting ? 'Sending JV…' : 'Post Deferred VAT JV to SAP'}
                   </button>
+                  {supplierInvoiceVx && <span className="hint">Supplier Invoice ใช้ VX กรุณาตรวจบัญชีคู่รายการก่อนทำ JV ภาษีซื้อ</span>}
                   <span className="hint">
                     Fills the empty Assignment and Text on the posted journal entry (Local Hand&amp;Fr, Fee,
                     Purchase Variance) — only empty fields are changed.
@@ -3463,11 +3557,17 @@ export default function DocumentPage() {
           <button
             className="btn sm primary"
             onClick={doReocr}
-            disabled={posted || isSplit || !!doc.sourceDocId || fileExpired}
+            disabled={posted || isSplit || !!doc.sourceDocId || fileExpired || savingRecal}
             title={fileExpired ? 'The original file was removed after the retention period' : undefined}
           >
             <i className="fa-solid fa-arrow-rotate-right" /> Re-read Document
           </button>
+          {doc.module === 'AP' && (
+            <button className="btn sm ghost" onClick={runRecal} disabled={!canRecal}
+              title="Calculate from the current entries">
+              <i className="fa-solid fa-calculator" /> Recal
+            </button>
+          )}
           <button className="btn sm ghost" onClick={openRaw}>
             <i className="fa-solid fa-file-lines" /> Extracted Text
           </button>
@@ -3628,10 +3728,41 @@ export default function DocumentPage() {
       {/* Shipping cost check: FORM SHIPPING EXPENSE vs the invoices / receipts behind it, per COSTS
           heading (Local / Insurance / Fee / Overseas). A heading that does not agree shows its DIFF
           in red. Shown only when the bundle has form lines or supporting documents. */}
+      {doc.module === 'AP' && !locked && recalculated?.docId === doc.docId && (
+        <div className="card" id="recal-preview">
+          <div className="card-h"><h2>Recal Preview</h2></div>
+          <div className="card-b">
+            {recalTotals ? (
+              <>
+                <div className="tw">
+                  <table>
+                    <thead><tr><th>Vendor</th><th>Amount before Tax</th><th>VAT</th><th>WHT</th><th>Total Amount</th></tr></thead>
+                    <tbody>
+                      {[...recalTotals].map(([vendor, total]) => (
+                        <tr key={vendor}>
+                          <td>{vendor || '—'}</td><td>{fmt(total.subTotal)}</td><td>{fmt(total.vatAmount)}</td>
+                          <td>{fmt(total.whtAmount)}</td><td>{fmt(total.totalAmount)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                {recalShippingRows.length > 0 && (
+                  <p className="hint">
+                    Shipping Check DIFF (Form − Documents){' · '}
+                    {recalShippingRows.map(row => `${row.type}: ${row.docCount ? fmt(row.diff) : 'Supporting documents missing'}`).join(' · ')}
+                  </p>
+                )}
+                <button className="btn primary" onClick={saveRecal} disabled={!canRecal}>{savingRecal ? 'Saving…' : 'Save'}</button>
+              </>
+            ) : <p role="status">The form changed. Click Recal to refresh the totals before saving.</p>}
+          </div>
+        </div>
+      )}
       {(doc.module === 'AP' || doc.module === 'II') && (
         <ShippingCheck
           doc={doc}
-          posted={posted}
+          posted={locked}
           // header values are plain JSON; editHeader is typed for strings only
           onDocsChange={(docs) => editHeader('sourceDocs', docs as unknown as string)}
         />
@@ -3656,8 +3787,26 @@ export default function DocumentPage() {
             key={vendorFilter || 'all'}
             groups={AP_TRADE_GROUPS}
             values={vendorTotals ?? h}
-            posted={posted}
+            posted={locked}
             onEdit={editHeaderSynced}
+            beforeFields={{
+              Payment: <SupplierInvoicePayment
+                key={doc.docId}
+                docId={doc.docId}
+                terms={invoicePaymentTerms}
+                code={String(h.paymentTermsCode ?? '').trim().toUpperCase()}
+                description={String(h.paymentTerms ?? '')}
+                baseline={String(h.baselineDate ?? '')}
+                purchaseOrder={selectedPo || poNumberOf(h)}
+                locked={locked}
+                sent={posted || partial}
+                onTerm={term => {
+                  editHeader('paymentTermsCode', term.code);
+                  editHeader('paymentTerms', term.description);
+                }}
+                onBaseline={date => editHeader('baselineDate', date)}
+              />,
+            }}
             extras={{
               // What the figures on this tab come to in the company's own books. The invoice is
               // in the supplier's currency — PROMPT bills in THB against a purchase order kept in
@@ -3981,8 +4130,42 @@ export default function DocumentPage() {
                   )}
                 </>
               ),
-              Tax: <TaxDataTable {...taxProps} bare />,
-              'Withholding Tax': <WhtTable {...whtProps} bare />,
+              Tax: (
+                <>
+                  {canChooseInvoiceTax && (
+                    <div className="f" style={{ marginBottom: 16 }}>
+                      <label htmlFor="supplier-invoice-tax-mode">ภาษีใน Supplier Invoice</label>
+                      <select
+                        id="supplier-invoice-tax-mode"
+                        value={supplierInvoiceVx ? 'VX' : 'SOURCE'}
+                        disabled={locked}
+                        onChange={e => {
+                          const value = e.currentTarget.value;
+                          setDoc(current => current ? {
+                            ...current, header: { ...current.header, supplierInvoiceTaxMode: value },
+                          } : current);
+                        }}
+                      >
+                        <option value="SOURCE">ตามรายการภาษี</option>
+                        <option value="VX">VX – ส่ง VAT 0.00 บาท</option>
+                      </select>
+                      <span className="hint">
+                        ใช้กับใบแจ้งหนี้ค่าขนส่ง ข้อมูลใบกำกับด้านล่างและ VAT นำเข้าของกรมศุลกากรยังใช้ตามเอกสาร
+                      </span>
+                      {supplierInvoiceVx && (
+                        <span className="hint">ใบแจ้งหนี้ค่าขนส่งจะส่ง VAT 0.00 บาท กรุณาตรวจบัญชีคู่รายการก่อนทำ JV ภาษีซื้อ</span>
+                      )}
+                    </div>
+                  )}
+                  <TaxDataTable
+                    key={recalVersion}
+                    {...taxProps}
+                    title={canChooseInvoiceTax ? 'ภาษีตามใบกำกับต้นทาง' : undefined}
+                    bare
+                  />
+                </>
+              ),
+              'Withholding Tax': <WhtTable key={recalVersion} {...whtProps} bare />,
             }}
           />
         </div>
@@ -4060,7 +4243,7 @@ export default function DocumentPage() {
       {/* Action bar */}
       <div className="card">
         <div className="card-b row">
-          <button className="btn primary" onClick={() => runMap(false)} disabled={posted || isSplit}>
+          <button className="btn primary" onClick={() => runMap(false)} disabled={posted || isSplit || savingRecal}>
             <i className="fa-solid fa-magnifying-glass" /> Step 2 — Data Mapping
           </button>
           {/* MGT/Zoho Step 3: reveal the Sales Order editor above (mirrors how Step 2 reveals the
@@ -4089,8 +4272,8 @@ export default function DocumentPage() {
           {!isMgt && doc.module !== 'SO' && (
             <button
               className="btn success"
-              onClick={() => setPostOpen(true)}
-              disabled={!(map && map.pass && !posted && !isSplit)}
+              onClick={openPostReview}
+              disabled={!(map && map.pass && !posted && !isSplit) || savingRecal}
             >
               ⎋ Step 3 · Review and send to SAP
             </button>
@@ -4217,10 +4400,10 @@ export default function DocumentPage() {
 
       {/* While a send is running the dialog cannot be closed (Cancel, ✕, Esc, backdrop): SAP may
           already be creating documents, and closing it hid the result and the rollback note. */}
-      <Modal open={postOpen} onClose={() => { if (!posting) setPostOpen(false); }}>
+      <Modal open={postOpen} onClose={() => { if (!posting && !checkingInvoiceReview) setPostOpen(false); }}>
         <ModalHeader
           title="Confirm Submission to SAP S/4HANA"
-          onClose={() => { if (!posting) setPostOpen(false); }}
+          onClose={() => { if (!posting && !checkingInvoiceReview) setPostOpen(false); }}
         />
         <div className="card-b">
             <>
@@ -4314,7 +4497,7 @@ export default function DocumentPage() {
                         <td>{doc.lines.length} rows</td>
                       </tr>
                     )}
-                    {sendBreakdown.length > 1 ? null : (
+                    {reviewSupplierInvoice || sendBreakdown.length > 1 ? null : (
                       <tr>
                         <th>Total</th>
                         <td>
@@ -4324,9 +4507,46 @@ export default function DocumentPage() {
                         </td>
                       </tr>
                     )}
+                    {reviewSupplierInvoice && supplierInvoiceReview?.map((review, index) => {
+                      const term = invoicePaymentTerms.find(row => row.code === review.paymentTerms.toUpperCase());
+                      const termDescription = term?.description ??
+                        (review.paymentTerms === h.paymentTermsCode ? String(h.paymentTerms ?? '') : '');
+                      const due = expectedPaymentDueDate(review.baselineDate, termDescription);
+                      return (
+                      <Fragment key={index}>
+                        <tr>
+                          <th>ยอดใบแจ้งหนี้ {review.reference}</th>
+                          <td><b>{formatInvoiceReviewAmount.format(review.gross)} {review.currency}</b></td>
+                        </tr>
+                        <tr>
+                          <th>VAT ที่ส่งเข้า SAP</th>
+                          <td>{formatInvoiceReviewAmount.format(review.vat)} {review.currency}{review.taxMode === 'VX' ? ' (VX)' : ''}</td>
+                        </tr>
+                        <tr>
+                          <th>Balance จากรายการที่จะส่ง</th>
+                          <td>{formatInvoiceReviewAmount.format(review.balance)} {review.currency}</td>
+                        </tr>
+                        <tr>
+                          <th>Payment Terms</th>
+                          <td>{review.paymentTerms || 'ตามค่า SAP'}{termDescription ? ` — ${termDescription}` : ''}</td>
+                        </tr>
+                        <tr>
+                          <th>Baseline Date</th>
+                          <td>{paymentDateForDisplay(review.baselineDate)}</td>
+                        </tr>
+                        <tr>
+                          <th>Due On</th>
+                          <td>{due ? `${paymentDateForDisplay(due)} (วันที่คาดการณ์)` : 'รอ SAP คำนวณ'}</td>
+                        </tr>
+                      </Fragment>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
+              {checkingInvoiceReview && (
+                <p className="hint" role="status">กำลังตรวจยอดและภาษีที่จะส่งเข้า SAP…</p>
+              )}
               {postError && (
                 <div
                   className="hint"
@@ -4342,7 +4562,7 @@ export default function DocumentPage() {
                     overflow: 'auto',
                   }}
                 >
-                  <b>SAP ไม่รับเอกสาร</b>
+                  <b>{reviewSupplierInvoice && !supplierInvoiceReview?.length ? 'ตรวจข้อมูลก่อนส่งไม่สำเร็จ' : 'SAP ไม่รับเอกสาร'}</b>
                   <br />
                   {postError}
                 </div>
@@ -4367,7 +4587,7 @@ export default function DocumentPage() {
                 <button
                   className="btn success"
                   onClick={confirmPost}
-                  disabled={sendBlockers.length > 0 || posting}
+                  disabled={sendBlockers.length > 0 || posting || (reviewSupplierInvoice && !supplierInvoiceReview?.length)}
                   title={sendBlockers.join(' · ')}
                 >
                   {posting ? 'Sending…' : 'Confirm send to SAP'}
@@ -4375,7 +4595,7 @@ export default function DocumentPage() {
                 <button
                   className="btn"
                   onClick={() => setPostOpen(false)}
-                  disabled={posting}
+                  disabled={posting || checkingInvoiceReview}
                   title={posting ? 'กำลังส่งเข้า SAP — รอให้เสร็จก่อน' : undefined}
                 >
                   Cancel

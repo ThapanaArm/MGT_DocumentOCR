@@ -265,7 +265,8 @@ public static class SapImportSupplierInvoiceExcel
                 // says things like "30 days", and cutting that to 4 characters produced "30 d" —
                 // a value that means nothing to SAP and only fails at posting. Write it only when
                 // it already looks like a key, and leave the field for a person otherwise.
-                Code(ws.Cell(row, C_PaymentTerms), paymentTerms.Resolve(header.GetStr("paymentTerms")));
+                Code(ws.Cell(row, C_PaymentTerms), paymentTerms.Resolve(
+                    Or(header.GetStr("paymentTermsCode").Trim(), header.GetStr("paymentTerms"))));
                 Text(ws.Cell(row, C_Assignment), Cut(header.GetStr("assignmentText"), 18));
                 Date(ws.Cell(row, C_TaxDate), Or(header.GetStr("taxDate"), header.GetStr("postingDate")));
                 Code(ws.Cell(row, C_HouseBank), Cut(header.GetStr("houseBank"), 5));

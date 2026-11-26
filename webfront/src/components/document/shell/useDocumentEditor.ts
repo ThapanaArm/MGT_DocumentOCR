@@ -29,9 +29,9 @@ export function useDocumentEditor(user: string) {
     setDocState((prev) => {
       const n = typeof next === 'function' ? (next as (p: DocModel | null) => DocModel | null)(prev) : next;
       if (!n || !prev || n.docId !== prev.docId) return n;
-      if (n.sapDocNos !== undefined && n.deferredJvs !== undefined) return n;
       return {
         ...n,
+        supplierInvoiceCompanyCode: n.supplierInvoiceCompanyCode ?? prev.supplierInvoiceCompanyCode,
         sapDocNos: n.sapDocNos ?? prev.sapDocNos,
         deferredJvs: n.deferredJvs ?? prev.deferredJvs,
       };
@@ -69,6 +69,7 @@ export function useDocumentEditor(user: string) {
           document.querySelector('.content')?.scrollTo({ top: 0, behavior: 'smooth' }); window.scrollTo({ top: 0, behavior: 'smooth' });
         }
       }
+      return res;
     },
     [doc, guard, showToast, user],
   );

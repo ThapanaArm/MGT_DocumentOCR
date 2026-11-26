@@ -1149,6 +1149,14 @@ input,select,textarea,.btn,.nav a{-webkit-tap-highlight-color:transparent}
 .so-group-number{display:inline-grid;place-items:center;width:26px;height:26px;border-radius:8px;background:var(--brand-soft);color:var(--brand);font-weight:700}
 @media (max-width:700px){.so-group-header{padding:16px;gap:12px}.so-group-notice{margin:12px 14px 0}.so-group-table-wrap{padding:8px 14px 14px}}
 
+/* Header dates show the stored value and use the browser calendar. */
+.field-date{position:relative}
+.field-date:has(.field-date-picker)>input{padding-right:36px}
+.field-date-picker{position:absolute;inset:0 4px 0 auto;width:32px;display:grid;place-items:center;color:var(--muted);border-radius:var(--r3)}
+.field-date-picker:hover,.field-date-picker:focus-within{color:var(--brand);background:var(--brand-soft)}
+.field-date-picker>input[type=date]{position:absolute;inset:0;width:100%;height:100%;padding:0;border:0;opacity:0;cursor:pointer}
+.field-date-picker>input::-webkit-calendar-picker-indicator{position:absolute;inset:0;width:100%;height:100%;padding:0;cursor:pointer}
+
 /* Locale-independent date range: always presents MM/DD/YYYY while retaining ISO API values. */
 .english-date-input{position:relative;display:inline-flex;align-items:center}
 .english-date-input>input[type=text]{width:132px;padding-right:34px;font-variant-numeric:tabular-nums}

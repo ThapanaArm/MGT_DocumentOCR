@@ -8,6 +8,8 @@ import { WHT_TYPES, WHT_CODES, RECIPIENT_TYPES, WHT_CODE_RATE } from '../../cons
    Type / Code / Recipient Type are real SAP codes (KUT-FI-AP-204), so they are
    dropdowns rather than free text — SAP rejects anything outside the master. */
 export type WhtItem = Record<string, any>;
+const postsAtPayment = (type: unknown) => ['OA', 'OB', 'OC'].includes(String(type ?? '').trim().toUpperCase());
+const amountFormat = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 export default function WhtTable({
   items,
@@ -33,11 +35,11 @@ export default function WhtTable({
   // SAP works the withholding amount out of the base itself, so the amount the read found is
   // only a cross-check: if it does not match base x rate, the code or the base is wrong.
   const expected = (w: WhtItem) => {
-    const rate = WHT_CODE_RATE[String(w.whtCode ?? '')];
-    return rate ? Math.round((Number(w.baseFc) || 0) * rate) / 100 : 0;
+    const rate = WHT_CODE_RATE[String(w.whtCode ?? '').trim()];
+    return rate ? Math.round(num(w.baseFc) * rate) / 100 : 0;
   };
   const mismatch = (w: WhtItem) => {
-    const amt = Number(w.amtFc) || 0;
+    const amt = num(w.amtFc);
     const exp = expected(w);
     return exp > 0 && amt > 0 && Math.abs(exp - amt) > 0.5;
   };
@@ -108,6 +110,12 @@ export default function WhtTable({
                         onBlur={(e) => (e.target.value = fmt(e.target.value))}
                         onInput={(e) => onEdit(i, 'amtFc', (e.target as HTMLInputElement).value)}
                       />
+                      {postsAtPayment(w.wtType) && (
+                        <div className="hint" style={{ marginTop: 4 }}>
+                          {expected(w) > 0 && `คาดการณ์ ${amountFormat.format(expected(w))} (${WHT_CODE_RATE[String(w.whtCode ?? '').trim()]}%) · `}
+                          SAP คำนวณตอนจ่าย
+                        </div>
+                      )}
                       {mismatch(w) && (
                         <div className="hint" style={{ color: 'var(--danger, #e5484d)', marginTop: 4 }}>
                           does not match {WHT_CODE_RATE[String(w.whtCode)]}% of base ({fmt(expected(w))})
@@ -134,9 +142,8 @@ export default function WhtTable({
           </table>
         </div>
         <p className="hint" style={{ marginTop: 10 }}>
-          In SAP you key only W/Tax Code and W/Tax Base — SAP computes W/Tax Amt from the code's
-          rate, so the amount column here is what the document says, kept as a cross-check.
-          W/Tax Base is the invoice amount before VAT; changing the code recalculates it.
+          Payment Posting (OA, OB, OC) ส่งรหัสและฐานภาษีให้ SAP คำนวณยอดตอนจ่าย
+          ส่วน Invoice Posting ใช้ยอดจากเอกสารในช่อง W/Tax Amt
         </p>
       </div>
     </div>

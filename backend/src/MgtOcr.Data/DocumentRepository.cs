@@ -289,9 +289,16 @@ public partial class DocumentRepository(Db db)
     // Always full delete+reinsert (matches Python) — ItemNo is always recomputed as (i+1)*10.
     public async Task SaveLinesAsync(string module, int docId, List<Dictionary<string, object?>> lines)
     {
-        var lineT = DocumentTables.For(module).Line;
         await using var conn = await db.OpenAsync();
         await using var tx = await conn.BeginTransactionAsync();
+        await SaveLinesAsync(conn, tx, module, docId, lines);
+        await tx.CommitAsync();
+    }
+
+    private static async Task SaveLinesAsync(System.Data.Common.DbConnection conn, System.Data.Common.DbTransaction tx,
+        string module, int docId, List<Dictionary<string, object?>> lines)
+    {
+        var lineT = DocumentTables.For(module).Line;
         await conn.ExecuteAsync($"DELETE FROM {lineT} WHERE DocId=@docId", new { docId }, tx);
         if (module is "AP" or "II") await ApplySupplierTaxMapAsync(conn, tx, docId, lines);
         for (var i = 0; i < lines.Count; i++)
@@ -313,7 +320,6 @@ public partial class DocumentRepository(Db db)
                 extraJson = extra is { Count: > 0 } ? JsonSerializer.Serialize(extra, PyJson.Options) : null,
             }, tx);
         }
-        await tx.CommitAsync();
     }
 
     // Records an external-system post (Zoho CRM Sales Order) exactly the way
@@ -398,11 +404,35 @@ public partial class DocumentRepository(Db db)
         };
     }
 
+    public async Task<bool> SaveDraftAsync(int docId, string module, Dictionary<string, object?> header,
+        List<Dictionary<string, object?>>? lines)
+    {
+        var docT = DocumentTables.For(module).Doc;
+        await using var conn = await db.OpenAsync();
+        await using var tx = await conn.BeginTransactionAsync();
+        var affected = await conn.ExecuteAsync($"""
+            UPDATE {docT} SET Status='NEW', MapStatus=NULL, MapMessage=NULL
+            WHERE DocId=@docId AND Status NOT IN ('POSTED', 'PARTIAL', 'POSTING', 'SPLIT')
+            """, new { docId }, tx);
+        if (affected == 0) return false;
+        await UpdateHeaderAsync(conn, tx, docId, module, header);
+        if (lines != null) await SaveLinesAsync(conn, tx, module, docId, lines);
+        await tx.CommitAsync();
+        return true;
+    }
+
     public async Task UpdateHeaderAsync(int docId, string module, Dictionary<string, object?> header)
+    {
+        await using var conn = await db.OpenAsync();
+        await UpdateHeaderAsync(conn, null, docId, module, header);
+    }
+
+    private static async Task UpdateHeaderAsync(System.Data.Common.DbConnection conn, System.Data.Common.DbTransaction? tx,
+        int docId, string module, Dictionary<string, object?> header)
     {
         var docT = DocumentTables.For(module).Doc;
         var d = Denorm(module, header);
-        await db.ExecuteAsync($"""
+        await conn.ExecuteAsync($"""
             UPDATE {docT} SET HeaderJson=@headerJson, DocNo=@docNo, DocDate=@docDate, PostingDate=@postingDate,
                 PartnerName=@partnerName, PartnerTaxId=@partnerTaxId, Currency=@currency, SubTotal=@subTotal,
                 VatRate=@vatRate, VatAmount=@vatAmount, WhtAmount=@whtAmount, TotalAmount=@totalAmount,
@@ -414,7 +444,7 @@ public partial class DocumentRepository(Db db)
             partnerName = d.Get("PartnerName"), partnerTaxId = d.Get("PartnerTaxId"), currency = d.Get("Currency"),
             subTotal = d.Get("SubTotal"), vatRate = d.Get("VatRate"), vatAmount = d.Get("VatAmount"),
             whtAmount = d.Get("WhtAmount"), totalAmount = d.Get("TotalAmount"), docId,
-        });
+        }, tx);
     }
 
     private const string DocListCols =

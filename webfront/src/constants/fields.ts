@@ -9,7 +9,7 @@
 //   [key, label, 'select', [value,label][]]   → dropdown
 export type FieldDef =
   | [string, string]
-  | [string, string, 'checkbox']
+  | [string, string, 'checkbox' | 'date']
   | [string, string, 'select', [string, string][]];
 export interface FieldGroup {
   title: string;
@@ -211,9 +211,9 @@ export const SAP_DOC_TYPES: Array<[string, string]> = [
 ];
 
 export const AP_H: FieldDef[] = [
-  ['docType', 'Document Type'], ['invoiceNo', 'Invoice No.'], ['invoiceDate', 'Invoice Date'],
-  ['postingDate', 'Posting Date'], ['vendorName', 'Vendor Name'], ['vendorTaxId', 'Tax ID'],
-  ['branch', 'Branch'], ['poRef', 'PO Reference'], ['currency', 'Currency'], ['paymentTerms', 'Payment Terms'],
+  ['docType', 'Document Type'], ['invoiceNo', 'Invoice No.'], ['invoiceDate', 'Invoice Date', 'date'],
+  ['postingDate', 'Posting Date', 'date'], ['vendorName', 'Vendor Name'], ['vendorTaxId', 'Tax ID'],
+  ['branch', 'Branch'], ['poRef', 'PO Reference'], ['currency', 'Currency'],
   // Shipping bundle: the goods supplier and ITS invoice no. (import declaration "INVNO.KCCCI260715-012"),
   // which the cost-line Text is built from ("KCC,INV.KCCCI260715-012"). Editable when the read missed it.
   ['goodsSupplier', 'Goods Supplier'], ['goodsInvoiceNo', 'Goods Invoice No. (INVNO.)'],
@@ -329,9 +329,9 @@ export const AP_TRADE_GROUPS: FieldGroup[] = [
         ['SubsequentDebit', '3 Subsequent Debit'],
         ['SubsequentCredit', '4 Subsequent Credit'],
       ]],
-      ['invoiceDate', 'Invoice Date'],     // 2)
+      ['invoiceDate', 'Invoice Date', 'date'], // 2)
       ['invoiceNo', 'Reference'],          // 3)
-      ['postingDate', 'Posting Date'],     // 4)
+      ['postingDate', 'Posting Date', 'date'], // 4)
       ['totalAmount', 'Amount'],           // 5)
       ['currency', 'Currency'],            // 6)
       ['exchangeRate', 'Exchange Rate'],   // 6b)
@@ -384,11 +384,6 @@ export const AP_TRADE_GROUPS: FieldGroup[] = [
   {
     title: 'Payment',
     fields: [
-      ['baselineDate', 'Baseline Date'],  
-      ['dueDate', 'Due Date'], 
-      ['paymentTerms', 'Payment Terms'],
-      // The SAP key that is sent (5004), as SAP's Payment tab shows it (AP, 2026-11-18).
-      ['paymentTermsCode', 'Pyt Terms (SAP key)'],
       ['paymentMethod', 'Payment Method'], 
       ['paymentBlock', 'Payment Block', 'select', [ 
         ['', 'Free for payment'],
@@ -417,9 +412,9 @@ export const AP_TRADE_GROUPS: FieldGroup[] = [
   {
     title: 'Tax',
     fields: [
-      ['taxReportingDate', 'Tax Reporting Date'], // 5)
-      ['taxFulfillDate', 'Tax Fulfill Date'],     // 6)
-      ['taxDate', 'Tax Date'],                     // 7)
+      ['taxReportingDate', 'Tax Reporting Date', 'date'], // 5)
+      ['taxFulfillDate', 'Tax Fulfill Date', 'date'], // 6)
+      ['taxDate', 'Tax Date', 'date'], // 7)
       ['calculateTax', 'Calculate Tax', 'checkbox'], // 8)
     ],
   },

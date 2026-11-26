@@ -11,12 +11,14 @@ export default function TabbedGroups({
   posted,
   onEdit,
   extras,
+  beforeFields,
 }: {
   groups: FieldGroup[];
   values: Record<string, any>;
   posted?: boolean;
   onEdit: (key: string, value: string) => void;
   extras?: Record<string, ReactNode>;
+  beforeFields?: Record<string, ReactNode>;
 }) {
   const [active, setActive] = useState(groups[0]?.title ?? '');
   const current = groups.find((g) => g.title === active) || groups[0];
@@ -34,6 +36,7 @@ export default function TabbedGroups({
           </button>
         ))}
       </div>
+      {beforeFields?.[current.title]}
       {current.fields.length > 0 && (
         <div className="card-b">
           <FieldGrid

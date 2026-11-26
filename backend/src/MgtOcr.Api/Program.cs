@@ -236,6 +236,8 @@ builder.Services.AddSingleton<MgtOcr.Api.Auth.SingleSessionService>();
 // thread (many files at once would otherwise time out the upload request and hit the OCR rate limit).
 builder.Services.AddSingleton<OcrJobRepository>();
 builder.Services.AddSingleton<JobLogRepository>();
+builder.Services.AddHttpClient(nameof(MgtOcr.Api.Services.SapUsdThbWorker));
+builder.Services.AddHostedService<MgtOcr.Api.Services.SapUsdThbWorker>();
 // Page memory for AP bundles (sql/43_page_memory.sql): which page of a bundle is what.
 builder.Services.AddSingleton<MgtOcr.Api.Services.PageMemoryStore>();
 builder.Services.AddSingleton<MgtOcr.Api.Services.WhtVendorRules>();

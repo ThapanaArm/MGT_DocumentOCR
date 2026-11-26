@@ -70,7 +70,8 @@ public record SapPurchaseOrderHead(
     string SupplierName,
     string CompanyCode,
     string PurchasingOrganization,
-    string Currency);
+    string Currency,
+    string PaymentTerms = "");
 
 /// <summary>Read-only lookup of a purchase order's items — API_PURCHASEORDER_PROCESS_SRV.
 ///
@@ -216,7 +217,8 @@ public class SapPurchaseOrderClient(AppConfig config, HttpClient httpClient)
                 GetString(el, "SupplierName") ?? "",
                 GetString(el, "CompanyCode") ?? "",
                 GetString(el, "PurchasingOrganization") ?? "",
-                GetString(el, "DocumentCurrency") ?? "");
+                GetString(el, "DocumentCurrency") ?? "",
+                GetString(el, "PaymentTerms") ?? "");
         }
         catch
         {

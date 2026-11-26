@@ -6,42 +6,37 @@ import { TAX_CODES, isDutyRow } from '../../constants/fields';
    TxValidFrm, Tax Rate. */
 export type TaxItem = Record<string, any>;
 
-/* Item, Tax Code and Input Tax Type say the same thing three ways and must agree (AP, 2026-11-18):
-   D1 = Deferred tax = "Deferred Input VAT", V1 = Input tax = "Input VAT". Changing any one of them
-   moves the other two. VX / duty rows are left alone. */
-const VAT_LABELS = { INPUT: 'Input VAT', DEFERRED: 'Deferred Input VAT' } as const;
-const isVatLabel = (l: unknown) => {
-  const s = String(l ?? '').trim().toLowerCase();
-  return s === '' || s === 'input vat' || s === 'deferred input vat';
-};
-function shownLabel(t: TaxItem): string {
-  if (!isVatLabel(t.label)) return String(t.label ?? '');
-  const code = String(t.taxCode ?? '').trim().toUpperCase();
-  if (/^D[0-9]$/.test(code)) return VAT_LABELS.DEFERRED;
-  if (/^V[0-9]$/.test(code)) return VAT_LABELS.INPUT;
-  return String(t.label ?? '');
+const VAT_LABELS = { INPUT: 'Input VAT', DEFERRED: 'Deferred Input VAT', EXEMPT: 'Exempt VAT' } as const;
+const isDutyOrFee = (t: TaxItem) =>
+  isDutyRow({ extCode: t.extCode, desc: t.label }) || /^customs fee$/i.test(String(t.label ?? '').trim());
+
+function vatKindForCode(code: string): keyof typeof VAT_LABELS | undefined {
+  if (/^D[0-2]$/.test(code)) return 'DEFERRED';
+  if (/^V[0-4]$/.test(code)) return 'INPUT';
+  if (code === 'VX') return 'EXEMPT';
 }
+
 function linkedEdits(t: TaxItem, key: string, value: string): Array<[string, string]> {
-  const out: Array<[string, string]> = [[key, value]];
-  const code = String(t.taxCode ?? '').trim().toUpperCase();
-  const digit = /^[VD]([0-9])$/.test(code) ? code[1] : '1';
-  const setKind = (kind: 'INPUT' | 'DEFERRED') => {
-    if (key !== 'taxKind') out.push(['taxKind', kind]);
-    if (key !== 'taxCode') out.push(['taxCode', (kind === 'DEFERRED' ? 'D' : 'V') + digit]);
-    if (key !== 'label' && isVatLabel(t.label)) out.push(['label', VAT_LABELS[kind]]);
-  };
-  if (key === 'taxCode') {
-    const v = value.trim().toUpperCase();
-    if (/^D[0-9]$/.test(v)) { out.push(['taxKind', 'DEFERRED']); if (isVatLabel(t.label)) out.push(['label', VAT_LABELS.DEFERRED]); }
-    else if (/^V[0-9]$/.test(v)) { out.push(['taxKind', 'INPUT']); if (isVatLabel(t.label)) out.push(['label', VAT_LABELS.INPUT]); }
-  } else if (key === 'taxKind' && (value === 'INPUT' || value === 'DEFERRED')) {
-    if (code !== 'VX') setKind(value);
-  } else if (key === 'label') {
-    const s = value.trim().toLowerCase();
-    if (s === 'deferred input vat') setKind('DEFERRED');
-    else if (s === 'input vat') setKind('INPUT');
+  if (isDutyOrFee(t)) return [[key, value]];
+  let code = String(t.taxCode ?? '').trim().toUpperCase();
+  if (key === 'taxKind') {
+    if (value !== 'INPUT' && value !== 'DEFERRED') return [];
+    // Only these rates have both a standard and a deferred SAP code.
+    if (code && !/^[VD][0-2]$/.test(code)) return [];
+    code = (value === 'DEFERRED' ? 'D' : 'V') + (code ? code[1] : '1');
+  } else if (key === 'taxCode') {
+    code = value.trim().toUpperCase();
+  } else {
+    return [[key, value]];
   }
-  return out;
+
+  const kind = vatKindForCode(code);
+  if (!kind) {
+    return vatKindForCode(String(t.taxCode ?? '').trim().toUpperCase())
+      ? [['taxCode', code], ['taxKind', ''], ['label', '']]
+      : [['taxCode', code]];
+  }
+  return [['taxCode', code], ['taxKind', kind === 'EXEMPT' ? '' : kind], ['label', VAT_LABELS[kind]]];
 }
 
 export default function TaxDataTable({
@@ -51,6 +46,7 @@ export default function TaxDataTable({
   onAdd,
   onDelete,
   bare,
+  title = 'Tax Data',
 }: {
   items: TaxItem[];
   posted: boolean;
@@ -58,6 +54,7 @@ export default function TaxDataTable({
   onAdd: () => void;
   onDelete: (i: number) => void;
   bare?: boolean; // render without the outer .card wrapper (for use inside a tabbed card)
+  title?: string;
 }) {
   const edit = (i: number, key: string, value: string) => {
     for (const [k, v] of linkedEdits(items[i] || {}, key, value)) onEdit(i, k, v);
@@ -74,7 +71,7 @@ export default function TaxDataTable({
     <div className={bare ? undefined : 'card'}>
       {!bare && (
         <div className="card-h">
-          <h2>Tax Data ({items.length})</h2>
+          <h2>{title} ({items.length})</h2>
           <div className="sp" />
           {addBtn}
         </div>
@@ -82,15 +79,11 @@ export default function TaxDataTable({
       <div className="card-b">
         {bare && (
           <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-            <p className="sec-title" style={{ margin: 0 }}>Tax Data</p>
+            <p className="sec-title" style={{ margin: 0 }}>{title}</p>
             {addBtn}
           </div>
         )}
         <div className="tw">
-          <datalist id="tax-item-labels">
-            <option value="Input VAT" />
-            <option value="Deferred Input VAT" />
-          </datalist>
           <table>
             <thead>
               <tr>
@@ -112,17 +105,17 @@ export default function TaxDataTable({
             </thead>
             <tbody>
               {items.length ? (
-                items.map((t, i) => (
-                  <tr key={i}>
+                items.map((t, i) => {
+                  const code = String(t.taxCode ?? '').trim().toUpperCase();
+                  const dutyOrFee = isDutyOrFee(t);
+                  const vatKind = dutyOrFee ? undefined : vatKindForCode(code);
+                  return <tr key={i}>
                     <td>
                       <input
-                        // A VAT row's name follows its code (rows saved before the three were linked
-                        // still read "Input VAT" next to D1): shown as the code says.
-                        value={shownLabel(t)}
-                        readOnly={posted}
+                        value={vatKind ? VAT_LABELS[vatKind] : String(t.label ?? '')}
+                        readOnly={posted || Boolean(vatKind)}
                         onChange={(e) => edit(i, 'label', e.target.value)}
                         placeholder="e.g. Input VAT, Import Duty"
-                        list="tax-item-labels"
                       />
                     </td>
                     <td>
@@ -148,7 +141,7 @@ export default function TaxDataTable({
                     </td>
                     <td>
                       <select
-                        value={t.taxCode || ''}
+                        value={code}
                         disabled={posted}
                         onChange={(e) => edit(i, 'taxCode', e.target.value)}
                       >
@@ -166,17 +159,18 @@ export default function TaxDataTable({
                           A duty row (Excise Tax, Interior Tax, Import Duty) is not input VAT at
                           all — there is nothing to claim and nothing to defer — so it shows a dash
                           rather than an empty dropdown that reads as a field somebody forgot. */}
-                      {isDutyRow({ desc: t.label }) ? (
-                        <span className="muted" title="Duty is not input VAT — it has no input-tax type">
+                      {dutyOrFee || vatKind === 'EXEMPT' ? (
+                        <span className="muted" title="No input-tax type">
                           —
                         </span>
                       ) : (
                         <select
-                          value={t.taxKind || ''}
-                          disabled={posted}
+                          value={vatKind ?? t.taxKind ?? ''}
+                          disabled={posted || (code !== '' && !/^[VD][0-2]$/.test(code))}
+                          title={/^V[34]$/.test(code) ? 'Select the Tax Code to change this tax type' : undefined}
                           onChange={(e) => edit(i, 'taxKind', e.target.value)}
                         >
-                          <option value="">— Select —</option>
+                          <option value="" disabled>— Select —</option>
                           <option value="INPUT">Input tax</option>
                           <option value="DEFERRED">Deferred tax</option>
                         </select>
@@ -258,8 +252,8 @@ export default function TaxDataTable({
                         </button>
                       )}
                     </td>
-                  </tr>
-                ))
+                  </tr>;
+                })
               ) : (
                 <tr>
                   <td colSpan={14} className="empty">
@@ -270,7 +264,7 @@ export default function TaxDataTable({
             </tbody>
             <tfoot>
               <tr className="totrow">
-                <td colSpan={2} style={{ textAlign: 'right' }}>Tax Total</td>
+                <td colSpan={2} style={{ textAlign: 'right' }}>{title === 'Tax Data' ? 'Tax Total' : 'ยอดภาษีตามใบกำกับ'}</td>
                 <td className="num">{fmt(total)}</td>
                 <td colSpan={11} />
               </tr>
