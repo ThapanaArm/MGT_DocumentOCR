@@ -1,4 +1,5 @@
-﻿using System.Text.Json;
+﻿using Microsoft.Extensions.Caching.Memory;
+using System.Text.Json;
 using Dapper;
 using MgtOcr.Core;
 using MgtOcr.Core.Auth;
@@ -20,7 +21,7 @@ namespace MgtOcr.Api.Controllers;
 [ApiController]
 [ServiceFilter(typeof(DepartmentAccessFilter))]
 public class DocumentsController(DocumentRepository repo, MasterRepository masters, OcrEngine ocr,
-    SapClient sap, SapBusinessPartnerClient sapBp, AppConfig config, ICurrentUserAccessor currentUser,
+    SapClient sap, SapBusinessPartnerClient sapBp, IMemoryCache cache, AppConfig config, ICurrentUserAccessor currentUser,
     OcrJobRepository jobs, MgtOcr.Api.Services.DocumentIngestService ingest,
     SapProductClient sapProduct, SapPurchaseOrderClient sapPo, FileArchiveRepository archive, MgtOcr.Api.Services.GraphArchiveClient graph,
     SalesOrderPostRepository soPosts, JobLogRepository jobLog, ILogger<DocumentsController> logger,
@@ -1309,53 +1310,71 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     // tab can fill Goods Receipt (Material Doc.) / Fiscal Year instead of asking for them by hand
     // (AP, 2026-11-18). A receipt cancelled by a 102 is returned with reversed = true.
     [HttpGet("api/sap/po/{po}/goods-receipts")]
-    public async Task<IActionResult> PoGoodsReceipts(string po)
+    public async Task<IActionResult> PoGoodsReceipts(string po, [FromQuery] bool miroGoods = false)
     {
         po = (po ?? "").Trim();
         if (po.Length == 0) throw new HttpApiException(400, "PO is required");
         if (string.IsNullOrWhiteSpace(config.SapMaterialDocumentBaseUrl))
             return Ok(new { configured = false, receipts = Array.Empty<object>() });
         List<System.Text.Json.JsonElement> rows;
-        try { rows = await sapPo.GoodsReceiptItemsAsync(po); }
+        try { rows = await sapPo.GoodsReceiptItemsAsync(po, includePostingDate: miroGoods); }
         catch (Exception ex) { throw new HttpApiException(502, $"อ่าน Goods Receipt ของ PO {po} จาก SAP ไม่ได้: {ex.Message}"); }
 
-        static string S(System.Text.Json.JsonElement e, string n) =>
-            e.TryGetProperty(n, out var v) ? (v.ValueKind == System.Text.Json.JsonValueKind.String ? v.GetString() ?? "" : v.ToString()) : "";
         static double N(System.Text.Json.JsonElement e, string n) =>
-            double.TryParse(S(e, n), System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var d) ? d : 0;
-        static string D(string s)
-        {
-            var m = System.Text.RegularExpressions.Regex.Match(s ?? "", @"-?\d+");
-            return (s ?? "").StartsWith("/Date(") && m.Success && long.TryParse(m.Value, out var ms)
-                ? DateTimeOffset.FromUnixTimeMilliseconds(ms).UtcDateTime.ToString("yyyy-MM-dd")
-                : (s ?? "").Length >= 10 ? s![..10] : s ?? "";
-        }
-        static bool IsReversal(System.Text.Json.JsonElement g) =>
-            string.Equals(S(g, "DebitCreditCode"), "H", StringComparison.OrdinalIgnoreCase)
-            || S(g, "GoodsMovementType") is "102" or "122" or "162";
+            double.TryParse(ReceiptValue(e, n), System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var d) ? d : 0;
 
-        // Receipts a reversal points back at (ReversedMaterialDocument / Year).
-        var cancelled = rows.Where(IsReversal)
-            .Select(g => $"{S(g, "ReversedMaterialDocument")}|{S(g, "ReversedMaterialDocumentYear")}")
-            .Where(k => k != "|").ToHashSet();
-        var receipts = rows.Where(g => !IsReversal(g))
-            .GroupBy(g => (Doc: S(g, "MaterialDocument"), Year: S(g, "MaterialDocumentYear")))
+        var receipts = rows.Where(g => miroGoods ? IsMiroGoodsReceipt(g) : !IsReceiptReversal(g))
+            .GroupBy(g => (Doc: ReceiptValue(g, "MaterialDocument"), Year: ReceiptValue(g, "MaterialDocumentYear")))
             .Where(g => g.Key.Doc.Length > 0)
             .Select(g => new
             {
                 matDoc = g.Key.Doc,
                 year = g.Key.Year,
-                postingDate = D(S(g.First(), "PostingDate")),
-                movementType = S(g.First(), "GoodsMovementType"),
+                postingDate = GoodsReceiptPostingDate(g.First()),
+                movementType = ReceiptValue(g.First(), "GoodsMovementType"),
                 qty = Math.Round(g.Sum(x => N(x, "QuantityInEntryUnit")), 3),
-                unit = S(g.First(), "EntryUnit"),
-                poItems = g.Select(x => S(x, "PurchaseOrderItem").TrimStart('0')).Where(x => x.Length > 0).Distinct().ToList(),
-                reversed = cancelled.Contains($"{g.Key.Doc}|{g.Key.Year}"),
+                unit = ReceiptValue(g.First(), "EntryUnit"),
+                poItems = g.Select(x => ReceiptValue(x, "PurchaseOrderItem").TrimStart('0')).Where(x => x.Length > 0).Distinct().ToList(),
+                reversed = IsReceiptCancelled(rows, g.Key.Doc, g.Key.Year),
             })
             .OrderByDescending(r => r.year).ThenByDescending(r => r.matDoc)
             .ToList();
         return Ok(new { configured = true, receipts });
     }
+
+    private static string ReceiptValue(JsonElement row, string name) =>
+        row.ValueKind == JsonValueKind.Object && row.TryGetProperty(name, out var value) ? value.ToString().Trim() : "";
+
+    private static bool IsReceiptReversal(JsonElement row) =>
+        ReceiptValue(row, "DebitCreditCode").Equals("H", StringComparison.OrdinalIgnoreCase)
+        || ReceiptValue(row, "GoodsMovementType") is "102" or "122" or "162";
+
+    private static bool IsMiroGoodsReceipt(JsonElement row) =>
+        ReceiptValue(row, "GoodsMovementType") == "101" && !IsReceiptReversal(row);
+
+    private static bool IsReceiptCancelled(IEnumerable<JsonElement> rows, string document, string year) =>
+        rows.Any(row => (ReceiptValue(row, "MaterialDocument") == document && ReceiptValue(row, "MaterialDocumentYear") == year
+                && ReceiptValue(row, "GoodsMovementIsCancelled").ToUpperInvariant() is "TRUE" or "X")
+            || (IsReceiptReversal(row) && ReceiptValue(row, "ReversedMaterialDocument") == document
+                && ReceiptValue(row, "ReversedMaterialDocumentYear") == year));
+
+    private static string GoodsReceiptPostingDate(JsonElement row)
+    {
+        var raw = row.TryGetProperty("to_MaterialDocumentHeader", out var header) ? ReceiptValue(header, "PostingDate") : "";
+        if (raw.Length == 0) raw = ReceiptValue(row, "PostingDate");
+        var culture = System.Globalization.CultureInfo.InvariantCulture;
+        var match = System.Text.RegularExpressions.Regex.Match(raw, @"^/Date\((-?\d+)(?:[+-]\d{4})?\)/$");
+        if (match.Success && long.TryParse(match.Groups[1].Value, out var ms)
+            && ms is >= -62135596800000L and <= 253402300799999L)
+            return DateTimeOffset.FromUnixTimeMilliseconds(ms).UtcDateTime.ToString("yyyy-MM-dd", culture);
+        return raw.Length >= 10 && DateOnly.TryParseExact(raw[..10], "yyyy-MM-dd", culture,
+            System.Globalization.DateTimeStyles.None, out var date) ? date.ToString("yyyy-MM-dd", culture) : "";
+    }
+
+    private static bool UsesMiroGoodsPostingDate(Dictionary<string, object?> doc) =>
+        doc.GetStr("module") == "AP"
+        && Export.SapImportSupplierInvoiceExcel.IsPoKeyed(doc)
+        && (doc.Get("header") as Dictionary<string, object?>).GetStr("refDocType").Trim() is not ("2" or "3");
 
     // GET /api/documents/123/pages → { count, isPdf }. The "View document" frames are drawn over
     // page pictures, not over the browser's PDF viewer, so the screen needs to know how many there are.
@@ -1944,7 +1963,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         var header = (Dictionary<string, object?>)doc["header"]!;
         // Every tax invoice needs its issuer's Tax ID before anything goes to SAP (Accounting,
         // 2026-11-12). The preview still opens so the person can see what is missing.
-        if (forPost && module is "AP" or "II"
+        if (forPost && !Export.GoodsInvoiceTax.Applies(doc) && module is "AP" or "II"
             && Export.DeferredVatReversal.MissingTaxIds(doc) is { Count: > 0 } noTaxId)
             throw new HttpApiException(400, Export.DeferredVatReversal.MissingTaxIdMessage(noTaxId));
         var companyCode = module == "SO"
@@ -1996,6 +2015,9 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             var poRef = Export.SupplierInvoicePayload.PoNumber(header);
             var poItems = new List<MgtOcr.Sap.SapPurchaseOrderItem>();
             var goodsReceiptItems = new List<System.Text.Json.JsonElement>();
+            var apCompany = (await ExportCompanyAsync(Convert.ToInt32(doc.Get("docId") ?? 0)))?.CompanyCode
+                ?? config.SapCompanyCode;
+            var requireMiroReceipt = UsesMiroGoodsPostingDate(doc) && doc.GetStr("status") != "POSTED";
             // The lookup is skipped entirely once every goods line already names its PO item:
             // the person assigned them on the PO Reference tab, and those numbers are what the
             // payload uses anyway. That also keeps the flow working while the communication
@@ -2040,7 +2062,37 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             // Goods keyed against the PO: the goods receipt names the material document, year and
             // GR item SAP wants on every PO line of a GR-based invoice (M8/375). Best effort — the
             // screen's MatDoc number still stands in when SAP cannot be read.
-            if (poRef.Length > 0 && !isDeliveryCostDoc && sapPo.Configured
+            if (requireMiroReceipt)
+            {
+                var matDoc = header.GetStr("refMatDoc").Trim();
+                var year = header.GetStr("refMatDocYear").Trim();
+                if (poRef.Length == 0 || matDoc.Length == 0)
+                    throw new HttpApiException(400, "Select a Goods Receipt (Material Doc.) for the PO in PO Reference.");
+                if (string.IsNullOrWhiteSpace(config.SapMaterialDocumentBaseUrl))
+                    throw new HttpApiException(502, "SAP Material Document API is not configured.");
+                try { goodsReceiptItems = await sapPo.GoodsReceiptItemsAsync(poRef, includePostingDate: true); }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "[AP] MIRO goods-receipt lookup failed for PO {Po}", poRef);
+                    throw new HttpApiException(502, $"Could not verify Goods Receipt {matDoc} for PO {poRef} in SAP. Please retry.");
+                }
+                var matches = goodsReceiptItems.Where(r => IsMiroGoodsReceipt(r)
+                    && ReceiptValue(r, "MaterialDocument") == matDoc
+                    && (year.Length == 0 || ReceiptValue(r, "MaterialDocumentYear") == year))
+                    .GroupBy(r => ReceiptValue(r, "MaterialDocumentYear")).ToList();
+                if (matches.Count != 1 || matches[0].Key.Length == 0)
+                    throw new HttpApiException(400, $"Check the Material Doc. and Fiscal Year for Goods Receipt {matDoc} on PO {poRef}.");
+                year = matches[0].Key;
+                if (IsReceiptCancelled(goodsReceiptItems, matDoc, year))
+                    throw new HttpApiException(400, $"Goods Receipt {matDoc}/{year} has been reversed. Check PO Reference.");
+                var postingDate = GoodsReceiptPostingDate(matches[0].First());
+                if (postingDate.Length == 0)
+                    throw new HttpApiException(400, $"SAP did not return a valid Posting Date for Goods Receipt {matDoc}/{year}.");
+                header["postingDate"] = postingDate;
+                header["refMatDocYear"] = year;
+                goodsReceiptItems = matches[0].ToList();
+            }
+            else if (poRef.Length > 0 && !isDeliveryCostDoc && sapPo.Configured
                 && !string.IsNullOrWhiteSpace(config.SapMaterialDocumentBaseUrl)
                 && Export.SapImportSupplierInvoiceExcel.IsPoKeyed(doc))
             {
@@ -2107,8 +2159,6 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
                     }
                 }
             }
-            var apCompany = (await ExportCompanyAsync(Convert.ToInt32(doc.Get("docId") ?? 0)))?.CompanyCode
-                ?? config.SapCompanyCode;
             var party = doc.GetStr("partnerCode") is { Length: > 0 } pc ? pc : header.GetStr("vendorCode");
             // The payment-terms KEY the invoice needs when the purchase order carries none
             // (M8_2/169). The words on the document ("60 Days After B/L Date") are run through
@@ -2158,13 +2208,15 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             }
             if (vendors.Count <= 1)
             {
+                var goodsTax = await ResolveGoodsTaxAsync(doc, party, forPost);
+                if (goodsTax.Issue.Length > 0) throw new HttpApiException(400, goodsTax.Issue);
                 var only = Export.SupplierInvoicePayload.Build(
                     Export.SupplierInvoicePayload.DocsPerInvoice(doc, party, SameParty)[0], apCompany, party, poItems, source, apTerms, goodsReceiptItems: goodsReceiptItems,
                     taxBaseClearingAccount: config.SapSupplierInvoiceTaxBaseClearingAccount, sameParty: SameParty,
-                    perPo: perPo);
+                    perPo: perPo, requireMiroReceipt: requireMiroReceipt, goodsTax: goodsTax);
                 // One condition billed under two tax codes on a PO with one item for it cannot be one
                 // SAP document (M8/321 / FF812) — it goes as one document per tax code.
-                return (TestReference(Export.SupplierInvoicePayload.SplitByTaxCode(only).Select(MapVendors).ToList(), doc), res);
+                return (TestReference(Export.SupplierInvoicePayload.SplitByTaxCode(only).Select(p => MapVendors(p, requireMiroReceipt)).ToList(), doc), res);
             }
             // A supplier whose invoice SAP cannot take yet (customs import VAT larger than the fee it
             // sits on) is held back, and the rest of the bundle — the agent's Local costs — goes now.
@@ -2272,10 +2324,12 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
     /// party, every delivery-cost line's FreightSupplier and every PO line's ReferenceDocument.
     /// The document itself is left alone: re-coding its lines detaches the Tax tab rows, which are
     /// keyed on the original code.</summary>
-    private Dictionary<string, object?> MapVendors(Dictionary<string, object?> payload)
+    private Dictionary<string, object?> MapVendors(Dictionary<string, object?> payload) => MapVendors(payload, false);
+
+    private Dictionary<string, object?> MapVendors(Dictionary<string, object?> payload, bool preserveGoodsReceipt)
     {
         var matDocs = config.SapSupplierInvoiceMatDocMap;
-        if (matDocs.Count > 0
+        if (!preserveGoodsReceipt && matDocs.Count > 0
             && payload.GetValueOrDefault("to_SuplrInvcItemPurOrdRef") is System.Collections.IEnumerable grLines)
             foreach (var it in grLines)
                 if (it is Dictionary<string, object?> row && row.GetValueOrDefault("ReferenceDocument") is string md
@@ -2355,6 +2409,47 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         for (var i = 0; i < lines.Count; i++)
             if (lines[i].GetStr("materialCode").Length > 0) mLines[i.ToString()] = lines[i].Get("materialCode");
         return m;
+    }
+
+    [HttpPost("api/documents/{docId:int}/goods-tax")]
+    public async Task<IActionResult> PreviewGoodsTax(int docId, [FromBody] Dictionary<string, object?> body)
+    {
+        var doc = await repo.GetDocumentAsync(docId);
+        var draft = JsonBodyHelpers.Unwrap(body);
+        if (doc.GetStr("module") != "AP" || !Export.SapImportSupplierInvoiceExcel.IsPoKeyed(doc)
+            || draft.Get("header") is not Dictionary<string, object?> header || draft.Get("lines") is not List<object?> lines)
+            throw new HttpApiException(400, "Provide the header and lines of an AP Goods document.");
+        doc["header"] = header;
+        doc["lines"] = lines.OfType<Dictionary<string, object?>>().ToList();
+        return Ok(await ResolveGoodsTaxAsync(doc, draft.GetStr("vendorCode")));
+    }
+
+    private async Task<Export.GoodsInvoiceTaxDecision> ResolveGoodsTaxAsync(
+        Dictionary<string, object?> doc, string party, bool forPost = false)
+    {
+        if (!Export.GoodsInvoiceTax.Applies(doc) || doc.GetStr("status") == "POSTED") return new();
+        if (string.IsNullOrWhiteSpace(party)) return new(Issue: "Match the goods supplier before checking its SAP tax details.");
+        var code = config.SapSupplierInvoiceVendorMap.TryGetValue(party.Trim(), out var mapped) ? mapped : party.Trim();
+        var user = await currentUser.RequireAsync();
+        var group = config.CompanyForUser(user.PrimaryCompany?.CompanyCode, user.SalesOrganization)?.AuthorizationGroup;
+        if (string.IsNullOrWhiteSpace(group))
+            return new(Issue: "No SAP Business Partner authorization group is configured for this company.");
+        try
+        {
+            var key = ("AP Goods Supplier Tax", group, code);
+            if (forPost || !cache.TryGetValue<SapSupplierTaxProfile>(key, out var profile))
+            {
+                profile = await sapBp.FindSupplierTaxProfileAsync(code, group);
+                if (profile != null) cache.Set(key, profile, TimeSpan.FromMinutes(2));
+            }
+            return profile is null ? new(Issue: $"SAP Vendor Master did not return supplier {code}. Check the matched vendor.")
+                : Export.GoodsInvoiceTax.Resolve(doc, party, profile);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "[AP] SAP vendor tax lookup failed for {Vendor}", code);
+            return new(Issue: $"Could not check vendor {code} in SAP Vendor Master. Retry the check before sending.");
+        }
     }
 
     [HttpGet("api/documents/{docId:int}/payload")]
@@ -2893,6 +2988,15 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
                 var documentSapDocNo = module is "AP" or "II"
                     ? results.Select(x => x.Result.SapDocNo).FirstOrDefault(n => !string.IsNullOrWhiteSpace(n)) ?? ""
                     : Cut50(sapDocNos);
+                if (UsesMiroGoodsPostingDate(doc))
+                {
+                    var goodsHeader = (Dictionary<string, object?>)doc["header"]!;
+                    await conn.ExecuteAsync($"""
+                        UPDATE {docT} SET PostingDate=CONVERT(date, @postingDate, 23),
+                            HeaderJson=JSON_MODIFY(JSON_MODIFY(HeaderJson, '$.postingDate', @postingDate), '$.refMatDocYear', @year)
+                        WHERE DocId=@docId
+                        """, new { docId, postingDate = goodsHeader.GetStr("postingDate"), year = goodsHeader.GetStr("refMatDocYear") }, tx);
+                }
                 await conn.ExecuteAsync($"UPDATE {docT} SET Status='POSTED', SapDocNo=@sapDocNo, CompanyCode=@companyCode, PostedAt=SYSDATETIME(), PostedBy=@user, UpdatedAt=SYSDATETIME() WHERE DocId=@docId",
                     new { sapDocNo = documentSapDocNo, companyCode, user, docId }, tx);
             }

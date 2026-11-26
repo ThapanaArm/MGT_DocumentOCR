@@ -140,13 +140,14 @@ public class SapPurchaseOrderClient(AppConfig config, HttpClient httpClient)
 
     /// <summary>Goods-receipt items of a purchase order — API_MATERIAL_DOCUMENT_SRV /
     /// A_MaterialDocumentItem. Raw, every field SAP sends. Empty when the service is not configured.</summary>
-    public async Task<List<JsonElement>> GoodsReceiptItemsAsync(string purchaseOrder)
+    public async Task<List<JsonElement>> GoodsReceiptItemsAsync(string purchaseOrder, bool includePostingDate = false)
     {
         var po = (purchaseOrder ?? "").Trim();
         var baseUrl = config.SapMaterialDocumentBaseUrl;
         if (string.IsNullOrWhiteSpace(baseUrl) || po.Length == 0) return [];
         var url = $"{baseUrl.TrimEnd('/')}/A_MaterialDocumentItem" +
                   $"?$filter={Uri.EscapeDataString($"PurchaseOrder eq '{EscapeODataLiteral(po)}'")}&$top=500&$format=json";
+        if (includePostingDate) url += "&$expand=to_MaterialDocumentHeader";
         using var req = new HttpRequestMessage(HttpMethod.Get, url);
         var auth = string.IsNullOrWhiteSpace(config.SapMaterialDocumentAuthHeader)
             ? config.SapPurchaseOrderAuthHeader : config.SapMaterialDocumentAuthHeader;

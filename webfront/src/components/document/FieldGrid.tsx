@@ -9,6 +9,7 @@ export default function FieldGrid({
   posted,
   numeric,
   required,
+  readOnlyField,
   onEdit,
 }: {
   fields: FieldDef[];
@@ -16,6 +17,7 @@ export default function FieldGrid({
   posted?: boolean;
   numeric?: boolean;
   required?: string[]; // keys shown with a required (*) marker
+  readOnlyField?: string;
   onEdit: (key: string, value: string) => void;
 }) {
   return (
@@ -58,10 +60,10 @@ export default function FieldGrid({
                   type="text"
                   aria-label={label}
                   value={String(raw ?? '')}
-                  readOnly={posted}
+                  readOnly={posted || k === readOnlyField}
                   onChange={(e) => onEdit(k, e.currentTarget.value)}
                 />
-                {!posted && (
+                {!posted && k !== readOnlyField && (
                   <span className="field-date-picker">
                     <i className="fa-regular fa-calendar" aria-hidden="true" />
                     <input
@@ -92,7 +94,7 @@ export default function FieldGrid({
               <input
                 type="text"
                 value={raw == null ? '' : String(raw)}
-                readOnly={posted}
+                readOnly={posted || k === readOnlyField}
                 onChange={(e) => onEdit(k, e.target.value)}
               />
             )}

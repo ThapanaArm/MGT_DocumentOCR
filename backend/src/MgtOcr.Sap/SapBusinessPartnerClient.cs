@@ -10,6 +10,9 @@ namespace MgtOcr.Sap;
 // always the tax number SAP itself has on file for this partner, regardless of whether the
 // search was keyed by tax ID or by name, so the UI can show SAP's real value even when the
 // document being matched had no Tax ID of its own (or a different one) to search with.
+public record SapSupplierTaxNumber(string Type, string Number);
+public record SapSupplierTaxProfile(string? Country, IReadOnlyList<SapSupplierTaxNumber> TaxNumbers);
+
 public record BusinessPartner(
     string BusinessPartnerId, string BusinessPartnerName, string? BusinessPartnerFullName = null,
     bool BusinessPartnerIsBlocked = false, string? AddressCity = null, string? AddressStreet = null,
@@ -261,6 +264,46 @@ public class SapBusinessPartnerClient(AppConfig config, HttpClient httpClient)
     /// SAP Gateway (it was returning 0 even for real codes like 2000028), so this is an EXACT match —
     /// the person types the full code. Same AuthorizationGroup scoping and Enrich (Tax ID + address)
     /// as the other lookups.</summary>
+    public async Task<SapSupplierTaxProfile?> FindSupplierTaxProfileAsync(string code, string authorizationGroup)
+    {
+        var baseUrl = config.SapSupplierInvoiceBusinessPartnerBaseUrl.TrimEnd('/');
+        if (baseUrl.Length == 0 || authorizationGroup.Length == 0 || code.Length == 0 || (code.Length > 10 || !code.All(char.IsAsciiLetterOrDigit)))
+            return null;
+        var ids = new List<string> { code };
+        if (code.All(char.IsAsciiDigit) && code.Length < 10) ids.Add(code.PadLeft(10, '0'));
+        var partners = await FetchByIdsAsync(ids, ids.Count, authorizationGroup, baseUrl);
+        var partner = partners.FirstOrDefault(bp => bp.BusinessPartnerId == code)
+            ?? (partners.Count == 1 ? partners[0] : null);
+        if (partner is null) return null;
+
+        var filter = $"BusinessPartner eq '{EscapeODataLiteral(partner.BusinessPartnerId)}'";
+        var addressesTask = GetJsonAsync($"{baseUrl}/A_BusinessPartnerAddress?$filter={Uri.EscapeDataString(filter)}&$select=AddressID,Country");
+        var taxesTask = GetJsonAsync($"{baseUrl}/A_BusinessPartnerTaxNumber?$filter={Uri.EscapeDataString(filter)}&$select=BPTaxType,BPTaxNumber");
+        await Task.WhenAll(addressesTask, taxesTask);
+
+        var addresses = EnumerateResults(await addressesTask).ToList();
+        var countries = addresses.Select(row => GetString(row, "Country")?.Trim().ToUpperInvariant())
+            .Where(country => !string.IsNullOrEmpty(country)).Distinct().ToList();
+        string? country = countries.Count == 1 ? countries[0] : null;
+        if (countries.Count > 1)
+        {
+            var defaultFilter = Uri.EscapeDataString(filter + " and AddressUsage eq 'XXDEFAULT'");
+            var usage = await GetJsonAsync($"{baseUrl}/A_BuPaAddressUsage?$filter={defaultFilter}&$select=AddressID,StandardUsage");
+            var defaults = EnumerateResults(usage).ToList();
+            var standard = defaults.Where(row => row.TryGetProperty("StandardUsage", out var flag) &&
+                (flag.ValueKind == JsonValueKind.True || flag.ToString() == "X")).ToList();
+            var addressIds = (standard.Count > 0 ? standard : defaults)
+                .Select(row => GetString(row, "AddressID")).Where(id => !string.IsNullOrEmpty(id)).ToHashSet();
+            var mainCountries = addresses.Where(row => addressIds.Contains(GetString(row, "AddressID")))
+                .Select(row => GetString(row, "Country")?.Trim().ToUpperInvariant())
+                .Where(value => !string.IsNullOrEmpty(value)).Distinct().ToList();
+            if (mainCountries.Count == 1) country = mainCountries[0];
+        }
+        var taxNumbers = EnumerateResults(await taxesTask).Select(row => new SapSupplierTaxNumber(
+            GetString(row, "BPTaxType") ?? "", GetString(row, "BPTaxNumber") ?? "")).ToList();
+        return new(country, taxNumbers);
+    }
+
     public async Task<List<BusinessPartner>> FindByCodeAsync(string code, string? authorizationGroup = null, int top = 20)
     {
         var baseUrl = config.SapBusinessPartnerBaseUrl;
@@ -674,9 +717,9 @@ public class SapBusinessPartnerClient(AppConfig config, HttpClient httpClient)
 
     /// <summary>Re-fetch full Business Partner rows (name etc.) for a small, known set of codes.</summary>
     private async Task<List<BusinessPartner>> FetchByIdsAsync(
-        List<string> businessPartnerIds, int top, string? authorizationGroup = null)
+        List<string> businessPartnerIds, int top, string? authorizationGroup = null, string? serviceBaseUrl = null)
     {
-        var baseUrl = config.SapBusinessPartnerBaseUrl;
+        var baseUrl = serviceBaseUrl ?? config.SapBusinessPartnerBaseUrl;
         // OR'd into one $filter so this is a single extra round trip regardless of how many
         // tax-number rows matched (normally at most one distinct BP per Tax ID anyway).
         var filter = WithAuthorizationGroup(

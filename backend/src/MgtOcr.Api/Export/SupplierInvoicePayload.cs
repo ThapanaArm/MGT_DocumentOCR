@@ -52,7 +52,9 @@ public static class SupplierInvoicePayload
         Func<string, string>? sameParty = null,
         // One shipping bundle for several purchase orders (FORM SHIPPING EXPENSE per PO): each
         // PO's own items and goods receipts, keyed by PO number. Null = the single-PO document.
-        IReadOnlyDictionary<string, PoData>? perPo = null)
+        IReadOnlyDictionary<string, PoData>? perPo = null,
+        bool requireMiroReceipt = false,
+        GoodsInvoiceTaxDecision? goodsTax = null)
     {
         // Two codes for the same SAP supplier — the test tenant's 1000134 and production's 4000357
         // are both PROMPT — are one supplier here. Without this the rows tagged 4000357 (the
@@ -78,7 +80,7 @@ public static class SupplierInvoicePayload
             return string.Equals(Party(v), Party(vendor), StringComparison.OrdinalIgnoreCase);
         }
         var glRows = SapImportSupplierInvoiceExcel.GlRowsFor(doc).Where(Mine).ToList();
-        var taxRows = DeferredVatReversal.EffectiveTaxRows(doc).Where(Mine).ToList();
+        var taxRows = (goodsTax?.TaxRows ?? DeferredVatReversal.EffectiveTaxRows(doc)).Where(Mine).ToList();
         // This document is the Customs Department's (its tax rows are all import VAT receipts).
         var customsParty = taxRows.Count > 0 && taxRows.All(DeferredVatReversal.IsImportVat);
         var isPoKeyed = SapImportSupplierInvoiceExcel.IsPoKeyed(doc);
@@ -209,8 +211,12 @@ public static class SupplierInvoicePayload
 
         var purOrdRef = wantsGoods
             ? PurchaseOrderItems(doc, poRef, poItems, currency, header.GetStr("taxCode").Trim(),
-                matDoc, matDocYear, assignment, itemText, goodsReceiptItems)
+                matDoc, matDocYear, assignment, itemText, goodsReceiptItems, requireMiroReceipt)
             : [];
+        var goodsTaxCode = goodsTax?.Code ?? "";
+        if (goodsTaxCode.Length > 0)
+            foreach (var item in purOrdRef.Cast<Dictionary<string, object?>>())
+                item["TaxCode"] = goodsTaxCode;
 
         // Planned delivery costs. These are NOT G/L lines: the purchase order already booked them
         // as an accrual when the goods were received (document 5000000005 credits 21229108 Local
@@ -333,7 +339,7 @@ public static class SupplierInvoicePayload
         // node — sending one then is what SAP rejects as "Property 'to_SupplierInvoiceTax' is invalid".
         // Unticked (the default here), the amounts we read off the tax invoices are sent as they
         // were reviewed, which is what a Thai input-VAT document needs: one row per tax invoice.
-        var calcTax = !invoiceVx && header.GetStr("calculateTax").Trim() is { Length: > 0 } ct
+        var calcTax = !invoiceVx && goodsTaxCode.Length == 0 && header.GetStr("calculateTax").Trim() is { Length: > 0 } ct
             && !string.Equals(ct, "false", StringComparison.OrdinalIgnoreCase) && ct != "0";
 
         // One row per tax invoice, carrying its own code and base — what the Tax tab holds after
@@ -1951,7 +1957,8 @@ public static class SupplierInvoicePayload
         Dictionary<string, object?> doc, string poRef, IReadOnlyList<SapPurchaseOrderItem> poItems,
         string headerCurrency, string headerTaxCode, string matDoc, string matDocYear,
         string assignment, string itemText,
-        IReadOnlyList<System.Text.Json.JsonElement>? goodsReceiptItems = null)
+        IReadOnlyList<System.Text.Json.JsonElement>? goodsReceiptItems = null,
+        bool requireMiroReceipt = false)
     {
         var result = new List<object>();
         if (doc.Get("lines") is not System.Collections.IEnumerable lines) return result;
@@ -2002,6 +2009,12 @@ public static class SupplierInvoicePayload
             // to learn the GR-based IV flag above -- letting the PO's tax code win as well changed
             // posted documents (a PO item carrying a 7% code turned a 25,600.00 invoice into
             // M8/534 "Balance not zero: 1,792.00-"). So for those lines the screen still decides.
+            var typedGrItem = TypedGrItem(l);
+            var gr = GrRef(goodsReceiptItems, poRef, itemNo, matDoc, matDocYear, typedGrItem, requireMiroReceipt);
+            if (requireMiroReceipt && gr is null)
+                throw new MgtOcr.Core.HttpApiException(400,
+                    $"Goods Receipt {matDoc}/{matDocYear} does not match PO {poRef}, item {itemNo}. Check PO Reference.");
+
             var poFields = assigned.Length > 0 ? null : match;
             result.Add(new Dictionary<string, object?>
             {
@@ -2051,16 +2064,10 @@ public static class SupplierInvoicePayload
                 // receipt read from SAP (API_MATERIAL_DOCUMENT_SRV) supplies the number, year and GR
                 // item of THIS PO item — SAP answers M8/375 "Fill in mandatory field
                 // 'ReferenceDocument, -FiscalYear, -Item'" otherwise. Unknown flag = send.
-                ["ReferenceDocument"] = match?.GrBasedIv == false ? null
-                    : GrRef(goodsReceiptItems, poRef, itemNo, matDoc) is { } gr1 ? gr1.Doc
-                    : matDoc.Length > 0 ? matDoc : null,
-                ["ReferenceDocumentFiscalYear"] = match?.GrBasedIv == false ? null
-                    : GrRef(goodsReceiptItems, poRef, itemNo, matDoc) is { } gr2 ? gr2.Year
-                    : matDoc.Length > 0 ? matDocYear : null,
-                ["ReferenceDocumentItem"] = match?.GrBasedIv == false ? null
-                    : TypedGrItem(l) is { Length: > 0 } typedGr ? typedGr
-                    : GrRef(goodsReceiptItems, poRef, itemNo, matDoc) is { } gr3 ? gr3.Item
-                    : matDoc.Length > 0 ? GrItem(l, no) : null,
+                ["ReferenceDocument"] = match?.GrBasedIv == false ? null : gr?.Doc ?? (matDoc.Length > 0 ? matDoc : null),
+                ["ReferenceDocumentFiscalYear"] = match?.GrBasedIv == false ? null : gr?.Year ?? (matDoc.Length > 0 ? matDocYear : null),
+                ["ReferenceDocumentItem"] = match?.GrBasedIv == false ? null : requireMiroReceipt ? gr?.Item : typedGrItem.Length > 0 ? typedGrItem
+                    : gr?.Item ?? (matDoc.Length > 0 ? GrItem(l, no) : null),
                 // Item Text only: A_SuplrInvcItemPurOrdRefType has SupplierInvoiceItemText but
                 // NO AssignmentReference (unlike the G/L item), so the assignment travels on the
                 // header instead and SAP copies it onto the vendor line.
@@ -2100,7 +2107,8 @@ public static class SupplierInvoicePayload
     /// SAP returned for the PO: the latest one, or the one named on the bundle when it names one.
     /// Null when SAP returned none for the item — the caller then falls back to what the screen has.</summary>
     private static (string Doc, string Year, string Item)? GrRef(
-        IReadOnlyList<System.Text.Json.JsonElement>? rows, string poRef, string poItem, string matDoc)
+        IReadOnlyList<System.Text.Json.JsonElement>? rows, string poRef, string poItem,
+        string matDoc, string matDocYear, string grItem, bool requireMiroReceipt)
     {
         if (rows is null || rows.Count == 0 || poItem.Length == 0) return null;
         static string S(System.Text.Json.JsonElement r, string n) =>
@@ -2117,9 +2125,12 @@ public static class SupplierInvoicePayload
         var receipts = mine.Where(r => S(r, "GoodsMovementType") == "101"
                 && !reversed.Contains(S(r, "MaterialDocument") + "|" + Key(S(r, "MaterialDocumentItem"))))
             .ToList();
-        var pick = (matDoc.Length > 0 ? receipts.FirstOrDefault(r => S(r, "MaterialDocument") == matDoc) : default)
-            is { ValueKind: System.Text.Json.JsonValueKind.Object } named ? named
-            : receipts.OrderByDescending(r => S(r, "MaterialDocumentYear") + S(r, "MaterialDocument")).FirstOrDefault();
+        var pick = receipts.FirstOrDefault(r => S(r, "MaterialDocument") == matDoc
+            && (!requireMiroReceipt || (S(r, "MaterialDocumentYear") == matDocYear
+                && S(r, "MaterialDocumentItem").Length > 0
+                && (grItem.Length == 0 || Key(S(r, "MaterialDocumentItem")) == Key(grItem)))));
+        if (!requireMiroReceipt && pick.ValueKind != System.Text.Json.JsonValueKind.Object)
+            pick = receipts.OrderByDescending(r => S(r, "MaterialDocumentYear") + S(r, "MaterialDocument")).FirstOrDefault();
         if (pick.ValueKind != System.Text.Json.JsonValueKind.Object) return null;
         return (S(pick, "MaterialDocument"), S(pick, "MaterialDocumentYear"), Key(S(pick, "MaterialDocumentItem")));
     }
