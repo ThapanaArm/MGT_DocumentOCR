@@ -19,13 +19,19 @@ type Receipt = {
 export default function GoodsReceiptPicker({
   po,
   matDoc,
+  year,
+  miroGoods = false,
   locked,
   onPick,
+  onRefresh,
 }: {
   po: string;
   matDoc: string;
+  year?: string;
+  miroGoods?: boolean;
   locked: boolean;
   onPick: (matDoc: string, year: string) => void;
+  onRefresh?: () => void;
 }) {
   const [list, setList] = useState<Receipt[] | null>(null);
   const [msg, setMsg] = useState('');
@@ -38,7 +44,7 @@ export default function GoodsReceiptPicker({
     setMsg('');
     try {
       const r = await apiClient.get<{ configured: boolean; receipts: Receipt[] }>(
-        `/api/sap/po/${encodeURIComponent(p)}/goods-receipts`,
+        `/api/sap/po/${encodeURIComponent(p)}/goods-receipts${miroGoods ? '?miroGoods=true' : ''}`,
       );
       if (!r.configured) {
         setList([]);
@@ -48,7 +54,7 @@ export default function GoodsReceiptPicker({
       setList(r.receipts);
       const active = r.receipts.filter((x) => !x.reversed);
       if (active.length === 0) setMsg(`PO ${p} ยังไม่มี Goods Receipt ใน SAP`);
-      else if (auto && active.length === 1 && !matDoc.trim() && !locked) {
+      else if (auto && !miroGoods && active.length === 1 && !matDoc.trim() && !locked) {
         onPick(active[0].matDoc, active[0].year);
         setMsg(`ดึงจาก SAP แล้ว: ${active[0].matDoc} / ${active[0].year}`);
       }
@@ -61,19 +67,19 @@ export default function GoodsReceiptPicker({
   };
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { void load(true); }, [po]);
+  useEffect(() => { void load(true); }, [po, miroGoods]);
 
   const fmtDate = (d: string) => (/^\d{4}-\d{2}-\d{2}$/.test(d) ? d.split('-').reverse().join('.') : d);
 
   return (
     <div style={{ display: 'grid', gap: 6 }}>
       <div className="row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-        <button className="btn sm ghost" disabled={loading || !po.trim()} onClick={() => void load(false)}
+        <button className="btn sm ghost" disabled={loading || !po.trim()} onClick={() => { onRefresh?.(); void load(false); }}
           title="อ่าน Goods Receipt ของ PO นี้จาก SAP">
           <i className={loading ? 'fa-solid fa-spinner fa-spin' : 'fa-solid fa-rotate'} /> ดึง GR จาก SAP
         </button>
         {(list || []).map((r) => {
-          const on = r.matDoc === matDoc.trim();
+          const on = r.matDoc === matDoc.trim() && (!miroGoods || !year || r.year === year);
           return (
             <button
               key={`${r.matDoc}-${r.year}`}

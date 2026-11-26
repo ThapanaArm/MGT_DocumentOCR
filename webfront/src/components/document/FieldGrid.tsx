@@ -12,6 +12,7 @@ export default function FieldGrid({
   posted,
   numeric,
   required,
+  readOnlyField,
   onEdit,
 }: {
   fields: FieldDef[];
@@ -19,6 +20,7 @@ export default function FieldGrid({
   posted?: boolean;
   numeric?: boolean;
   required?: string[]; // keys shown with a required (*) marker
+  readOnlyField?: string;
   onEdit: (key: string, value: string) => void;
 }) {
   return (
@@ -62,7 +64,7 @@ export default function FieldGrid({
             ) : type === 'date' ? (
               // The app's one date field: shown dd/MM/yyyy in English, stored/sent as YYYY-MM-DD.
               <>
-                <DateInput value={raw == null ? '' : String(raw)} disabled={posted} onChange={(v) => onEdit(k, v)} ariaLabel={label} />
+                <DateInput value={raw == null ? '' : String(raw)} disabled={posted || k === readOnlyField} onChange={(v) => onEdit(k, v)} ariaLabel={label} />
                 {toIsoDate(raw) === null && (
                   <small className="hint">Read from document: "{String(raw)}" — pick the date</small>
                 )}

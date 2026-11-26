@@ -9,12 +9,14 @@ export default function TabbedGroups({
   groups,
   values,
   posted,
+  readOnlyField,
   onEdit,
   extras,
 }: {
   groups: FieldGroup[];
   values: Record<string, any>;
   posted?: boolean;
+  readOnlyField?: string;
   onEdit: (key: string, value: string) => void;
   extras?: Record<string, ReactNode>;
 }) {
@@ -40,6 +42,7 @@ export default function TabbedGroups({
             fields={current.fields}
             values={values}
             posted={posted}
+            readOnlyField={readOnlyField}
             required={current.required}
             onEdit={onEdit}
           />

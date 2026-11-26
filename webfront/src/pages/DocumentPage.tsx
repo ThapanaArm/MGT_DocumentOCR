@@ -43,7 +43,7 @@ import {
   dutyLabelEn,
 } from '../constants/fields';
 import { SEND_DISABLED_AP } from '../constants/flags';
-import { dt, fileRetention, fmt, fmtAmt, fmtCost, intFmt, moduleLabel, statusBadge } from '../utils/format';
+import { dt, fileRetention, fmt, fmtAmt, fmtCost, intFmt, moduleLabel, num, statusBadge } from '../utils/format';
 import ShippingCheck, { missingRecalAmount, shippingCheckRows, vendorInvoiceTotals } from '../components/document/ShippingCheck';
 import { findDupes } from '../utils/dupes';
 import { isVatTaxRow, linkedGlTaxCodes, syncGlTaxCodes } from '../utils/glTaxCodes';
@@ -59,6 +59,7 @@ import PoReferenceTable from '../components/document/PoReferenceTable';
 import GlItemsTable from '../components/document/GlItemsTable';
 import DocumentBoxes, { hasDocumentFrames } from '../components/document/DocumentBoxes';
 import GoodsReceiptPicker from '../components/document/GoodsReceiptPicker';
+import { DEPLOYMENT_COMPANY } from '../constants/deployment';
 import TaxDataTable from '../components/document/TaxDataTable';
 import WhtTable from '../components/document/WhtTable';
 import IncomingInvoiceCard from '../components/document/IncomingInvoiceCard';
@@ -574,6 +575,27 @@ function isInventoryPoDoc(d: DocModel): boolean {
   return String(d.apDocCategory ?? '').trim().toUpperCase() === INVENTORY_PO_CATEGORY;
 }
 
+function usesMiroGoodsPostingDate(d: DocModel): boolean {
+  return DEPLOYMENT_COMPANY === 'GLC' && d.module === 'AP' && isInventoryPoDoc(d)
+    && !['2', '3'].includes(String(d.header.refDocType ?? '').trim());
+}
+
+function miroGoodsTaxCode(d: DocModel, vendorCode: string, taxId: unknown): string {
+  const supplier = vendorCode.replace(/^0+/, '');
+  if (/^2\d/.test(supplier)) return 'VX';
+  const vendorTaxId = String(taxId ?? '').trim() || String(d.header.vendorTaxId ?? '').trim();
+  if (!/^[0-9]{13}$/.test(vendorTaxId.replace(/[- ]/g, ''))) return '';
+  const goodsBase = d.lines.filter(line => !['VAT', 'WHT', 'DUTY'].includes(String(line.extCode ?? '').trim()))
+    .reduce((total, line) => total + num(line.amount), 0);
+  const vatBase = (d.header.taxItems || []).filter((row: Record<string, unknown>) => {
+    const vendor = String(row.vendorCode ?? '').trim();
+    return (!vendor || vendor === vendorCode)
+      && String(row.taxCode ?? '').trim().toUpperCase() === 'V1' && num(row.docCurrencyAmt) > 0
+      && !/CUSTOMS|ศุลกากร|กรมศุล/i.test(String(row.issuerName ?? ''));
+  }).reduce((total: number, row: Record<string, unknown>) => total + num(row.baseAmount), 0);
+  return goodsBase > 0 && Math.abs(vatBase - goodsBase) <= 0.01 ? 'V1' : '';
+}
+
 function refDocumentFor(d: DocModel): string {
   return isInventoryPoDoc(d) ? 'PO' : 'DELIVERY_NOTE';
 }
@@ -767,7 +789,7 @@ function seedRefDocument(d: DocModel): DocModel {
   // M8/429 "Goods receipt item <doc> <year> 0001 is invalid", naming a year nobody chose.
   // Seeded visibly so a wrong one can be seen and corrected.
   const matDocForYear = String(next.refMatDoc ?? h.refMatDoc ?? '').trim();
-  if (matDocForYear && !String(h.refMatDocYear ?? '').trim()) {
+  if (matDocForYear && !String(h.refMatDocYear ?? '').trim() && !usesMiroGoodsPostingDate(d)) {
     const raw = String(h.postingDate ?? h.invoiceDate ?? '').trim();
     const yr = /^(\d{4})/.exec(raw)?.[1] ?? String(new Date().getFullYear());
     next.refMatDocYear = yr;
@@ -1501,9 +1523,82 @@ export default function DocumentPage() {
      the same number of days. A posted document is never touched. */
   const grPoNo = doc ? poNumberOf(doc.header as Record<string, any>).split(/[,\s]+/)[0] || '' : '';
   const grMatDoc = String(doc?.header.refMatDoc ?? '').trim();
+  const grYear = String(doc?.header.refMatDocYear ?? '').trim();
+  const miroGoods = !!doc && usesMiroGoodsPostingDate(doc);
+  const grLocked = ['POSTED', 'SPLIT', 'PARTIAL', 'POSTING'].includes(String(doc?.status));
+  const goodsVendor = String(map?.header.vendor?.code || doc?.partnerCode || doc?.header.vendorCode || '').trim();
+  const goodsVendorMaster = miroGoods ? masters?.vendors?.find(v => String(v.VendorCode ?? '').trim() === goodsVendor) : undefined;
+  const goodsTaxCode = doc && miroGoods && !grLocked ? miroGoodsTaxCode(doc, goodsVendor, goodsVendorMaster?.TaxId) : '';
+  useEffect(() => {
+    if (!goodsTaxCode) return;
+    setDoc(current => {
+      if (current !== doc || !current) return current;
+      const header = current.header;
+      const glItems = (header.glItems || []).map((row: Record<string, unknown>) => {
+        const vendor = String(row.vendorCode ?? '').trim();
+        const isGoodsSummary = ['C', 'H'].includes(String(row.drCr ?? '').trim().toUpperCase())
+          && String(row.glAccount ?? '').trim() === GL_PO_GOODS
+          && num(row.amount) === num(header.totalAmount) && (!vendor || vendor === goodsVendor);
+        return isGoodsSummary && row.taxCode !== goodsTaxCode ? { ...row, taxCode: goodsTaxCode } : row;
+      });
+      const calculateTax = goodsTaxCode === 'V1' ? '' : header.calculateTax;
+      if (header.taxCode === goodsTaxCode && header.calculateTax === calculateTax
+        && glItems.every((row: Record<string, unknown>, index: number) => row === header.glItems?.[index])) return current;
+      return { ...current, header: { ...header, taxCode: goodsTaxCode, calculateTax, glItems } };
+    });
+  }, [doc, goodsTaxCode, goodsVendor, setDoc]);
+  const [grRefresh, refreshGr] = useState(0);
+  const [miroGr, setMiroGr] = useState<{ key: string; date?: string; error?: string }>();
+  const grKey = JSON.stringify([doc?.docId, grPoNo, grMatDoc, grYear, grRefresh]);
+  const checkedGr = miroGr?.key === grKey ? miroGr : undefined;
+  const miroGrIssue = !grPoNo ? 'Enter the Purchasing Order in PO Reference.'
+    : !grMatDoc ? 'Select a Goods Receipt (Material Doc.) in PO Reference.'
+    : checkedGr?.error ?? (!checkedGr?.date ? 'Waiting for the Goods Receipt Posting Date from SAP.' : '');
+  const grVendorCode = String(map?.header.vendor?.code ?? doc?.partnerCode ?? '').trim();
+  useEffect(() => {
+    const docId = doc?.docId;
+    if (!docId || !miroGoods || grLocked || !grMatDoc || !/^\d{10}$/.test(grPoNo)) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        type GrRow = { matDoc: string; year: string; postingDate: string; reversed: boolean };
+        const result = await apiClient.get<{ configured: boolean; receipts: GrRow[] }>(
+          `/api/sap/po/${encodeURIComponent(grPoNo)}/goods-receipts?miroGoods=true`);
+        if (cancelled) return;
+        const matches = result.receipts.filter(gr => gr.matDoc === grMatDoc && (!grYear || gr.year === grYear));
+        const gr = matches.length === 1 ? matches[0] : undefined;
+        if (!result.configured || !gr || !gr.year || gr.reversed || !/^\d{4}-\d{2}-\d{2}$/.test(gr.postingDate)) {
+          setMiroGr({ key: grKey, error: gr?.reversed
+            ? `Goods Receipt ${grMatDoc}/${gr.year} has been reversed. Check PO Reference.`
+            : `Could not verify the Posting Date for Goods Receipt ${grMatDoc}. Check the Material Doc. and Fiscal Year in PO Reference.` });
+          return;
+        }
+        setMiroGr({ key: grKey, date: gr.postingDate });
+        setDoc(current => {
+          if (current?.docId !== docId) return current;
+          const header = current.header;
+          const oldDate = String(header.postingDate ?? '').trim();
+          const oldBase = String(header.baselineDate ?? '').trim();
+          const next: DocModel['header'] = { ...header, postingDate: gr.postingDate };
+          if (/^2\d/.test(grVendorCode) && oldDate !== gr.postingDate && oldDate && oldBase === oldDate) {
+            next.baselineDate = gr.postingDate;
+            const day = (s: string) => Date.parse(`${s}T00:00:00Z`);
+            const due = day(String(header.dueDate ?? '').trim());
+            const previous = day(oldDate);
+            if (Number.isFinite(due) && Number.isFinite(previous))
+              next.dueDate = new Date(due + day(gr.postingDate) - previous).toISOString().slice(0, 10);
+          }
+          return { ...current, header: next };
+        });
+      } catch {
+        if (!cancelled) setMiroGr({ key: grKey, error: 'Could not read Goods Receipt from SAP. Use the GR refresh button in PO Reference to retry.' });
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [doc?.docId, miroGoods, grLocked, grPoNo, grMatDoc, grYear, grKey, grVendorCode, setDoc]);
   const grDone = useRef('');
   useEffect(() => {
-    if (!doc || (doc.module !== 'AP' && doc.module !== 'II') || !isInventoryPoDoc(doc)) return;
+    if (!doc || miroGoods || (doc.module !== 'AP' && doc.module !== 'II') || !isInventoryPoDoc(doc)) return;
     if (['POSTED', 'SPLIT', 'PARTIAL', 'POSTING'].includes(String(doc.status))) return;
     if (!/^\d{10}$/.test(grPoNo)) return;
     const mark = String((doc.header as Record<string, any>).postingDateGr ?? '');
@@ -1550,7 +1645,7 @@ export default function DocumentPage() {
     })();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [doc?.docId, doc?.status, grPoNo, grMatDoc]);
+  }, [doc?.docId, doc?.status, grPoNo, grMatDoc, miroGoods]);
 
   if (failed)
     return (
@@ -1800,9 +1895,11 @@ export default function DocumentPage() {
             showToast(read.confidenceNote || 'Could not re-read the document.', 'error');
             return;
           }
+          if (miroGoods) refreshGr(version => version + 1);
           const edited = recalBaseline.current?.docId === doc.docId ? invoiceChanges(recalBaseline.current, doc) : [];
           const changes = invoiceChanges(doc, missingInvoiceFields(doc, seedTaxItems(read))).filter(({ path }) =>
-            !edited.some(edit => edit.path.every((part, index) => part === path[index])));
+            !(miroGoods && path[0] === 'header' && path[1] === 'postingDate')
+            && !edited.some(edit => edit.path.every((part, index) => part === path[index])));
           setPendingRead(changes.length ? { base: doc, changes } : null);
           showToast(changes.length ? 'Review the values found by Re-read Document.' : 'Re-read found no new values for empty fields.');
         } finally {
@@ -2028,6 +2125,7 @@ export default function DocumentPage() {
       out.push(`ชื่อผู้ออกใบกำกับต้องเป็นภาษาอังกฤษ: ${thaiIssuers.join(', ')} — แก้ในแท็บ Tax หรือ Master Mapping → 8. Tax Invoice Issuer`);
     }
     if (isInventoryPoDoc(doc)) {
+      if (miroGoods && miroGrIssue) out.push(miroGrIssue);
       if (!poNumberOf(h)) {
         out.push('ยังไม่มีเลขใบสั่งซื้อ — กรอกช่อง Purchasing Order ในแท็บ PO Reference');
       }
@@ -2039,7 +2137,7 @@ export default function DocumentPage() {
       // Goods only, for the reason above: on a delivery bundle each tax invoice carries its own
       // code and the cost lines are exempt, so comparing the header against the vendor's rule
       // would stop a document that is perfectly correct.
-      const want = isInventoryPoDoc(doc) ? taxDefaultsForVendor(vendorCode) : null;
+      const want = goodsTaxCode ? { taxCode: goodsTaxCode } : taxDefaultsForVendor(vendorCode);
       const haveCode = String(h.taxCode ?? '').trim().toUpperCase();
       const haveCalc = String(h.calculateTax ?? '').trim().toUpperCase() === 'X';
       if (want && haveCode && haveCode !== want.taxCode) {
@@ -2049,7 +2147,7 @@ export default function DocumentPage() {
             + ` แต่เอกสารตั้งไว้เป็น ${haveCode}`,
         );
       }
-      if (want?.taxCode === 'V1' && haveCode === 'V1' && !haveCalc) {
+      if (want?.taxCode === 'V1' && haveCode === 'V1' && !haveCalc && goodsTaxCode !== 'V1') {
         out.push('ซื้อในประเทศ (V1) ต้องติ๊ก Calculate Tax ในแท็บ Basic Data');
       }
       // The purchase order belongs to a supplier of its own. Invoicing party 2000236 against
@@ -3861,7 +3959,8 @@ export default function DocumentPage() {
           {doc.module !== 'II' && (
             <>
               <p className="sec-title">HEADER — Header Information</p>
-              <FieldGrid fields={headerDefFor(doc.module)} values={h} posted={locked} onEdit={editHeaderSynced} />
+              <FieldGrid fields={headerDefFor(doc.module)} values={miroGoods && !grLocked ? { ...h, postingDate: checkedGr?.date ?? '' } : h}
+                posted={locked} readOnlyField={miroGoods ? 'postingDate' : undefined} onEdit={editHeaderSynced} />
             </>
           )}
         </div>
@@ -3962,8 +4061,9 @@ export default function DocumentPage() {
             // uncontrolled (see the Totals card).
             key={`${vendorFilter || 'all'}-${invoiceFormVersion}`}
             groups={AP_TRADE_GROUPS}
-            values={vendorTotals ?? h}
+            values={miroGoods && !grLocked ? { ...(vendorTotals ?? h), postingDate: checkedGr?.date ?? '' } : vendorTotals ?? h}
             posted={posted}
+            readOnlyField={miroGoods ? 'postingDate' : undefined}
             onEdit={editHeaderSynced}
             extras={{
               // What the figures on this tab come to in the company's own books. The invoice is
@@ -3972,6 +4072,7 @@ export default function DocumentPage() {
               // dollars or half a million baht. Shown rather than left to be discovered in SAP.
               'Basic Data': (
                 <>
+                  {miroGoods && !grLocked && miroGrIssue && <p className="hint">{miroGrIssue}</p>}
                   {/* One tab per SAP document with its Reference / Assignment / Text, the Reference
                       editable (extra.sapRef on that document's rows) — same as MGT (AP, 2026-11-18). */}
                   {(() => {
@@ -4057,7 +4158,7 @@ export default function DocumentPage() {
                     && (() => {
                       // Domestic vendor (1xxxxxx) = no GR reference, unless someone asks for it.
                       const dom = taxDefaultsForVendor(String(map?.header.vendor.code ?? ''))?.taxCode === 'V1';
-                      return !dom || showGrFields || String(h.refMatDoc ?? '').trim().length > 0;
+                      return miroGoods || !dom || showGrFields || String(h.refMatDoc ?? '').trim().length > 0;
                     })() === false ? (
                     <p className="hint" style={{ margin: '0 0 12px' }}>
                       ซื้อในประเทศ — ไม่ต้องอ้างใบรับของ{' '}
@@ -4073,7 +4174,7 @@ export default function DocumentPage() {
                   {String(h.refDocument ?? '').trim() === 'PO'
                     && (() => {
                       const dom = taxDefaultsForVendor(String(map?.header.vendor.code ?? ''))?.taxCode === 'V1';
-                      return !dom || showGrFields || String(h.refMatDoc ?? '').trim().length > 0;
+                      return miroGoods || !dom || showGrFields || String(h.refMatDoc ?? '').trim().length > 0;
                     })() && (
                     /* GR-based invoice verification: a stock PO item can only be invoiced
                        against the goods receipt, and SAP asks for the material document by
@@ -4084,7 +4185,10 @@ export default function DocumentPage() {
                         <span className="hint">Goods Receipt (Material Doc.)</span>
                         <input
                           value={String(h.refMatDoc ?? '')}
-                          onChange={(e) => editHeader('refMatDoc', e.target.value.replace(/\D/g, ''))}
+                          onChange={(e) => {
+                            editHeader('refMatDoc', e.target.value.replace(/\D/g, ''));
+                            if (miroGoods) editHeader('refMatDocYear', '');
+                          }}
                           disabled={locked}
                           placeholder="เช่น 5000002095"
                           style={{ width: 170 }}
@@ -4107,6 +4211,9 @@ export default function DocumentPage() {
                         <GoodsReceiptPicker
                           po={poNumberOf(h).split(/[,\s]+/)[0] || ''}
                           matDoc={String(h.refMatDoc ?? '')}
+                          year={grYear}
+                          miroGoods={miroGoods}
+                          onRefresh={miroGoods ? () => refreshGr(version => version + 1) : undefined}
                           locked={locked}
                           onPick={(m, y) => { editHeader('refMatDoc', m); editHeader('refMatDocYear', y); }}
                         />
