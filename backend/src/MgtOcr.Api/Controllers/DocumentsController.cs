@@ -1,3 +1,4 @@
+﻿using Microsoft.Extensions.Caching.Memory;
 using System.Text.Json;
 using Dapper;
 using MgtOcr.Core;
@@ -20,7 +21,7 @@ namespace MgtOcr.Api.Controllers;
 [ApiController]
 [ServiceFilter(typeof(DepartmentAccessFilter))]
 public class DocumentsController(DocumentRepository repo, MasterRepository masters, OcrEngine ocr,
-    SapClient sap, SapBusinessPartnerClient sapBp, AppConfig config, ICurrentUserAccessor currentUser,
+    SapClient sap, SapBusinessPartnerClient sapBp, IMemoryCache cache, AppConfig config, ICurrentUserAccessor currentUser,
     OcrJobRepository jobs, MgtOcr.Api.Services.DocumentIngestService ingest,
     SapProductClient sapProduct, SapPurchaseOrderClient sapPo, FileArchiveRepository archive, MgtOcr.Api.Services.GraphArchiveClient graph,
     SalesOrderPostRepository soPosts, JobLogRepository jobLog, UserRepository users, ILogger<DocumentsController> logger,
@@ -2139,7 +2140,7 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         var header = (Dictionary<string, object?>)doc["header"]!;
         // Every tax invoice needs its issuer's Tax ID before anything goes to SAP (Accounting,
         // 2026-11-12). The preview still opens so the person can see what is missing.
-        if (forPost && module is "AP" or "II"
+        if (forPost && !Export.GoodsInvoiceTax.Applies(doc) && module is "AP" or "II"
             && Export.DeferredVatReversal.MissingTaxIds(doc) is { Count: > 0 } noTaxId)
             throw new HttpApiException(400, Export.DeferredVatReversal.MissingTaxIdMessage(noTaxId));
         var companyCode = module == "SO"
@@ -2355,10 +2356,12 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
             var vendors = Export.SupplierInvoicePayload.VendorsOf(doc, SameParty);
             if (vendors.Count <= 1)
             {
+                var goodsTax = await ResolveGoodsTaxAsync(doc, party, forPost);
+                if (goodsTax.Issue.Length > 0) throw new HttpApiException(400, goodsTax.Issue);
                 var only = Export.SupplierInvoicePayload.Build(
                     doc, apCompany, party, poItems, source, apTerms, goodsReceiptItems: goodsReceiptItems,
                     taxBaseClearingAccount: config.SapSupplierInvoiceTaxBaseClearingAccount, sameParty: SameParty,
-                    perPo: perPo, requireMiroReceipt: requireMiroReceipt, vendorTaxId: pm.GetStr("TaxId"));
+                    perPo: perPo, requireMiroReceipt: requireMiroReceipt, goodsTax: goodsTax);
                 // One condition billed under two tax codes on a PO with one item for it cannot be one
                 // SAP document (M8/321 / FF812) — it goes as one document per tax code.
                 return (TestReference(Export.SupplierInvoicePayload.SplitByTaxCode(only).Select(p => MapVendors(p, requireMiroReceipt)).ToList(), doc), res);
@@ -2533,6 +2536,47 @@ public class DocumentsController(DocumentRepository repo, MasterRepository maste
         for (var i = 0; i < lines.Count; i++)
             if (lines[i].GetStr("materialCode").Length > 0) mLines[i.ToString()] = lines[i].Get("materialCode");
         return m;
+    }
+
+    [HttpPost("api/documents/{docId:int}/goods-tax")]
+    public async Task<IActionResult> PreviewGoodsTax(int docId, [FromBody] Dictionary<string, object?> body)
+    {
+        var doc = await repo.GetDocumentAsync(docId);
+        var draft = JsonBodyHelpers.Unwrap(body);
+        if (doc.GetStr("module") != "AP" || !Export.SapImportSupplierInvoiceExcel.IsPoKeyed(doc)
+            || draft.Get("header") is not Dictionary<string, object?> header || draft.Get("lines") is not List<object?> lines)
+            throw new HttpApiException(400, "Provide the header and lines of an AP Goods document.");
+        doc["header"] = header;
+        doc["lines"] = lines.OfType<Dictionary<string, object?>>().ToList();
+        return Ok(await ResolveGoodsTaxAsync(doc, draft.GetStr("vendorCode")));
+    }
+
+    private async Task<Export.GoodsInvoiceTaxDecision> ResolveGoodsTaxAsync(
+        Dictionary<string, object?> doc, string party, bool forPost = false)
+    {
+        if (!Export.GoodsInvoiceTax.Applies(doc) || doc.GetStr("status") == "POSTED") return new();
+        if (string.IsNullOrWhiteSpace(party)) return new(Issue: "Match the goods supplier before checking its SAP tax details.");
+        var code = config.SapSupplierInvoiceVendorMap.TryGetValue(party.Trim(), out var mapped) ? mapped : party.Trim();
+        var user = await currentUser.RequireAsync();
+        var group = config.CompanyForUser(user.PrimaryCompany?.CompanyCode, user.SalesOrganization)?.AuthorizationGroup;
+        if (string.IsNullOrWhiteSpace(group))
+            return new(Issue: "No SAP Business Partner authorization group is configured for this company.");
+        try
+        {
+            var key = ("AP Goods Supplier Tax", group, code);
+            if (forPost || !cache.TryGetValue<SapSupplierTaxProfile>(key, out var profile))
+            {
+                profile = await sapBp.FindSupplierTaxProfileAsync(code, group);
+                if (profile != null) cache.Set(key, profile, TimeSpan.FromMinutes(2));
+            }
+            return profile is null ? new(Issue: $"SAP Vendor Master did not return supplier {code}. Check the matched vendor.")
+                : Export.GoodsInvoiceTax.Resolve(doc, party, profile);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "[AP] SAP vendor tax lookup failed for {Vendor}", code);
+            return new(Issue: $"Could not check vendor {code} in SAP Vendor Master. Retry the check before sending.");
+        }
     }
 
     [HttpGet("api/documents/{docId:int}/payload")]

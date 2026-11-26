@@ -580,22 +580,6 @@ function usesMiroGoodsPostingDate(d: DocModel): boolean {
     && !['2', '3'].includes(String(d.header.refDocType ?? '').trim());
 }
 
-function miroGoodsTaxCode(d: DocModel, vendorCode: string, taxId: unknown): string {
-  const supplier = vendorCode.replace(/^0+/, '');
-  if (/^2\d/.test(supplier)) return 'VX';
-  const vendorTaxId = String(taxId ?? '').trim() || String(d.header.vendorTaxId ?? '').trim();
-  if (!/^[0-9]{13}$/.test(vendorTaxId.replace(/[- ]/g, ''))) return '';
-  const goodsBase = d.lines.filter(line => !['VAT', 'WHT', 'DUTY'].includes(String(line.extCode ?? '').trim()))
-    .reduce((total, line) => total + num(line.amount), 0);
-  const vatBase = (d.header.taxItems || []).filter((row: Record<string, unknown>) => {
-    const vendor = String(row.vendorCode ?? '').trim();
-    return (!vendor || vendor === vendorCode)
-      && String(row.taxCode ?? '').trim().toUpperCase() === 'V1' && num(row.docCurrencyAmt) > 0
-      && !/CUSTOMS|ศุลกากร|กรมศุล/i.test(String(row.issuerName ?? ''));
-  }).reduce((total: number, row: Record<string, unknown>) => total + num(row.baseAmount), 0);
-  return goodsBase > 0 && Math.abs(vatBase - goodsBase) <= 0.01 ? 'V1' : '';
-}
-
 function refDocumentFor(d: DocModel): string {
   return isInventoryPoDoc(d) ? 'PO' : 'DELIVERY_NOTE';
 }
@@ -1527,8 +1511,44 @@ export default function DocumentPage() {
   const miroGoods = !!doc && usesMiroGoodsPostingDate(doc);
   const grLocked = ['POSTED', 'SPLIT', 'PARTIAL', 'POSTING'].includes(String(doc?.status));
   const goodsVendor = String(map?.header.vendor?.code || doc?.partnerCode || doc?.header.vendorCode || '').trim();
-  const goodsVendorMaster = miroGoods ? masters?.vendors?.find(v => String(v.VendorCode ?? '').trim() === goodsVendor) : undefined;
-  const goodsTaxCode = doc && miroGoods && !grLocked ? miroGoodsTaxCode(doc, goodsVendor, goodsVendorMaster?.TaxId) : '';
+  type GoodsTaxDecision = { code: string; issue: string; taxRows?: Record<string, unknown>[] };
+  const [goodsTaxCheck, setGoodsTaxCheck] = useState<{ key: string; decision: GoodsTaxDecision }>();
+  const goodsTaxInput = doc && miroGoods && !grLocked && goodsVendor ? JSON.stringify({
+    vendorCode: goodsVendor,
+    header: {
+      refDocType: doc.header.refDocType,
+      vendorTaxId: doc.header.vendorTaxId,
+      vatAmount: doc.header.vatAmount,
+      subTotal: doc.header.subTotal,
+      invoiceNo: doc.header.invoiceNo,
+      invoiceDate: doc.header.invoiceDate,
+      vendorName: doc.header.vendorName,
+      vatRate: doc.header.vatRate,
+      taxItems: doc.header.taxItems,
+    },
+    lines: doc.lines.map(({ amount, extCode, extra }) => ({ amount, extCode, extra })),
+  }) : '';
+  const goodsTaxKey = doc?.docId + '|' + goodsTaxInput;
+  const checkedGoodsTax = goodsTaxCheck?.key === goodsTaxKey ? goodsTaxCheck.decision : undefined;
+  const goodsTaxCode = checkedGoodsTax?.code || '';
+  const goodsTaxIssue = !goodsVendor ? 'Match the goods supplier before checking its SAP tax details.'
+    : checkedGoodsTax?.issue ?? 'Checking the supplier country and tax registration in SAP.';
+  useEffect(() => {
+    if (!doc?.docId || !goodsTaxInput) return;
+    let active = true;
+    const timer = window.setTimeout(async () => {
+      try {
+        const decision = await apiClient.post<GoodsTaxDecision>(
+          '/api/documents/' + doc.docId + '/goods-tax', JSON.parse(goodsTaxInput));
+        if (active) setGoodsTaxCheck({ key: goodsTaxKey, decision });
+      } catch {
+        if (active) setGoodsTaxCheck({ key: goodsTaxKey, decision: {
+          code: '', issue: 'Could not verify the supplier tax details in SAP. Reload the document to retry.',
+        } });
+      }
+    }, 250);
+    return () => { active = false; window.clearTimeout(timer); };
+  }, [doc?.docId, goodsTaxInput, goodsTaxKey]);
   useEffect(() => {
     if (!goodsTaxCode) return;
     setDoc(current => {
@@ -1541,12 +1561,14 @@ export default function DocumentPage() {
           && num(row.amount) === num(header.totalAmount) && (!vendor || vendor === goodsVendor);
         return isGoodsSummary && row.taxCode !== goodsTaxCode ? { ...row, taxCode: goodsTaxCode } : row;
       });
-      const calculateTax = goodsTaxCode === 'V1' ? '' : header.calculateTax;
-      if (header.taxCode === goodsTaxCode && header.calculateTax === calculateTax
+      const calculateTax = '';
+      const taxItems = checkedGoodsTax?.taxRows ?? header.taxItems;
+      const sameTaxItems = JSON.stringify(taxItems) === JSON.stringify(header.taxItems);
+      if (header.taxCode === goodsTaxCode && header.calculateTax === calculateTax && sameTaxItems
         && glItems.every((row: Record<string, unknown>, index: number) => row === header.glItems?.[index])) return current;
-      return { ...current, header: { ...header, taxCode: goodsTaxCode, calculateTax, glItems } };
+      return { ...current, header: { ...header, taxCode: goodsTaxCode, calculateTax, glItems, taxItems } };
     });
-  }, [doc, goodsTaxCode, goodsVendor, setDoc]);
+  }, [doc, checkedGoodsTax, goodsTaxCode, goodsVendor, setDoc]);
   const [grRefresh, refreshGr] = useState(0);
   const [miroGr, setMiroGr] = useState<{ key: string; date?: string; error?: string }>();
   const grKey = JSON.stringify([doc?.docId, grPoNo, grMatDoc, grYear, grRefresh]);
@@ -2126,6 +2148,7 @@ export default function DocumentPage() {
     }
     if (isInventoryPoDoc(doc)) {
       if (miroGoods && miroGrIssue) out.push(miroGrIssue);
+      if (miroGoods && goodsTaxIssue) out.push(goodsTaxIssue);
       if (!poNumberOf(h)) {
         out.push('ยังไม่มีเลขใบสั่งซื้อ — กรอกช่อง Purchasing Order ในแท็บ PO Reference');
       }
@@ -4073,6 +4096,7 @@ export default function DocumentPage() {
               'Basic Data': (
                 <>
                   {miroGoods && !grLocked && miroGrIssue && <p className="hint">{miroGrIssue}</p>}
+                  {miroGoods && !grLocked && goodsTaxIssue && <p className="hint">{goodsTaxIssue}</p>}
                   {/* One tab per SAP document with its Reference / Assignment / Text, the Reference
                       editable (extra.sapRef on that document's rows) — same as MGT (AP, 2026-11-18). */}
                   {(() => {

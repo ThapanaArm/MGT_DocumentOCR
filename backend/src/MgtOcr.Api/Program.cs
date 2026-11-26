@@ -125,6 +125,8 @@ var appConfig = new AppConfig
     // "BaseUrl_Dev"/"BaseUrl_Prod" per sapBpEnv above, falling back to the old flat "BaseUrl"
     // key so an appsettings.json that hasn't been split into Dev/Prod yet still works.
     SapBusinessPartnerBaseUrl = Get($"Sap:BusinessPartner:BaseUrl_{Cap(sapBpEnv)}", Get("Sap:BusinessPartner:BaseUrl")),
+    SapSupplierInvoiceBusinessPartnerBaseUrl = Get($"Sap:BusinessPartner:BaseUrl_{Cap(sapSupplierInvoiceEnv)}",
+        string.Equals(sapSupplierInvoiceEnv, sapBpEnv, StringComparison.OrdinalIgnoreCase) ? Get("Sap:BusinessPartner:BaseUrl") : ""),
     SapBusinessPartnerAuthHeader = Get("Sap:BusinessPartner:AuthHeader"),
     SapSalesOrderBaseUrl = Get($"Sap:SalesOrder:BaseUrl_{Cap(sapBpEnv)}", Get("Sap:SalesOrder:BaseUrl")),
     // Same keys, resolved against the write environment — used only by SapClient.PostAsync.

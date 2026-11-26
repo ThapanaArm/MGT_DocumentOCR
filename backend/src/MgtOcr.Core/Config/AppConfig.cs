@@ -59,6 +59,7 @@ public class AppConfig
     // Sap:User/Sap:Password. AuthHeader, if set, is used as-is (e.g. "Basic <base64>") and wins
     // over Sap:User/Sap:Password; leave it blank to fall back to those.
     public string SapBusinessPartnerBaseUrl { get; init; } = "";
+    public string SapSupplierInvoiceBusinessPartnerBaseUrl { get; init; } = "";
     public string SapBusinessPartnerAuthHeader { get; init; } = "";
 
     // Sales Order (module "SO") posting can use its own dedicated Dev/Prod service root

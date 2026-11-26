@@ -42,7 +42,7 @@ public static class SupplierInvoicePayload
         // PO's own items and goods receipts, keyed by PO number. Null = the single-PO document.
         IReadOnlyDictionary<string, PoData>? perPo = null,
         bool requireMiroReceipt = false,
-        string vendorTaxId = "")
+        GoodsInvoiceTaxDecision? goodsTax = null)
     {
         // Two codes for the same SAP supplier — the test tenant's 1000134 and production's 4000357
         // are both PROMPT — are one supplier here. Without this the rows tagged 4000357 (the
@@ -68,7 +68,7 @@ public static class SupplierInvoicePayload
             return string.Equals(Party(v), Party(vendor), StringComparison.OrdinalIgnoreCase);
         }
         var glRows = SapImportSupplierInvoiceExcel.GlRowsFor(doc).Where(Mine).ToList();
-        var taxRows = DeferredVatReversal.EffectiveTaxRows(doc).Where(Mine).ToList();
+        var taxRows = (goodsTax?.TaxRows ?? DeferredVatReversal.EffectiveTaxRows(doc)).Where(Mine).ToList();
         // This document is the Customs Department's (its tax rows are all import VAT receipts).
         var customsParty = taxRows.Count > 0 && taxRows.All(DeferredVatReversal.IsImportVat);
         var isPoKeyed = SapImportSupplierInvoiceExcel.IsPoKeyed(doc);
@@ -139,11 +139,7 @@ public static class SupplierInvoicePayload
             ? PurchaseOrderItems(doc, poRef, poItems, currency, header.GetStr("taxCode").Trim(),
                 matDoc, matDocYear, assignment, itemText, goodsReceiptItems, requireMiroReceipt)
             : [];
-        var goodsTaxCode = companyCode == "2000" && doc.GetStr("module") == "AP"
-            && isPoKeyed && !wantsDeliveryCosts && doc.GetStr("status") != "POSTED"
-            ? GoodsSupplierTaxCode(invoicingParty, Or(vendorTaxId.Trim(), header.GetStr("vendorTaxId").Trim()),
-                taxRows, purOrdRef.Sum(PoAmount))
-            : "";
+        var goodsTaxCode = goodsTax?.Code ?? "";
         if (goodsTaxCode.Length > 0)
             foreach (var item in purOrdRef.Cast<Dictionary<string, object?>>())
                 item["TaxCode"] = goodsTaxCode;
@@ -222,7 +218,7 @@ public static class SupplierInvoicePayload
         // node — sending one then is what SAP rejects as "Property 'to_SupplierInvoiceTax' is invalid".
         // Unticked (the default here), the amounts we read off the tax invoices are sent as they
         // were reviewed, which is what a Thai input-VAT document needs: one row per tax invoice.
-        var calcTax = goodsTaxCode != "V1" && header.GetStr("calculateTax").Trim() is { Length: > 0 } ct
+        var calcTax = goodsTaxCode.Length == 0 && header.GetStr("calculateTax").Trim() is { Length: > 0 } ct
             && !string.Equals(ct, "false", StringComparison.OrdinalIgnoreCase) && ct != "0";
 
         // One row per tax invoice, carrying its own code and base — what the Tax tab holds after
@@ -1745,21 +1741,6 @@ public static class SupplierInvoicePayload
         }
 
         return result;
-    }
-
-    private static string GoodsSupplierTaxCode(string vendor, string taxId,
-        IEnumerable<Dictionary<string, object?>> taxRows, double goodsBase)
-    {
-        var supplier = vendor.Trim().TrimStart('0');
-        if (supplier.Length > 1 && supplier[0] == '2' && char.IsAsciiDigit(supplier[1])) return "VX";
-        if (!System.Text.RegularExpressions.Regex.IsMatch(taxId.Replace("-", "").Replace(" ", ""), @"^[0-9]{13}$")
-            || goodsBase <= 0)
-            return "";
-        // Apply V1 to the goods only when the reviewed input-VAT rows cover those goods.
-        var inputVatBase = taxRows.Where(row => row.GetStr("taxCode").Trim().Equals("V1", StringComparison.OrdinalIgnoreCase)
-            && Num(row.Get("docCurrencyAmt")) > 0 && !DeferredVatReversal.IsImportVat(row))
-            .Sum(row => Num(row.Get("baseAmount")));
-        return Math.Abs(inputVatBase - goodsBase) <= 0.01 ? "V1" : "";
     }
 
     private static List<object> PurchaseOrderItems(
